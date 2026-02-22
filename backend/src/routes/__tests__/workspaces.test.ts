@@ -116,3 +116,34 @@ test('WAL events logged for workspace_create and workspace_delete', async () => 
   expect(events[0].event_type).toBe('workspace_create');
   expect(events[1].event_type).toBe('workspace_delete');
 });
+
+test('GET /api/workspaces/:id/context returns 200 with null fields before hydration', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+
+  const res = await request(app).get('/api/workspaces/ws-test-1/context');
+
+  expect(res.status).toBe(200);
+  expect(res.body.schemaSnapshot).toBeNull();
+  expect(res.body.schemaTableCount).toBeNull();
+  expect(res.body.gitMemory).toBeNull();
+  expect(res.body.lastIngestedCommitHash).toBeNull();
+  expect(res.body.gitCommitCount).toBeNull();
+});
+
+test('GET /api/workspaces/:id/context returns populated fields after INSERT', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+
+  db.prepare(
+    `INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_snapshot_at, schema_table_count, git_memory, git_memory_updated_at, last_ingested_commit_hash, git_commit_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('ws-test-1', 'CREATE TABLE users (id TEXT);', '2026-02-21T00:00:00Z', 1, 'some memory', '2026-02-21T00:00:00Z', 'abc123', 5);
+
+  const res = await request(app).get('/api/workspaces/ws-test-1/context');
+
+  expect(res.status).toBe(200);
+  expect(res.body.schemaSnapshot).toBe('CREATE TABLE users (id TEXT);');
+  expect(res.body.schemaTableCount).toBe(1);
+  expect(res.body.gitMemory).toBe('some memory');
+  expect(res.body.lastIngestedCommitHash).toBe('abc123');
+  expect(res.body.gitCommitCount).toBe(5);
+});

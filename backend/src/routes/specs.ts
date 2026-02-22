@@ -39,11 +39,21 @@ router.post('/generate', async (req: Request, res: Response) => {
       `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
     ).get(workspaceId) as { content_yaml: string } | undefined;
 
+    // 5b. Fetch auto-hydrated context from workspace_context
+    const ctx = db.prepare(
+      `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
+    ).get(workspaceId) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+
+    const schemaSnapshot = ctx?.schema_snapshot || undefined;
+    const gitMemory = ctx?.git_memory || undefined;
+
     // 6. Synthesize direction stack
     const synthesized = synthesize({
       l1: l1Row?.content_yaml,
       l2: l2Row?.content_yaml,
       l3: l3Row?.content_yaml,
+      schemaSnapshot,
+      gitMemory,
       specBrief: brief,
       storyAnnotations,
     });
@@ -88,7 +98,10 @@ router.post('/generate', async (req: Request, res: Response) => {
     const model = getActiveModel();
     db.prepare(
       `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', ?, ?)`
-    ).run(slug, JSON.stringify({ title, domain, storyCount: parsed.stories.length, provider, model }));
+    ).run(slug, JSON.stringify({
+      title, domain, storyCount: parsed.stories.length, provider, model,
+      hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
+    }));
 
     // 15. Write spec to workspace directory
     let specPath: string;

@@ -185,6 +185,58 @@ test('WAL event inserted with event_type=generate and payload includes provider'
   expect(payload.storyCount).toBe(2);
 });
 
+test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydrated context', async () => {
+  mockChatComplete.mockResolvedValue(validLlmResponse);
+
+  // Seed workspace_context with schema + git
+  db.prepare(
+    `INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_memory, git_commit_count)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run('ws-test', 'CREATE TABLE users (id TEXT);', 1, 'conventions:\n  - use snake_case', 10);
+
+  await request(app)
+    .post('/api/specs/generate')
+    .send({
+      workspaceId: 'ws-test',
+      domain: 'backend',
+      title: 'Hydrated Spec',
+      brief: 'Build with context',
+    });
+
+  const event = db.prepare(
+    "SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'hydrated-spec'"
+  ).get() as { payload: string };
+
+  expect(event).toBeDefined();
+  const payload = JSON.parse(event.payload);
+  expect(payload.hasSchema).toBe(true);
+  expect(payload.hasGitMemory).toBe(true);
+});
+
+test('WAL event has hasSchema:false when workspace has no hydrated context', async () => {
+  mockChatComplete.mockResolvedValue(validLlmResponse);
+
+  // No workspace_context seeded — should gracefully default to false
+
+  await request(app)
+    .post('/api/specs/generate')
+    .send({
+      workspaceId: 'ws-test',
+      domain: 'backend',
+      title: 'No Context Spec',
+      brief: 'Build without context',
+    });
+
+  const event = db.prepare(
+    "SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'no-context-spec'"
+  ).get() as { payload: string };
+
+  expect(event).toBeDefined();
+  const payload = JSON.parse(event.payload);
+  expect(payload.hasSchema).toBe(false);
+  expect(payload.hasGitMemory).toBe(false);
+});
+
 test('POST /api/specs/generate returns 409 when slug already exists on disk', async () => {
   mockChatComplete.mockResolvedValue(validLlmResponse);
 

@@ -29,7 +29,7 @@ test('PRAGMA journal_mode returns wal', () => {
   expect(result[0].journal_mode).toBe('wal');
 });
 
-test('all 5 tables exist in sqlite_master', () => {
+test('all 6 tables exist in sqlite_master', () => {
   const tables = db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     .all() as { name: string }[];
@@ -39,6 +39,7 @@ test('all 5 tables exist in sqlite_master', () => {
     'pipeline_runs',
     'story_results',
     'wal_events',
+    'workspace_context',
     'workspaces',
   ]);
 });

@@ -60,14 +60,41 @@ router.get('/preview', (req: Request, res: Response) => {
       ).get(String(workspaceId)) as { content_yaml: string } | undefined
     : undefined;
 
+  // Fetch auto-hydrated context from workspace_context
+  let schemaSnapshot: string | undefined;
+  let gitMemory: string | undefined;
+  let schemaTableCount: number | null = null;
+  let gitCommitCount: number | null = null;
+
+  if (workspaceId) {
+    const ctx = db.prepare(
+      `SELECT schema_snapshot, schema_table_count, git_memory, git_commit_count
+       FROM workspace_context WHERE workspace_id = ?`
+    ).get(String(workspaceId)) as {
+      schema_snapshot: string | null;
+      schema_table_count: number | null;
+      git_memory: string | null;
+      git_commit_count: number | null;
+    } | undefined;
+
+    if (ctx) {
+      schemaSnapshot = ctx.schema_snapshot || undefined;
+      gitMemory = ctx.git_memory || undefined;
+      schemaTableCount = ctx.schema_table_count;
+      gitCommitCount = ctx.git_commit_count;
+    }
+  }
+
   const synthesized = synthesize({
     l1: l1Row?.content_yaml,
     l2: l2Row?.content_yaml,
     l3: l3Row?.content_yaml,
+    schemaSnapshot,
+    gitMemory,
     specBrief: String(brief),
   });
 
-  res.json({ preview: synthesized });
+  res.json({ synthesized, schemaTableCount, gitCommitCount });
 });
 
 export default router;
