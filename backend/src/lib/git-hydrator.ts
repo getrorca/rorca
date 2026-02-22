@@ -38,7 +38,6 @@ export async function gitMapStep(
     maxCommits = 1000,
     chunkSize = 50,
     concurrency = 5,
-    mapModel = 'claude-haiku-4-5-20251001',
   } = options;
 
   const git = simpleGit(workspacePath);
@@ -115,7 +114,6 @@ export function getLatestHash(summaries: GitChunkSummary[]): string | null {
 export interface GitReduceOptions {
   summaries: GitChunkSummary[];
   workspaceLabel: string;
-  reduceModel?: string;
 }
 
 const REDUCE_PROMPT = `You are synthesizing multiple git history summaries into a single, dense project memory document.
@@ -142,11 +140,7 @@ Be dense — this YAML will be injected into every future spec generation for th
 export async function gitReduceStep(
   options: GitReduceOptions
 ): Promise<string> {
-  const {
-    summaries,
-    workspaceLabel,
-    reduceModel = 'claude-sonnet-4-6',
-  } = options;
+  const { summaries, workspaceLabel } = options;
 
   if (summaries.length === 0) return '';
 

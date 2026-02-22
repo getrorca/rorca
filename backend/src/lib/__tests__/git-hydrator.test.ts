@@ -202,20 +202,3 @@ conventions:
   expect(callArgs[1]).toBe('claude-sonnet-4-6');
 });
 
-test('gitReduceStep uses custom reduceModel when provided', async () => {
-  const summaries: GitChunkSummary[] = [
-    { fromHash: 'a', toHash: 'b', commitCount: 3, summary: '- Added auth' },
-  ];
-  mockChatComplete.mockResolvedValue('yaml output');
-
-  await gitReduceStep({
-    summaries,
-    workspaceLabel: 'Test',
-    reduceModel: 'custom-model',
-  });
-
-  expect(mockChatComplete).toHaveBeenCalledWith(
-    expect.any(Array),
-    'custom-model'
-  );
-});
