@@ -131,10 +131,15 @@ router.post('/generate', async (req: Request, res: Response) => {
     // 8. Call LLM
     const rawResponse = await chatComplete([{ role: 'user', content: fullPrompt }]);
 
-    // 9. Parse JSON
+    // 9. Parse JSON — strip markdown fences and preamble text if present
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown> };
     try {
-      parsed = JSON.parse(rawResponse);
+      // Extract JSON from ```json ... ``` code block if present
+      const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
+      // If there's still leading text before the JSON object, strip it
+      const jsonStart = jsonStr.indexOf('{');
+      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
     } catch {
       res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
       return;

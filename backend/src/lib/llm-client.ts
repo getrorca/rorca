@@ -1,11 +1,16 @@
-import { execFile } from 'child_process';
+import { exec } from 'child_process';
 import { promisify } from 'util';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 export interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 
-const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
 
-// Uses your Claude subscription via the claude CLI — no API key needed
+// Uses your Claude subscription via the claude CLI.
+// Writes prompt to a temp file and uses shell expansion — required because
+// claude --print produces empty output when spawned without a TTY.
 export async function chatComplete(messages: ChatMessage[]): Promise<string> {
   const prompt = messages.length === 1
     ? messages[0].content
@@ -13,17 +18,26 @@ export async function chatComplete(messages: ChatMessage[]): Promise<string> {
         m.role === 'user' ? m.content : `[Previous response: ${m.content}]`
       ).join('\n\n---\n\n');
 
-  // Unset CLAUDECODE so the nested claude invocation isn't blocked
-  const env = { ...process.env };
-  delete env.CLAUDECODE;
+  // Write prompt to temp file (avoids shell injection and TTY issues)
+  const tmpFile = path.join(os.tmpdir(), `rorcha-prompt-${Date.now()}.txt`);
+  fs.writeFileSync(tmpFile, prompt, 'utf8');
 
-  const { stdout } = await execFileAsync('claude', ['--print', prompt], {
-    env,
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: 120_000,
-  });
+  try {
+    // env -u CLAUDECODE: unset so nested invocation isn't blocked
+    // < /dev/null: signal non-interactive mode (prevents SIGTTOU when backend runs in bg)
+    const { stdout } = await execAsync(
+      `env -u CLAUDECODE claude --print "$(cat ${tmpFile})" < /dev/null`,
+      {
+        shell: '/bin/bash',
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 180_000,
+      }
+    );
 
-  return stdout.trim();
+    return stdout.trim();
+  } finally {
+    fs.unlinkSync(tmpFile);
+  }
 }
 
 export function getActiveProvider(): string { return 'claude-cli'; }

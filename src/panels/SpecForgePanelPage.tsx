@@ -51,7 +51,7 @@ export default function SpecForgePanelPage() {
   const handleStoryCountChange = (value: string) => {
     const n = parseInt(value, 10);
     if (isNaN(n)) return;
-    setStoryCount(Math.min(30, Math.max(3, n)));
+    setStoryCount(Math.min(500, Math.max(1, n)));
   };
 
   const handleStoryPrefixChange = (value: string) => {
@@ -191,7 +191,7 @@ export default function SpecForgePanelPage() {
                     <input
                       type="number"
                       min={3}
-                      max={30}
+                      max={500}
                       value={storyCount}
                       onChange={(e) => handleStoryCountChange(e.target.value)}
                       className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors"
