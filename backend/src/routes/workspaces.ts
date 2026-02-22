@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import * as fs from 'fs';
+import * as path from 'path';
 import { db } from '../db/index';
 import { hydrateSchema } from '../lib/schema-hydrator';
 import {
@@ -202,6 +203,55 @@ router.post('/:id/hydrate', async (req, res) => {
   }
 
   res.json(result);
+});
+
+// GET /api/workspaces/:id/files?patterns=README.md,CLAUDE.md,...
+router.get('/:id/files', (req, res) => {
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  const patternsParam = (req.query.patterns as string) || '';
+  const patterns = patternsParam.split(',').map(p => p.trim()).filter(Boolean);
+
+  const exists: string[] = [];
+
+  for (const pattern of patterns) {
+    if (pattern.includes('*')) {
+      try {
+        const parts = pattern.split('/');
+        const dir = parts.slice(0, -1).join('/') || '.';
+        const ext = parts[parts.length - 1].replace(/\*/g, '');
+        const fullDir = path.join(workspace.path, dir);
+
+        if (fs.existsSync(fullDir) && fs.statSync(fullDir).isDirectory()) {
+          const scanDir = (dirPath: string, recursive: boolean) => {
+            const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+            for (const entry of entries) {
+              const fullPath = path.join(dirPath, entry.name);
+              if (entry.isFile() && entry.name.endsWith(ext)) {
+                exists.push(path.relative(workspace.path, fullPath));
+              } else if (entry.isDirectory() && recursive) {
+                scanDir(fullPath, true);
+              }
+            }
+          };
+          scanDir(fullDir, pattern.includes('**'));
+        }
+      } catch {
+        // Skip invalid patterns
+      }
+    } else {
+      const fullPath = path.join(workspace.path, pattern);
+      if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+        exists.push(pattern);
+      }
+    }
+  }
+
+  res.json({ exists });
 });
 
 // GET /api/workspaces/:id

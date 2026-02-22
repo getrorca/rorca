@@ -71,9 +71,9 @@ beforeEach(() => {
 
 afterEach(() => {
   // Clean up any spec files written to os.tmpdir()
-  const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
-  if (fs.existsSync(pendingDir)) {
-    fs.rmSync(pendingDir, { recursive: true, force: true });
+  const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
+  if (fs.existsSync(specsRoot)) {
+    fs.rmSync(specsRoot, { recursive: true, force: true });
   }
 
   db.close();
@@ -262,4 +262,239 @@ test('POST /api/specs/generate returns 409 when slug already exists on disk', as
     });
   expect(res2.status).toBe(409);
   expect(res2.body.error).toContain('duplicate-check');
+});
+
+// ─── R-001: List / Approve / Reject / Get Detail ──────────────────────────────
+
+/** Seed a spec file on disk for R-001 tests */
+function seedSpecFile(dir: string, slug: string, overrides?: Record<string, unknown>) {
+  fs.mkdirSync(dir, { recursive: true });
+  const spec = {
+    title: slug.replace(/-/g, ' '),
+    userStories: [
+      { id: 'US-001', title: 'Story one', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [], passes: false },
+    ],
+    generatedAt: '2026-02-20T12:00:00.000Z',
+    ...overrides,
+  };
+  fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify(spec, null, 2), 'utf8');
+  return spec;
+}
+
+describe('GET /api/specs (list)', () => {
+  test('returns pending and approved specs with correct status', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+
+    seedSpecFile(pendingDir, 'my-pending-spec');
+    seedSpecFile(approvedDir, 'my-approved-spec', { generatedAt: '2026-02-19T10:00:00.000Z' });
+
+    const res = await request(app).get('/api/specs?workspaceId=ws-test');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(2);
+
+    const pending = res.body.specs.find((s: any) => s.id === 'my-pending-spec');
+    const approved = res.body.specs.find((s: any) => s.id === 'my-approved-spec');
+
+    expect(pending).toBeDefined();
+    expect(pending.status).toBe('pending');
+    expect(pending.storyCount).toBe(1);
+
+    expect(approved).toBeDefined();
+    expect(approved.status).toBe('approved');
+    expect(approved.approvedAt).toBeDefined();
+  });
+
+  test('filters by status=pending', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+
+    seedSpecFile(pendingDir, 'pend-only');
+    seedSpecFile(approvedDir, 'appr-only');
+
+    const res = await request(app).get('/api/specs?workspaceId=ws-test&status=pending');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('pend-only');
+  });
+
+  test('filters by status=approved', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+
+    seedSpecFile(pendingDir, 'pend-only2');
+    seedSpecFile(approvedDir, 'appr-only2');
+
+    const res = await request(app).get('/api/specs?workspaceId=ws-test&status=approved');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('appr-only2');
+  });
+
+  test('returns empty array when no specs exist', async () => {
+    const res = await request(app).get('/api/specs?workspaceId=ws-test');
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toEqual([]);
+  });
+
+  test('missing workspaceId → 400', async () => {
+    const res = await request(app).get('/api/specs');
+    expect(res.status).toBe(400);
+  });
+
+  test('unknown workspaceId → 404', async () => {
+    const res = await request(app).get('/api/specs?workspaceId=nonexistent');
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /api/specs/:id/approve', () => {
+  test('moves file to approved/ and returns ok', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+
+    seedSpecFile(pendingDir, 'to-approve');
+
+    const res = await request(app)
+      .post('/api/specs/to-approve/approve')
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.approvedPath).toContain('approved');
+    expect(res.body.approvedPath).toContain('to-approve.json');
+
+    // File moved: no longer in pending, exists in approved
+    expect(fs.existsSync(path.join(pendingDir, 'to-approve.json'))).toBe(false);
+    expect(fs.existsSync(path.join(approvedDir, 'to-approve.json'))).toBe(true);
+  });
+
+  test('emits WAL event with event_type=spec_approved', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedSpecFile(pendingDir, 'wal-approve');
+
+    await request(app)
+      .post('/api/specs/wal-approve/approve')
+      .send({ workspaceId: 'ws-test' });
+
+    const event = db.prepare(
+      "SELECT * FROM wal_events WHERE event_type = 'spec_approved'"
+    ).get() as { event_type: string; spec_id: string; actor: string; payload: string };
+
+    expect(event).toBeDefined();
+    expect(event.spec_id).toBe('wal-approve');
+    expect(event.actor).toBe('user');
+    const payload = JSON.parse(event.payload);
+    expect(payload.workspaceId).toBe('ws-test');
+  });
+
+  test('creates approved/ directory if it does not exist', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+
+    seedSpecFile(pendingDir, 'auto-mkdir');
+    // Ensure approved/ doesn't exist
+    expect(fs.existsSync(approvedDir)).toBe(false);
+
+    const res = await request(app)
+      .post('/api/specs/auto-mkdir/approve')
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(fs.existsSync(approvedDir)).toBe(true);
+  });
+
+  test('spec not found → 404', async () => {
+    const res = await request(app)
+      .post('/api/specs/ghost/approve')
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(404);
+  });
+
+  test('missing workspaceId → 400', async () => {
+    const res = await request(app)
+      .post('/api/specs/whatever/approve')
+      .send({});
+
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('POST /api/specs/:id/reject', () => {
+  test('deletes file and returns ok', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedSpecFile(pendingDir, 'to-reject');
+
+    const res = await request(app)
+      .post('/api/specs/to-reject/reject')
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(fs.existsSync(path.join(pendingDir, 'to-reject.json'))).toBe(false);
+  });
+
+  test('emits WAL event with event_type=spec_rejected and reason', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedSpecFile(pendingDir, 'wal-reject');
+
+    await request(app)
+      .post('/api/specs/wal-reject/reject')
+      .send({ workspaceId: 'ws-test', reason: 'Too many stories' });
+
+    const event = db.prepare(
+      "SELECT * FROM wal_events WHERE event_type = 'spec_rejected'"
+    ).get() as { event_type: string; spec_id: string; actor: string; payload: string };
+
+    expect(event).toBeDefined();
+    expect(event.spec_id).toBe('wal-reject');
+    expect(event.actor).toBe('user');
+    const payload = JSON.parse(event.payload);
+    expect(payload.reason).toBe('Too many stories');
+  });
+
+  test('spec not found → 404', async () => {
+    const res = await request(app)
+      .post('/api/specs/ghost/reject')
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('GET /api/specs/:specId (detail)', () => {
+  test('returns full spec JSON from pending', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const seeded = seedSpecFile(pendingDir, 'detail-spec');
+
+    const res = await request(app).get('/api/specs/detail-spec?workspaceId=ws-test');
+
+    expect(res.status).toBe(200);
+    expect(res.body.title).toBe(seeded.title);
+    expect(res.body.userStories).toHaveLength(1);
+  });
+
+  test('returns full spec JSON from approved', async () => {
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const seeded = seedSpecFile(approvedDir, 'approved-detail');
+
+    const res = await request(app).get('/api/specs/approved-detail?workspaceId=ws-test');
+
+    expect(res.status).toBe(200);
+    expect(res.body.title).toBe(seeded.title);
+  });
+
+  test('spec not found → 404', async () => {
+    const res = await request(app).get('/api/specs/nonexistent?workspaceId=ws-test');
+    expect(res.status).toBe(404);
+  });
+
+  test('missing workspaceId → 400', async () => {
+    const res = await request(app).get('/api/specs/some-spec');
+    expect(res.status).toBe(400);
+  });
 });

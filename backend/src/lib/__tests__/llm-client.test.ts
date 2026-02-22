@@ -1,94 +1,89 @@
-describe('llm-client', () => {
-  const originalEnv = process.env;
+import { promisify } from 'util';
 
+// Mock child_process.execFile before requiring the module
+const mockExecFile = jest.fn();
+jest.mock('child_process', () => ({
+  execFile: mockExecFile,
+}));
+
+// Mock promisify to return our mock
+jest.mock('util', () => ({
+  promisify: jest.fn((fn: unknown) => {
+    // Return a function that delegates to our mock
+    return (...args: unknown[]) => mockExecFile(...args);
+  }),
+}));
+
+describe('llm-client', () => {
   beforeEach(() => {
     jest.resetModules();
-    process.env = { ...originalEnv };
-    delete process.env.SPEC_PROVIDER;
-    delete process.env.SPEC_MODEL_ANTHROPIC;
-    delete process.env.SPEC_MODEL_OPENROUTER;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.OPENROUTER_API_KEY;
+    jest.clearAllMocks();
+
+    // Re-apply mocks after resetModules
+    jest.doMock('child_process', () => ({
+      execFile: mockExecFile,
+    }));
+    jest.doMock('util', () => ({
+      promisify: jest.fn(() => mockExecFile),
+    }));
   });
 
-  afterEach(() => {
-    process.env = originalEnv;
-  });
-
-  test('getActiveProvider returns "anthropic" when SPEC_PROVIDER not set', () => {
+  test('getActiveProvider returns "claude-cli"', () => {
     const { getActiveProvider } = require('../llm-client');
-    expect(getActiveProvider()).toBe('anthropic');
+    expect(getActiveProvider()).toBe('claude-cli');
   });
 
-  test('getActiveProvider returns "openrouter" when SPEC_PROVIDER=openrouter', () => {
-    process.env.SPEC_PROVIDER = 'openrouter';
-    const { getActiveProvider } = require('../llm-client');
-    expect(getActiveProvider()).toBe('openrouter');
-  });
-
-  test('getActiveModel returns "claude-sonnet-4-6" when SPEC_PROVIDER=anthropic and no model env', () => {
+  test('getActiveModel returns "claude (subscription)"', () => {
     const { getActiveModel } = require('../llm-client');
-    expect(getActiveModel()).toBe('claude-sonnet-4-6');
+    expect(getActiveModel()).toBe('claude (subscription)');
   });
 
-  test('getActiveModel returns "openai/gpt-oss-120b" when SPEC_PROVIDER=openrouter and no model env', () => {
-    process.env.SPEC_PROVIDER = 'openrouter';
-    const { getActiveModel } = require('../llm-client');
-    expect(getActiveModel()).toBe('openai/gpt-oss-120b');
-  });
-
-  test('chatComplete with provider=anthropic calls Anthropic SDK', async () => {
-    process.env.ANTHROPIC_API_KEY = 'test-key';
-
-    const mockCreate = jest.fn().mockResolvedValue({
-      content: [{ type: 'text', text: 'LLM response' }],
-    });
-
-    jest.doMock('@anthropic-ai/sdk', () => {
-      return {
-        __esModule: true,
-        default: jest.fn().mockImplementation(() => ({
-          messages: { create: mockCreate },
-        })),
-      };
-    });
+  test('chatComplete calls claude CLI with --print and returns trimmed stdout', async () => {
+    mockExecFile.mockResolvedValue({ stdout: '  LLM response\n' });
 
     const { chatComplete } = require('../llm-client');
     const result = await chatComplete([{ role: 'user', content: 'hello' }]);
 
     expect(result).toBe('LLM response');
-    expect(mockCreate).toHaveBeenCalledWith(
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'claude',
+      ['--print', 'hello'],
       expect.objectContaining({
-        model: 'claude-sonnet-4-6',
-        messages: [{ role: 'user', content: 'hello' }],
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 120_000,
       })
     );
   });
 
-  test('chatComplete with provider=openrouter calls OpenRouter fetch', async () => {
-    process.env.SPEC_PROVIDER = 'openrouter';
-    process.env.OPENROUTER_API_KEY = 'test-or-key';
-
-    const mockFetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        choices: [{ message: { content: 'OR response' } }],
-      }),
-    });
-    global.fetch = mockFetch;
+  test('chatComplete concatenates multi-turn messages', async () => {
+    mockExecFile.mockResolvedValue({ stdout: 'response\n' });
 
     const { chatComplete } = require('../llm-client');
-    const result = await chatComplete([{ role: 'user', content: 'hello' }]);
+    await chatComplete([
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: 'reply' },
+      { role: 'user', content: 'follow-up' },
+    ]);
 
-    expect(result).toBe('OR response');
-    expect(mockFetch).toHaveBeenCalledWith(
-      'https://openrouter.ai/api/v1/chat/completions',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'Authorization': 'Bearer test-or-key',
-        }),
-      })
-    );
+    // Multi-message format: user messages + [Previous response: ...] for assistant
+    const callArgs = mockExecFile.mock.calls[0];
+    const prompt = callArgs[1][1]; // second arg to ['--print', prompt]
+    expect(prompt).toContain('first');
+    expect(prompt).toContain('[Previous response: reply]');
+    expect(prompt).toContain('follow-up');
+  });
+
+  test('chatComplete strips CLAUDECODE from env', async () => {
+    process.env.CLAUDECODE = 'true';
+    mockExecFile.mockResolvedValue({ stdout: 'ok\n' });
+
+    const { chatComplete } = require('../llm-client');
+    await chatComplete([{ role: 'user', content: 'test' }]);
+
+    const callArgs = mockExecFile.mock.calls[0];
+    const env = callArgs[2].env;
+    expect(env.CLAUDECODE).toBeUndefined();
+
+    delete process.env.CLAUDECODE;
   });
 });

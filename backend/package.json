@@ -9,11 +9,13 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
+    "@types/multer": "^2.0.0",
     "better-sqlite3": "^11.8.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "js-yaml": "^4.1.0",
+    "multer": "^2.0.2",
     "simple-git": "^3.27.0"
   },
   "devDependencies": {

@@ -4,6 +4,40 @@ import { synthesize } from '../lib/direction-stack';
 
 const router = Router();
 
+// GET /api/direction — fetch a single direction layer
+router.get('/', (req: Request, res: Response) => {
+  const { layer, workspaceId } = req.query;
+
+  if (!layer || ![1, 2, 3].includes(Number(layer))) {
+    res.status(400).json({ error: 'layer must be 1, 2, or 3' });
+    return;
+  }
+
+  const layerNum = Number(layer);
+  let row: { content_yaml: string } | undefined;
+
+  if (layerNum === 1) {
+    row = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+    ).get() as { content_yaml: string } | undefined;
+  } else if (layerNum === 2) {
+    // L2 is domain-scoped; for the panel we fetch workspace-level L2
+    row = workspaceId
+      ? db.prepare(
+          `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+        ).get(String(workspaceId)) as { content_yaml: string } | undefined
+      : undefined;
+  } else {
+    row = workspaceId
+      ? db.prepare(
+          `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+        ).get(String(workspaceId)) as { content_yaml: string } | undefined
+      : undefined;
+  }
+
+  res.json({ contentYaml: row?.content_yaml ?? '' });
+});
+
 // PUT /api/direction — upsert a direction layer
 router.put('/', (req: Request, res: Response) => {
   const { layer, workspaceId, domain, contentYaml } = req.body;
@@ -95,6 +129,55 @@ router.get('/preview', (req: Request, res: Response) => {
   });
 
   res.json({ synthesized, schemaTableCount, gitCommitCount });
+});
+
+// POST /api/direction/synthesize — synthesize with L4/L5 in body
+router.post('/synthesize', (req: Request, res: Response) => {
+  const { workspaceId, l4SpecBrief, l5Annotations } = req.body;
+
+  // Fetch persisted layers
+  const l1Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+  ).get() as { content_yaml: string } | undefined;
+
+  const l2Row = workspaceId
+    ? db.prepare(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+      ).get(String(workspaceId)) as { content_yaml: string } | undefined
+    : undefined;
+
+  const l3Row = workspaceId
+    ? db.prepare(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+      ).get(String(workspaceId)) as { content_yaml: string } | undefined
+    : undefined;
+
+  // Fetch auto-hydrated context
+  let schemaSnapshot: string | undefined;
+  let gitMemory: string | undefined;
+
+  if (workspaceId) {
+    const ctx = db.prepare(
+      `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
+    ).get(String(workspaceId)) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+
+    if (ctx) {
+      schemaSnapshot = ctx.schema_snapshot || undefined;
+      gitMemory = ctx.git_memory || undefined;
+    }
+  }
+
+  const synthesized = synthesize({
+    l1: l1Row?.content_yaml,
+    l2: l2Row?.content_yaml,
+    l3: l3Row?.content_yaml,
+    schemaSnapshot,
+    gitMemory,
+    specBrief: l4SpecBrief || '',
+    storyAnnotations: l5Annotations || undefined,
+  });
+
+  res.json({ synthesized });
 });
 
 export default router;

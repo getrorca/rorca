@@ -5,6 +5,9 @@ import workspacesRouter from './routes/workspaces';
 import directionRouter from './routes/direction';
 import specsRouter from './routes/specs';
 import walRouter from './routes/wal';
+import contextRouter from './routes/context';
+import pipelineRouter from './routes/pipeline';
+import worktreesRouter from './routes/worktrees';
 
 dotenv.config();
 
@@ -22,6 +25,9 @@ app.use('/api/workspaces', workspacesRouter);
 app.use('/api/direction', directionRouter);
 app.use('/api/specs', specsRouter);
 app.use('/api/wal', walRouter);
+app.use('/api/context', contextRouter);
+app.use('/api/pipeline', pipelineRouter);
+app.use('/api/worktrees', worktreesRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {

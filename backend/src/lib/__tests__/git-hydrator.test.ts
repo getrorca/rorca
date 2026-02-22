@@ -198,7 +198,5 @@ conventions:
   expect(callArgs[0][0].content).toContain('Chunk 1');
   expect(callArgs[0][0].content).toContain('Chunk 2');
   expect(callArgs[0][0].content).not.toContain('Chunk 3');
-  // Default model
-  expect(callArgs[1]).toBe('claude-sonnet-4-6');
 });
 

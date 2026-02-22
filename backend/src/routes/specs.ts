@@ -1,4 +1,6 @@
 import { Router, Request, Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
@@ -6,6 +8,66 @@ import { chatComplete, getActiveProvider, getActiveModel } from '../lib/llm-clie
 import { writeSpec } from '../lib/spec-writer';
 
 const router = Router();
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+interface WorkspaceRow {
+  id: string;
+  label: string;
+  path: string;
+}
+
+interface SpecSummary {
+  id: string;
+  specName: string;
+  storyCount: number;
+  status: 'pending' | 'approved';
+  generatedAt: string;
+  approvedAt?: string;
+  workspacePath: string;
+}
+
+function getWorkspace(workspaceId: string): WorkspaceRow | undefined {
+  return db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+}
+
+function specsDirs(workspacePath: string) {
+  const pendingDir = path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending');
+  const approvedDir = path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved');
+  return { pendingDir, approvedDir };
+}
+
+function safeReaddir(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  } catch {
+    return [];
+  }
+}
+
+function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string } {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  return JSON.parse(raw);
+}
+
+function buildSummary(
+  filePath: string,
+  fileName: string,
+  status: 'pending' | 'approved',
+  workspacePath: string,
+): SpecSummary {
+  const content = parseSpecFile(filePath);
+  const stat = fs.statSync(filePath);
+  return {
+    id: fileName.replace('.json', ''),
+    specName: content.title ?? fileName.replace('.json', ''),
+    storyCount: Array.isArray(content.userStories) ? content.userStories.length : 0,
+    status,
+    generatedAt: content.generatedAt ?? stat.birthtime.toISOString(),
+    ...(status === 'approved' ? { approvedAt: stat.mtime.toISOString() } : {}),
+    workspacePath,
+  };
+}
 
 router.post('/generate', async (req: Request, res: Response) => {
   try {
@@ -133,6 +195,310 @@ router.post('/generate', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[Specs] Generate error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── R-001: GET / — List specs with status ──────────────────────────────────
+
+router.get('/', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspaceId as string;
+    const statusFilter = (req.query.status as string) || 'all';
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const specs: SpecSummary[] = [];
+
+    if (statusFilter !== 'approved') {
+      for (const file of safeReaddir(pendingDir)) {
+        try {
+          specs.push(buildSummary(path.join(pendingDir, file), file, 'pending', workspace.path));
+        } catch {
+          // skip unparseable files
+        }
+      }
+    }
+
+    if (statusFilter !== 'pending') {
+      for (const file of safeReaddir(approvedDir)) {
+        try {
+          specs.push(buildSummary(path.join(approvedDir, file), file, 'approved', workspace.path));
+        } catch {
+          // skip unparseable files
+        }
+      }
+    }
+
+    // Sort by generatedAt DESC
+    specs.sort((a, b) =>
+      new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
+    );
+
+    res.json({ specs });
+  } catch (error: any) {
+    console.error('[Specs] List error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── W-003: GET /archive — Searchable, filterable spec archive ────────────────
+
+interface ArchiveSpecSummary extends SpecSummary {
+  rejectedAt?: string;
+  rejectReason?: string;
+  storyTitles: string[];
+}
+
+function buildArchiveSummary(
+  filePath: string,
+  fileName: string,
+  status: 'pending' | 'approved',
+  workspacePath: string,
+): ArchiveSpecSummary {
+  const base = buildSummary(filePath, fileName, status, workspacePath);
+  const content = parseSpecFile(filePath);
+  const stories = (content as any).userStories ?? (content as any).stories ?? [];
+  const storyTitles = stories.map((s: any) => s.title ?? s.id ?? '').filter(Boolean);
+  return { ...base, storyTitles };
+}
+
+function matchesSearch(spec: ArchiveSpecSummary, q: string): boolean {
+  const lower = q.toLowerCase();
+  if (spec.specName.toLowerCase().includes(lower)) return true;
+  if (spec.id.toLowerCase().includes(lower)) return true;
+  for (const title of spec.storyTitles) {
+    if (title.toLowerCase().includes(lower)) return true;
+  }
+  return false;
+}
+
+router.get('/archive', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspaceId as string;
+    const q = (req.query.q as string) || '';
+    const statusFilter = (req.query.status as string) || 'all';
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const allSpecs: ArchiveSpecSummary[] = [];
+
+    // Collect pending specs
+    if (statusFilter === 'all' || statusFilter === 'pending') {
+      for (const file of safeReaddir(pendingDir)) {
+        try {
+          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path));
+        } catch {
+          // skip unparseable files
+        }
+      }
+    }
+
+    // Collect approved specs
+    if (statusFilter === 'all' || statusFilter === 'approved') {
+      for (const file of safeReaddir(approvedDir)) {
+        try {
+          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path));
+        } catch {
+          // skip unparseable files
+        }
+      }
+    }
+
+    // Collect rejected specs from WAL events
+    if (statusFilter === 'all' || statusFilter === 'rejected') {
+      const rejectedEvents = db.prepare(
+        `SELECT spec_id, ts, payload FROM wal_events
+         WHERE event_type = 'spec_rejected'
+         AND payload LIKE '%' || ? || '%'
+         ORDER BY ts DESC`
+      ).all(workspaceId) as { spec_id: string; ts: string; payload: string }[];
+
+      const seenRejected = new Set<string>();
+      for (const evt of rejectedEvents) {
+        if (seenRejected.has(evt.spec_id)) continue;
+        seenRejected.add(evt.spec_id);
+        // Skip if spec still exists (re-generated after rejection)
+        if (allSpecs.some(s => s.id === evt.spec_id)) continue;
+
+        const payload = JSON.parse(evt.payload);
+        allSpecs.push({
+          id: evt.spec_id,
+          specName: evt.spec_id,
+          storyCount: 0,
+          status: 'rejected' as any,
+          generatedAt: evt.ts,
+          rejectedAt: evt.ts,
+          rejectReason: payload.reason ?? undefined,
+          workspacePath: workspace.path,
+          storyTitles: [],
+        });
+      }
+    }
+
+    // Sort by generatedAt DESC
+    allSpecs.sort((a, b) =>
+      new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
+    );
+
+    // Apply search filter
+    const filtered = q ? allSpecs.filter(s => matchesSearch(s, q)) : allSpecs;
+
+    // Paginate
+    const total = filtered.length;
+    const paged = filtered.slice(offset, offset + limit);
+
+    res.json({
+      specs: paged,
+      total,
+      hasMore: offset + limit < total,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Archive error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── R-001: GET /:specId — Return full spec JSON ─────────────────────────────
+
+router.get('/:specId', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const workspaceId = req.query.workspaceId as string;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let content: unknown;
+    if (fs.existsSync(pendingFile)) {
+      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    res.json(content);
+  } catch (error: any) {
+    console.error('[Specs] Get error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── R-001: POST /:specId/approve — Move to approved/ ────────────────────────
+
+router.post('/:specId/approve', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+
+    if (!fs.existsSync(pendingFile)) {
+      res.status(404).json({ error: `Spec '${specId}' not found in pending` });
+      return;
+    }
+
+    // Create approved/ if needed and move the file
+    fs.mkdirSync(approvedDir, { recursive: true });
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+    fs.renameSync(pendingFile, approvedFile);
+
+    // Emit WAL event
+    db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_approved', ?, 'user', ?)`
+    ).run(specId, JSON.stringify({ workspaceId }));
+
+    res.json({ ok: true, approvedPath: approvedFile });
+  } catch (error: any) {
+    console.error('[Specs] Approve error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── R-001: POST /:specId/reject — Delete spec ───────────────────────────────
+
+router.post('/:specId/reject', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId, reason } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+
+    if (!fs.existsSync(pendingFile)) {
+      res.status(404).json({ error: `Spec '${specId}' not found in pending` });
+      return;
+    }
+
+    fs.unlinkSync(pendingFile);
+
+    // Emit WAL event
+    db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_rejected', ?, 'user', ?)`
+    ).run(specId, JSON.stringify({ workspaceId, reason: reason ?? null }));
+
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('[Specs] Reject error:', error);
     res.status(500).json({ error: error.message });
   }
 });
