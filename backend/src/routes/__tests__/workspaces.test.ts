@@ -1,0 +1,118 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import type { Express } from 'express';
+import type Database from 'better-sqlite3';
+import request from 'supertest';
+
+let app: Express;
+let db: Database.Database;
+let tmpDir: string;
+let dbPath: string;
+
+beforeEach(() => {
+  jest.resetModules();
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-ws-test-'));
+  dbPath = path.join(tmpDir, 'test.db');
+  process.env.DB_PATH = dbPath;
+  process.env.NODE_ENV = 'test';
+  const serverMod = require('../../server');
+  app = serverMod.default;
+  const dbMod = require('../../db/index');
+  db = dbMod.db;
+});
+
+afterEach(() => {
+  db.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.DB_PATH;
+  delete process.env.NODE_ENV;
+});
+
+const validWorkspace = {
+  id: 'ws-test-1',
+  label: 'Test Workspace',
+  path: os.tmpdir(),
+  domains: ['frontend', 'backend'],
+};
+
+test('POST /api/workspaces with valid path returns 201', async () => {
+  const res = await request(app).post('/api/workspaces').send(validWorkspace);
+
+  expect(res.status).toBe(201);
+  expect(res.body.workspace).toMatchObject({
+    id: 'ws-test-1',
+    label: 'Test Workspace',
+    path: os.tmpdir(),
+    domains: ['frontend', 'backend'],
+  });
+  expect(res.body.workspace.created_at).toBeDefined();
+});
+
+test('POST /api/workspaces with non-existent path returns 400', async () => {
+  const res = await request(app)
+    .post('/api/workspaces')
+    .send({ ...validWorkspace, path: '/does/not/exist/xyz' });
+
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain('/does/not/exist/xyz');
+});
+
+test('POST /api/workspaces missing required field returns 400', async () => {
+  const res = await request(app)
+    .post('/api/workspaces')
+    .send({ id: 'ws-1', label: 'Test' });
+
+  expect(res.status).toBe(400);
+  expect(res.body.error).toBeDefined();
+});
+
+test('GET /api/workspaces returns array containing created workspace', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+
+  const res = await request(app).get('/api/workspaces');
+
+  expect(res.status).toBe(200);
+  expect(res.body.workspaces).toHaveLength(1);
+  expect(res.body.workspaces[0].id).toBe('ws-test-1');
+  expect(Array.isArray(res.body.workspaces[0].domains)).toBe(true);
+});
+
+test('GET /api/workspaces/:id returns workspace', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+
+  const res = await request(app).get('/api/workspaces/ws-test-1');
+
+  expect(res.status).toBe(200);
+  expect(res.body.workspace.id).toBe('ws-test-1');
+});
+
+test('GET /api/workspaces/:id returns 404 for nonexistent', async () => {
+  const res = await request(app).get('/api/workspaces/nonexistent');
+
+  expect(res.status).toBe(404);
+  expect(res.body.error).toBe('Workspace not found');
+});
+
+test('DELETE /api/workspaces/:id returns 204 and workspace is gone', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+
+  const delRes = await request(app).delete('/api/workspaces/ws-test-1');
+  expect(delRes.status).toBe(204);
+
+  const getRes = await request(app).get('/api/workspaces/ws-test-1');
+  expect(getRes.status).toBe(404);
+});
+
+test('WAL events logged for workspace_create and workspace_delete', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).delete('/api/workspaces/ws-test-1');
+
+  const events = db
+    .prepare("SELECT event_type, workspace_id FROM wal_events WHERE workspace_id = 'ws-test-1' ORDER BY id")
+    .all() as { event_type: string; workspace_id: string }[];
+
+  expect(events).toHaveLength(2);
+  expect(events[0].event_type).toBe('workspace_create');
+  expect(events[1].event_type).toBe('workspace_delete');
+});
