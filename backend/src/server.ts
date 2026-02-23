@@ -19,6 +19,7 @@ import githubChecksRouter from './routes/github-checks';
 import teamsRouter from './routes/teams';
 import invitesRouter from './routes/invites';
 import activityRouter from './routes/activity';
+import analyticsRouter from './routes/analytics';
 import usersRouter from './routes/users';
 import authRouter, { authRequired } from './routes/auth';
 import { startScheduler } from './lib/scheduler';
@@ -71,6 +72,7 @@ app.use('/api/workspaces/:id/github', workspaceGithubRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/teams', teamsRouter);
 app.use('/api/activity', activityRouter);
+app.use('/api/analytics', analyticsRouter);
 app.use('/api/users', usersRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */

@@ -1076,14 +1076,45 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
   });
 });
 
+// ─── Token usage recording helper ─────────────────────────────────────────────
+// Inserts into token_usage table with cost calculation from model_pricing.
+// Called by both the POST endpoint and WAL auto-record.
+
+interface ModelPricingRow {
+  model_id: string;
+  input_cost_per_1k: number;
+  output_cost_per_1k: number;
+}
+
+function recordTokenUsage(runId: number, storyId: string, inputTokens: number, outputTokens: number, model?: string) {
+  const run = db.prepare(
+    'SELECT workspace_id FROM pipeline_runs WHERE id = ?'
+  ).get(runId) as { workspace_id: string } | undefined;
+  if (!run) return;
+
+  const modelName = model || 'unknown';
+  const pricing = db.prepare(
+    'SELECT * FROM model_pricing WHERE model_id = ?'
+  ).get(modelName) as ModelPricingRow | undefined;
+
+  const costUsd = pricing
+    ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
+    : 0;
+
+  db.prepare(
+    `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, Math.round(costUsd * 1_000_000) / 1_000_000);
+}
+
 // ─── POST /api/pipeline/runs/:runId/stories/:storyId/tokens — Record token usage ─
 // Allows run-loop.sh or external callers to report token usage for a story.
 
 router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
-    const storyId = req.params.storyId;
-    const { inputTokens, outputTokens } = req.body as { inputTokens?: number; outputTokens?: number };
+    const storyId = String(req.params.storyId);
+    const { inputTokens, outputTokens, model } = req.body as { inputTokens?: number; outputTokens?: number; model?: string };
 
     if (isNaN(runId)) {
       res.status(400).json({ error: 'Invalid runId' });
@@ -1108,6 +1139,9 @@ router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response
     db.prepare(
       `UPDATE story_results SET input_tokens = COALESCE(?, input_tokens), output_tokens = COALESCE(?, output_tokens) WHERE id = ?`
     ).run(inputTokens ?? null, outputTokens ?? null, row.id);
+
+    // Also record into token_usage analytics table
+    recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model);
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -1168,6 +1202,7 @@ router.get('/stream', (req: Request, res: Response) => {
         lastSeenId = event.id;
 
         // V2-025: Auto-record token usage from WAL event payloads into story_results
+        // V2-043: Also insert into token_usage analytics table
         if (event.story_id && event.payload && (event.event_type === 'story_passed' || event.event_type === 'story_failed')) {
           try {
             const payload = JSON.parse(event.payload);
@@ -1182,6 +1217,14 @@ router.get('/stream', (req: Request, res: Response) => {
                     `UPDATE story_results SET input_tokens = COALESCE(?, input_tokens), output_tokens = COALESCE(?, output_tokens) WHERE id = ?`
                   ).run(payload.input_tokens ?? null, payload.output_tokens ?? null, storyRow.id);
                 }
+                // Record into token_usage analytics table
+                recordTokenUsage(
+                  runIdFromPayload,
+                  event.story_id,
+                  payload.input_tokens || 0,
+                  payload.output_tokens || 0,
+                  payload.model,
+                );
               }
             }
           } catch { /* payload parse error — ignore */ }
