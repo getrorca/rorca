@@ -35,6 +35,8 @@ type SpecStatus = 'pending' | 'approved' | 'rejected';
 type StatusFilter = 'all' | SpecStatus;
 type PreviewTab = 'stories' | 'graph' | 'diagram' | 'json';
 
+type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
+
 interface ArchiveSpec {
   id: string;
   specName: string;
@@ -50,6 +52,7 @@ interface ArchiveSpec {
   readinessPercent?: number;
   tags: string[];
   forkedFrom?: string;
+  reviewStatus?: ReviewStatus;
 }
 
 interface ArchiveResponse {
@@ -381,6 +384,17 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                         <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
                           {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
                         </span>
+                        {spec.reviewStatus && spec.reviewStatus !== 'draft' && (
+                          <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded border ${
+                            spec.reviewStatus === 'review_requested' ? 'bg-accent/15 text-accent border-accent/30' :
+                            spec.reviewStatus === 'approved' ? 'bg-success/15 text-success border-success/30' :
+                            'bg-warning/15 text-warning border-warning/30'
+                          }`}>
+                            {spec.reviewStatus === 'review_requested' ? 'Needs Review' :
+                             spec.reviewStatus === 'approved' ? 'Review OK' :
+                             'Changes Req.'}
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2">
                         {spec.readinessPercent != null && (
