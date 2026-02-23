@@ -1,0 +1,3 @@
+-- V2-044: Enhance model_pricing with provider, per-1M pricing, and effective_date
+-- Column additions handled idempotently in db/index.ts (SQLite lacks ADD COLUMN IF NOT EXISTS)
+-- This file exists as a migration marker only.
