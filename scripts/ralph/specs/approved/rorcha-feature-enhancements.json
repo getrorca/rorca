@@ -27,7 +27,8 @@
         "DELETE /api/templates/:id removes a template and returns 204"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "US-003",

@@ -8,6 +8,7 @@ import walRouter from './routes/wal';
 import contextRouter from './routes/context';
 import pipelineRouter from './routes/pipeline';
 import worktreesRouter from './routes/worktrees';
+import templatesRouter from './routes/templates';
 
 dotenv.config();
 
@@ -28,6 +29,7 @@ app.use('/api/wal', walRouter);
 app.use('/api/context', contextRouter);
 app.use('/api/pipeline', pipelineRouter);
 app.use('/api/worktrees', worktreesRouter);
+app.use('/api/templates', templatesRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
