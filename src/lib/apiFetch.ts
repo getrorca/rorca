@@ -1,31 +1,32 @@
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3030';
 
-const TOKEN_KEY = 'rorcha_access_token';
-const REFRESH_KEY = 'rorcha_refresh_token';
+// In-memory token storage (not localStorage — XSS safety)
+let accessToken: string | null = null;
+let refreshToken: string | null = null;
 
 export function getAccessToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return accessToken;
 }
 
 export function getRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_KEY);
+  return refreshToken;
 }
 
-export function setTokens(accessToken: string, refreshToken: string): void {
-  localStorage.setItem(TOKEN_KEY, accessToken);
-  localStorage.setItem(REFRESH_KEY, refreshToken);
+export function setTokens(newAccessToken: string, newRefreshToken: string): void {
+  accessToken = newAccessToken;
+  refreshToken = newRefreshToken;
 }
 
 export function clearTokens(): void {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(REFRESH_KEY);
+  accessToken = null;
+  refreshToken = null;
 }
 
 let refreshPromise: Promise<boolean> | null = null;
 
 async function attemptRefresh(): Promise<boolean> {
-  const refreshToken = getRefreshToken();
-  if (!refreshToken) return false;
+  const rt = getRefreshToken();
+  if (!rt) return false;
 
   // Deduplicate concurrent refresh attempts
   if (refreshPromise) return refreshPromise;
@@ -35,7 +36,7 @@ async function attemptRefresh(): Promise<boolean> {
       const res = await fetch(`${BASE_URL}/api/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken }),
+        body: JSON.stringify({ refreshToken: rt }),
       });
       if (!res.ok) {
         clearTokens();
@@ -56,13 +57,13 @@ async function attemptRefresh(): Promise<boolean> {
 }
 
 export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
-  const accessToken = getAccessToken();
+  const at = getAccessToken();
 
   const headers: Record<string, string> = {
     ...(opts?.headers as Record<string, string> | undefined),
   };
-  if (accessToken) {
-    headers['Authorization'] = `Bearer ${accessToken}`;
+  if (at) {
+    headers['Authorization'] = `Bearer ${at}`;
   }
 
   const res = await fetch(`${BASE_URL}${path}`, { ...opts, headers });

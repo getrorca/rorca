@@ -1,14 +1,44 @@
 import { useState } from 'react';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
 import AddWorkspaceModal from './components/AddWorkspaceModal';
+import LoginPage from './components/LoginPage';
+import RegisterPage from './components/RegisterPage';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
 import DirectionStackPanel from './panels/DirectionStackPanel';
 import ReviewQueuePanel from './panels/ReviewQueuePanel';
 import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
 import WorktreesPanel from './panels/WorktreesPanel';
 import ArchivePanel from './panels/ArchivePanel';
+
+type AuthPage = 'login' | 'register';
+
+function AuthGate() {
+  const { isAuthenticated, loading } = useAuth();
+  const [authPage, setAuthPage] = useState<AuthPage>('login');
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-bg">
+        <div className="text-muted text-sm">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return authPage === 'login'
+      ? <LoginPage onSwitchToRegister={() => setAuthPage('register')} />
+      : <RegisterPage onSwitchToLogin={() => setAuthPage('login')} />;
+  }
+
+  return (
+    <WorkspaceProvider>
+      <AppContent />
+    </WorkspaceProvider>
+  );
+}
 
 function AppContent() {
   const [activePanel, setActivePanel] = useState<PanelId>('forge');
@@ -54,9 +84,9 @@ function AppContent() {
 
 function App() {
   return (
-    <WorkspaceProvider>
-      <AppContent />
-    </WorkspaceProvider>
+    <AuthProvider>
+      <AuthGate />
+    </AuthProvider>
   );
 }
 
