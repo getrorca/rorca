@@ -458,5 +458,34 @@ Key decisions:
 - Spending calculated from token_usage.cost_usd (built in V2-043/V2-044)
 - notify_emails stored as JSON array in TEXT column (SQLite pattern consistent with existing code)
 
+## Story V2-046: API Key Vault (Secure Key Storage) — DONE
+Files touched:
+- backend/src/db/migrations/025_api_key_vault.sql (new) — creates api_key_vault table
+- backend/src/routes/vault.ts (new) — POST/GET/DELETE /api/vault/keys + getVaultKey helper
+- backend/src/server.ts (modified) — register vault route at /api/vault/keys
+- backend/src/lib/llm-client.ts (modified) — added Anthropic SDK path when apiKey provided
+- backend/src/routes/specs.ts (modified) — resolve vault key for spec generation, add-stories, rewrite
+- backend/src/routes/pipeline.ts (modified) — inject ANTHROPIC_API_KEY env var into run-loop.sh
+- backend/src/routes/__tests__/vault.test.ts (new) — 11 tests covering all endpoints + getVaultKey
+- backend/src/db/__tests__/db.test.ts (modified) — added api_key_vault to table list assertion
+
+What was built:
+- api_key_vault table: id, user_id, provider, encrypted_key, label, spend_total_usd, last_used_at, created_at
+- AES-256-GCM encryption (same pattern as GitHub token encryption in auth.ts) — key derived from JWT_SECRET
+- POST /api/vault/keys — stores encrypted key, returns masked (last 4 chars only), never returns plaintext
+- GET /api/vault/keys — lists keys with masked_key, provider, label, spend_total_usd, last_used_at
+- DELETE /api/vault/keys/:id — removes key, returns historical spend_total_usd
+- getVaultKey(userId, provider) — exported helper decrypts and returns key for use by other routes
+- chatComplete extended with ChatOptions overload: when apiKey provided, uses Anthropic SDK directly
+- Spec generation (generate, add-stories, rewrite) auto-resolves vault key for authenticated user
+- Pipeline trigger injects ANTHROPIC_API_KEY into run-loop.sh env when vault key available
+
+Key decisions:
+- Reused existing AES-256-GCM pattern from auth.ts (GitHub token encryption) — same VAULT_KEY derivation
+- chatComplete backward compatible: accepts string (model) or ChatOptions object
+- Valid providers: anthropic, openai, openrouter, openai-compat
+- Pipeline integration injects key as env var (ANTHROPIC_API_KEY) since run-loop.sh is a separate process
+- Batch processing threads userId through BatchBriefItem for vault key resolution
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
