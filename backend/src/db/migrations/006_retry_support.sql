@@ -1,0 +1,2 @@
+-- US-004: Retry support marker (actual migration handled in db/index.ts)
+-- Adds 'partial_failure' to pipeline_runs status CHECK constraint

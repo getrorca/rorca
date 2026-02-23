@@ -148,6 +148,13 @@ router.post('/trigger', async (req: Request, res: Response) => {
 
     // 11. Update status when process exits
     child.on('close', (code) => {
+      // Guard: DB may be closed if the process exits after test teardown
+      if (!db.open) {
+        buf.done = true;
+        buf.subscribers.clear();
+        return;
+      }
+
       const status = code === 0 ? 'done' : 'failed';
       db.prepare(
         `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
@@ -267,6 +274,231 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/pipeline/runs/:runId/retry — Retry failed stories ─────────────
+// Accepts optional 'storyIds' array; when omitted, retries all failed stories.
+// Preserves original failed story_result rows for audit trail.
+
+router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const { storyIds } = req.body as { storyIds?: string[] };
+
+    // 1. Fetch the run
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    // Only retry runs that have terminal failure states
+    if (!['failed', 'done', 'partial_failure'].includes(run.status)) {
+      res.status(409).json({ error: `Cannot retry run with status '${run.status}'` });
+      return;
+    }
+
+    // 2. Find failed stories for this run
+    const allStories = db.prepare(
+      'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+    ).all(runId) as StoryResultRow[];
+
+    // Get the latest result per story_id (highest retry count)
+    const latestByStory = new Map<string, StoryResultRow>();
+    for (const s of allStories) {
+      const existing = latestByStory.get(s.story_id);
+      if (!existing || s.retries > existing.retries) {
+        latestByStory.set(s.story_id, s);
+      }
+    }
+
+    const failedStories = Array.from(latestByStory.values()).filter(s => s.status === 'fail');
+
+    if (failedStories.length === 0) {
+      res.status(422).json({ error: 'No failed stories to retry' });
+      return;
+    }
+
+    // 3. Determine which stories to retry
+    let storiesToRetry: StoryResultRow[];
+    if (storyIds && storyIds.length > 0) {
+      storiesToRetry = failedStories.filter(s => storyIds.includes(s.story_id));
+      if (storiesToRetry.length === 0) {
+        res.status(422).json({ error: 'None of the specified storyIds are failed stories in this run' });
+        return;
+      }
+    } else {
+      storiesToRetry = failedStories;
+    }
+
+    // 4. Look up workspace
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(run.workspace_id) as
+      { id: string; label: string; path: string } | undefined;
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // 5. Verify run-loop.sh exists
+    const cwd = run.worktree_path || workspace.path;
+    const runLoopScript = path.join(cwd, 'scripts', 'run-loop.sh');
+    if (!fs.existsSync(runLoopScript)) {
+      res.status(422).json({ error: `run-loop.sh not found at ${runLoopScript}` });
+      return;
+    }
+
+    // 6. Create new story_result rows with incremented retry count + emit WAL events
+    const newStoryResults: Array<{ storyId: string; attempt: number }> = [];
+    const insertStory = db.prepare(
+      `INSERT INTO story_results (run_id, story_id, status, retries) VALUES (?, ?, 'retry', ?)`
+    );
+    const insertWal = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload) VALUES ('story_retried', ?, ?, ?)`
+    );
+
+    for (const story of storiesToRetry) {
+      const attempt = story.retries + 1;
+      insertStory.run(runId, story.story_id, attempt);
+
+      const walResult = insertWal.run(
+        run.workspace_id,
+        story.story_id,
+        JSON.stringify({ run_id: runId, story_id: story.story_id, attempt })
+      );
+
+      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walEvent);
+
+      newStoryResults.push({ storyId: story.story_id, attempt });
+    }
+
+    // 7. Transition run status to 'running'
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'running', finished_at = NULL WHERE id = ?`
+    ).run(runId);
+
+    // 8. Read the original spec and create a filtered version with only retry stories
+    const absSpecPath = path.join(workspace.path, 'scripts', run.spec_path);
+    if (!fs.existsSync(absSpecPath)) {
+      res.status(422).json({ error: `Spec file not found at ${absSpecPath}` });
+      return;
+    }
+
+    const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+    const retryStoryIds = new Set(storiesToRetry.map(s => s.story_id));
+    const retrySpec = {
+      ...specJson,
+      userStories: specJson.userStories.filter((s: { id: string }) => retryStoryIds.has(s.id)),
+    };
+
+    // Write temporary retry spec
+    const retrySpecName = `retry-${runId}-${Date.now()}.json`;
+    const retrySpecDir = path.join(workspace.path, 'scripts', 'ralph', 'specs', 'approved');
+    const retrySpecPath = path.join(retrySpecDir, retrySpecName);
+    fs.mkdirSync(retrySpecDir, { recursive: true });
+    fs.writeFileSync(retrySpecPath, JSON.stringify(retrySpec, null, 2));
+
+    // 9. Build clean env
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
+        env[k] = v;
+      }
+    }
+
+    // 10. Spawn run-loop.sh with the retry spec
+    const child = spawn('bash', [runLoopScript, '--json', retrySpecPath], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+
+    if (child.pid) {
+      db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, runId);
+    }
+
+    // 11. Set up output buffer for this retry
+    const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
+    outputBuffers.set(runId, buf);
+
+    const onData = (data: Buffer) => {
+      const text = data.toString('utf8');
+      buf.chunks.push(text);
+      buf.subscribers.forEach(cb => cb(text));
+    };
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
+
+    // 12. Handle process exit — determine final status based on story outcomes
+    child.on('close', (code) => {
+      // Guard: DB may be closed if the process exits after test teardown
+      if (!db.open) {
+        buf.done = true;
+        buf.subscribers.clear();
+        return;
+      }
+
+      // Check if all stories in this run are now passing
+      const currentStories = db.prepare(
+        'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+      ).all(runId) as StoryResultRow[];
+
+      // Build latest status per story_id
+      const latest = new Map<string, string>();
+      for (const s of currentStories) {
+        const existing = latest.get(s.story_id);
+        if (!existing) {
+          latest.set(s.story_id, s.status);
+        } else {
+          // Later rows (higher id) are more recent
+          latest.set(s.story_id, s.status);
+        }
+      }
+
+      const hasFailures = Array.from(latest.values()).some(st => st === 'fail');
+      const finalStatus = hasFailures ? 'partial_failure' : (code === 0 ? 'done' : 'partial_failure');
+
+      db.prepare(
+        `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
+      ).run(finalStatus, runId);
+
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+      ).run(run.workspace_id, JSON.stringify({ run_id: runId, status: finalStatus, exit_code: code }));
+
+      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walEvent);
+
+      buf.done = true;
+      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`));
+      buf.subscribers.clear();
+      setTimeout(() => outputBuffers.delete(runId), 30 * 60 * 1000);
+
+      // Clean up temporary retry spec
+      try { fs.unlinkSync(retrySpecPath); } catch { /* ignore */ }
+    });
+
+    res.status(200).json({
+      ok: true,
+      runId,
+      retriedStories: newStoryResults,
+    });
+  } catch (error: any) {
+    console.error('[Pipeline] Retry error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
 // Streams raw stdout/stderr (with ANSI codes) to xterm.js on the frontend.
 // Late-joiners receive a full replay of buffered chunks, then live updates.
@@ -354,7 +586,7 @@ router.get('/stream', (req: Request, res: Response) => {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected')
              AND (payload LIKE ? OR spec_id IS NOT NULL)
            ORDER BY id ASC
            LIMIT 50`
@@ -363,7 +595,7 @@ router.get('/stream', (req: Request, res: Response) => {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected')
            ORDER BY id ASC
            LIMIT 50`
         ).all(lastSeenId);
