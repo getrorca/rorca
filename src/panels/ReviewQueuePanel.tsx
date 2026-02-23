@@ -21,6 +21,7 @@ import { apiFetch } from '../lib/apiFetch';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
 import { InlineStoryEditor } from '../components/InlineStoryEditor';
+import { StoryComments } from '../components/StoryComments';
 import DependencyGraph from '../components/DependencyGraph';
 import MermaidDiagram from '../components/MermaidDiagram';
 import { useToast, ToastContainer } from '../components/Toast';
@@ -778,6 +779,15 @@ function PreviewStoriesTab({
   const [bulkLoading, setBulkLoading] = useState(false);
   const [priorityValue, setPriorityValue] = useState(3);
   const [showPriorityPicker, setShowPriorityPicker] = useState(false);
+  const [commentCounts, setCommentCounts] = useState<Record<string, number>>({});
+  const [commentsOpenFor, setCommentsOpenFor] = useState<string | null>(null);
+
+  // Fetch unresolved comment counts per story
+  useEffect(() => {
+    apiFetch<{ counts: Record<string, number> }>(`/api/specs/${specId}/comments/counts`)
+      .then(data => setCommentCounts(data.counts))
+      .catch(() => {});
+  }, [specId]);
 
   // Sync when prop changes
   useEffect(() => {
@@ -975,16 +985,32 @@ function PreviewStoriesTab({
             onCancel={() => setEditingStoryId(null)}
           />
         ) : (
-          <StoryCard
-            key={story.id}
-            story={story}
-            allStoryIds={allStoryIds}
-            onEdit={() => setEditingStoryId(story.id)}
-            selected={selectedIds.has(story.id)}
-            onToggleSelect={() => toggleSelect(story.id)}
-            specId={specId}
-            workspaceId={workspaceId}
-          />
+          <div key={story.id}>
+            <StoryCard
+              story={story}
+              allStoryIds={allStoryIds}
+              onEdit={() => setEditingStoryId(story.id)}
+              selected={selectedIds.has(story.id)}
+              onToggleSelect={() => toggleSelect(story.id)}
+              specId={specId}
+              workspaceId={workspaceId}
+              commentCount={commentCounts[story.id] ?? 0}
+              onOpenComments={() => setCommentsOpenFor(commentsOpenFor === story.id ? null : story.id)}
+            />
+            {commentsOpenFor === story.id && (
+              <StoryComments
+                specId={specId}
+                storyId={story.id}
+                onClose={() => setCommentsOpenFor(null)}
+                onCountChange={(count) => setCommentCounts(prev => {
+                  const next = { ...prev };
+                  if (count > 0) next[story.id] = count;
+                  else delete next[story.id];
+                  return next;
+                })}
+              />
+            )}
+          </div>
         )
       )}
     </div>
