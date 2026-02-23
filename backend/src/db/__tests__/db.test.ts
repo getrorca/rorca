@@ -42,6 +42,7 @@ test('all core tables plus FTS5 tables exist in sqlite_master', () => {
     'pipeline_runs',
     'pipeline_schedules',
     'refresh_tokens',
+    'spec_assignments',
     'spec_search_index',
     'spec_search_index_config',
     'spec_search_index_content',
