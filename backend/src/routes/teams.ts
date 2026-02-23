@@ -4,6 +4,8 @@ import { db } from '../db';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import type { AuthUser } from './auth';
 import { requireRole } from './auth';
+import { validateDirectionYaml } from '../lib/direction-validator';
+import { synthesize } from '../lib/direction-stack';
 
 const router = Router();
 
@@ -68,6 +70,32 @@ function emitWalEvent(eventType: string, payload: Record<string, unknown>): void
   };
   broadcastAll(walEvent);
 }
+
+// GET /api/teams — List teams the authenticated user belongs to
+router.get('/', (req: Request, res: Response) => {
+  try {
+    const user = getAuthUser(req);
+    const rows = db.prepare(`
+      SELECT t.id, t.name, t.slug, t.owner_id AS ownerId, t.created_at AS createdAt, tm.role
+      FROM teams t
+      JOIN team_members tm ON t.id = tm.team_id
+      WHERE tm.user_id = ?
+      ORDER BY t.name ASC
+    `).all(user.id) as Array<{
+      id: string;
+      name: string;
+      slug: string;
+      ownerId: string;
+      createdAt: string;
+      role: string;
+    }>;
+
+    res.json(rows);
+  } catch (error: unknown) {
+    console.error('[Teams] list error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
 
 // POST /api/teams — Create a new team
 router.post('/', (req: Request, res: Response) => {
@@ -331,6 +359,145 @@ router.patch('/:id/settings', requireRole('admin'), (req: Request, res: Response
     res.json({ id: teamId, name: trimmedName, slug: team.slug });
   } catch (error: unknown) {
     console.error('[Teams] settings error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// GET /api/teams/:id/direction — Fetch team-scoped L1/L2 direction layers
+router.get('/:id/direction', requireRole('viewer'), (req: Request, res: Response) => {
+  try {
+    const teamId = req.params.id;
+
+    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const l1Row = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = ? AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+    ).get(teamId) as { content_yaml: string } | undefined;
+
+    const l2Row = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = ? AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+    ).get(teamId) as { content_yaml: string } | undefined;
+
+    res.json({
+      teamId,
+      teamName: team.name,
+      l1: l1Row?.content_yaml ?? '',
+      l2: l2Row?.content_yaml ?? '',
+    });
+  } catch (error: unknown) {
+    console.error('[Teams] get direction error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// PUT /api/teams/:id/direction — Create or update team-level L1/L2 direction layers (admin only)
+router.put('/:id/direction', requireRole('admin'), (req: Request, res: Response) => {
+  try {
+    const teamId = req.params.id;
+    const { layer, contentYaml } = req.body;
+
+    if (!layer || ![1, 2].includes(Number(layer))) {
+      res.status(400).json({ error: 'layer must be 1 or 2 for team direction' });
+      return;
+    }
+
+    if (contentYaml === undefined || contentYaml === null) {
+      res.status(400).json({ error: 'contentYaml is required' });
+      return;
+    }
+
+    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const layerNum = Number(layer);
+
+    // Validate YAML
+    const validation = validateDirectionYaml(layerNum, contentYaml);
+    if (validation.yamlError) {
+      res.status(422).json({ error: 'Invalid YAML syntax', yamlError: validation.yamlError });
+      return;
+    }
+    if (!validation.valid) {
+      res.status(422).json({ error: 'Direction content failed schema validation', validationErrors: validation.errors });
+      return;
+    }
+
+    // Upsert team-scoped layer
+    db.prepare(`
+      INSERT INTO direction_layers (layer, workspace_id, domain, team_id, content_yaml, updated_at)
+      VALUES (?, NULL, NULL, ?, ?, datetime('now'))
+      ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
+      DO UPDATE SET content_yaml = excluded.content_yaml, updated_at = datetime('now')
+    `).run(layerNum, teamId, contentYaml);
+
+    emitWalEvent('team_direction_update', { teamId, layer: layerNum });
+
+    res.json({ ok: true });
+  } catch (error: unknown) {
+    console.error('[Teams] update direction error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// POST /api/teams/:id/direction/preview — Preview merged output for a team workspace
+router.post('/:id/direction/preview', requireRole('viewer'), (req: Request, res: Response) => {
+  try {
+    const teamId = req.params.id;
+    const { workspaceId, specBrief } = req.body;
+
+    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    // Fetch global L1
+    const globalL1 = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = '' AND COALESCE(team_id,'') = ''`
+    ).get() as { content_yaml: string } | undefined;
+
+    // Fetch global L2
+    const globalL2 = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = '' AND COALESCE(team_id,'') = ''`
+    ).get() as { content_yaml: string } | undefined;
+
+    // Fetch team L1/L2
+    const teamL1 = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
+    ).get(teamId) as { content_yaml: string } | undefined;
+
+    const teamL2 = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
+    ).get(teamId) as { content_yaml: string } | undefined;
+
+    // Fetch workspace L3 if provided
+    let l3Content: string | undefined;
+    if (workspaceId) {
+      const l3Row = db.prepare(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain,'') = '' AND COALESCE(team_id,'') = ''`
+      ).get(String(workspaceId)) as { content_yaml: string } | undefined;
+      l3Content = l3Row?.content_yaml;
+    }
+
+    const synthesized = synthesize({
+      l1: globalL1?.content_yaml,
+      l2: globalL2?.content_yaml,
+      teamL1: teamL1?.content_yaml,
+      teamL2: teamL2?.content_yaml,
+      l3: l3Content,
+      specBrief: specBrief || '(no spec brief)',
+    });
+
+    res.json({ synthesized });
+  } catch (error: unknown) {
+    console.error('[Teams] direction preview error:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });

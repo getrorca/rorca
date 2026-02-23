@@ -15,6 +15,7 @@ import ArchivePanel from './panels/ArchivePanel';
 import CompareRunsPanel from './panels/CompareRunsPanel';
 import GitHubSettingsPanel from './panels/GitHubSettingsPanel';
 import ActivityFeedPanel from './panels/ActivityFeedPanel';
+import TeamDirectionPanel from './panels/TeamDirectionPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -72,9 +73,10 @@ function AppContent() {
 
   return (
     <Shell sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} />}>
-      {activePanel === 'forge'     && <SpecForgePanelPage />}
-      {activePanel === 'stack'     && <DirectionStackPanel />}
-      {activePanel === 'queue'     && <ReviewQueuePanel />}
+      {activePanel === 'forge'           && <SpecForgePanelPage />}
+      {activePanel === 'stack'           && <DirectionStackPanel />}
+      {activePanel === 'team-direction'  && <TeamDirectionPanel />}
+      {activePanel === 'queue'           && <ReviewQueuePanel />}
       {activePanel === 'pipeline'  && <PipelineMonitorPanel />}
       {activePanel === 'worktrees' && <WorktreesPanel />}
       {activePanel === 'compare'   && <CompareRunsPanel onBack={() => setActivePanel('pipeline')} />}
