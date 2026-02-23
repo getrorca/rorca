@@ -418,4 +418,81 @@ router.delete('/pricing/:modelId', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/analytics/models — Model comparison metrics ─────────────────────
+// Aggregates cost, speed, quality, and usage metrics per model from historical data.
+// Query params:
+//   workspace_id — optional filter
+//   from         — ISO date (inclusive), default 30 days ago
+//   to           — ISO date (inclusive), default now
+
+interface ModelComparisonRow {
+  model: string;
+  total_stories: number;
+  passed_stories: number;
+  failed_stories: number;
+  avg_cost_usd: number;
+  total_cost_usd: number;
+  avg_elapsed_seconds: number;
+  avg_input_tokens: number;
+  avg_output_tokens: number;
+}
+
+router.get('/models', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspace_id as string | undefined;
+
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const from = (req.query.from as string) || thirtyDaysAgo.toISOString();
+    const to = (req.query.to as string) || now.toISOString();
+
+    const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
+    const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
+
+    // Join token_usage with story_results to get pass/fail + elapsed_seconds per story
+    // token_usage has model, cost; story_results has status, elapsed_seconds
+    const sql = `
+      SELECT
+        tu.model,
+        COUNT(*) AS total_stories,
+        SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END) AS passed_stories,
+        SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END) AS failed_stories,
+        AVG(tu.cost_usd) AS avg_cost_usd,
+        SUM(tu.cost_usd) AS total_cost_usd,
+        AVG(sr.elapsed_seconds) AS avg_elapsed_seconds,
+        AVG(tu.input_tokens) AS avg_input_tokens,
+        AVG(tu.output_tokens) AS avg_output_tokens
+      FROM token_usage tu
+      JOIN story_results sr ON tu.run_id = sr.run_id AND tu.story_id = sr.story_id
+      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ?
+      ${wsFilter}
+      AND sr.status IN ('pass', 'fail')
+      GROUP BY tu.model
+      ORDER BY total_stories DESC
+    `;
+
+    const rows = db.prepare(sql).all(...params) as ModelComparisonRow[];
+
+    // Enrich with pass rate and insufficient data flag
+    const models = rows.map(r => ({
+      model: r.model,
+      totalStories: r.total_stories,
+      passedStories: r.passed_stories,
+      failedStories: r.failed_stories,
+      passRate: r.total_stories > 0 ? r.passed_stories / r.total_stories : 0,
+      avgCostUsd: r.avg_cost_usd ?? 0,
+      totalCostUsd: r.total_cost_usd ?? 0,
+      avgElapsedSeconds: r.avg_elapsed_seconds ?? 0,
+      avgInputTokens: Math.round(r.avg_input_tokens ?? 0),
+      avgOutputTokens: Math.round(r.avg_output_tokens ?? 0),
+      insufficientData: r.total_stories < 5,
+    }));
+
+    res.json({ models, dateRange: { from, to } });
+  } catch (error: any) {
+    console.error('[Analytics] Models comparison error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
