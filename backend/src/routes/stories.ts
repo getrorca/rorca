@@ -50,8 +50,47 @@ function getSpecTags(specId: string, workspaceId: string): string[] {
   return rows.map(r => r.tag_name);
 }
 
-// ─── GET /api/stories/search ─────────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/stories/search:
+ *   get:
+ *     tags: [Stories]
+ *     summary: Search stories across all specs
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         required: true
+ *         schema: { type: string }
+ *         description: Search query (matches title, description, acceptance criteria)
+ *       - in: query
+ *         name: workspaceId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [all, pending, approved], default: all }
+ *       - in: query
+ *         name: tags
+ *         schema: { type: string }
+ *         description: Comma-separated tag filter
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50, maximum: 200 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *     responses:
+ *       200:
+ *         description: Search results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items: { type: array, items: { type: object } }
+ *                 total: { type: integer }
+ *                 hasMore: { type: boolean }
+ *       400: { description: "Missing q parameter" }
+ */
 router.get('/search', (req: Request, res: Response) => {
   try {
     const q = (req.query.q as string || '').trim();

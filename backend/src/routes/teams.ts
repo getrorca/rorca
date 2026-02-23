@@ -71,7 +71,41 @@ function emitWalEvent(eventType: string, payload: Record<string, unknown>): void
   broadcastAll(walEvent);
 }
 
-// GET /api/teams — List teams the authenticated user belongs to
+/**
+ * @swagger
+ * /api/teams:
+ *   get:
+ *     tags: [Teams]
+ *     summary: List teams the user belongs to
+ *     responses:
+ *       200:
+ *         description: List of teams
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items: { $ref: '#/components/schemas/Team' }
+ *   post:
+ *     tags: [Teams]
+ *     summary: Create a new team
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, slug]
+ *             properties:
+ *               name: { type: string }
+ *               slug: { type: string, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+ *     responses:
+ *       201:
+ *         description: Team created
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Team' }
+ *       409: { description: "Slug already taken" }
+ */
 router.get('/', (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
@@ -228,7 +262,29 @@ router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) 
   }
 });
 
-// GET /api/teams/:id/members — List team members (any member can view)
+/**
+ * @swagger
+ * /api/teams/{id}/members:
+ *   get:
+ *     tags: [Teams]
+ *     summary: List team members
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Team members
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 teamId: { type: string }
+ *                 teamName: { type: string }
+ *                 members: { type: array, items: { type: object } }
+ */
 router.get('/:id/members', requireRole('viewer'), (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;

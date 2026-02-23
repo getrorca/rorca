@@ -86,8 +86,53 @@ function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
   return result;
 }
 
-// ─── POST / — Create a template from an approved spec ─────────────────────────
-
+/**
+ * @swagger
+ * /api/templates:
+ *   post:
+ *     tags: [Templates]
+ *     summary: Create a template from an approved spec
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, sourceSpecId, brief, storyStructure]
+ *             properties:
+ *               name: { type: string }
+ *               description: { type: string }
+ *               sourceSpecId: { type: string }
+ *               brief: { type: string }
+ *               storyStructure: { type: array, items: { $ref: '#/components/schemas/UserStory' } }
+ *               directionLayers: { type: object }
+ *               teamId: { type: string }
+ *     responses:
+ *       201:
+ *         description: Template created
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Template' }
+ *       400: { description: "Missing required fields" }
+ *   get:
+ *     tags: [Templates]
+ *     summary: List templates
+ *     parameters:
+ *       - in: query
+ *         name: scope
+ *         schema: { type: string, enum: [all, personal, team], default: all }
+ *     responses:
+ *       200:
+ *         description: List of templates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 templates:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/Template' }
+ */
 router.post('/', (req: Request, res: Response) => {
   try {
     const user = (req as Request & { user: AuthUser }).user;
@@ -200,8 +245,39 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /:id/rate — Rate a template (1-5) ──────────────────────────────────
-
+/**
+ * @swagger
+ * /api/templates/{id}/rate:
+ *   post:
+ *     tags: [Templates]
+ *     summary: Rate a template (1-5)
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [rating]
+ *             properties:
+ *               rating: { type: integer, minimum: 1, maximum: 5 }
+ *     responses:
+ *       200:
+ *         description: Rating saved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 avgRating: { type: number }
+ *                 ratingCount: { type: integer }
+ *                 userRating: { type: integer }
+ *       404: { description: "Template not found" }
+ */
 router.post('/:id/rate', (req: Request, res: Response) => {
   try {
     const user = (req as Request & { user: AuthUser }).user;
@@ -246,8 +322,36 @@ router.post('/:id/rate', (req: Request, res: Response) => {
   }
 });
 
-// ─── GET /:id — Get a single template ─────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/templates/{id}:
+ *   get:
+ *     tags: [Templates]
+ *     summary: Get a single template
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Template with full body
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Template' }
+ *       404: { description: "Template not found" }
+ *   delete:
+ *     tags: [Templates]
+ *     summary: Delete a template
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204: { description: "Deleted" }
+ *       404: { description: "Template not found" }
+ */
 router.get('/:id', (req: Request, res: Response) => {
   try {
     const user = (req as Request & { user: AuthUser }).user;
