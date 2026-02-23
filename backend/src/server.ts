@@ -13,6 +13,8 @@ import templatesRouter from './routes/templates';
 import storiesRouter from './routes/stories';
 import schedulesRouter from './routes/schedules';
 import envVarsRouter from './routes/env-vars';
+import workspaceGithubRouter from './routes/workspace-github';
+import webhooksRouter from './routes/webhooks';
 import authRouter, { authRequired } from './routes/auth';
 import { startScheduler } from './lib/scheduler';
 
@@ -30,6 +32,7 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.use('/api/auth', authRouter);
+app.use('/api/webhooks', webhooksRouter);
 
 // ─── Auth middleware (all routes below require authentication) ───
 app.use(authRequired);
@@ -47,6 +50,7 @@ app.use('/api/worktrees', worktreesRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/stories', storiesRouter);
 app.use('/api/workspaces/:id/env-vars', envVarsRouter);
+app.use('/api/workspaces/:id/github', workspaceGithubRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
