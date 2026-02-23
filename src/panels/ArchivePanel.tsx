@@ -399,7 +399,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                       </div>
                       <div className="flex items-center gap-2">
                         {spec.readinessPercent != null && (
-                          <ReadinessRing percent={spec.readinessPercent} size={28} />
+                          <ReadinessRing percent={spec.readinessPercent} size={28} showHelp />
                         )}
                         <span className="text-[10px] text-muted flex items-center gap-1">
                           <Clock size={10} />
