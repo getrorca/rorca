@@ -59,6 +59,7 @@ test('all core tables plus FTS5 tables exist in sqlite_master', () => {
     'workspace_access',
     'workspace_context',
     'workspace_env_vars',
+    'workspace_github_webhooks',
     'workspaces',
   ]);
 });
