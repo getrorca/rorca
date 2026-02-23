@@ -16,6 +16,8 @@ import envVarsRouter from './routes/env-vars';
 import workspaceGithubRouter from './routes/workspace-github';
 import webhooksRouter from './routes/webhooks';
 import githubChecksRouter from './routes/github-checks';
+import teamsRouter from './routes/teams';
+import invitesRouter from './routes/invites';
 import authRouter, { authRequired } from './routes/auth';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
@@ -44,6 +46,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/auth', authRouter);
 app.use('/api/webhooks', webhooksRouter);
+app.use('/api/invites', invitesRouter);
 registerWebhookHandlers();
 
 // ─── Auth middleware (all routes below require authentication) ───
@@ -64,6 +67,7 @@ app.use('/api/stories', storiesRouter);
 app.use('/api/workspaces/:id/env-vars', envVarsRouter);
 app.use('/api/workspaces/:id/github', workspaceGithubRouter);
 app.use('/api/github/checks', githubChecksRouter);
+app.use('/api/teams', teamsRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {

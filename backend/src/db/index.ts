@@ -158,6 +158,12 @@ export function runMigrations() {
   if (!wsCols.some(c => c.name === 'pr_template')) {
     db.exec('ALTER TABLE workspaces ADD COLUMN pr_template TEXT');
   }
+
+  // V2-035: Add last_active_at column to team_members (idempotent)
+  const tmCols = db.pragma('table_info(team_members)') as { name: string }[];
+  if (!tmCols.some(c => c.name === 'last_active_at')) {
+    db.exec('ALTER TABLE team_members ADD COLUMN last_active_at TEXT');
+  }
 }
 
 runMigrations();

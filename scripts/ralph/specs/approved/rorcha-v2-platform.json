@@ -590,7 +590,8 @@
         "V2-005",
         "V2-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "V2-036",
@@ -1700,6 +1701,25 @@
       ],
       "dependsOn": [
         "V2-104"
+      ]
+    },
+    {
+      "id": "V2-106",
+      "title": "LLM Provider Abstraction Layer",
+      "description": "As a developer, I want llm-client.ts refactored into a multi-provider abstraction so Rorcha can route spec generation and story prompts through Anthropic SDK, OpenAI-compatible endpoints (any provider with a baseURL), or OpenRouter \u2014 determined by the user's configured provider and stored API key.",
+      "acceptanceCriteria": [
+        "llm-client.ts exports a unified chatComplete(messages, opts) that accepts an optional provider override: 'anthropic' | 'openai-compat' | 'openrouter' | 'claude-cli' (default)",
+        "Provider 'anthropic' uses @anthropic-ai/sdk with the API key from BYOB vault or ANTHROPIC_API_KEY env var",
+        "Provider 'openai-compat' uses openai npm package with configurable baseURL and API key \u2014 covers OpenAI, Groq, Together, DeepSeek, Mistral, Ollama, and all Chinese labs",
+        "Provider 'openrouter' uses openai package with baseURL='https://openrouter.ai/api/v1' \u2014 covers Google Gemini, xAI Grok, and any other outlier",
+        "Provider 'claude-cli' retains existing claude --print subprocess path for users running on Claude subscription",
+        "Active provider and model are resolved in order: request param \u2192 workspace preferred_model \u2192 user BYOB key provider \u2192 DEFAULT_MODEL",
+        "TokenUsage is normalized across all providers to { inputTokens, outputTokens } regardless of SDK response shape",
+        "GET /api/direction/models returns available models filtered to the user's configured providers",
+        "Unit tests cover provider routing logic with mocked SDK responses"
+      ],
+      "dependsOn": [
+        "V2-046"
       ]
     }
   ],
