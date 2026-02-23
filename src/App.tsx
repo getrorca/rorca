@@ -1,12 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
 import AddWorkspaceModal from './components/AddWorkspaceModal';
 import CommandPalette from './components/CommandPalette';
+import KeyboardShortcutsPanel from './components/KeyboardShortcutsPanel';
 import LoginPage from './components/LoginPage';
 import RegisterPage from './components/RegisterPage';
+import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
 import DirectionStackPanel from './panels/DirectionStackPanel';
 import ReviewQueuePanel from './panels/ReviewQueuePanel';
@@ -53,18 +55,26 @@ function AppContent() {
   const { workspaces, addWorkspace } = useWorkspace();
   const [showAddModal, setShowAddModal] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
 
-  // Global Cmd+K / Ctrl+K listener
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault();
-        setShowCommandPalette((prev) => !prev);
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  // Global keyboard shortcuts via useHotkeys
+  const hotkeys = useMemo<HotkeyBinding[]>(() => [
+    { key: 'mod+k', handler: () => setShowCommandPalette((prev) => !prev) },
+    { key: '?', handler: () => setShowShortcuts((prev) => !prev) },
+    { key: 'mod+/', handler: () => setShowShortcuts((prev) => !prev) },
+    // Navigation: Cmd+1..5 for top panels
+    { key: 'mod+1', handler: () => setActivePanel('forge') },
+    { key: 'mod+2', handler: () => setActivePanel('stack') },
+    { key: 'mod+3', handler: () => setActivePanel('queue') },
+    { key: 'mod+4', handler: () => setActivePanel('pipeline') },
+    { key: 'mod+5', handler: () => setActivePanel('archive') },
+    // Spec actions
+    { key: 'mod+n', handler: () => setActivePanel('forge') },
+    // Pipeline actions
+    { key: 'mod+shift+r', handler: () => setActivePanel('pipeline') },
+  ], []);
+
+  useHotkeys(hotkeys);
 
   if (workspaces.length === 0) {
     return (
@@ -114,6 +124,9 @@ function AppContent() {
           onNavigate={setActivePanel}
           onClose={() => setShowCommandPalette(false)}
         />
+      )}
+      {showShortcuts && (
+        <KeyboardShortcutsPanel onClose={() => setShowShortcuts(false)} />
       )}
     </Shell>
   );
