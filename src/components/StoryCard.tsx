@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit } from 'lucide-react';
+import { apiFetch } from '../lib/apiFetch';
 
 export interface Story {
   id: string;
@@ -13,6 +14,16 @@ export interface Story {
   passes?: boolean;
   excluded?: boolean;
   mergedVia?: string;
+}
+
+interface StoryCommit {
+  id: number;
+  story_id: string;
+  spec_id: string;
+  commit_sha: string;
+  commit_message: string;
+  author: string;
+  pushed_at: string;
 }
 
 function getReadinessWarnings(story: Story, allStoryIds?: Set<string>): string[] {
@@ -37,6 +48,8 @@ export function StoryCard({
   allStoryIds,
   selected,
   onToggleSelect,
+  specId,
+  workspaceId,
 }: {
   story: Story;
   onToggleExclude?: () => void;
@@ -44,13 +57,32 @@ export function StoryCard({
   allStoryIds?: Set<string>;
   selected?: boolean;
   onToggleSelect?: () => void;
+  specId?: string;
+  workspaceId?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [commitsExpanded, setCommitsExpanded] = useState(false);
+  const [commits, setCommits] = useState<StoryCommit[]>([]);
+  const [commitsLoaded, setCommitsLoaded] = useState(false);
 
   const isDone = story.passes === true;
   const isDeferred = story.excluded === true && !isDone;
   const warnings = getReadinessWarnings(story, allStoryIds);
   const isNotReady = warnings.length > 0 && !isDone;
+
+  const canShowCommits = !!(specId && workspaceId);
+
+  useEffect(() => {
+    if (!commitsExpanded || commitsLoaded || !specId || !workspaceId) return;
+    apiFetch<{ commits: StoryCommit[] }>(
+      `/api/specs/${specId}/stories/${story.id}/commits?workspaceId=${workspaceId}`
+    ).then(data => {
+      setCommits(data.commits);
+      setCommitsLoaded(true);
+    }).catch(() => {
+      setCommitsLoaded(true);
+    });
+  }, [commitsExpanded, commitsLoaded, specId, workspaceId, story.id]);
 
   return (
     <div className={`border rounded bg-panel transition-opacity ${
@@ -174,6 +206,17 @@ export function StoryCard({
             Acceptance criteria ({story.acceptanceCriteria.length})
           </button>
         )}
+
+        {canShowCommits && (
+          <button
+            onClick={() => setCommitsExpanded(!commitsExpanded)}
+            className="flex items-center gap-1 mt-1 text-xs text-muted hover:text-text transition-colors"
+          >
+            {commitsExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <GitCommit size={11} />
+            Commits{commitsLoaded ? ` (${commits.length})` : ''}
+          </button>
+        )}
       </div>
 
       {expanded && (
@@ -189,6 +232,30 @@ export function StoryCard({
             <div className="mt-2 text-xs text-muted">
               <span className="font-medium">Depends on:</span>{' '}
               {story.dependencies.join(', ')}
+            </div>
+          )}
+        </div>
+      )}
+
+      {commitsExpanded && (
+        <div className="px-3 pb-3 pt-0">
+          {!commitsLoaded ? (
+            <div className="text-xs text-muted">Loading...</div>
+          ) : commits.length === 0 ? (
+            <div className="text-xs text-muted">No linked commits</div>
+          ) : (
+            <div className="space-y-1.5">
+              {commits.map(c => (
+                <div key={c.id} className="flex items-start gap-2 text-xs">
+                  <code className="shrink-0 px-1 py-0.5 rounded bg-surface text-accent font-mono text-[10px]">
+                    {c.commit_sha.slice(0, 7)}
+                  </code>
+                  <span className="text-text truncate flex-1" title={c.commit_message}>
+                    {c.commit_message.split('\n')[0]}
+                  </span>
+                  <span className="shrink-0 text-muted">{c.author}</span>
+                </div>
+              ))}
             </div>
           )}
         </div>
