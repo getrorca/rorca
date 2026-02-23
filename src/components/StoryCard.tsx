@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check, MessageSquare } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { AssigneeDropdown } from './AssigneeDropdown';
+import type { Assignee } from './AssigneeDropdown';
 
 export interface Story {
   id: string;
@@ -52,6 +54,8 @@ export function StoryCard({
   workspaceId,
   commentCount,
   onOpenComments,
+  assignee,
+  onAssignStory,
 }: {
   story: Story;
   onToggleExclude?: () => void;
@@ -63,6 +67,8 @@ export function StoryCard({
   workspaceId?: string;
   commentCount?: number;
   onOpenComments?: () => void;
+  assignee?: Assignee | null;
+  onAssignStory?: (userId: string | null) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [commitsExpanded, setCommitsExpanded] = useState(false);
@@ -233,6 +239,17 @@ export function StoryCard({
               )}
             </div>
           </div>
+          {/* Assignee */}
+          {onAssignStory && workspaceId && (
+            <div className="shrink-0 mt-0.5">
+              <AssigneeDropdown
+                assignee={assignee}
+                onAssign={onAssignStory}
+                workspaceId={workspaceId}
+                size="sm"
+              />
+            </div>
+          )}
           {/* Edit button */}
           {onEdit && (
             <button
