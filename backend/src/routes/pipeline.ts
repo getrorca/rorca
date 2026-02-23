@@ -9,6 +9,7 @@ import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
 import { DEFAULT_MODEL, isValidModel, type SupportedModel } from '../lib/llm-client';
+import { getWorkspaceEnvVars } from './env-vars';
 
 /** Persistent log file path for a run — survives backend restarts */
 const runLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
@@ -165,6 +166,12 @@ router.post('/trigger', async (req: Request, res: Response) => {
       if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
         env[k] = v;
       }
+    }
+
+    // 7b. Inject workspace-specific env vars (decrypted)
+    const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
+    for (const [k, v] of Object.entries(workspaceEnvVars)) {
+      env[k] = v;
     }
 
     // 8. Run pre-run hooks — abort if any exit non-zero
@@ -553,6 +560,12 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
         env[k] = v;
       }
+    }
+
+    // 9b. Inject workspace-specific env vars (decrypted)
+    const wsEnvVars = getWorkspaceEnvVars(run.workspace_id);
+    for (const [k, v] of Object.entries(wsEnvVars)) {
+      env[k] = v;
     }
 
     // 10. Spawn run-loop.sh with the retry spec — detached, output to log file
