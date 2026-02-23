@@ -17,6 +17,7 @@ import GitHubSettingsPanel from './panels/GitHubSettingsPanel';
 import ActivityFeedPanel from './panels/ActivityFeedPanel';
 import TeamDirectionPanel from './panels/TeamDirectionPanel';
 import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
+import UsageDashboardPanel from './panels/UsageDashboardPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -83,6 +84,7 @@ function AppContent() {
       {activePanel === 'compare'   && <CompareRunsPanel onBack={() => setActivePanel('pipeline')} />}
       {activePanel === 'archive'   && <ArchivePanel onNavigate={setActivePanel} />}
       {activePanel === 'marketplace' && <TemplateMarketplacePanel />}
+      {activePanel === 'usage'     && <UsageDashboardPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
     </Shell>
