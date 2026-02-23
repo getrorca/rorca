@@ -74,6 +74,38 @@ export function runMigrations() {
     db.exec('ALTER TABLE users ADD COLUMN avatar_url TEXT');
   }
 
+  // V2-017: Add 'timeout' to story_results status CHECK + elapsed_seconds column (idempotent)
+  const storyResultsSql = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_results'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (!storyResultsSql.includes('timeout')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE story_results_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES pipeline_runs(id),
+        story_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pass','fail','skip','retry','timeout')),
+        retries INTEGER NOT NULL DEFAULT 0,
+        log_path TEXT,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT,
+        elapsed_seconds INTEGER
+      );
+      INSERT INTO story_results_new (id, run_id, story_id, status, retries, log_path, started_at, finished_at)
+        SELECT id, run_id, story_id, status, retries, log_path, started_at, finished_at FROM story_results;
+      DROP TABLE story_results;
+      ALTER TABLE story_results_new RENAME TO story_results;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
+
+  // Also add elapsed_seconds if story_results exists but without it (edge case: table was already recreated above)
+  const srCols = db.pragma('table_info(story_results)') as { name: string }[];
+  if (!srCols.some(c => c.name === 'elapsed_seconds')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN elapsed_seconds INTEGER');
+  }
+
   // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
   const tableSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`

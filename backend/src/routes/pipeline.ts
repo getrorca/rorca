@@ -57,6 +57,7 @@ interface StoryResultRow {
   log_path: string | null;
   started_at: string;
   finished_at: string | null;
+  elapsed_seconds: number | null;
 }
 
 // ─── POST /api/pipeline/trigger — Spawn run-loop.sh for a spec ──────────────
