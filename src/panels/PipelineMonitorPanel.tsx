@@ -6,6 +6,7 @@ import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
+import { HelpTooltip } from '../components/HelpTooltip';
 
 type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens';
 
@@ -138,6 +139,7 @@ function ContextBudgetBar({ inputTokens, outputTokens }: { inputTokens: number; 
         {formatTokens(total)}/{formatTokens(CONTEXT_WINDOW)}
       </span>
       {isWarning && <AlertTriangle className="w-3 h-3 text-amber-400 flex-shrink-0" />}
+      <HelpTooltip helpKey="context-budget" size={10} />
     </div>
   );
 }
@@ -754,7 +756,10 @@ export default function PipelineMonitorPanel() {
                 {totalCount > 0 && (
                   <div className="px-4 py-2 border-b border-[var(--border)] shrink-0">
                     <div className="flex items-center justify-between text-xs text-[var(--text-muted)] mb-1">
-                      <span>{completedCount}/{totalCount} stories complete</span>
+                      <span className="inline-flex items-center gap-1">
+                        {completedCount}/{totalCount} stories complete
+                        <HelpTooltip helpKey="pipeline-parallelism" size={10} />
+                      </span>
                       <span>{progressPct}%</span>
                     </div>
                     <div className="h-1.5 bg-[var(--border)] rounded-full overflow-hidden">
@@ -803,8 +808,9 @@ export default function PipelineMonitorPanel() {
                             <span className="font-mono text-xs text-[var(--text-muted)] w-16 flex-shrink-0">
                               {story.storyId}
                             </span>
-                            <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded border flex-shrink-0 ${pConfig.className}`}>
+                            <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded border flex-shrink-0 ${pConfig.className}`}>
                               {pConfig.label}
+                              <HelpTooltip helpKey="story-priority" size={9} />
                             </span>
                             <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
                             <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">

@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Menu } from 'lucide-react';
+import { Menu, HelpCircle } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
+import { useHelpTips } from '../contexts/HelpTipsContext';
 import AddWorkspaceModal from './AddWorkspaceModal';
 import ThemeToggle from './ThemeToggle';
 
@@ -102,6 +103,25 @@ function UserMenu() {
   );
 }
 
+function ShowTipsToggle() {
+  const { showTips, setShowTips } = useHelpTips();
+  return (
+    <button
+      onClick={() => setShowTips(!showTips)}
+      className={`flex items-center gap-1 px-2 py-1.5 rounded text-xs transition-colors ${
+        showTips
+          ? 'text-accent bg-accent/10 hover:bg-accent/20'
+          : 'text-muted hover:text-[var(--text)] hover:bg-bg'
+      }`}
+      title={showTips ? 'Hide help tips' : 'Show help tips'}
+      aria-label={showTips ? 'Hide help tips' : 'Show help tips'}
+    >
+      <HelpCircle size={14} />
+      <span className="hidden sm:inline">Tips</span>
+    </button>
+  );
+}
+
 interface ShellProps {
   sidebar?: React.ReactNode;
   children?: React.ReactNode;
@@ -129,6 +149,7 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton 
         </div>
         <div className="flex items-center gap-1 sm:gap-2">
           <WorkspaceSelector />
+          <ShowTipsToggle />
           <ThemeToggle />
           <UserMenu />
         </div>
