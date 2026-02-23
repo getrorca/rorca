@@ -6,6 +6,7 @@ import * as os from 'os';
 import simpleGit from 'simple-git';
 import { db } from '../db/index';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
+import { runHooks } from '../lib/hook-runner';
 
 /** Persistent log file path for a run — survives backend restarts */
 const runLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
@@ -130,11 +131,58 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }
     }
 
-    // 8. Spawn run-loop.sh — detached so it survives backend restarts.
+    // 8. Run pre-run hooks — abort if any exit non-zero
+    const logPath = runLogPath(runId);
+    const preRunResults = runHooks(workspaceId, 'pre_run', cwd, env);
+    if (preRunResults.length > 0) {
+      // Write hook output to the log file so it appears in the terminal
+      const hookOutput = preRunResults.map(r =>
+        `\x1b[36m[pre_run hook: ${r.command}]\x1b[0m\n${r.output}` +
+        (r.exitCode !== 0 ? `\n\x1b[31m[Hook exited with code ${r.exitCode}]\x1b[0m\n` : '\n')
+      ).join('');
+      fs.writeFileSync(logPath, hookOutput);
+
+      const failed = preRunResults.find(r => r.exitCode !== 0);
+      if (failed) {
+        // Mark run as failed and emit WAL event
+        db.prepare(
+          `UPDATE pipeline_runs SET status = 'failed', finished_at = datetime('now') WHERE id = ?`
+        ).run(runId);
+
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+        ).run(workspaceId, JSON.stringify({
+          run_id: runId, status: 'failed', reason: 'pre_run_hook_failed',
+          hook_command: failed.command, exit_code: failed.exitCode,
+        }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+          walResult.lastInsertRowid
+        ) as WalEvent;
+        broadcastAll(walEvent);
+
+        // Set up output buffer so terminal can display hook output
+        const failBuf: OutputBuffer = { chunks: [hookOutput], done: true, subscribers: new Set() };
+        outputBuffers.set(runId, failBuf);
+        setTimeout(() => {
+          outputBuffers.delete(runId);
+          try { fs.unlinkSync(logPath); } catch { /* already gone */ }
+        }, 30 * 60 * 1000);
+
+        res.status(422).json({
+          error: 'Pre-run hook failed',
+          runId,
+          hookCommand: failed.command,
+          exitCode: failed.exitCode,
+          output: failed.output,
+        });
+        return;
+      }
+    }
+
+    // 9. Spawn run-loop.sh — detached so it survives backend restarts.
     //    stdout+stderr go directly to the log file via file descriptor (no pipes).
     //    Pipes break on parent death (SIGPIPE), but file descriptors don't.
     const scriptInCwd = path.join(cwd, 'scripts', 'run-loop.sh');
-    const logPath = runLogPath(runId);
     const logFd = fs.openSync(logPath, 'a');
     const child = spawn('bash', [scriptInCwd, '--json', absSpecPath], {
       cwd,
@@ -200,6 +248,19 @@ router.post('/trigger', async (req: Request, res: Response) => {
       db.prepare(
         `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
       ).run(status, runId);
+
+      // Run post-run hooks with RUN_STATUS and RUN_ID env vars
+      const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
+      const postRunResults = runHooks(workspaceId, 'post_run', cwd, postRunEnv);
+      if (postRunResults.length > 0) {
+        const hookOutput = postRunResults.map(r =>
+          `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +
+          (r.exitCode !== 0 ? `\r\n\x1b[31m[Hook exited with code ${r.exitCode}]\x1b[0m\r\n` : '\r\n')
+        ).join('');
+        buf.chunks.push(hookOutput);
+        buf.subscribers.forEach(cb => cb(hookOutput));
+        fs.appendFileSync(logPath, hookOutput);
+      }
 
       const walResult = db.prepare(
         `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
