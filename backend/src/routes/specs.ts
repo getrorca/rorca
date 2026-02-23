@@ -2495,4 +2495,40 @@ router.delete('/:specId/tags/:tag', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/specs/:specId/stories/:storyId/commits ─────────────────────────
+
+interface StoryCommitRow {
+  id: number;
+  story_id: string;
+  spec_id: string;
+  workspace_id: string;
+  commit_sha: string;
+  commit_message: string;
+  author: string;
+  pushed_at: string;
+}
+
+router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) => {
+  try {
+    const { specId, storyId } = req.params;
+    const workspaceId = req.query.workspaceId as string;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing workspaceId query param' });
+      return;
+    }
+
+    const commits = db.prepare(
+      `SELECT * FROM story_commits
+       WHERE spec_id = ? AND story_id = ? AND workspace_id = ?
+       ORDER BY pushed_at DESC`
+    ).all(specId, storyId, workspaceId) as StoryCommitRow[];
+
+    res.json({ commits });
+  } catch (error: any) {
+    console.error('[Specs] Story commits error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;

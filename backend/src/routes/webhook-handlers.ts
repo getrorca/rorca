@@ -214,9 +214,116 @@ export function handlePullRequestMerge(
   }
 }
 
+// ─── Commit → Story ID extraction ───────────────────────────────────────────
+
+/**
+ * Extract story IDs from a single commit message.
+ * Matches patterns like:
+ *   - feat(US-001): description
+ *   - feat(US-001, US-002): description
+ *   - fix(US-003): description
+ * Falls back to scanning for any US-XXX pattern.
+ */
+export function extractStoryIdsFromCommit(message: string): string[] {
+  const ids = new Set<string>();
+
+  // Pattern: feat(US-XXX) or feat(US-XXX, US-YYY) — also fix(), chore(), etc.
+  const parenPattern = /\w+\(([^)]*US-\d+[^)]*)\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = parenPattern.exec(message)) !== null) {
+    const inner = match[1];
+    const innerIds = inner.match(/US-\d+/gi) || [];
+    for (const id of innerIds) {
+      ids.add(id.toUpperCase());
+    }
+  }
+
+  // Fallback: any US-XXX pattern in the message
+  if (ids.size === 0) {
+    const fallbackIds = message.match(/US-\d+/gi) || [];
+    for (const id of fallbackIds) {
+      ids.add(id.toUpperCase());
+    }
+  }
+
+  return Array.from(ids);
+}
+
+// ─── Push handler ───────────────────────────────────────────────────────────
+
+interface PushCommit {
+  id: string;
+  message: string;
+  author: { name: string; email: string; username?: string };
+  timestamp: string;
+}
+
+/**
+ * Handle push events: parse commit messages for story ID patterns
+ * and store mappings in the story_commits table.
+ */
+export function handlePush(
+  payload: Record<string, any>,
+  _event: string,
+  workspaceId: string,
+): void {
+  const commits: PushCommit[] = payload.commits ?? [];
+  if (commits.length === 0) return;
+
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+  if (!workspace) {
+    console.error(`[Webhook] Workspace ${workspaceId} not found`);
+    return;
+  }
+
+  const insertStmt = db.prepare(
+    `INSERT OR IGNORE INTO story_commits (story_id, spec_id, workspace_id, commit_sha, commit_message, author, pushed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  let totalLinked = 0;
+
+  for (const commit of commits) {
+    const storyIds = extractStoryIdsFromCommit(commit.message);
+    if (storyIds.length === 0) continue;
+
+    // Find which specs contain these story IDs
+    const specMatches = findSpecsWithStories(workspace.path, storyIds);
+
+    for (const { specId, matchedStoryIds } of specMatches) {
+      for (const storyId of matchedStoryIds) {
+        const author = commit.author?.username || commit.author?.name || 'unknown';
+        const pushedAt = commit.timestamp || new Date().toISOString();
+        insertStmt.run(storyId, specId, workspaceId, commit.id, commit.message, author, pushedAt);
+        totalLinked++;
+      }
+    }
+  }
+
+  if (totalLinked > 0) {
+    console.log(`[Webhook] Push: linked ${totalLinked} commit-story mappings for workspace ${workspaceId}`);
+
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_push_commits', ?, 'github', ?)`
+    ).run(workspaceId, JSON.stringify({
+      commits_count: commits.length,
+      linked_count: totalLinked,
+      ref: payload.ref ?? '',
+    }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+
+    broadcastAll(walEvent);
+  }
+}
+
 // ─── Register handlers ───────────────────────────────────────────────────────
 
 export function registerWebhookHandlers(): void {
   onGithubEvent('pull_request', handlePullRequestMerge);
+  onGithubEvent('push', handlePush);
   console.log('[Webhook] Registered pull_request merge handler');
+  console.log('[Webhook] Registered push commit-linking handler');
 }
