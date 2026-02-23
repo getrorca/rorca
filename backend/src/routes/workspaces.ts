@@ -17,6 +17,7 @@ interface WorkspaceRow {
   path: string;
   domains: string;
   created_at: string;
+  pr_template: string | null;
 }
 
 interface WorkspaceContextRow {
@@ -34,6 +35,7 @@ function parseWorkspace(row: WorkspaceRow) {
   return {
     ...row,
     domains: JSON.parse(row.domains) as string[],
+    pr_template: row.pr_template ?? null,
   };
 }
 
@@ -262,6 +264,24 @@ router.get('/:id', (req, res) => {
     return;
   }
   res.json({ workspace: parseWorkspace(row) });
+});
+
+// PATCH /api/workspaces/:id — Update workspace settings (e.g. pr_template)
+router.patch('/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
+  if (!row) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  const { pr_template } = req.body;
+  if (pr_template !== undefined) {
+    const value = pr_template === null || pr_template === '' ? null : String(pr_template);
+    db.prepare('UPDATE workspaces SET pr_template = ? WHERE id = ?').run(value, req.params.id);
+  }
+
+  const updated = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow;
+  res.json({ workspace: parseWorkspace(updated) });
 });
 
 // DELETE /api/workspaces/:id
