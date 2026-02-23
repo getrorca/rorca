@@ -66,8 +66,9 @@ export default function RunTerminal({ runId }: RunTerminalProps) {
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    // Connect to live output stream
-    const es = new EventSource(`/api/pipeline/runs/${runId}/output`);
+    // Connect to live output stream — must use absolute URL (backend is on :3030, not :5210)
+    const base = import.meta.env.VITE_API_URL || 'http://localhost:3030';
+    const es = new EventSource(`${base}/api/pipeline/runs/${runId}/output`);
     esRef.current = es;
 
     es.addEventListener('chunk', (e: MessageEvent) => {
