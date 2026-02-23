@@ -125,7 +125,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
 
     // 3. Conflict check — is there already an active run for this workspace?
     const activeRun = db.prepare(
-      `SELECT * FROM pipeline_runs WHERE workspace_id = ? AND status = 'running' LIMIT 1`
+      `SELECT * FROM pipeline_runs WHERE workspace_id = ? AND status IN ('running', 'paused') LIMIT 1`
     ).get(workspaceId) as PipelineRunRow | undefined;
 
     if (activeRun && !autoWorktree) {
@@ -683,6 +683,139 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/pipeline/runs/:runId/pause — Pause a running pipeline ─────────
+// Sends SIGTSTP to the process group so the current story finishes before pausing.
+
+router.post('/runs/:runId/pause', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    if (run.status !== 'running') {
+      res.status(409).json({ error: `Cannot pause run with status '${run.status}'` });
+      return;
+    }
+
+    if (!run.pid || !isPidAlive(run.pid)) {
+      res.status(409).json({ error: 'Process is not alive' });
+      return;
+    }
+
+    // Send SIGTSTP to the process group (negative pid) — the current story
+    // finishes because SIGTSTP is a "soft" stop that the shell handles at
+    // the next job-control boundary, letting the foreground child complete.
+    try {
+      process.kill(-run.pid, 'SIGTSTP');
+    } catch (err: any) {
+      res.status(500).json({ error: `Failed to send SIGTSTP: ${err.message}` });
+      return;
+    }
+
+    // Update status to 'paused'
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'paused' WHERE id = ?`
+    ).run(runId);
+
+    // Compute elapsed time and completed story count for the WAL event
+    const elapsedMs = Date.now() - new Date(run.started_at + 'Z').getTime();
+    const elapsedSeconds = Math.floor(elapsedMs / 1000);
+    const completedStories = db.prepare(
+      `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status IN ('pass', 'fail')`
+    ).get(runId) as { cnt: number };
+
+    // Emit WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_paused', ?, ?)`
+    ).run(run.workspace_id, JSON.stringify({
+      run_id: runId,
+      elapsed_seconds: elapsedSeconds,
+      completed_stories: completedStories.cnt,
+    }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({ ok: true, runId, status: 'paused' });
+  } catch (error: any) {
+    console.error('[Pipeline] Pause error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/pipeline/runs/:runId/resume — Resume a paused pipeline ────────
+// Sends SIGCONT to the process group to resume execution.
+
+router.post('/runs/:runId/resume', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    if (run.status !== 'paused') {
+      res.status(409).json({ error: `Cannot resume run with status '${run.status}'` });
+      return;
+    }
+
+    if (!run.pid || !isPidAlive(run.pid)) {
+      res.status(409).json({ error: 'Process is not alive' });
+      return;
+    }
+
+    // Send SIGCONT to the process group
+    try {
+      process.kill(-run.pid, 'SIGCONT');
+    } catch (err: any) {
+      res.status(500).json({ error: `Failed to send SIGCONT: ${err.message}` });
+      return;
+    }
+
+    // Update status back to 'running'
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'running' WHERE id = ?`
+    ).run(runId);
+
+    // Emit WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_resumed', ?, ?)`
+    ).run(run.workspace_id, JSON.stringify({ run_id: runId }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({ ok: true, runId, status: 'running' });
+  } catch (error: any) {
+    console.error('[Pipeline] Resume error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
 // Streams raw stdout/stderr (with ANSI codes) to xterm.js on the frontend.
 // Late-joiners receive a full replay of buffered chunks, then live updates.
@@ -753,7 +886,7 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
   // Check if the original process is still alive
   const run = db.prepare('SELECT pid, status FROM pipeline_runs WHERE id = ?')
     .get(runId) as { pid: number | null; status: string } | undefined;
-  const stillRunning = run?.status === 'running' && run?.pid != null && isPidAlive(run.pid);
+  const stillRunning = (run?.status === 'running' || run?.status === 'paused') && run?.pid != null && isPidAlive(run.pid);
 
   if (!stillRunning) {
     clearInterval(hb);
@@ -829,7 +962,7 @@ router.get('/stream', (req: Request, res: Response) => {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
              AND (payload LIKE ? OR spec_id IS NOT NULL)
            ORDER BY id ASC
            LIMIT 50`
@@ -838,7 +971,7 @@ router.get('/stream', (req: Request, res: Response) => {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
            ORDER BY id ASC
            LIMIT 50`
         ).all(lastSeenId);
