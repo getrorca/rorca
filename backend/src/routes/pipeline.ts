@@ -392,6 +392,142 @@ router.get('/runs', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/pipeline/runs/compare — Compare two pipeline runs side-by-side ─
+
+router.get('/runs/compare', (req: Request, res: Response) => {
+  try {
+    const run1Id = parseInt(String(req.query.run1), 10);
+    const run2Id = parseInt(String(req.query.run2), 10);
+
+    if (isNaN(run1Id) || isNaN(run2Id)) {
+      res.status(400).json({ error: 'Missing or invalid run1/run2 query params' });
+      return;
+    }
+
+    if (run1Id === run2Id) {
+      res.status(400).json({ error: 'Cannot compare a run with itself' });
+      return;
+    }
+
+    // Fetch both runs
+    const run1 = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(run1Id) as PipelineRunRow | undefined;
+    const run2 = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(run2Id) as PipelineRunRow | undefined;
+
+    if (!run1) { res.status(404).json({ error: `Run ${run1Id} not found` }); return; }
+    if (!run2) { res.status(404).json({ error: `Run ${run2Id} not found` }); return; }
+
+    // Fetch story results for both runs (latest per story_id by highest id)
+    const stories1All = db.prepare(
+      'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+    ).all(run1Id) as StoryResultRow[];
+    const stories2All = db.prepare(
+      'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+    ).all(run2Id) as StoryResultRow[];
+
+    // Deduplicate to latest result per story_id (retries produce multiple rows)
+    const latestStory = (rows: StoryResultRow[]) => {
+      const map = new Map<string, StoryResultRow>();
+      for (const r of rows) map.set(r.story_id, r); // last row wins (ordered by id ASC)
+      return map;
+    };
+
+    const map1 = latestStory(stories1All);
+    const map2 = latestStory(stories2All);
+
+    // Collect all story IDs from both runs
+    const allStoryIds = new Set([...map1.keys(), ...map2.keys()]);
+
+    // Build per-story comparison
+    type StoryChange = 'unchanged' | 'improved' | 'regressed' | 'new_in_run2' | 'removed_in_run2';
+    interface StoryComparison {
+      storyId: string;
+      run1Status: string | null;
+      run2Status: string | null;
+      run1Elapsed: number | null;
+      run2Elapsed: number | null;
+      run1Retries: number | null;
+      run2Retries: number | null;
+      change: StoryChange;
+    }
+
+    const stories: StoryComparison[] = [];
+
+    for (const storyId of allStoryIds) {
+      const s1 = map1.get(storyId);
+      const s2 = map2.get(storyId);
+
+      let change: StoryChange = 'unchanged';
+      if (!s1 && s2) {
+        change = 'new_in_run2';
+      } else if (s1 && !s2) {
+        change = 'removed_in_run2';
+      } else if (s1 && s2 && s1.status !== s2.status) {
+        // Determine if improved or regressed
+        const isPass = (st: string) => st === 'pass';
+        if (!isPass(s1.status) && isPass(s2.status)) {
+          change = 'improved';
+        } else if (isPass(s1.status) && !isPass(s2.status)) {
+          change = 'regressed';
+        } else {
+          change = 'unchanged'; // e.g. fail→skip — neither clear improvement nor regression
+        }
+      }
+
+      stories.push({
+        storyId,
+        run1Status: s1?.status ?? null,
+        run2Status: s2?.status ?? null,
+        run1Elapsed: s1?.elapsed_seconds ?? null,
+        run2Elapsed: s2?.elapsed_seconds ?? null,
+        run1Retries: s1?.retries ?? null,
+        run2Retries: s2?.retries ?? null,
+        change,
+      });
+    }
+
+    // Sort: changes first, then alphabetical
+    const changePriority: Record<StoryChange, number> = {
+      regressed: 0, improved: 1, new_in_run2: 2, removed_in_run2: 3, unchanged: 4,
+    };
+    stories.sort((a, b) =>
+      changePriority[a.change] !== changePriority[b.change]
+        ? changePriority[a.change] - changePriority[b.change]
+        : a.storyId.localeCompare(b.storyId)
+    );
+
+    // Compute summary stats
+    const passCount = (map: Map<string, StoryResultRow>) =>
+      Array.from(map.values()).filter(s => s.status === 'pass').length;
+    const totalElapsed = (map: Map<string, StoryResultRow>) =>
+      Array.from(map.values()).reduce((sum, s) => sum + (s.elapsed_seconds ?? 0), 0);
+
+    const run1PassCount = passCount(map1);
+    const run2PassCount = passCount(map2);
+    const run1Total = map1.size;
+    const run2Total = map2.size;
+
+    const summary = {
+      run1PassRate: run1Total > 0 ? Math.round((run1PassCount / run1Total) * 100) : 0,
+      run2PassRate: run2Total > 0 ? Math.round((run2PassCount / run2Total) * 100) : 0,
+      passRateDelta: (run2Total > 0 ? (run2PassCount / run2Total) : 0) - (run1Total > 0 ? (run1PassCount / run1Total) : 0),
+      run1TotalElapsed: totalElapsed(map1),
+      run2TotalElapsed: totalElapsed(map2),
+      elapsedDelta: totalElapsed(map2) - totalElapsed(map1),
+      run1StoryCount: run1Total,
+      run2StoryCount: run2Total,
+      improved: stories.filter(s => s.change === 'improved').length,
+      regressed: stories.filter(s => s.change === 'regressed').length,
+      newStories: stories.filter(s => s.change === 'new_in_run2').length,
+      removedStories: stories.filter(s => s.change === 'removed_in_run2').length,
+    };
+
+    res.json({ run1, run2, stories, summary });
+  } catch (error: any) {
+    console.error('[Pipeline] Compare runs error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET /api/pipeline/runs/:runId — Get run detail + story results ──────────
 
 router.get('/runs/:runId', (req: Request, res: Response) => {
