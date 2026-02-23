@@ -487,5 +487,26 @@ Key decisions:
 - Pipeline integration injects key as env var (ANTHROPIC_API_KEY) since run-loop.sh is a separate process
 - Batch processing threads userId through BatchBriefItem for vault key resolution
 
+## Story V2-049: Completion Rate Breakdown — DONE
+Files touched:
+- backend/src/routes/analytics.ts (modified — added GET /completion-rates endpoint, added path + fs imports)
+- src/panels/CompletionRatePanel.tsx (new — horizontal bar charts with pass rate by complexity and tag)
+- src/components/Sidebar.tsx (modified — added 'completion' PanelId + BarChart3 icon)
+- src/App.tsx (modified — import + render CompletionRatePanel)
+
+What was built:
+- GET /api/analytics/completion-rates returns pass/fail/skip percentages grouped by story complexity (1-5 + unrated)
+- Includes breakdown by spec tags (from spec_tags table), showing which categories have lowest pass rates
+- CompletionRatePanel renders horizontal bar charts (Recharts) with pass rate per group, toggle between complexity and tag views
+- Groups with pass rate below 60% highlighted in red with AlertTriangle icon
+- Configurable time range (7d/30d/90d/180d) with 30d default, workspace filter
+
+Key decisions:
+- Complexity and tags resolved by reading spec JSON files from disk + spec_tags table (not stored in story_results)
+- Spec files cached in a Map per request to avoid redundant disk reads
+- Tags are spec-level (not story-level), so each story inherits all tags from its parent spec
+- byTag results sorted by passRate ascending (worst first) so improvement opportunities are most visible
+- Used layout="vertical" BarChart for horizontal bars — better readability for group labels
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
