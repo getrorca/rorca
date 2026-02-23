@@ -13,13 +13,53 @@ const REFRESH_TOKEN_EXPIRES_DAYS = 7;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_COST = 12;
 
+// GitHub OAuth config
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
+const GITHUB_CALLBACK_URL = process.env.GITHUB_CALLBACK_URL || 'http://localhost:3030/api/auth/github/callback';
+const GITHUB_SCOPES = 'user:email repo';
+
+// Encryption key for GitHub tokens at rest — derived from JWT_SECRET via SHA256 to get 32 bytes
+const ENCRYPTION_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
+const ENCRYPTION_ALGO = 'aes-256-gcm' as const;
+
 interface UserRow {
   id: string;
   email: string;
   display_name: string;
   password_hash: string;
+  github_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface GitHubConnectionRow {
+  id: string;
+  user_id: string;
+  github_user_id: string;
+  encrypted_token: string;
+  scopes: string;
+  github_username: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface GitHubTokenResponse {
+  access_token: string;
+  token_type: string;
+  scope: string;
+}
+
+interface GitHubUser {
+  id: number;
+  login: string;
+  email: string | null;
+}
+
+interface GitHubEmail {
+  email: string;
+  primary: boolean;
+  verified: boolean;
 }
 
 interface RefreshTokenRow {
@@ -232,6 +272,196 @@ router.post('/logout', (req: Request, res: Response) => {
   }
 
   res.json({ message: 'Logged out successfully' });
+});
+
+// ─── Token encryption helpers ───
+
+export function encryptToken(plaintext: string): string {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGO, ENCRYPTION_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  // Format: iv:authTag:ciphertext (all hex)
+  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+export function decryptToken(encryptedStr: string): string {
+  const [ivHex, authTagHex, ciphertextHex] = encryptedStr.split(':');
+  const iv = Buffer.from(ivHex, 'hex');
+  const authTag = Buffer.from(authTagHex, 'hex');
+  const ciphertext = Buffer.from(ciphertextHex, 'hex');
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGO, ENCRYPTION_KEY, iv);
+  decipher.setAuthTag(authTag);
+  return decipher.update(ciphertext) + decipher.final('utf8');
+}
+
+// ─── GitHub OAuth helper: fetch from GitHub API ───
+
+async function githubApiFetch<T>(url: string, token: string): Promise<T> {
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+    },
+  });
+  if (!resp.ok) {
+    throw new Error(`GitHub API error: ${resp.status} ${resp.statusText}`);
+  }
+  return resp.json() as Promise<T>;
+}
+
+// GET /api/auth/github — redirect to GitHub OAuth authorization URL
+router.get('/github', (_req: Request, res: Response) => {
+  if (!GITHUB_CLIENT_ID) {
+    res.status(500).json({ error: 'GitHub OAuth not configured: GITHUB_CLIENT_ID missing' });
+    return;
+  }
+
+  const state = crypto.randomBytes(16).toString('hex');
+  const params = new URLSearchParams({
+    client_id: GITHUB_CLIENT_ID,
+    redirect_uri: GITHUB_CALLBACK_URL,
+    scope: GITHUB_SCOPES,
+    state,
+  });
+
+  res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
+});
+
+// GET /api/auth/github/callback — exchange code for token, create/link user
+router.get('/github/callback', async (req: Request, res: Response) => {
+  const { code } = req.query;
+
+  if (!code || typeof code !== 'string') {
+    res.status(400).json({ error: 'Authorization code is required' });
+    return;
+  }
+
+  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+    res.status(500).json({ error: 'GitHub OAuth not configured' });
+    return;
+  }
+
+  try {
+    // 1. Exchange code for access token
+    const tokenResp = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: GITHUB_CALLBACK_URL,
+      }),
+    });
+
+    const tokenData = await tokenResp.json() as GitHubTokenResponse & { error?: string; error_description?: string };
+    if (tokenData.error || !tokenData.access_token) {
+      res.status(401).json({ error: tokenData.error_description || 'Failed to exchange authorization code' });
+      return;
+    }
+
+    const githubAccessToken = tokenData.access_token;
+    const grantedScopes = tokenData.scope || GITHUB_SCOPES;
+
+    // 2. Fetch GitHub user profile
+    const githubUser = await githubApiFetch<GitHubUser>('https://api.github.com/user', githubAccessToken);
+    const githubUserId = String(githubUser.id);
+    const githubUsername = githubUser.login;
+
+    // 3. Fetch verified primary email
+    let primaryEmail = githubUser.email;
+    if (!primaryEmail) {
+      const emails = await githubApiFetch<GitHubEmail[]>('https://api.github.com/user/emails', githubAccessToken);
+      const primary = emails.find(e => e.primary && e.verified);
+      if (!primary) {
+        res.status(400).json({ error: 'No verified primary email found on GitHub account' });
+        return;
+      }
+      primaryEmail = primary.email;
+    }
+    primaryEmail = primaryEmail.toLowerCase().trim();
+
+    // 4. Find or create user, link GitHub connection
+    // Check if a github_connection already exists for this GitHub user
+    const existingConnection = db.prepare(
+      'SELECT * FROM github_connections WHERE github_user_id = ?'
+    ).get(githubUserId) as GitHubConnectionRow | undefined;
+
+    let userId: string;
+    let userEmail: string;
+    let displayName: string;
+
+    if (existingConnection) {
+      // Returning GitHub user — update their token
+      userId = existingConnection.user_id;
+      const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as UserRow;
+      userEmail = user.email;
+      displayName = user.display_name;
+
+      // Update encrypted token and scopes
+      db.prepare(
+        "UPDATE github_connections SET encrypted_token = ?, scopes = ?, github_username = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(encryptToken(githubAccessToken), grantedScopes, githubUsername, existingConnection.id);
+    } else {
+      // Check if a user with this email already exists (account linking)
+      const existingUser = db.prepare('SELECT * FROM users WHERE email = ?').get(primaryEmail) as UserRow | undefined;
+
+      if (existingUser) {
+        // Link GitHub to existing email-based account
+        userId = existingUser.id;
+        userEmail = existingUser.email;
+        displayName = existingUser.display_name;
+
+        // Set github_id on user
+        db.prepare("UPDATE users SET github_id = ?, updated_at = datetime('now') WHERE id = ?").run(githubUserId, userId);
+      } else {
+        // Create new user (no password — GitHub-only account)
+        userId = crypto.randomUUID();
+        userEmail = primaryEmail;
+        displayName = githubUsername;
+
+        // Use a random unusable password hash for GitHub-only users
+        const noPasswordHash = `github:${crypto.randomBytes(32).toString('hex')}`;
+        db.prepare(
+          'INSERT INTO users (id, email, display_name, password_hash, github_id) VALUES (?, ?, ?, ?, ?)'
+        ).run(userId, userEmail, displayName, noPasswordHash, githubUserId);
+      }
+
+      // Create github_connection
+      const connectionId = crypto.randomUUID();
+      db.prepare(
+        'INSERT INTO github_connections (id, user_id, github_user_id, encrypted_token, scopes, github_username) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(connectionId, userId, githubUserId, encryptToken(githubAccessToken), grantedScopes, githubUsername);
+    }
+
+    // 5. Generate JWT + refresh token pair (same as email login)
+    const accessToken = generateAccessToken(userId, userEmail);
+    const refreshToken = generateRefreshToken();
+    storeRefreshToken(userId, refreshToken);
+
+    // Emit WAL event
+    db.prepare(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_login', '', ?)"
+    ).run(JSON.stringify({ userId, email: userEmail, githubUserId, githubUsername }));
+
+    res.json({
+      user: {
+        id: userId,
+        email: userEmail,
+        displayName,
+        githubUsername,
+      },
+      accessToken,
+      refreshToken,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error during GitHub OAuth';
+    res.status(500).json({ error: message });
+  }
 });
 
 // Auth middleware — verifies JWT access token from Authorization header
