@@ -862,7 +862,8 @@
         "Recent commands are shown when the palette opens with no query, keyboard arrows navigate results, and Enter selects"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "V2-052",
