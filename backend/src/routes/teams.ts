@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { db } from '../db';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import type { AuthUser } from './auth';
+import { requireRole } from './auth';
 
 const router = Router();
 
@@ -37,12 +38,6 @@ interface TeamInviteRow {
   expires_at: string;
   accepted_at: string | null;
   created_at: string;
-}
-
-interface UserRow {
-  id: string;
-  email: string;
-  display_name: string;
 }
 
 function getAuthUser(req: Request): AuthUser {
@@ -130,8 +125,8 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-// POST /api/teams/:id/invites — Send an email invitation
-router.post('/:id/invites', (req: Request, res: Response) => {
+// POST /api/teams/:id/invites — Send an email invitation (admin only)
+router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
     const teamId = req.params.id;
@@ -149,15 +144,6 @@ router.post('/:id/invites', (req: Request, res: Response) => {
     const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
     if (!team) {
       res.status(404).json({ error: 'Team not found' });
-      return;
-    }
-
-    // Verify requester is owner (admin role)
-    const membership = db.prepare(
-      'SELECT * FROM team_members WHERE team_id = ? AND user_id = ?'
-    ).get(teamId, user.id) as TeamMemberRow | undefined;
-    if (!membership || membership.role !== 'admin') {
-      res.status(403).json({ error: 'Only team admins can send invites' });
       return;
     }
 
@@ -200,8 +186,6 @@ router.post('/:id/invites', (req: Request, res: Response) => {
 
     emitWalEvent('team_invite_sent', { teamId, inviteId, email: trimmedEmail, role: inviteRole, invitedBy: user.id });
 
-    // In production, this would send an actual email.
-    // For now, return the token so it can be used directly.
     res.status(201).json({
       inviteId,
       email: trimmedEmail,
@@ -216,25 +200,14 @@ router.post('/:id/invites', (req: Request, res: Response) => {
   }
 });
 
-// GET /api/teams/:id/members — List team members
-router.get('/:id/members', (req: Request, res: Response) => {
+// GET /api/teams/:id/members — List team members (any member can view)
+router.get('/:id/members', requireRole('viewer'), (req: Request, res: Response) => {
   try {
-    const user = getAuthUser(req);
     const teamId = req.params.id;
 
-    // Verify team exists
     const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
     if (!team) {
       res.status(404).json({ error: 'Team not found' });
-      return;
-    }
-
-    // Verify requester is a member
-    const membership = db.prepare(
-      'SELECT * FROM team_members WHERE team_id = ? AND user_id = ?'
-    ).get(teamId, user.id) as TeamMemberRow | undefined;
-    if (!membership) {
-      res.status(403).json({ error: 'You are not a member of this team' });
       return;
     }
 
@@ -264,6 +237,100 @@ router.get('/:id/members', (req: Request, res: Response) => {
     res.json({ teamId, teamName: team.name, members });
   } catch (error: unknown) {
     console.error('[Teams] members error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// PATCH /api/teams/:id/members/:userId — Update a member's role (admin only)
+router.patch('/:id/members/:userId', requireRole('admin'), (req: Request, res: Response) => {
+  try {
+    const teamId = req.params.id;
+    const targetUserId = req.params.userId;
+    const { role } = req.body;
+
+    if (!role || !['admin', 'editor', 'viewer'].includes(role)) {
+      res.status(400).json({ error: 'Valid role is required (admin, editor, viewer)' });
+      return;
+    }
+
+    const membership = db.prepare(
+      'SELECT * FROM team_members WHERE team_id = ? AND user_id = ?'
+    ).get(teamId, targetUserId) as TeamMemberRow | undefined;
+    if (!membership) {
+      res.status(404).json({ error: 'Member not found' });
+      return;
+    }
+
+    db.prepare(
+      'UPDATE team_members SET role = ? WHERE team_id = ? AND user_id = ?'
+    ).run(role, teamId, targetUserId);
+
+    emitWalEvent('team_member_role_changed', { teamId, userId: targetUserId, oldRole: membership.role, newRole: role });
+
+    res.json({ teamId, userId: targetUserId, role });
+  } catch (error: unknown) {
+    console.error('[Teams] update member error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// DELETE /api/teams/:id/members/:userId — Remove a member (admin only)
+router.delete('/:id/members/:userId', requireRole('admin'), (req: Request, res: Response) => {
+  try {
+    const teamId = req.params.id;
+    const targetUserId = req.params.userId;
+    const user = getAuthUser(req);
+
+    // Prevent removing yourself if you're the owner
+    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    if (team && team.owner_id === targetUserId) {
+      res.status(400).json({ error: 'Cannot remove the team owner' });
+      return;
+    }
+
+    const result = db.prepare(
+      'DELETE FROM team_members WHERE team_id = ? AND user_id = ?'
+    ).run(teamId, targetUserId);
+
+    if (result.changes === 0) {
+      res.status(404).json({ error: 'Member not found' });
+      return;
+    }
+
+    emitWalEvent('team_member_removed', { teamId, userId: targetUserId, removedBy: user.id });
+
+    res.json({ ok: true });
+  } catch (error: unknown) {
+    console.error('[Teams] remove member error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// PATCH /api/teams/:id/settings — Update team settings (admin only)
+router.patch('/:id/settings', requireRole('admin'), (req: Request, res: Response) => {
+  try {
+    const teamId = req.params.id;
+    const { name } = req.body;
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      res.status(400).json({ error: 'Team name is required' });
+      return;
+    }
+
+    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    if (!team) {
+      res.status(404).json({ error: 'Team not found' });
+      return;
+    }
+
+    const trimmedName = name.trim();
+    db.prepare('UPDATE teams SET name = ? WHERE id = ?').run(trimmedName, teamId);
+
+    emitWalEvent('team_settings_updated', { teamId, name: trimmedName });
+
+    res.json({ id: teamId, name: trimmedName, slug: team.slug });
+  } catch (error: unknown) {
+    console.error('[Teams] settings error:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });

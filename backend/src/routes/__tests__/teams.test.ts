@@ -34,6 +34,12 @@ function createTeam(ownerId: string, overrides: { name?: string; slug?: string }
   return { id, name, slug };
 }
 
+function addMember(teamId: string, userId: string, role: 'admin' | 'editor' | 'viewer') {
+  db.prepare(
+    "INSERT INTO team_members (team_id, user_id, role, accepted_at, last_active_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))"
+  ).run(teamId, userId, role);
+}
+
 // Cleanup between tests
 afterEach(() => {
   db.prepare('DELETE FROM team_invites').run();
@@ -142,15 +148,12 @@ describe('POST /api/teams/:id/invites', () => {
     expect(res.body.error).toMatch(/maximum 3 pending invites/i);
   });
 
-  it('rejects non-admin invites', async () => {
+  it('rejects non-admin invites with 403', async () => {
     const owner = createUser();
     const viewer = createUser({ email: 'viewer@test.com' });
     const team = createTeam(owner.id);
 
-    // Add viewer as non-admin
-    db.prepare(
-      "INSERT INTO team_members (team_id, user_id, role, accepted_at) VALUES (?, ?, 'viewer', datetime('now'))"
-    ).run(team.id, viewer.id);
+    addMember(team.id, viewer.id, 'viewer');
 
     const token = tokenFor(viewer);
     const res = await request(app)
@@ -159,7 +162,24 @@ describe('POST /api/teams/:id/invites', () => {
       .send({ email: 'someone@example.com' });
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/only team admins/i);
+    expect(res.body.error).toMatch(/requires admin role/i);
+  });
+
+  it('rejects editor invites with 403', async () => {
+    const owner = createUser();
+    const editor = createUser({ email: 'editor@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, editor.id, 'editor');
+
+    const token = tokenFor(editor);
+    const res = await request(app)
+      .post(`/api/teams/${team.id}/invites`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'someone@example.com' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/requires admin role/i);
   });
 
   it('rejects duplicate pending invite for same email', async () => {
@@ -294,10 +314,7 @@ describe('GET /api/teams/:id/members', () => {
     const member = createUser({ email: 'member@test.com', displayName: 'Member' });
     const team = createTeam(owner.id);
 
-    // Add member directly
-    db.prepare(
-      "INSERT INTO team_members (team_id, user_id, role, accepted_at, last_active_at) VALUES (?, ?, 'editor', datetime('now'), datetime('now'))"
-    ).run(team.id, member.id);
+    addMember(team.id, member.id, 'editor');
 
     const res = await request(app)
       .get(`/api/teams/${team.id}/members`)
@@ -315,6 +332,21 @@ describe('GET /api/teams/:id/members', () => {
     expect(editorMember.displayName).toBe('Member');
   });
 
+  it('allows viewers to list members', async () => {
+    const owner = createUser();
+    const viewer = createUser({ email: 'viewer@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, viewer.id, 'viewer');
+
+    const res = await request(app)
+      .get(`/api/teams/${team.id}/members`)
+      .set('Authorization', `Bearer ${tokenFor(viewer)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.members).toHaveLength(2);
+  });
+
   it('rejects non-members', async () => {
     const owner = createUser();
     const outsider = createUser({ email: 'outsider@test.com' });
@@ -326,13 +358,288 @@ describe('GET /api/teams/:id/members', () => {
 
     expect(res.status).toBe(403);
   });
+});
 
-  it('returns 404 for non-existent team', async () => {
-    const user = createUser();
+// ─── Role-based permission enforcement ───
+
+describe('requireRole middleware', () => {
+  it('returns 403 for non-team-members', async () => {
+    const owner = createUser();
+    const outsider = createUser({ email: 'outsider@test.com' });
+    const team = createTeam(owner.id);
+
     const res = await request(app)
-      .get('/api/teams/non-existent-id/members')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .post(`/api/teams/${team.id}/invites`)
+      .set('Authorization', `Bearer ${tokenFor(outsider)}`)
+      .send({ email: 'someone@example.com' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('You are not a member of this team');
+  });
+
+  it('viewers cannot send invites (requires admin)', async () => {
+    const owner = createUser();
+    const viewer = createUser({ email: 'viewer@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, viewer.id, 'viewer');
+
+    const res = await request(app)
+      .post(`/api/teams/${team.id}/invites`)
+      .set('Authorization', `Bearer ${tokenFor(viewer)}`)
+      .send({ email: 'someone@example.com' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Insufficient permissions: requires admin role');
+  });
+
+  it('editors cannot send invites (requires admin)', async () => {
+    const owner = createUser();
+    const editor = createUser({ email: 'editor@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, editor.id, 'editor');
+
+    const res = await request(app)
+      .post(`/api/teams/${team.id}/invites`)
+      .set('Authorization', `Bearer ${tokenFor(editor)}`)
+      .send({ email: 'someone@example.com' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Insufficient permissions: requires admin role');
+  });
+
+  it('admins can send invites', async () => {
+    const owner = createUser();
+    const team = createTeam(owner.id);
+
+    const res = await request(app)
+      .post(`/api/teams/${team.id}/invites`)
+      .set('Authorization', `Bearer ${tokenFor(owner)}`)
+      .send({ email: 'someone@example.com', role: 'editor' });
+
+    expect(res.status).toBe(201);
+  });
+
+  it('role hierarchy: viewer < editor < admin', async () => {
+    const owner = createUser();
+    const editor = createUser({ email: 'editor@test.com' });
+    const viewer = createUser({ email: 'viewer@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, editor.id, 'editor');
+    addMember(team.id, viewer.id, 'viewer');
+
+    // Viewer can read members (requires viewer)
+    const viewRes = await request(app)
+      .get(`/api/teams/${team.id}/members`)
+      .set('Authorization', `Bearer ${tokenFor(viewer)}`);
+    expect(viewRes.status).toBe(200);
+
+    // Viewer cannot update settings (requires admin)
+    const settingsRes = await request(app)
+      .patch(`/api/teams/${team.id}/settings`)
+      .set('Authorization', `Bearer ${tokenFor(viewer)}`)
+      .send({ name: 'Hacked' });
+    expect(settingsRes.status).toBe(403);
+    expect(settingsRes.body.error).toBe('Insufficient permissions: requires admin role');
+
+    // Editor cannot update settings (requires admin)
+    const editorSettingsRes = await request(app)
+      .patch(`/api/teams/${team.id}/settings`)
+      .set('Authorization', `Bearer ${tokenFor(editor)}`)
+      .send({ name: 'Hacked' });
+    expect(editorSettingsRes.status).toBe(403);
+
+    // Admin can update settings
+    const adminSettingsRes = await request(app)
+      .patch(`/api/teams/${team.id}/settings`)
+      .set('Authorization', `Bearer ${tokenFor(owner)}`)
+      .send({ name: 'Updated Name' });
+    expect(adminSettingsRes.status).toBe(200);
+    expect(adminSettingsRes.body.name).toBe('Updated Name');
+  });
+});
+
+describe('PATCH /api/teams/:id/members/:userId', () => {
+  it('admin can change member role', async () => {
+    const owner = createUser();
+    const editor = createUser({ email: 'editor@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, editor.id, 'editor');
+
+    const res = await request(app)
+      .patch(`/api/teams/${team.id}/members/${editor.id}`)
+      .set('Authorization', `Bearer ${tokenFor(owner)}`)
+      .send({ role: 'viewer' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe('viewer');
+
+    const member = db.prepare(
+      'SELECT role FROM team_members WHERE team_id = ? AND user_id = ?'
+    ).get(team.id, editor.id) as { role: string };
+    expect(member.role).toBe('viewer');
+  });
+
+  it('editor cannot change member roles', async () => {
+    const owner = createUser();
+    const editor = createUser({ email: 'editor@test.com' });
+    const viewer = createUser({ email: 'viewer@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, editor.id, 'editor');
+    addMember(team.id, viewer.id, 'viewer');
+
+    const res = await request(app)
+      .patch(`/api/teams/${team.id}/members/${viewer.id}`)
+      .set('Authorization', `Bearer ${tokenFor(editor)}`)
+      .send({ role: 'editor' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Insufficient permissions: requires admin role');
+  });
+
+  it('rejects invalid role', async () => {
+    const owner = createUser();
+    const editor = createUser({ email: 'editor@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, editor.id, 'editor');
+
+    const res = await request(app)
+      .patch(`/api/teams/${team.id}/members/${editor.id}`)
+      .set('Authorization', `Bearer ${tokenFor(owner)}`)
+      .send({ role: 'superadmin' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid role/i);
+  });
+
+  it('returns 404 for non-existent member', async () => {
+    const owner = createUser();
+    const team = createTeam(owner.id);
+
+    const res = await request(app)
+      .patch(`/api/teams/${team.id}/members/non-existent-id`)
+      .set('Authorization', `Bearer ${tokenFor(owner)}`)
+      .send({ role: 'editor' });
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe('DELETE /api/teams/:id/members/:userId', () => {
+  it('admin can remove a member', async () => {
+    const owner = createUser();
+    const member = createUser({ email: 'member@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, member.id, 'editor');
+
+    const res = await request(app)
+      .delete(`/api/teams/${team.id}/members/${member.id}`)
+      .set('Authorization', `Bearer ${tokenFor(owner)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+
+    const remaining = db.prepare(
+      'SELECT * FROM team_members WHERE team_id = ? AND user_id = ?'
+    ).get(team.id, member.id);
+    expect(remaining).toBeUndefined();
+  });
+
+  it('cannot remove the team owner', async () => {
+    const owner = createUser();
+    const admin2 = createUser({ email: 'admin2@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, admin2.id, 'admin');
+
+    const res = await request(app)
+      .delete(`/api/teams/${team.id}/members/${owner.id}`)
+      .set('Authorization', `Bearer ${tokenFor(admin2)}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cannot remove the team owner/i);
+  });
+
+  it('editor cannot remove members', async () => {
+    const owner = createUser();
+    const editor = createUser({ email: 'editor@test.com' });
+    const viewer = createUser({ email: 'viewer@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, editor.id, 'editor');
+    addMember(team.id, viewer.id, 'viewer');
+
+    const res = await request(app)
+      .delete(`/api/teams/${team.id}/members/${viewer.id}`)
+      .set('Authorization', `Bearer ${tokenFor(editor)}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Insufficient permissions: requires admin role');
+  });
+});
+
+describe('PATCH /api/teams/:id/settings', () => {
+  it('admin can update team name', async () => {
+    const owner = createUser();
+    const team = createTeam(owner.id);
+
+    const res = await request(app)
+      .patch(`/api/teams/${team.id}/settings`)
+      .set('Authorization', `Bearer ${tokenFor(owner)}`)
+      .send({ name: 'New Name' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('New Name');
+    expect(res.body.slug).toBe(team.slug);
+  });
+
+  it('viewer cannot update team settings', async () => {
+    const owner = createUser();
+    const viewer = createUser({ email: 'viewer@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, viewer.id, 'viewer');
+
+    const res = await request(app)
+      .patch(`/api/teams/${team.id}/settings`)
+      .set('Authorization', `Bearer ${tokenFor(viewer)}`)
+      .send({ name: 'Hacked' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Insufficient permissions: requires admin role');
+  });
+
+  it('editor cannot update team settings', async () => {
+    const owner = createUser();
+    const editor = createUser({ email: 'editor@test.com' });
+    const team = createTeam(owner.id);
+
+    addMember(team.id, editor.id, 'editor');
+
+    const res = await request(app)
+      .patch(`/api/teams/${team.id}/settings`)
+      .set('Authorization', `Bearer ${tokenFor(editor)}`)
+      .send({ name: 'Hacked' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Insufficient permissions: requires admin role');
+  });
+
+  it('rejects empty name', async () => {
+    const owner = createUser();
+    const team = createTeam(owner.id);
+
+    const res = await request(app)
+      .patch(`/api/teams/${team.id}/settings`)
+      .set('Authorization', `Bearer ${tokenFor(owner)}`)
+      .send({ name: '' });
+
+    expect(res.status).toBe(400);
   });
 });
