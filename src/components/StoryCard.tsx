@@ -1,26 +1,60 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2 } from 'lucide-react';
 
 export interface Story {
   id: string;
   title: string;
   acceptanceCriteria: string[];
   dependencies?: string[];
+  passes?: boolean;
+  excluded?: boolean;
 }
 
-export function StoryCard({ story }: { story: Story }) {
+export function StoryCard({
+  story,
+  onToggleExclude,
+}: {
+  story: Story;
+  onToggleExclude?: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
 
+  const isDone = story.passes === true;
+  const isDeferred = story.excluded === true && !isDone;
+
   return (
-    <div className="border border-border rounded bg-panel">
+    <div className={`border rounded bg-panel transition-opacity ${
+      isDeferred ? 'border-border/50 opacity-50' : 'border-border'
+    }`}>
       <div className="px-3 py-2.5">
         <div className="flex items-start gap-2">
-          <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-accent/15 text-accent mt-0.5">
+          <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded mt-0.5 ${
+            isDone
+              ? 'bg-success/15 text-success'
+              : isDeferred
+              ? 'bg-muted/15 text-muted'
+              : 'bg-accent/15 text-accent'
+          }`}>
             {story.id}
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-text truncate">{story.title}</span>
+              <span className={`text-sm font-semibold truncate ${
+                isDeferred ? 'text-muted line-through' : 'text-text'
+              }`}>
+                {story.title}
+              </span>
+              {isDone && (
+                <span className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-success/15 text-success">
+                  <CheckCircle2 size={9} />
+                  DONE
+                </span>
+              )}
+              {isDeferred && (
+                <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-muted/15 text-muted">
+                  DEFERRED
+                </span>
+              )}
               {story.dependencies && story.dependencies.length > 0 && (
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
                   depends
@@ -28,6 +62,20 @@ export function StoryCard({ story }: { story: Story }) {
               )}
             </div>
           </div>
+          {/* Defer / Include toggle — only when not already passed */}
+          {!isDone && onToggleExclude && (
+            <button
+              onClick={onToggleExclude}
+              title={isDeferred ? 'Include in next run' : 'Defer (skip next run)'}
+              className={`shrink-0 mt-0.5 transition-colors ${
+                isDeferred
+                  ? 'text-muted hover:text-success'
+                  : 'text-muted/40 hover:text-warning'
+              }`}
+            >
+              {isDeferred ? <PlusCircle size={14} /> : <MinusCircle size={14} />}
+            </button>
+          )}
         </div>
 
         {story.acceptanceCriteria.length > 0 && (

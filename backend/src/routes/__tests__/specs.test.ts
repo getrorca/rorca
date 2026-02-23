@@ -997,3 +997,258 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     expect(res2.body.hasMore).toBe(false);
   });
 });
+
+// ─── US-008: Batch Spec Generation with Brief Queue ────────────────────────────
+
+describe('POST /api/specs/generate/batch', () => {
+  test('accepts array of briefs and returns batchId + briefCount', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+
+    const res = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Build user auth', workspaceId: 'ws-test', title: 'Auth Feature' },
+          { brief: 'Build payments', workspaceId: 'ws-test', title: 'Payment Feature' },
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.batchId).toBeDefined();
+    expect(typeof res.body.batchId).toBe('string');
+    expect(res.body.briefCount).toBe(2);
+  });
+
+  test('missing briefs array → 400', async () => {
+    const res = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('briefs');
+  });
+
+  test('empty briefs array → 400', async () => {
+    const res = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({ briefs: [] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('empty');
+  });
+
+  test('brief missing required fields → 400 with index', async () => {
+    const res = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Valid brief', workspaceId: 'ws-test' },
+          { brief: 'Missing workspace' },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('index 1');
+    expect(res.body.error).toContain('workspaceId');
+  });
+
+  test('brief with invalid model → 400 with index', async () => {
+    const res = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Test', workspaceId: 'ws-test', model: 'gpt-4o' },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('index 0');
+    expect(res.body.error).toContain('gpt-4o');
+  });
+
+  test('emits batch_started WAL event', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+
+    const res = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Build auth', workspaceId: 'ws-test', title: 'Batch WAL Test' },
+        ],
+      });
+
+    expect(res.status).toBe(201);
+
+    const event = db.prepare(
+      "SELECT * FROM wal_events WHERE event_type = 'batch_started'"
+    ).get() as { event_type: string; payload: string };
+
+    expect(event).toBeDefined();
+    const payload = JSON.parse(event.payload);
+    expect(payload.batchId).toBe(res.body.batchId);
+    expect(payload.briefCount).toBe(1);
+  });
+});
+
+describe('GET /api/specs/generate/batch/:batchId', () => {
+  test('returns batch status with per-brief progress', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+
+    const createRes = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Build auth', workspaceId: 'ws-test', title: 'Batch Status A' },
+          { brief: 'Build payments', workspaceId: 'ws-test', title: 'Batch Status B' },
+        ],
+      });
+
+    expect(createRes.status).toBe(201);
+    const { batchId } = createRes.body;
+
+    // Wait for processing to complete
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.body.batchId).toBe(batchId);
+    expect(statusRes.body.createdAt).toBeDefined();
+    expect(statusRes.body.totalBriefs).toBe(2);
+    expect(statusRes.body.items).toHaveLength(2);
+    expect(statusRes.body.summary).toBeDefined();
+    expect(typeof statusRes.body.summary.completed).toBe('number');
+    expect(typeof statusRes.body.summary.failed).toBe('number');
+    expect(typeof statusRes.body.summary.generating).toBe('number');
+    expect(typeof statusRes.body.summary.queued).toBe('number');
+  });
+
+  test('nonexistent batchId → 404', async () => {
+    const res = await request(app).get('/api/specs/generate/batch/nonexistent-id');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('not found');
+  });
+
+  test('completed batch has finishedAt and all items completed', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 50, outputTokens: 100 } });
+
+    const createRes = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Single brief', workspaceId: 'ws-test', title: 'Finished Batch' },
+        ],
+      });
+
+    const { batchId } = createRes.body;
+
+    // Wait for processing to complete
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.body.finishedAt).toBeDefined();
+    expect(statusRes.body.summary.completed).toBe(1);
+    expect(statusRes.body.summary.queued).toBe(0);
+    expect(statusRes.body.summary.generating).toBe(0);
+    expect(statusRes.body.items[0].status).toBe('completed');
+    expect(statusRes.body.items[0].slug).toBeDefined();
+  });
+
+  test('failed briefs captured with errors, do not block remaining briefs', async () => {
+    // First call fails, second succeeds
+    mockChatComplete
+      .mockRejectedValueOnce(new Error('LLM timeout'))
+      .mockResolvedValueOnce({ text: validLlmResponse, usage: { inputTokens: 50, outputTokens: 100 } });
+
+    const createRes = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Will fail', workspaceId: 'ws-test', title: 'Failing Brief' },
+          { brief: 'Will succeed', workspaceId: 'ws-test', title: 'Succeeding Brief' },
+        ],
+      });
+
+    const { batchId } = createRes.body;
+
+    // Wait for both to process
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.body.finishedAt).toBeDefined();
+    expect(statusRes.body.summary.failed).toBe(1);
+    expect(statusRes.body.summary.completed).toBe(1);
+
+    // First item failed with error message
+    const failedItem = statusRes.body.items.find((i: any) => i.status === 'failed');
+    expect(failedItem).toBeDefined();
+    expect(failedItem.error).toContain('LLM timeout');
+
+    // Second item completed successfully
+    const completedItem = statusRes.body.items.find((i: any) => i.status === 'completed');
+    expect(completedItem).toBeDefined();
+    expect(completedItem.slug).toBeDefined();
+  });
+
+  test('workspace not found for a brief sets status to failed', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 50, outputTokens: 100 } });
+
+    const createRes = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Bad workspace', workspaceId: 'nonexistent-ws', title: 'Bad WS' },
+          { brief: 'Good workspace', workspaceId: 'ws-test', title: 'Good WS' },
+        ],
+      });
+
+    const { batchId } = createRes.body;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.body.summary.failed).toBe(1);
+    expect(statusRes.body.summary.completed).toBe(1);
+
+    const failedItem = statusRes.body.items[0];
+    expect(failedItem.status).toBe('failed');
+    expect(failedItem.error).toContain('Workspace not found');
+  });
+
+  test('emits batch_progress WAL events during processing', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 50, outputTokens: 100 } });
+
+    const createRes = await request(app)
+      .post('/api/specs/generate/batch')
+      .send({
+        briefs: [
+          { brief: 'Progress test', workspaceId: 'ws-test', title: 'Progress Brief' },
+        ],
+      });
+
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const events = db.prepare(
+      "SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC"
+    ).all() as { payload: string }[];
+
+    // Should have at least 2 progress events: generating + completed/failed
+    expect(events.length).toBeGreaterThanOrEqual(2);
+
+    const firstPayload = JSON.parse(events[0].payload);
+    expect(firstPayload.batchId).toBe(createRes.body.batchId);
+    expect(firstPayload.briefIndex).toBe(0);
+    expect(firstPayload.totalBriefs).toBe(1);
+    expect(firstPayload.status).toBe('generating');
+
+    const secondPayload = JSON.parse(events[1].payload);
+    expect(secondPayload.status).toBe('completed');
+    expect(secondPayload.slug).toBeDefined();
+  });
+});
