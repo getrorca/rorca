@@ -10,6 +10,7 @@ import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
 import { DEFAULT_MODEL, isValidModel, type SupportedModel } from '../lib/llm-client';
 import { getWorkspaceEnvVars } from './env-vars';
+import { checkBudgetThresholds } from './budget';
 
 /** Persistent log file path for a run — survives backend restarts */
 const runLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
@@ -118,14 +119,26 @@ router.post('/trigger', async (req: Request, res: Response) => {
       return;
     }
 
-    // 2. Verify run-loop.sh exists in this workspace
+    // 2. Budget cap guard — block if hard cap exceeded for this period
+    const budgetStatus = checkBudgetThresholds(workspaceId);
+    if (budgetStatus.capExceeded) {
+      res.status(409).json({
+        error: 'Budget cap exceeded for this period',
+        spending_usd: Math.round(budgetStatus.spending * 1_000_000) / 1_000_000,
+        hard_cap_usd: budgetStatus.config!.hard_cap_usd,
+        period: budgetStatus.config!.period,
+      });
+      return;
+    }
+
+    // 3. Verify run-loop.sh exists in this workspace
     const runLoopScript = path.join(workspace.path, 'scripts', 'run-loop.sh');
     if (!fs.existsSync(runLoopScript)) {
       res.status(422).json({ error: `run-loop.sh not found at ${runLoopScript}` });
       return;
     }
 
-    // 3. Conflict check — is there already an active run for this workspace?
+    // 4. Conflict check — is there already an active run for this workspace?
     const activeRun = db.prepare(
       `SELECT * FROM pipeline_runs WHERE workspace_id = ? AND status IN ('running', 'paused') LIMIT 1`
     ).get(workspaceId) as PipelineRunRow | undefined;
