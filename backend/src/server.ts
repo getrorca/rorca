@@ -12,6 +12,7 @@ import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
 import storiesRouter from './routes/stories';
 import schedulesRouter from './routes/schedules';
+import envVarsRouter from './routes/env-vars';
 import authRouter, { authRequired } from './routes/auth';
 import { startScheduler } from './lib/scheduler';
 
@@ -45,6 +46,7 @@ app.use('/api/pipeline/schedules', schedulesRouter);
 app.use('/api/worktrees', worktreesRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/stories', storiesRouter);
+app.use('/api/workspaces/:id/env-vars', envVarsRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
