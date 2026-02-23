@@ -1,0 +1,289 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { createHmac } from 'crypto';
+import type { Express } from 'express';
+import type Database from 'better-sqlite3';
+import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
+
+let app: Express;
+let db: Database.Database;
+let tmpDir: string;
+let authToken: string;
+
+const WEBHOOK_SECRET = 'test-webhook-secret-for-hmac';
+const WORKSPACE_ID = 'ws-webhook-test';
+
+function sign(body: string, secret: string): string {
+  return 'sha256=' + createHmac('sha256', secret).update(body).digest('hex');
+}
+
+function makePayload(overrides: Record<string, any> = {}) {
+  return {
+    action: 'opened',
+    ref: 'refs/heads/main',
+    repository: { full_name: 'acme/my-repo' },
+    sender: { login: 'octocat' },
+    ...overrides,
+  };
+}
+
+beforeEach(async () => {
+  jest.resetModules();
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-webhook-test-'));
+  const dbPath = path.join(tmpDir, 'test.db');
+  process.env.DB_PATH = dbPath;
+  process.env.NODE_ENV = 'test';
+
+  const serverMod = require('../../server');
+  app = serverMod.default;
+  const dbMod = require('../../db/index');
+  db = dbMod.db;
+  authToken = await getAuthToken(app);
+
+  // Clear WAL events from user registration
+  db.prepare('DELETE FROM wal_events').run();
+
+  // Create a workspace
+  db.prepare(
+    "INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)"
+  ).run(WORKSPACE_ID, 'Webhook Test', tmpDir);
+
+  // Store encrypted webhook secret — use encryptToken from auth module
+  const authMod = require('../auth');
+  const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
+  db.prepare(
+    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret);
+});
+
+afterEach(async () => {
+  // Allow any pending setImmediate callbacks to flush before closing the DB
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setTimeout(r, 50));
+  db.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.DB_PATH;
+  delete process.env.NODE_ENV;
+});
+
+// ─── Signature verification ─────────────────────────────────────────────────
+
+test('valid signature returns 200', async () => {
+  const payload = makePayload();
+  const body = JSON.stringify(payload);
+  const sig = sign(body, WEBHOOK_SECRET);
+
+  const res = await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig)
+    .set('X-GitHub-Event', 'push')
+    .set('X-GitHub-Delivery', 'delivery-123')
+    .send(body);
+
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual({ ok: true });
+});
+
+test('invalid signature returns 401 with no WAL event logged', async () => {
+  const payload = makePayload();
+  const body = JSON.stringify(payload);
+  const badSig = sign(body, 'wrong-secret');
+
+  const res = await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', badSig)
+    .set('X-GitHub-Event', 'push')
+    .set('X-GitHub-Delivery', 'delivery-456')
+    .send(body);
+
+  expect(res.status).toBe(401);
+  expect(res.body.error).toMatch(/invalid webhook signature/i);
+
+  // No WAL event should be created for invalid signatures
+  const events = db.prepare(
+    "SELECT * FROM wal_events WHERE event_type = 'github_webhook'"
+  ).all();
+  expect(events).toHaveLength(0);
+});
+
+test('tampered body fails signature check', async () => {
+  const payload = makePayload();
+  const originalBody = JSON.stringify(payload);
+  const sig = sign(originalBody, WEBHOOK_SECRET);
+
+  // Send a different body with the signature from the original
+  const tamperedPayload = makePayload({ action: 'closed' });
+  const tamperedBody = JSON.stringify(tamperedPayload);
+
+  const res = await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig)
+    .set('X-GitHub-Event', 'push')
+    .set('X-GitHub-Delivery', 'delivery-789')
+    .send(tamperedBody);
+
+  expect(res.status).toBe(401);
+});
+
+// ─── Missing headers ────────────────────────────────────────────────────────
+
+test('missing X-Hub-Signature-256 header returns 400', async () => {
+  const body = JSON.stringify(makePayload());
+
+  const res = await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-GitHub-Event', 'push')
+    .send(body);
+
+  expect(res.status).toBe(400);
+  expect(res.body.error).toMatch(/missing.*header/i);
+});
+
+test('missing X-GitHub-Event header returns 400', async () => {
+  const body = JSON.stringify(makePayload());
+  const sig = sign(body, WEBHOOK_SECRET);
+
+  const res = await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig)
+    .send(body);
+
+  expect(res.status).toBe(400);
+  expect(res.body.error).toMatch(/missing.*header/i);
+});
+
+test('missing repository in payload returns 400', async () => {
+  const payload = { action: 'opened', sender: { login: 'octocat' } };
+  const body = JSON.stringify(payload);
+  const sig = sign(body, WEBHOOK_SECRET);
+
+  const res = await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig)
+    .set('X-GitHub-Event', 'push')
+    .send(body);
+
+  expect(res.status).toBe(400);
+  expect(res.body.error).toMatch(/missing repository/i);
+});
+
+// ─── Unknown repository ─────────────────────────────────────────────────────
+
+test('webhook for unconnected repo returns 404', async () => {
+  const payload = makePayload({ repository: { full_name: 'unknown/repo' } });
+  const body = JSON.stringify(payload);
+  const sig = sign(body, WEBHOOK_SECRET);
+
+  const res = await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig)
+    .set('X-GitHub-Event', 'push')
+    .send(body);
+
+  expect(res.status).toBe(404);
+});
+
+// ─── WAL event logging ──────────────────────────────────────────────────────
+
+test('valid webhook logs a wal_event with github_webhook type', async () => {
+  const payload = makePayload({ action: 'synchronize' });
+  const body = JSON.stringify(payload);
+  const sig = sign(body, WEBHOOK_SECRET);
+
+  await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig)
+    .set('X-GitHub-Event', 'pull_request')
+    .set('X-GitHub-Delivery', 'delivery-wal')
+    .send(body);
+
+  // Give async processing time to complete
+  await new Promise((r) => setTimeout(r, 100));
+
+  const events = db.prepare(
+    "SELECT * FROM wal_events WHERE event_type = 'github_webhook'"
+  ).all() as any[];
+
+  expect(events).toHaveLength(1);
+  expect(events[0].workspace_id).toBe(WORKSPACE_ID);
+
+  const walPayload = JSON.parse(events[0].payload);
+  expect(walPayload.event).toBe('pull_request');
+  expect(walPayload.deliveryId).toBe('delivery-wal');
+  expect(walPayload.repo).toBe('acme/my-repo');
+  expect(walPayload.action).toBe('synchronize');
+  expect(walPayload.sender).toBe('octocat');
+});
+
+// ─── Event-specific handler dispatch ────────────────────────────────────────
+
+test('event handlers are dispatched for the correct event type', async () => {
+  const received: { event: string; workspaceId: string }[] = [];
+
+  // Register a handler via the exported onGithubEvent
+  const webhooksMod = require('../webhooks');
+  webhooksMod.onGithubEvent('issues', (
+    _payload: any,
+    event: string,
+    workspaceId: string,
+  ) => {
+    received.push({ event, workspaceId });
+  });
+
+  const payload = makePayload({ action: 'opened' });
+  const body = JSON.stringify(payload);
+  const sig = sign(body, WEBHOOK_SECRET);
+
+  await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig)
+    .set('X-GitHub-Event', 'issues')
+    .set('X-GitHub-Delivery', 'delivery-dispatch')
+    .send(body);
+
+  // Give async processing time to complete
+  await new Promise((r) => setTimeout(r, 100));
+
+  expect(received).toHaveLength(1);
+  expect(received[0].event).toBe('issues');
+  expect(received[0].workspaceId).toBe(WORKSPACE_ID);
+});
+
+// ─── last_webhook_at update ─────────────────────────────────────────────────
+
+test('valid webhook updates last_webhook_at timestamp', async () => {
+  const payload = makePayload();
+  const body = JSON.stringify(payload);
+  const sig = sign(body, WEBHOOK_SECRET);
+
+  const before = db.prepare(
+    'SELECT last_webhook_at FROM workspace_github_webhooks WHERE workspace_id = ?'
+  ).get(WORKSPACE_ID) as any;
+  expect(before.last_webhook_at).toBeNull();
+
+  await request(app)
+    .post('/api/webhooks/github')
+    .set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', sig)
+    .set('X-GitHub-Event', 'push')
+    .send(body);
+
+  await new Promise((r) => setTimeout(r, 100));
+
+  const after = db.prepare(
+    'SELECT last_webhook_at FROM workspace_github_webhooks WHERE workspace_id = ?'
+  ).get(WORKSPACE_ID) as any;
+  expect(after.last_webhook_at).not.toBeNull();
+});

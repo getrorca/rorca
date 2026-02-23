@@ -24,7 +24,16 @@ const app = express();
 const PORT = process.env.PORT || 3030;
 
 app.use(cors({ origin: 'http://localhost:5210' }));
-app.use(express.json());
+
+// Capture raw body for webhook signature verification.
+// The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    if ((req as express.Request).originalUrl?.startsWith('/api/webhooks/')) {
+      (req as any).rawBody = buf;
+    }
+  },
+}));
 
 // ─── Public routes (no auth required) ───
 app.get('/api/health', (_req, res) => {
