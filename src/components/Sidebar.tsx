@@ -1,6 +1,6 @@
-import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp } from 'lucide-react';
+import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp, BarChart3 } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity';
+export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion';
 
 const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'forge',           label: 'Spec Forge',         icon: Wand2          },
@@ -16,6 +16,7 @@ const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'costs',           label: 'Cost Breakdown',       icon: DollarSign     },
   { id: 'models',          label: 'Model Comparison',     icon: Zap            },
   { id: 'velocity',        label: 'Velocity Chart',       icon: TrendingUp     },
+  { id: 'completion',      label: 'Completion Rates',     icon: BarChart3      },
   { id: 'activity',        label: 'Activity Feed',       icon: Rss            },
   { id: 'github',          label: 'GitHub',              icon: Github         },
 ];

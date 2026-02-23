@@ -1,4 +1,6 @@
 import { Router, Request, Response } from 'express';
+import path from 'path';
+import fs from 'fs';
 import { db } from '../db/index';
 
 const router = Router();
@@ -611,6 +613,192 @@ router.get('/velocity', (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[Analytics] Velocity query error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/analytics/completion-rates — Pass/fail/skip by complexity & tag ─
+// Query params:
+//   from         — ISO date (inclusive), default 30 days ago
+//   to           — ISO date (inclusive), default now
+//   workspace_id — optional filter
+
+interface StoryResultRow {
+  story_id: string;
+  status: string;
+  spec_path: string;
+  workspace_id: string;
+  workspace_path: string;
+}
+
+interface CompletionGroup {
+  label: string;
+  passed: number;
+  failed: number;
+  skipped: number;
+  total: number;
+  passRate: number;
+}
+
+router.get('/completion-rates', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspace_id as string | undefined;
+
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const from = (req.query.from as string) || thirtyDaysAgo.toISOString();
+    const to = (req.query.to as string) || now.toISOString();
+
+    // Fetch all story results in range joined with pipeline_runs for spec_path + workspace
+    const wsFilter = workspaceId ? 'AND pr.workspace_id = ?' : '';
+    const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
+
+    const sql = `
+      SELECT
+        sr.story_id,
+        sr.status,
+        pr.spec_path,
+        pr.workspace_id,
+        w.path AS workspace_path
+      FROM story_results sr
+      JOIN pipeline_runs pr ON sr.run_id = pr.id
+      JOIN workspaces w ON pr.workspace_id = w.id
+      WHERE sr.finished_at >= ? AND sr.finished_at <= ?
+      ${wsFilter}
+      AND sr.status IN ('pass', 'fail', 'skip')
+    `;
+
+    const rows = db.prepare(sql).all(...params) as StoryResultRow[];
+
+    // Build a cache of spec JSON files: specPath → parsed stories
+    const specCache = new Map<string, { stories: any[]; tags: string[] }>();
+
+    for (const row of rows) {
+      if (specCache.has(row.spec_path)) continue;
+
+      try {
+        const absPath = path.join(row.workspace_path, 'scripts', row.spec_path);
+        if (fs.existsSync(absPath)) {
+          const raw = JSON.parse(fs.readFileSync(absPath, 'utf8'));
+          const stories: any[] = raw.userStories ?? raw.stories ?? [];
+
+          // Get tags from spec_tags table
+          const specId = row.spec_path
+            .replace('ralph/specs/approved/', '')
+            .replace('ralph/specs/pending/', '')
+            .replace('.json', '');
+          const tagRows = db.prepare(
+            'SELECT tag_name FROM spec_tags WHERE spec_id = ? AND workspace_id = ? ORDER BY tag_name'
+          ).all(specId, row.workspace_id) as { tag_name: string }[];
+
+          specCache.set(row.spec_path, {
+            stories,
+            tags: tagRows.map(t => t.tag_name),
+          });
+        } else {
+          specCache.set(row.spec_path, { stories: [], tags: [] });
+        }
+      } catch {
+        specCache.set(row.spec_path, { stories: [], tags: [] });
+      }
+    }
+
+    // Group by complexity (1-5, plus "unrated" for stories without complexity)
+    const complexityBuckets: Record<string, { passed: number; failed: number; skipped: number }> = {};
+    // Group by tag
+    const tagBuckets: Record<string, { passed: number; failed: number; skipped: number }> = {};
+
+    for (const row of rows) {
+      const spec = specCache.get(row.spec_path);
+      const story = spec?.stories.find((s: any) => s.id === row.story_id);
+      const complexity = story?.complexity;
+      const complexityKey = complexity && complexity >= 1 && complexity <= 5
+        ? String(complexity)
+        : 'unrated';
+
+      if (!complexityBuckets[complexityKey]) {
+        complexityBuckets[complexityKey] = { passed: 0, failed: 0, skipped: 0 };
+      }
+
+      const bucket = complexityBuckets[complexityKey];
+      if (row.status === 'pass') bucket.passed++;
+      else if (row.status === 'fail') bucket.failed++;
+      else if (row.status === 'skip') bucket.skipped++;
+
+      // Tag buckets: each story contributes to ALL tags of its parent spec
+      const tags = spec?.tags ?? [];
+      for (const tag of tags) {
+        if (!tagBuckets[tag]) {
+          tagBuckets[tag] = { passed: 0, failed: 0, skipped: 0 };
+        }
+        const tb = tagBuckets[tag];
+        if (row.status === 'pass') tb.passed++;
+        else if (row.status === 'fail') tb.failed++;
+        else if (row.status === 'skip') tb.skipped++;
+      }
+    }
+
+    // Convert to sorted arrays
+    const complexityLabels: Record<string, string> = {
+      '1': '1 - Trivial',
+      '2': '2 - Simple',
+      '3': '3 - Moderate',
+      '4': '4 - Complex',
+      '5': '5 - Epic',
+      'unrated': 'Unrated',
+    };
+
+    const byComplexity: CompletionGroup[] = ['1', '2', '3', '4', '5', 'unrated']
+      .filter(k => complexityBuckets[k])
+      .map(k => {
+        const b = complexityBuckets[k];
+        const total = b.passed + b.failed + b.skipped;
+        return {
+          label: complexityLabels[k] || k,
+          passed: b.passed,
+          failed: b.failed,
+          skipped: b.skipped,
+          total,
+          passRate: total > 0 ? Math.round((b.passed / total) * 1000) / 10 : 0,
+        };
+      });
+
+    const byTag: CompletionGroup[] = Object.entries(tagBuckets)
+      .map(([tag, b]) => {
+        const total = b.passed + b.failed + b.skipped;
+        return {
+          label: tag,
+          passed: b.passed,
+          failed: b.failed,
+          skipped: b.skipped,
+          total,
+          passRate: total > 0 ? Math.round((b.passed / total) * 1000) / 10 : 0,
+        };
+      })
+      .sort((a, b) => a.passRate - b.passRate); // lowest pass rate first (improvement opportunities at top)
+
+    // Overall summary
+    const totalPassed = rows.filter(r => r.status === 'pass').length;
+    const totalFailed = rows.filter(r => r.status === 'fail').length;
+    const totalSkipped = rows.filter(r => r.status === 'skip').length;
+    const totalStories = rows.length;
+
+    res.json({
+      byComplexity,
+      byTag,
+      summary: {
+        total: totalStories,
+        passed: totalPassed,
+        failed: totalFailed,
+        skipped: totalSkipped,
+        overallPassRate: totalStories > 0
+          ? Math.round((totalPassed / totalStories) * 1000) / 10
+          : 0,
+      },
+      dateRange: { from, to },
+    });
+  } catch (error: any) {
+    console.error('[Analytics] Completion rates error:', error);
     res.status(500).json({ error: error.message });
   }
 });
