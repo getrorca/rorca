@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../db/index';
+import { AuthUser } from './auth';
 
 const router = Router();
 
@@ -16,13 +17,81 @@ interface TemplateRow {
   direction_layers: string | null;
   story_count: number;
   created_at: string;
+  team_id: string | null;
+  author_id: string | null;
+  usage_count: number;
+}
+
+interface RatingRow {
+  template_id: string;
+  avg_rating: number;
+  rating_count: number;
+}
+
+function getUserTeamIds(userId: string): string[] {
+  const rows = db.prepare(
+    'SELECT team_id FROM team_members WHERE user_id = ?'
+  ).all(userId) as { team_id: string }[];
+  return rows.map(r => r.team_id);
+}
+
+function getTemplateRating(templateId: string): { avgRating: number; ratingCount: number } {
+  const row = db.prepare(
+    `SELECT AVG(rating) as avg_rating, COUNT(*) as rating_count
+     FROM template_ratings WHERE template_id = ?`
+  ).get(templateId) as { avg_rating: number | null; rating_count: number };
+  return {
+    avgRating: row.avg_rating ? Math.round(row.avg_rating * 10) / 10 : 0,
+    ratingCount: row.rating_count,
+  };
+}
+
+function getAuthorInfo(authorId: string | null): { authorName: string | null; authorEmail: string | null } {
+  if (!authorId) return { authorName: null, authorEmail: null };
+  const user = db.prepare(
+    'SELECT display_name, email FROM users WHERE id = ?'
+  ).get(authorId) as { display_name: string; email: string } | undefined;
+  return {
+    authorName: user?.display_name ?? null,
+    authorEmail: user?.email ?? null,
+  };
+}
+
+function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
+  const { avgRating, ratingCount } = getTemplateRating(row.id);
+  const { authorName, authorEmail } = getAuthorInfo(row.author_id);
+
+  const result: Record<string, unknown> = {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    sourceSpecId: row.source_spec_id,
+    storyCount: row.story_count,
+    createdAt: row.created_at,
+    teamId: row.team_id,
+    authorId: row.author_id,
+    authorName,
+    authorEmail,
+    usageCount: row.usage_count,
+    avgRating,
+    ratingCount,
+  };
+
+  if (includeBody) {
+    result.brief = row.brief;
+    result.storyStructure = JSON.parse(row.story_structure);
+    result.directionLayers = row.direction_layers ? JSON.parse(row.direction_layers) : null;
+  }
+
+  return result;
 }
 
 // ─── POST / — Create a template from an approved spec ─────────────────────────
 
 router.post('/', (req: Request, res: Response) => {
   try {
-    const { name, description, sourceSpecId, brief, storyStructure, directionLayers } = req.body;
+    const user = (req as Request & { user: AuthUser }).user;
+    const { name, description, sourceSpecId, brief, storyStructure, directionLayers, teamId } = req.body;
 
     if (!name || !sourceSpecId || !brief || !storyStructure) {
       res.status(400).json({
@@ -36,12 +105,21 @@ router.post('/', (req: Request, res: Response) => {
       return;
     }
 
+    // Validate teamId if provided — user must be a member
+    if (teamId) {
+      const userTeamIds = getUserTeamIds(user.id);
+      if (!userTeamIds.includes(teamId)) {
+        res.status(403).json({ error: 'You are not a member of this team' });
+        return;
+      }
+    }
+
     const id = randomUUID();
     const storyCount = storyStructure.length;
 
     db.prepare(
-      `INSERT INTO templates (id, name, description, source_spec_id, brief, story_structure, direction_layers, story_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO templates (id, name, description, source_spec_id, brief, story_structure, direction_layers, story_count, team_id, author_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
       name,
@@ -51,43 +129,69 @@ router.post('/', (req: Request, res: Response) => {
       JSON.stringify(storyStructure),
       directionLayers ? JSON.stringify(directionLayers) : null,
       storyCount,
+      teamId ?? null,
+      user.id,
     );
 
     const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(id) as TemplateRow;
-
-    res.status(201).json({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      sourceSpecId: row.source_spec_id,
-      brief: row.brief,
-      storyStructure: JSON.parse(row.story_structure),
-      directionLayers: row.direction_layers ? JSON.parse(row.direction_layers) : null,
-      storyCount: row.story_count,
-      createdAt: row.created_at,
-    });
+    res.status(201).json(formatTemplate(row, true));
   } catch (error: any) {
     console.error('[Templates] Create error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ─── GET / — List all templates ───────────────────────────────────────────────
+// ─── GET / — List templates with scope filtering ─────────────────────────────
 
-router.get('/', (_req: Request, res: Response) => {
+router.get('/', (req: Request, res: Response) => {
   try {
-    const rows = db.prepare(
-      'SELECT id, name, description, source_spec_id, story_count, created_at FROM templates ORDER BY created_at DESC'
-    ).all() as Pick<TemplateRow, 'id' | 'name' | 'description' | 'source_spec_id' | 'story_count' | 'created_at'>[];
+    const user = (req as Request & { user: AuthUser }).user;
+    const scope = (req.query.scope as string) || 'all';
 
-    const templates = rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      sourceSpecId: row.source_spec_id,
-      storyCount: row.story_count,
-      createdAt: row.created_at,
-    }));
+    let rows: TemplateRow[];
+
+    if (scope === 'personal') {
+      // Only templates created by this user (no team_id)
+      rows = db.prepare(
+        `SELECT * FROM templates WHERE author_id = ? AND team_id IS NULL ORDER BY created_at DESC`
+      ).all(user.id) as TemplateRow[];
+    } else if (scope === 'team') {
+      // Templates shared with any of user's teams
+      const teamIds = getUserTeamIds(user.id);
+      if (teamIds.length === 0) {
+        rows = [];
+      } else {
+        const placeholders = teamIds.map(() => '?').join(',');
+        rows = db.prepare(
+          `SELECT * FROM templates WHERE team_id IN (${placeholders}) ORDER BY created_at DESC`
+        ).all(...teamIds) as TemplateRow[];
+      }
+    } else {
+      // 'all' — personal + team templates visible to this user
+      const teamIds = getUserTeamIds(user.id);
+      if (teamIds.length === 0) {
+        // No teams — show personal (author_id match) + templates with no team_id (legacy/global)
+        rows = db.prepare(
+          `SELECT * FROM templates WHERE author_id = ? OR team_id IS NULL ORDER BY created_at DESC`
+        ).all(user.id) as TemplateRow[];
+      } else {
+        const placeholders = teamIds.map(() => '?').join(',');
+        rows = db.prepare(
+          `SELECT * FROM templates
+           WHERE author_id = ? OR team_id IS NULL OR team_id IN (${placeholders})
+           ORDER BY created_at DESC`
+        ).all(user.id, ...teamIds) as TemplateRow[];
+      }
+    }
+
+    // Sort: featured (avg rating >= 4.0) first, then by created_at desc
+    const templates = rows.map(row => formatTemplate(row));
+    templates.sort((a, b) => {
+      const aFeatured = (a.avgRating as number) >= 4.0 ? 1 : 0;
+      const bFeatured = (b.avgRating as number) >= 4.0 ? 1 : 0;
+      if (bFeatured !== aFeatured) return bFeatured - aFeatured;
+      return 0; // preserve DB ordering (created_at DESC) within same featured status
+    });
 
     res.json({ templates });
   } catch (error: any) {
@@ -96,10 +200,57 @@ router.get('/', (_req: Request, res: Response) => {
   }
 });
 
+// ─── POST /:id/rate — Rate a template (1-5) ──────────────────────────────────
+
+router.post('/:id/rate', (req: Request, res: Response) => {
+  try {
+    const user = (req as Request & { user: AuthUser }).user;
+    const templateId = req.params.id as string;
+    const { rating } = req.body;
+
+    if (typeof rating !== 'number' || rating < 1 || rating > 5 || !Number.isInteger(rating)) {
+      res.status(400).json({ error: 'Rating must be an integer between 1 and 5' });
+      return;
+    }
+
+    // Check template exists
+    const template = db.prepare('SELECT id, team_id FROM templates WHERE id = ?').get(templateId) as
+      Pick<TemplateRow, 'id' | 'team_id'> | undefined;
+    if (!template) {
+      res.status(404).json({ error: 'Template not found' });
+      return;
+    }
+
+    // If template belongs to a team, user must be a member
+    if (template.team_id) {
+      const userTeamIds = getUserTeamIds(user.id);
+      if (!userTeamIds.includes(template.team_id)) {
+        res.status(403).json({ error: 'You must be a team member to rate this template' });
+        return;
+      }
+    }
+
+    // Upsert rating
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO template_ratings (id, template_id, user_id, rating)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(template_id, user_id) DO UPDATE SET rating = excluded.rating, updated_at = datetime('now')`
+    ).run(id, templateId, user.id, rating);
+
+    const { avgRating, ratingCount } = getTemplateRating(templateId);
+    res.json({ avgRating, ratingCount, userRating: rating });
+  } catch (error: any) {
+    console.error('[Templates] Rate error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET /:id — Get a single template ─────────────────────────────────────────
 
 router.get('/:id', (req: Request, res: Response) => {
   try {
+    const user = (req as Request & { user: AuthUser }).user;
     const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id) as TemplateRow | undefined;
 
     if (!row) {
@@ -107,17 +258,15 @@ router.get('/:id', (req: Request, res: Response) => {
       return;
     }
 
-    res.json({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      sourceSpecId: row.source_spec_id,
-      brief: row.brief,
-      storyStructure: JSON.parse(row.story_structure),
-      directionLayers: row.direction_layers ? JSON.parse(row.direction_layers) : null,
-      storyCount: row.story_count,
-      createdAt: row.created_at,
-    });
+    // Include user's own rating if any
+    const userRating = db.prepare(
+      'SELECT rating FROM template_ratings WHERE template_id = ? AND user_id = ?'
+    ).get(row.id, user.id) as { rating: number } | undefined;
+
+    const result = formatTemplate(row, true);
+    (result as Record<string, unknown>).userRating = userRating?.rating ?? null;
+
+    res.json(result);
   } catch (error: any) {
     console.error('[Templates] Get error:', error);
     res.status(500).json({ error: error.message });
