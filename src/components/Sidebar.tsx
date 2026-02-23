@@ -1,6 +1,6 @@
-import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github } from 'lucide-react';
+import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github';
+export type PanelId = 'forge' | 'stack' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity';
 
 const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'forge',     label: 'Spec Forge',       icon: Wand2     },
@@ -10,6 +10,7 @@ const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'worktrees', label: 'Worktree Manager',  icon: GitBranch },
   { id: 'compare',   label: 'Compare Runs',       icon: ArrowLeftRight },
   { id: 'archive',   label: 'Archive',           icon: Archive   },
+  { id: 'activity',  label: 'Activity Feed',     icon: Rss       },
   { id: 'github',    label: 'GitHub',            icon: Github    },
 ];
 

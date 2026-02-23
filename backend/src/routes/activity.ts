@@ -1,0 +1,242 @@
+import { Router } from 'express';
+import { db } from '../db/index';
+
+const router = Router();
+
+interface WalEventRow {
+  id: number;
+  ts: string;
+  event_type: string;
+  workspace_id: string | null;
+  spec_id: string | null;
+  story_id: string | null;
+  actor: string;
+  payload: string | null;
+}
+
+interface UserRow {
+  display_name: string;
+  email: string;
+  avatar_url: string | null;
+}
+
+/** Map WAL event_type to human-friendly activity type */
+function mapActivityType(eventType: string): string {
+  const mapping: Record<string, string> = {
+    generate: 'spec_created',
+    spec_generated: 'spec_created',
+    spec_approved: 'spec_approved',
+    spec_rejected: 'spec_rejected',
+    spec_forked: 'spec_edited',
+    story_edited: 'spec_edited',
+    direction_update: 'spec_edited',
+    run_started: 'run_triggered',
+    run_finished: 'run_completed',
+    run_failed: 'run_completed',
+    review_requested: 'spec_edited',
+    review_approved: 'spec_approved',
+    review_changes_requested: 'spec_rejected',
+    story_comment_added: 'comment_added',
+    team_invite_accepted: 'member_joined',
+    user_registered: 'member_joined',
+  };
+  return mapping[eventType] || eventType;
+}
+
+/** Generate human-readable description from a WAL event */
+function describeEvent(event: WalEventRow, displayName: string): string {
+  const actor = displayName || event.actor;
+  let payload: Record<string, unknown> = {};
+  if (event.payload) {
+    try { payload = JSON.parse(event.payload); } catch { /* ignore */ }
+  }
+
+  const specLabel = (payload.title as string) || event.spec_id || 'a spec';
+  const storyLabel = (payload.storyTitle as string) || event.story_id || 'a story';
+
+  switch (event.event_type) {
+    case 'generate':
+    case 'spec_generated':
+      return `${actor} created spec "${specLabel}"`;
+    case 'spec_approved':
+      return `${actor} approved spec "${specLabel}"`;
+    case 'spec_rejected':
+      return `${actor} rejected spec "${specLabel}"${payload.reason ? `: ${payload.reason}` : ''}`;
+    case 'spec_forked':
+      return `${actor} forked spec "${specLabel}"`;
+    case 'run_started':
+      return `${actor} triggered a pipeline run for "${specLabel}"`;
+    case 'run_finished':
+      return `${actor} completed pipeline run for "${specLabel}"`;
+    case 'run_failed':
+      return `${actor} pipeline run failed for "${specLabel}"`;
+    case 'run_paused':
+      return `${actor} paused pipeline run for "${specLabel}"`;
+    case 'run_resumed':
+      return `${actor} resumed pipeline run for "${specLabel}"`;
+    case 'story_passed':
+      return `Story "${storyLabel}" passed in "${specLabel}"`;
+    case 'story_failed':
+      return `Story "${storyLabel}" failed in "${specLabel}"`;
+    case 'story_edited':
+      return `${actor} edited story "${storyLabel}" in "${specLabel}"`;
+    case 'story_comment_added':
+      return `${actor} commented on story "${storyLabel}"`;
+    case 'review_requested':
+      return `${actor} requested review for "${specLabel}"`;
+    case 'review_approved':
+      return `${actor} approved review for "${specLabel}"`;
+    case 'review_changes_requested':
+      return `${actor} requested changes on "${specLabel}"`;
+    case 'direction_update':
+      return `${actor} updated direction stack`;
+    case 'team_created':
+      return `${actor} created a team`;
+    case 'team_invite_sent':
+      return `${actor} sent a team invite`;
+    case 'team_invite_accepted':
+      return `${actor} joined the team`;
+    case 'user_registered':
+      return `${actor} registered`;
+    case 'github_pr_merged':
+      return `${actor} merged PR for "${specLabel}"`;
+    case 'worktree_created':
+      return `${actor} created a worktree for "${specLabel}"`;
+    case 'worktree_merged':
+      return `${actor} merged worktree for "${specLabel}"`;
+    default:
+      return `${actor} performed ${event.event_type.replace(/_/g, ' ')}`;
+  }
+}
+
+/** Determine what the activity links to: spec, run, or story */
+function getTarget(event: WalEventRow): { type: string; id: string } | null {
+  let payload: Record<string, unknown> = {};
+  if (event.payload) {
+    try { payload = JSON.parse(event.payload); } catch { /* ignore */ }
+  }
+
+  if (event.story_id && event.spec_id) {
+    return { type: 'story', id: `${event.spec_id}/${event.story_id}` };
+  }
+
+  const runEvents = ['run_started', 'run_finished', 'run_failed', 'run_paused', 'run_resumed'];
+  if (runEvents.includes(event.event_type) && payload.runId) {
+    return { type: 'run', id: String(payload.runId) };
+  }
+
+  if (event.spec_id) {
+    return { type: 'spec', id: event.spec_id };
+  }
+
+  return null;
+}
+
+// Relevant event types for the activity feed (skip low-level noise like story_started, batch_progress, etc.)
+const ACTIVITY_EVENT_TYPES = [
+  'generate', 'spec_generated', 'spec_approved', 'spec_rejected', 'spec_forked',
+  'run_started', 'run_finished', 'run_failed', 'run_paused', 'run_resumed',
+  'story_passed', 'story_failed', 'story_edited',
+  'story_comment_added',
+  'review_requested', 'review_approved', 'review_changes_requested',
+  'direction_update',
+  'team_created', 'team_invite_sent', 'team_invite_accepted',
+  'user_registered',
+  'github_pr_merged',
+  'worktree_created', 'worktree_merged',
+];
+
+// GET /api/activity
+router.get('/', (req, res) => {
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 30, 1), 100);
+  const offset = Math.max(parseInt(String(req.query.offset), 10) || 0, 0);
+  const typeFilter = req.query.type ? String(req.query.type) : null;
+  const workspaceFilter = req.query.workspaceId ? String(req.query.workspaceId) : null;
+
+  // Build WHERE clause
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  // Filter to activity-relevant event types
+  const placeholders = ACTIVITY_EVENT_TYPES.map(() => '?').join(',');
+  conditions.push(`event_type IN (${placeholders})`);
+  params.push(...ACTIVITY_EVENT_TYPES);
+
+  if (typeFilter) {
+    // Map activity type back to WAL event types
+    const reverseMap: Record<string, string[]> = {
+      spec_created: ['generate', 'spec_generated'],
+      spec_approved: ['spec_approved', 'review_approved'],
+      spec_rejected: ['spec_rejected', 'review_changes_requested'],
+      spec_edited: ['spec_forked', 'story_edited', 'direction_update', 'review_requested'],
+      run_triggered: ['run_started'],
+      run_completed: ['run_finished', 'run_failed'],
+      comment_added: ['story_comment_added'],
+      member_joined: ['team_invite_accepted', 'user_registered'],
+    };
+    const walTypes = reverseMap[typeFilter];
+    if (walTypes) {
+      const fp = walTypes.map(() => '?').join(',');
+      conditions.push(`event_type IN (${fp})`);
+      params.push(...walTypes);
+    }
+  }
+
+  if (workspaceFilter) {
+    conditions.push('workspace_id = ?');
+    params.push(workspaceFilter);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const events = db.prepare(
+    `SELECT * FROM wal_events ${whereClause} ORDER BY id DESC LIMIT ? OFFSET ?`
+  ).all(...params, limit, offset) as WalEventRow[];
+
+  const countRow = db.prepare(
+    `SELECT COUNT(*) as total FROM wal_events ${whereClause}`
+  ).get(...params) as { total: number };
+
+  // Batch-fetch display names for all unique actors
+  const actorIds = [...new Set(events.map(e => e.actor))];
+  const userMap = new Map<string, UserRow>();
+  for (const actorId of actorIds) {
+    const user = db.prepare(
+      'SELECT display_name, email, avatar_url FROM users WHERE id = ? OR email = ?'
+    ).get(actorId, actorId) as UserRow | undefined;
+    if (user) {
+      userMap.set(actorId, user);
+    }
+  }
+
+  const items = events.map(event => {
+    const user = userMap.get(event.actor);
+    const displayName = user?.display_name || event.actor;
+    return {
+      id: event.id,
+      timestamp: event.ts,
+      activityType: mapActivityType(event.event_type),
+      rawEventType: event.event_type,
+      actor: {
+        id: event.actor,
+        name: displayName,
+        avatarUrl: user?.avatar_url || null,
+      },
+      target: getTarget(event),
+      description: describeEvent(event, displayName),
+      workspaceId: event.workspace_id,
+      specId: event.spec_id,
+      storyId: event.story_id,
+    };
+  });
+
+  res.json({
+    items,
+    total: countRow.total,
+    limit,
+    offset,
+    hasMore: offset + limit < countRow.total,
+  });
+});
+
+export default router;
