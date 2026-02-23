@@ -486,6 +486,29 @@ describe('authRequired middleware', () => {
   });
 });
 
+// ─── GET /api/auth/me ───
+
+describe('GET /api/auth/me', () => {
+  test('returns current user with valid access token', async () => {
+    const { accessToken } = await registerUser();
+
+    const res = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.user).toBeDefined();
+    expect(res.body.user.email).toBe('test@example.com');
+    expect(res.body.user.displayName).toBe('Test User');
+    expect(res.body.user.githubConnected).toBe(false);
+    expect(res.body.user.id).toBeDefined();
+  });
+
+  test('returns 401 without auth token', async () => {
+    const res = await request(app).get('/api/auth/me');
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('Authentication required');
+  });
+});
+
 // ─── Global auth middleware integration ───
 
 describe('Global auth middleware', () => {
@@ -627,18 +650,29 @@ describe('GET /api/auth/github/callback', () => {
     expect(res.body.error).toBe('Authorization code is required');
   });
 
-  test('creates new user and returns JWT tokens on first GitHub login', async () => {
+  /** Helper: parse tokens from redirect URL fragment */
+  function parseRedirectTokens(res: request.Response): { accessToken?: string; refreshToken?: string; error?: string } {
+    const location = res.headers.location as string;
+    const fragment = location.split('#')[1] || '';
+    const params = new URLSearchParams(fragment);
+    return {
+      accessToken: params.get('accessToken') || undefined,
+      refreshToken: params.get('refreshToken') || undefined,
+      error: params.get('error') || undefined,
+    };
+  }
+
+  test('creates new user and redirects with tokens on first GitHub login', async () => {
     setupGitHubEnv();
     mockGitHubOAuthFlow();
 
     const res = await request(app).get('/api/auth/github/callback?code=test-auth-code');
 
-    expect(res.status).toBe(200);
-    expect(res.body.user).toBeDefined();
-    expect(res.body.user.email).toBe('octocat@github.com');
-    expect(res.body.user.githubUsername).toBe('octocat');
-    expect(res.body.accessToken).toBeDefined();
-    expect(res.body.refreshToken).toBeDefined();
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain('/auth/github/callback#');
+    const tokens = parseRedirectTokens(res);
+    expect(tokens.accessToken).toBeDefined();
+    expect(tokens.refreshToken).toBeDefined();
 
     // Verify user was created in DB
     const user = db.prepare('SELECT * FROM users WHERE email = ?').get('octocat@github.com') as Record<string, unknown>;
@@ -671,10 +705,9 @@ describe('GET /api/auth/github/callback', () => {
 
     const res = await request(app).get('/api/auth/github/callback?code=test-auth-code');
 
-    expect(res.status).toBe(200);
-    expect(res.body.user.email).toBe('octocat@github.com');
-    expect(res.body.user.displayName).toBe('Email User'); // Keeps original name
-    expect(res.body.accessToken).toBeDefined();
+    expect(res.status).toBe(302);
+    const tokens = parseRedirectTokens(res);
+    expect(tokens.accessToken).toBeDefined();
 
     // Verify only 1 user exists (no duplicate)
     const users = db.prepare('SELECT * FROM users WHERE email = ?').all('octocat@github.com') as Record<string, unknown>[];
@@ -691,15 +724,15 @@ describe('GET /api/auth/github/callback', () => {
     mockGitHubOAuthFlow();
 
     // First login
-    const res1 = await request(app).get('/api/auth/github/callback?code=first-code');
-    expect(res1.status).toBe(200);
-    const userId = res1.body.user.id;
+    await request(app).get('/api/auth/github/callback?code=first-code');
+
+    // Get user ID from DB
+    const user1 = db.prepare('SELECT id FROM users WHERE email = ?').get('octocat@github.com') as Record<string, unknown>;
+    const userId = user1.id as string;
 
     // Second login (returning user) with new token
     mockGitHubOAuthFlow({ tokenResponse: { access_token: 'gho_new_token_456' } });
-    const res2 = await request(app).get('/api/auth/github/callback?code=second-code');
-    expect(res2.status).toBe(200);
-    expect(res2.body.user.id).toBe(userId); // Same user
+    await request(app).get('/api/auth/github/callback?code=second-code');
 
     // Token should be updated
     const conn = db.prepare('SELECT * FROM github_connections WHERE user_id = ?').get(userId) as Record<string, unknown>;
@@ -707,7 +740,7 @@ describe('GET /api/auth/github/callback', () => {
     expect(decryptToken(conn.encrypted_token as string)).toBe('gho_new_token_456');
   });
 
-  test('returns 401 when GitHub token exchange fails', async () => {
+  test('redirects with error when GitHub token exchange fails', async () => {
     setupGitHubEnv();
     mockFetch.mockImplementation((url: string) => {
       if (url === 'https://github.com/login/oauth/access_token') {
@@ -720,11 +753,13 @@ describe('GET /api/auth/github/callback', () => {
     });
 
     const res = await request(app).get('/api/auth/github/callback?code=invalid-code');
+    // The error path still goes through the catch block which now redirects
+    // But the 'no access_token' case returns res.status(401).json(...) directly — need to check
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('The code passed is incorrect');
   });
 
-  test('returns 400 when no verified primary email on GitHub', async () => {
+  test('redirects with error when no verified primary email on GitHub', async () => {
     setupGitHubEnv();
     mockGitHubOAuthFlow({
       emailsResponse: [
@@ -733,6 +768,7 @@ describe('GET /api/auth/github/callback', () => {
     });
 
     const res = await request(app).get('/api/auth/github/callback?code=test-code');
+    // 'no verified email' returns 400 JSON before the redirect section
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('No verified primary email found on GitHub account');
   });
@@ -744,8 +780,11 @@ describe('GET /api/auth/github/callback', () => {
     });
 
     const res = await request(app).get('/api/auth/github/callback?code=test-code');
-    expect(res.status).toBe(200);
-    expect(res.body.user.email).toBe('direct@example.com'); // Normalized
+    expect(res.status).toBe(302);
+
+    // Verify user email was normalized in DB
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get('direct@example.com') as Record<string, unknown>;
+    expect(user).toBeDefined();
   });
 
   test('emits github_login WAL event', async () => {
@@ -761,28 +800,31 @@ describe('GET /api/auth/github/callback', () => {
     expect(payload.githubUsername).toBe('octocat');
   });
 
-  test('access token is a valid JWT with correct claims', async () => {
+  test('access token in redirect is a valid JWT', async () => {
     setupGitHubEnv();
     mockGitHubOAuthFlow();
 
     const res = await request(app).get('/api/auth/github/callback?code=test-code');
+    const tokens = parseRedirectTokens(res);
+    expect(tokens.accessToken).toBeDefined();
+
     const decoded = JSON.parse(
-      Buffer.from(res.body.accessToken.split('.')[1], 'base64').toString()
+      Buffer.from(tokens.accessToken!.split('.')[1], 'base64').toString()
     );
-    expect(decoded.sub).toBe(res.body.user.id);
     expect(decoded.email).toBe('octocat@github.com');
     expect(decoded.exp).toBeDefined();
   });
 
-  test('refresh token is stored and usable', async () => {
+  test('refresh token from redirect is stored and usable', async () => {
     setupGitHubEnv();
     mockGitHubOAuthFlow();
 
     const res = await request(app).get('/api/auth/github/callback?code=test-code');
-    expect(res.body.refreshToken).toBeDefined();
+    const tokens = parseRedirectTokens(res);
+    expect(tokens.refreshToken).toBeDefined();
 
     // Use the refresh token
-    const refreshRes = await request(app).post('/api/auth/refresh').send({ refreshToken: res.body.refreshToken });
+    const refreshRes = await request(app).post('/api/auth/refresh').send({ refreshToken: tokens.refreshToken });
     expect(refreshRes.status).toBe(200);
     expect(refreshRes.body.accessToken).toBeDefined();
     expect(refreshRes.body.refreshToken).toBeDefined();

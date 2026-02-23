@@ -281,6 +281,28 @@ router.post('/logout', (req: Request, res: Response) => {
   res.json({ message: 'Logged out successfully' });
 });
 
+// GET /api/auth/me — return current authenticated user
+router.get('/me', authRequired, (req: Request, res: Response) => {
+  const authReq = req as Request & { user: AuthUser };
+  const user = db.prepare(
+    'SELECT id, email, display_name, github_id FROM users WHERE id = ?'
+  ).get(authReq.user.id) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id'> | undefined;
+
+  if (!user) {
+    res.status(401).json({ error: 'User not found' });
+    return;
+  }
+
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      displayName: user.display_name,
+      githubConnected: !!user.github_id,
+    },
+  });
+});
+
 // ─── Token encryption helpers ───
 
 export function encryptToken(plaintext: string): string {
@@ -455,19 +477,17 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_login', '', ?)"
     ).run(JSON.stringify({ userId, email: userEmail, githubUserId, githubUsername }));
 
-    res.json({
-      user: {
-        id: userId,
-        email: userEmail,
-        displayName,
-        githubUsername,
-      },
+    // Redirect to frontend with tokens in URL fragment (fragments aren't sent to servers)
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
+    const fragment = new URLSearchParams({
       accessToken,
       refreshToken,
-    });
+    }).toString();
+    res.redirect(`${frontendUrl}/auth/github/callback#${fragment}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error during GitHub OAuth';
-    res.status(500).json({ error: message });
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
+    res.redirect(`${frontendUrl}/auth/github/callback#error=${encodeURIComponent(message)}`);
   }
 });
 
