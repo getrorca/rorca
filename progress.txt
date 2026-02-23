@@ -271,5 +271,27 @@ Key decisions:
 - `team_members.role` restricted to admin/editor/viewer via CHECK constraint
 - teams.slug is UNIQUE indexed for URL-friendly team lookups
 
+## Story V2-014: Cross-Spec Story Search — DONE
+Files touched:
+- backend/src/routes/stories.ts (new — GET /api/stories/search endpoint)
+- backend/src/server.ts (modified — mount storiesRouter at /api/stories)
+- backend/src/routes/__tests__/stories.test.ts (new — 13 tests)
+- backend/src/routes/AGENTS.md (modified — added stories.ts to route inventory and endpoints)
+
+What was built:
+- GET /api/stories/search?q=&workspaceId=&status=&tags=&limit=&offset= searches story titles, descriptions, and acceptance criteria across all specs in a workspace
+- Results include storyId, storyTitle, storyDescription, acceptanceCriteria, specId, specTitle, specStatus, workspaceId, workspaceName, tags, and matchSnippet
+- Supports filtering by spec status (pending/approved), workspace (optional — omit for all workspaces), and tags (comma-separated, match ALL)
+- Paginated response: { items, total, hasMore }
+- Case-insensitive search with relevance sorting (title matches first, then description, then AC)
+- matchSnippet shows the first matching text for quick context
+
+Key decisions:
+- Created separate stories.ts route file (not added to specs.ts) to keep routes modular
+- Reads spec files from disk directly (same pattern as specs.ts listing) rather than using FTS index — simpler and fast enough for 1000-story workspaces
+- Helpers (specsDirs, safeReaddir, getSpecTags) duplicated from specs.ts to avoid circular imports — these are small, stable functions
+- When workspaceId is omitted, searches across ALL registered workspaces
+- Tag filtering operates at spec level (not story level) — consistent with existing tag system which tags specs, not individual stories
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)

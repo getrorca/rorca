@@ -13,6 +13,7 @@ All route files are Express routers mounted in `server.ts`. Every mutation must 
 | `pipeline.ts` | `/api/pipeline` | Run trigger, SSE output streaming, cancel, story status |
 | `worktrees.ts` | `/api/worktrees` | Git worktree list, create, delete, merge |
 | `templates.ts` | `/api/templates` | Spec template library CRUD |
+| `stories.ts` | `/api/stories` | Cross-spec story search with filters |
 | `wal.ts` | `/api/wal` | Paginated WAL event log |
 | `health.ts` | `/api/health` | Public health check — no auth |
 
@@ -77,6 +78,14 @@ POST   /api/templates               — Create template from approved spec
 GET    /api/templates               — List all templates
 GET    /api/templates/:id           — Fetch template detail
 DELETE /api/templates/:id           — Delete template
+```
+
+### stories.ts
+```
+GET    /api/stories/search?q=&workspaceId=&status=&tags=&limit=&offset=
+       — Search stories across all specs. q required. workspaceId optional (omit = all workspaces).
+       — Filters: status (pending|approved|all), tags (comma-separated, match ALL)
+       — Paginated: { items, total, hasMore }
 ```
 
 ### wal.ts
