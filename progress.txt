@@ -293,5 +293,27 @@ Key decisions:
 - When workspaceId is omitted, searches across ALL registered workspaces
 - Tag filtering operates at spec level (not story level) — consistent with existing tag system which tags specs, not individual stories
 
+## Story V2-021: Interactive SVG Dependency Graph — DONE
+Files touched:
+- package.json (modified — added @dagrejs/dagre + @types/dagre)
+- src/components/InteractiveDependencyGraph.tsx (new)
+- src/panels/PipelineMonitorPanel.tsx (modified)
+
+What was built:
+- New `InteractiveDependencyGraph` component rendering a custom SVG DAG using dagre for layout
+- Nodes colored by real-time status: gray=pending, blue=running (with pulse animation), green=passed, red=failed, yellow=skipped
+- Live status updates from SSE events merged into graph via `liveStatuses` prop
+- Critical path (longest dependency chain) highlighted with thicker accent-colored edges
+- Zoom (wheel + buttons), pan (drag background), and fit-to-screen controls
+- Click-to-popover on nodes showing story title, status badge, and elapsed time
+- Integrated as a new "Graph" tab in the Pipeline Monitor panel (alongside Terminal and Stories tabs)
+
+Key decisions:
+- Built custom SVG renderer instead of using dagre-d3 (which is unmaintained) — dagre handles layout, we render SVG directly
+- Critical path computed via longest-path DP on topological sort of the DAG
+- Status mapping: DerivedStory `pass/fail/running/retry/pending` → graph `passed/failed/running/running/pending`
+- Existing `DependencyGraph.tsx` (Mermaid-based) left untouched — used in Archive/ReviewQueue panels for static views
+- Popover positioned relative to container bounds to prevent overflow
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
