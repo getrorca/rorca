@@ -49,6 +49,8 @@ interface WorkspaceRow {
   path: string;
 }
 
+type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
+
 interface SpecSummary {
   id: string;
   specName: string;
@@ -60,6 +62,7 @@ interface SpecSummary {
   readinessPercent: number;
   tags: string[];
   forkedFrom?: string;
+  reviewStatus: ReviewStatus;
 }
 
 interface SpecVersionRow {
@@ -103,7 +106,7 @@ function safeReaddir(dir: string): string[] {
   }
 }
 
-function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string } {
+function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string; reviewStatus?: ReviewStatus } {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
 }
@@ -156,6 +159,7 @@ function buildSummary(
     readinessPercent: computeReadiness(stories),
     tags: workspaceId ? getSpecTags(specId, workspaceId) : [],
     ...(content.forkedFrom ? { forkedFrom: content.forkedFrom } : {}),
+    reviewStatus: content.reviewStatus ?? 'draft',
   };
 }
 
@@ -898,9 +902,15 @@ router.get('/', (req: Request, res: Response) => {
     }
 
     // Filter by tags (must match ALL specified tags)
-    const filtered = filterTags.length > 0
+    let filtered = filterTags.length > 0
       ? specs.filter(s => filterTags.every(t => s.tags.includes(t)))
       : specs;
+
+    // Filter by reviewStatus (e.g. ?reviewStatus=review_requested)
+    const reviewStatusFilter = req.query.reviewStatus as string | undefined;
+    if (reviewStatusFilter && VALID_REVIEW_STATUSES.includes(reviewStatusFilter as ReviewStatus)) {
+      filtered = filtered.filter(s => s.reviewStatus === reviewStatusFilter);
+    }
 
     // Sort by generatedAt DESC
     filtered.sort((a, b) =>
@@ -1225,6 +1235,7 @@ router.get('/archive', (req: Request, res: Response) => {
           storyTitles: [],
           readinessPercent: 0,
           tags: getSpecTags(evt.spec_id, workspaceId),
+          reviewStatus: 'draft' as ReviewStatus,
         });
       }
     }
@@ -2016,6 +2027,142 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (error: any) {
     console.error('[Specs] Reject error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-037: POST /:specId/request-review — Transition to review_requested ───
+
+const VALID_REVIEW_STATUSES: ReviewStatus[] = ['draft', 'review_requested', 'approved', 'changes_requested'];
+
+router.post('/:specId/request-review', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir } = specsDirs(workspace.path);
+    const specFile = path.join(pendingDir, `${specId}.json`);
+
+    if (!fs.existsSync(specFile)) {
+      res.status(404).json({ error: `Spec '${specId}' not found in pending` });
+      return;
+    }
+
+    const raw = fs.readFileSync(specFile, 'utf8');
+    const spec = JSON.parse(raw);
+    const currentStatus: ReviewStatus = spec.reviewStatus ?? 'draft';
+
+    // Only draft or changes_requested specs can be submitted for review
+    if (currentStatus !== 'draft' && currentStatus !== 'changes_requested') {
+      res.status(409).json({
+        error: `Cannot request review: spec is currently '${currentStatus}'`,
+      });
+      return;
+    }
+
+    spec.reviewStatus = 'review_requested';
+    fs.writeFileSync(specFile, JSON.stringify(spec, null, 2), 'utf8');
+
+    // Emit WAL event for audit trail
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('review_requested', ?, ?, 'user', ?)`
+    ).run(specId, workspaceId, JSON.stringify({ previousStatus: currentStatus }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({ ok: true, reviewStatus: 'review_requested' });
+  } catch (error: any) {
+    console.error('[Specs] Request review error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-037: POST /:specId/review — Approve or request changes ───────────────
+
+router.post('/:specId/review', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId, action, comment, reviewerId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    if (!action || !['approve', 'request_changes'].includes(action)) {
+      res.status(400).json({ error: "Missing or invalid 'action': must be 'approve' or 'request_changes'" });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir } = specsDirs(workspace.path);
+    const specFile = path.join(pendingDir, `${specId}.json`);
+
+    if (!fs.existsSync(specFile)) {
+      res.status(404).json({ error: `Spec '${specId}' not found in pending` });
+      return;
+    }
+
+    const raw = fs.readFileSync(specFile, 'utf8');
+    const spec = JSON.parse(raw);
+    const currentStatus: ReviewStatus = spec.reviewStatus ?? 'draft';
+
+    // Can only review specs that are in review_requested state
+    if (currentStatus !== 'review_requested') {
+      res.status(409).json({
+        error: `Cannot review: spec is currently '${currentStatus}', expected 'review_requested'`,
+      });
+      return;
+    }
+
+    const newStatus: ReviewStatus = action === 'approve' ? 'approved' : 'changes_requested';
+    spec.reviewStatus = newStatus;
+    fs.writeFileSync(specFile, JSON.stringify(spec, null, 2), 'utf8');
+
+    // Emit WAL event with reviewer info and comment for audit trail
+    const eventType = action === 'approve' ? 'review_approved' : 'review_changes_requested';
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES (?, ?, ?, ?, ?)`
+    ).run(
+      eventType,
+      specId,
+      workspaceId,
+      reviewerId ?? 'user',
+      JSON.stringify({
+        action,
+        comment: comment ?? null,
+        reviewerId: reviewerId ?? null,
+        previousStatus: currentStatus,
+      }),
+    );
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({ ok: true, reviewStatus: newStatus });
+  } catch (error: any) {
+    console.error('[Specs] Review error:', error);
     res.status(500).json({ error: error.message });
   }
 });
