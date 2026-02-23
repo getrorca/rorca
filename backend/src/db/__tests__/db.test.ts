@@ -47,9 +47,12 @@ test('all core tables plus FTS5 tables exist in sqlite_master', () => {
     'spec_search_index_idx',
     'spec_versions',
     'story_results',
+    'team_members',
+    'teams',
     'templates',
     'users',
     'wal_events',
+    'workspace_access',
     'workspace_context',
     'workspaces',
   ]);
