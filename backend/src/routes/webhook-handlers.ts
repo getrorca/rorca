@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
+import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -319,11 +320,50 @@ export function handlePush(
   }
 }
 
+// ─── PR opened/updated handler — spec compliance check ──────────────────────
+
+/**
+ * Handle pull_request events: when a PR is opened or updated (synchronize),
+ * evaluate acceptance criteria coverage and post a GitHub commit status check.
+ */
+export function handlePullRequestCheck(
+  payload: Record<string, any>,
+  _event: string,
+  workspaceId: string,
+): void {
+  const action = payload.action;
+  if (action !== 'opened' && action !== 'synchronize' && action !== 'reopened') {
+    return;
+  }
+
+  const pr = payload.pull_request;
+  if (!pr) return;
+
+  const prTitle: string = pr.title ?? '';
+  const branchName: string = pr.head?.ref ?? '';
+  const headSha: string = pr.head?.sha ?? '';
+  const prNumber: number = pr.number ?? 0;
+
+  if (!headSha || !prNumber) return;
+
+  const repoFullName: string = payload.repository?.full_name ?? '';
+  const [owner, repo] = repoFullName.split('/');
+  if (!owner || !repo) return;
+
+  // Fire and forget — the check is posted asynchronously
+  evaluatePrAndPostCheck(owner, repo, prNumber, headSha, prTitle, branchName, workspaceId)
+    .catch(err => {
+      console.error(`[Webhook] Check evaluation failed for PR #${prNumber}:`, err);
+    });
+}
+
 // ─── Register handlers ───────────────────────────────────────────────────────
 
 export function registerWebhookHandlers(): void {
   onGithubEvent('pull_request', handlePullRequestMerge);
+  onGithubEvent('pull_request', handlePullRequestCheck);
   onGithubEvent('push', handlePush);
   console.log('[Webhook] Registered pull_request merge handler');
+  console.log('[Webhook] Registered pull_request spec-compliance check handler');
   console.log('[Webhook] Registered push commit-linking handler');
 }

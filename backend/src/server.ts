@@ -15,6 +15,7 @@ import schedulesRouter from './routes/schedules';
 import envVarsRouter from './routes/env-vars';
 import workspaceGithubRouter from './routes/workspace-github';
 import webhooksRouter from './routes/webhooks';
+import githubChecksRouter from './routes/github-checks';
 import authRouter, { authRequired } from './routes/auth';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
@@ -62,6 +63,7 @@ app.use('/api/templates', templatesRouter);
 app.use('/api/stories', storiesRouter);
 app.use('/api/workspaces/:id/env-vars', envVarsRouter);
 app.use('/api/workspaces/:id/github', workspaceGithubRouter);
+app.use('/api/github/checks', githubChecksRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
