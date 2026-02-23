@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical } from 'lucide-react';
+import { Play, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
+import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 
-type DetailTab = 'stories' | 'terminal';
+type DetailTab = 'stories' | 'terminal' | 'graph';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -297,6 +298,32 @@ export default function PipelineMonitorPanel() {
     return selectedRunDetail.run;
   }, [selectedRunDetail, sseEvents]);
 
+  // Derive specId from selected run for graph tab
+  const selectedSpecId = useMemo(() => {
+    if (!selectedRunDetail) return '';
+    const filename = selectedRunDetail.run.spec_path.split('/').pop() || '';
+    return filename.replace(/\.json$/, '');
+  }, [selectedRunDetail]);
+
+  // Build live status map for the interactive graph (maps DerivedStory status to graph status)
+  const graphLiveStatuses = useMemo(() => {
+    const statusMap = new Map<string, { storyId: string; status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped'; startedAt: string | null; elapsed: string }>();
+    for (const s of derivedStories) {
+      const graphStatus = s.status === 'pass' ? 'passed' as const
+        : s.status === 'fail' ? 'failed' as const
+        : s.status === 'running' ? 'running' as const
+        : s.status === 'retry' ? 'running' as const
+        : 'pending' as const;
+      statusMap.set(s.storyId, {
+        storyId: s.storyId,
+        status: graphStatus,
+        startedAt: s.startedAt,
+        elapsed: s.elapsed,
+      });
+    }
+    return statusMap;
+  }, [derivedStories]);
+
   // Load log tail when expanding a story
   const handleStoryExpand = (storyId: string) => {
     if (expandedStory === storyId) {
@@ -552,6 +579,17 @@ export default function PipelineMonitorPanel() {
                   </span>
                 )}
               </button>
+              <button
+                onClick={() => setDetailTab('graph')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  detailTab === 'graph'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                }`}
+              >
+                <GitBranch className="w-3.5 h-3.5" />
+                Graph
+              </button>
             </div>
 
             {/* Terminal tab — xterm.js live output */}
@@ -652,6 +690,24 @@ export default function PipelineMonitorPanel() {
                   )}
                 </div>
               </>
+            )}
+
+            {/* Graph tab — interactive DAG */}
+            {detailTab === 'graph' && (
+              <div className="flex-1 min-h-0 overflow-hidden">
+                {selectedSpecId && workspaceId ? (
+                  <InteractiveDependencyGraph
+                    specId={selectedSpecId}
+                    workspaceId={workspaceId}
+                    runId={selectedRunId ?? undefined}
+                    liveStatuses={graphLiveStatuses}
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                    Select a run to view its dependency graph
+                  </div>
+                )}
+              </div>
             )}
           </>
         )}
