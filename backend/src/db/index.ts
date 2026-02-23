@@ -30,6 +30,26 @@ export function runMigrations() {
     db.exec('ALTER TABLE pipeline_runs ADD COLUMN worktree_path TEXT');
   }
 
+  // US-005: FTS5 virtual table for full-text spec search
+  const ftsExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='spec_search_index'`
+  ).get();
+  if (!ftsExists) {
+    db.exec(`
+      CREATE VIRTUAL TABLE spec_search_index USING fts5(
+        spec_slug UNINDEXED,
+        workspace_id UNINDEXED,
+        spec_title,
+        story_titles,
+        story_descriptions,
+        acceptance_criteria,
+        status UNINDEXED,
+        generated_at UNINDEXED,
+        tokenize='unicode61'
+      )
+    `);
+  }
+
   // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
   const tableSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
