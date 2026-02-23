@@ -408,5 +408,32 @@ Key decisions:
 - Scope filtering: 'personal' = user's own non-team templates, 'team' = user's team templates, 'all' = both + legacy global
 - Fixed pre-existing migration 019 bug: INSERT...SELECT referenced preferred_model before it existed on fresh DBs
 
+## Story V2-044: Cost Breakdowns with Provider Pricing — DONE
+Files touched:
+- backend/src/db/migrations/023_model_pricing_v2.sql (new — migration marker)
+- backend/src/db/index.ts (modified — idempotent column additions: provider, input_cost_per_1m, output_cost_per_1m, effective_date)
+- backend/src/routes/analytics.ts (modified — added GET /costs, GET /pricing, PUT /pricing/:modelId, DELETE /pricing/:modelId)
+- backend/src/db/__tests__/db.test.ts (modified — added token_usage to expected table list)
+- src/panels/CostBreakdownPanel.tsx (new — cost breakdown + pricing admin UI)
+- src/components/Sidebar.tsx (modified — added 'costs' panel with DollarSign icon)
+- src/App.tsx (modified — imported and wired CostBreakdownPanel)
+
+What was built:
+- Enhanced model_pricing table with provider, input_cost_per_1m, output_cost_per_1m, effective_date columns (backward-compatible with existing per-1k pricing)
+- GET /api/analytics/costs endpoint: cost breakdowns grouped by spec, run, model, or time period (weekly). Uses model_pricing join for actual provider rates. Formula: (tokens/1M) * rate_per_1M
+- GET /api/analytics/pricing endpoint: lists all model pricing entries normalized to per-1M display
+- PUT /api/analytics/pricing/:modelId: create or update model pricing (auto-converts per-1M to per-1K for backward compat)
+- DELETE /api/analytics/pricing/:modelId: remove model pricing
+- CostBreakdownPanel with two tabs: "Costs" (breakdown charts + tables) and "Pricing" (admin CRUD for model rates)
+- Costs tab: summary cards (total cost, input/output cost, avg/story), stacked bar chart, detailed table with input/output cost split
+- Period grouping: weekly cost aggregation with bar chart
+- Pricing tab: table of all model prices with inline edit, add new model form, delete
+
+Key decisions:
+- Kept existing input_cost_per_1k/output_cost_per_1k columns for backward compat with cost-estimator.ts and pipeline token recording
+- New per-1M columns are the canonical display unit; per-1K auto-computed on save
+- effective_date uses constant default ('') + UPDATE backfill to avoid SQLite "non-constant default" error in ALTER TABLE
+- Cost calculation in SQL uses per-1M if available, falls back to per-1K * factor for old data
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
