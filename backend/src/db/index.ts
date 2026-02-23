@@ -152,6 +152,12 @@ export function runMigrations() {
   if (!runColsPost.some(c => c.name === 'trigger_type')) {
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'");
   }
+
+  // V2-031: Add pr_template column to workspaces (idempotent)
+  const wsCols = db.pragma('table_info(workspaces)') as { name: string }[];
+  if (!wsCols.some(c => c.name === 'pr_template')) {
+    db.exec('ALTER TABLE workspaces ADD COLUMN pr_template TEXT');
+  }
 }
 
 runMigrations();
