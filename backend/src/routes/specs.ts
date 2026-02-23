@@ -299,6 +299,47 @@ interface SpecDiffResult {
   summary: { added: number; removed: number; modified: number; unchanged: number };
 }
 
+/**
+ * @swagger
+ * /api/specs/generate:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Generate a spec from a brief via LLM
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, title, brief]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               title: { type: string, example: "User Authentication" }
+ *               brief: { type: string, example: "Add login/register with JWT tokens" }
+ *               storyCount: { type: integer, default: 5 }
+ *               model: { type: string, example: "claude-sonnet-4-5-20250929" }
+ *               domain: { type: string }
+ *               diagramTypes: { type: array, items: { type: string } }
+ *               storyAnnotations: { type: string }
+ *               templateId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Generated spec
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 slug: { type: string }
+ *                 title: { type: string }
+ *                 stories: { type: array, items: { $ref: '#/components/schemas/UserStory' } }
+ *                 provider: { type: string }
+ *                 model: { type: string }
+ *                 usage: { type: object }
+ *                 specPath: { type: string }
+ *       400: { description: "Missing required fields" }
+ *       404: { description: "Workspace not found" }
+ */
 router.post('/generate', async (req: Request, res: Response) => {
   try {
     const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
@@ -891,8 +932,52 @@ router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
   }
 });
 
-// ─── R-001: GET / — List specs with status ──────────────────────────────────
-
+/**
+ * @swagger
+ * /api/specs:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List specs (pending/approved/all)
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [all, pending, approved], default: all }
+ *       - in: query
+ *         name: tags
+ *         schema: { type: string }
+ *         description: Comma-separated tag filter
+ *       - in: query
+ *         name: reviewStatus
+ *         schema: { type: string, enum: [draft, review_requested, approved, changes_requested] }
+ *       - in: query
+ *         name: assignee
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of specs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       specName: { type: string }
+ *                       storyCount: { type: integer }
+ *                       status: { type: string, enum: [pending, approved] }
+ *                       generatedAt: { type: string, format: date-time }
+ *                       readinessPercent: { type: number }
+ *                       tags: { type: array, items: { type: string } }
+ *                       reviewStatus: { type: string }
+ */
 router.get('/', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -1162,6 +1247,52 @@ function computeRelevanceScore(snippets: MatchSnippet[]): number {
   return score;
 }
 
+/**
+ * @swagger
+ * /api/specs/archive:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Search spec archive with pagination
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: q
+ *         schema: { type: string }
+ *         description: Full-text search query
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [all, pending, approved, rejected] }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *       - in: query
+ *         name: createdAfter
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: createdBefore
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: tags
+ *         schema: { type: string }
+ *         description: Comma-separated tag filter
+ *     responses:
+ *       200:
+ *         description: Paginated archive results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specs: { type: array, items: { type: object } }
+ *                 total: { type: integer }
+ *                 hasMore: { type: boolean }
+ */
 router.get('/archive', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -1852,8 +1983,26 @@ router.get('/tags/autocomplete', (req: Request, res: Response) => {
   }
 });
 
-// ─── R-001: GET /:specId — Return full spec JSON ─────────────────────────────
-
+/**
+ * @swagger
+ * /api/specs/{specId}:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get full spec detail
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *     responses:
+ *       200:
+ *         description: Full spec JSON with metadata
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/Spec' }
+ *       404: { description: "Spec not found" }
+ */
 router.get('/:specId', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -2000,8 +2149,38 @@ router.post('/:specId/fork', (req: Request, res: Response) => {
   }
 });
 
-// ─── R-001: POST /:specId/approve — Move to approved/ ────────────────────────
-
+/**
+ * @swagger
+ * /api/specs/{specId}/approve:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Approve a spec (move to approved/)
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Spec approved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 specPath: { type: string }
+ *       404: { description: "Spec not found in pending/" }
+ */
 router.post('/:specId/approve', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -2043,8 +2222,31 @@ router.post('/:specId/approve', (req: Request, res: Response) => {
   }
 });
 
-// ─── R-001: POST /:specId/reject — Delete spec ───────────────────────────────
-
+/**
+ * @swagger
+ * /api/specs/{specId}/reject:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Reject a spec (delete + preserve in WAL)
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               reason: { type: string }
+ *     responses:
+ *       200: { description: "Spec rejected", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+ *       404: { description: "Spec not found" }
+ */
 router.post('/:specId/reject', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;

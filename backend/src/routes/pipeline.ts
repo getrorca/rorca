@@ -70,8 +70,45 @@ interface StoryResultRow {
   output_tokens: number | null;
 }
 
-// ─── POST /api/pipeline/trigger — Spawn run-loop.sh for a spec ──────────────
-
+/**
+ * @swagger
+ * /api/pipeline/trigger:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Trigger a pipeline run (spawn run-loop.sh)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [specPath, workspaceId]
+ *             properties:
+ *               specPath: { type: string, example: "ralph/specs/approved/my-spec.json" }
+ *               workspaceId: { type: string }
+ *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
+ *               dryRun: { type: boolean, default: false }
+ *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
+ *     responses:
+ *       200:
+ *         description: Pipeline started or conflict detected
+ *         content:
+ *           application/json:
+ *             schema:
+ *               oneOf:
+ *                 - type: object
+ *                   properties:
+ *                     ok: { type: boolean }
+ *                     runId: { type: integer }
+ *                     worktreePath: { type: string }
+ *                     branchName: { type: string }
+ *                 - type: object
+ *                   properties:
+ *                     conflict: { type: boolean }
+ *                     activeRunId: { type: integer }
+ *       400: { description: "Missing required fields" }
+ *       404: { description: "Workspace or spec not found" }
+ */
 router.post('/trigger', async (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId, autoWorktree, dryRun, triggerType } = req.body;
@@ -397,6 +434,29 @@ router.post('/runs', (req: Request, res: Response) => {
 
 // ─── GET /api/pipeline/runs — List pipeline runs ─────────────────────────────
 
+/**
+ * @swagger
+ * /api/pipeline/runs:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: List pipeline runs
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of runs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 runs:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/PipelineRun' }
+ */
 router.get('/runs', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -562,6 +622,31 @@ router.get('/runs/compare', (req: Request, res: Response) => {
 
 // ─── GET /api/pipeline/runs/:runId — Get run detail + story results ──────────
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Get a pipeline run with story results
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Run details with story results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 run: { $ref: '#/components/schemas/PipelineRun' }
+ *                 stories:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/StoryResult' }
+ *       404: { description: "Run not found" }
+ */
 router.get('/runs/:runId', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
@@ -594,6 +679,31 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
 // Accepts optional 'storyIds' array; when omitted, retries all failed stories.
 // Preserves original failed story_result rows for audit trail.
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/retry:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Retry failed stories in a pipeline run
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               storyIds:
+ *                 type: array
+ *                 items: { type: string }
+ *                 description: Specific story IDs to retry (all failed if omitted)
+ *     responses:
+ *       200: { description: "Retry started", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer } } } } } }
+ *       404: { description: "Run not found" }
+ */
 router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
@@ -854,6 +964,21 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
 // ─── POST /api/pipeline/runs/:runId/pause — Pause a running pipeline ─────────
 // Sends SIGTSTP to the process group so the current story finishes before pausing.
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/pause:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Pause a running pipeline
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: "Paused", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, status: { type: string } } } } } }
+ *       404: { description: "Run not found" }
+ */
 router.post('/runs/:runId/pause', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
@@ -927,6 +1052,21 @@ router.post('/runs/:runId/pause', (req: Request, res: Response) => {
 // ─── POST /api/pipeline/runs/:runId/resume — Resume a paused pipeline ────────
 // Sends SIGCONT to the process group to resume execution.
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/resume:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Resume a paused pipeline
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: "Resumed", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, status: { type: string } } } } } }
+ *       404: { description: "Run not found" }
+ */
 router.post('/runs/:runId/resume', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
@@ -988,6 +1128,26 @@ router.post('/runs/:runId/resume', (req: Request, res: Response) => {
 // Streams raw stdout/stderr (with ANSI codes) to xterm.js on the frontend.
 // Late-joiners receive a full replay of buffered chunks, then live updates.
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/output:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Stream raw terminal output (SSE)
+ *     description: Server-Sent Events stream of base64-encoded terminal output. Late joiners receive full buffer replay.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: SSE stream with chunk events (base64 data) and done event
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ */
 router.get('/runs/:runId/output', (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.runId), 10);
   if (isNaN(runId)) {
@@ -1176,6 +1336,26 @@ router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
+/**
+ * @swagger
+ * /api/pipeline/stream:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Stream WAL events (SSE)
+ *     description: Server-Sent Events stream of WAL events (story progress). Polls wal_events table every 3s.
+ *     parameters:
+ *       - in: query
+ *         name: runId
+ *         schema: { type: string }
+ *         description: Filter events for a specific run
+ *     responses:
+ *       200:
+ *         description: SSE stream of WAL events
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ */
 router.get('/stream', (req: Request, res: Response) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',

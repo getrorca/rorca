@@ -39,7 +39,50 @@ function parseWorkspace(row: WorkspaceRow) {
   };
 }
 
-// POST /api/workspaces
+/**
+ * @swagger
+ * /api/workspaces:
+ *   post:
+ *     tags: [Workspaces]
+ *     summary: Register a new workspace
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [id, label, path, domains]
+ *             properties:
+ *               id: { type: string, example: "cashflow-ai" }
+ *               label: { type: string, example: "CashflowAI" }
+ *               path: { type: string, example: "/Users/dev/cashflow-ai" }
+ *               domains: { type: array, items: { type: string }, example: ["saas"] }
+ *     responses:
+ *       201:
+ *         description: Workspace created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workspace: { $ref: '#/components/schemas/Workspace' }
+ *       400: { description: "Missing fields or path not found" }
+ *       409: { description: "Workspace already exists" }
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: List all registered workspaces
+ *     responses:
+ *       200:
+ *         description: List of workspaces
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workspaces:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/Workspace' }
+ */
 router.post('/', (req, res) => {
   const { id, label, path, domains } = req.body;
 
@@ -79,7 +122,31 @@ router.get('/', (_req, res) => {
   res.json({ workspaces: rows.map(parseWorkspace) });
 });
 
-// GET /api/workspaces/:id/context
+/**
+ * @swagger
+ * /api/workspaces/{id}/context:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get workspace hydrated context (schema + git)
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Workspace context
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 schemaSnapshot: { type: string, nullable: true }
+ *                 schemaTableCount: { type: integer, nullable: true }
+ *                 gitMemory: { type: string, nullable: true }
+ *                 lastIngestedCommitHash: { type: string, nullable: true }
+ *                 gitCommitCount: { type: integer, nullable: true }
+ */
 router.get('/:id/context', (req, res) => {
   const row = db.prepare(
     'SELECT * FROM workspace_context WHERE workspace_id = ?'
@@ -94,7 +161,49 @@ router.get('/:id/context', (req, res) => {
   });
 });
 
-// POST /api/workspaces/:id/hydrate
+/**
+ * @swagger
+ * /api/workspaces/{id}/hydrate:
+ *   post:
+ *     tags: [Workspaces]
+ *     summary: Hydrate workspace context (schema and/or git)
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               types:
+ *                 type: array
+ *                 items: { type: string, enum: [schema, git] }
+ *                 default: [schema, git]
+ *     responses:
+ *       200:
+ *         description: Hydration result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 schema:
+ *                   type: object
+ *                   properties:
+ *                     tableCount: { type: integer }
+ *                     snapshot_at: { type: string, format: date-time, nullable: true }
+ *                 git:
+ *                   type: object
+ *                   properties:
+ *                     commitCount: { type: integer }
+ *                     memory_updated_at: { type: string, format: date-time, nullable: true }
+ *                     newCommits: { type: integer }
+ *       404: { description: "Workspace not found" }
+ */
 router.post('/:id/hydrate', async (req, res) => {
   const { id } = req.params;
   const types: string[] = req.body.types ?? ['schema', 'git'];
@@ -207,7 +316,36 @@ router.post('/:id/hydrate', async (req, res) => {
   res.json(result);
 });
 
-// GET /api/workspaces/:id/files?patterns=README.md,CLAUDE.md,...
+/**
+ * @swagger
+ * /api/workspaces/{id}/files:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Check which files exist in a workspace
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: patterns
+ *         required: true
+ *         schema: { type: string }
+ *         description: Comma-separated file paths or glob patterns
+ *         example: "README.md,CLAUDE.md"
+ *     responses:
+ *       200:
+ *         description: List of matching files
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 exists:
+ *                   type: array
+ *                   items: { type: string }
+ *       404: { description: "Workspace not found" }
+ */
 router.get('/:id/files', (req, res) => {
   const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
   if (!workspace) {
@@ -256,7 +394,63 @@ router.get('/:id/files', (req, res) => {
   res.json({ exists });
 });
 
-// GET /api/workspaces/:id
+/**
+ * @swagger
+ * /api/workspaces/{id}:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get a single workspace
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Workspace details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workspace: { $ref: '#/components/schemas/Workspace' }
+ *       404: { description: "Workspace not found" }
+ *   patch:
+ *     tags: [Workspaces]
+ *     summary: Update workspace settings
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               pr_template: { type: string, nullable: true }
+ *     responses:
+ *       200:
+ *         description: Updated workspace
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workspace: { $ref: '#/components/schemas/Workspace' }
+ *       404: { description: "Workspace not found" }
+ *   delete:
+ *     tags: [Workspaces]
+ *     summary: Delete a workspace
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204: { description: "Deleted" }
+ */
 router.get('/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
   if (!row) {

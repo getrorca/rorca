@@ -14,7 +14,34 @@ interface WalEventRow {
   payload: string | null;
 }
 
-// GET /api/wal
+/**
+ * @swagger
+ * /api/wal:
+ *   get:
+ *     tags: [WAL]
+ *     summary: Query paginated WAL event log
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50, maximum: 200 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *     responses:
+ *       200:
+ *         description: Paginated WAL events
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 events:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/WalEvent' }
+ *                 total: { type: integer }
+ *                 limit: { type: integer }
+ *                 offset: { type: integer }
+ */
 router.get('/', (req, res) => {
   const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 50, 1), 200);
   const offset = Math.max(parseInt(String(req.query.offset), 10) || 0, 0);

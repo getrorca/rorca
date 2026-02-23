@@ -29,6 +29,39 @@ interface TimeSeriesRow {
 //   group_by — 'spec' | 'story' | 'model' | 'user', default 'model'
 //   workspace_id — optional filter
 
+/**
+ * @swagger
+ * /api/analytics/usage:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Get token usage analytics
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: group_by
+ *         schema: { type: string, enum: [spec, story, model, user] }
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Usage analytics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 grouped: { type: array, items: { type: object } }
+ *                 timeSeries: { type: array, items: { type: object } }
+ *                 totals: { type: object }
+ *                 dateRange: { type: object }
+ *                 groupBy: { type: string }
+ */
 router.get('/usage', (req: Request, res: Response) => {
   try {
     const groupBy = (req.query.group_by as string) || 'model';
@@ -171,6 +204,38 @@ interface PeriodCostRow {
   story_count: number;
 }
 
+/**
+ * @swagger
+ * /api/analytics/costs:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Get cost analytics
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: group_by
+ *         schema: { type: string, enum: [spec, run, model, period] }
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Cost breakdown
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 groupBy: { type: string }
+ *                 breakdown: { type: array, items: { type: object } }
+ *                 totals: { type: object }
+ *                 dateRange: { type: object }
+ */
 router.get('/costs', (req: Request, res: Response) => {
   try {
     const groupBy = (req.query.group_by as string) || 'spec';
@@ -990,6 +1055,39 @@ function buildCompletionExport(from: string, to: string, workspaceId?: string, l
   return { rows, headers, total };
 }
 
+/**
+ * @swagger
+ * /api/analytics/export:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Export analytics data (CSV or JSON)
+ *     parameters:
+ *       - in: query
+ *         name: format
+ *         required: true
+ *         schema: { type: string, enum: [csv, json] }
+ *       - in: query
+ *         name: data_type
+ *         required: true
+ *         schema: { type: string, enum: [usage, costs, velocity, completion] }
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Exported data
+ *         content:
+ *           text/csv:
+ *             schema: { type: string }
+ *           application/json:
+ *             schema: { type: object }
+ */
 router.get('/export', (req: Request, res: Response) => {
   try {
     const format = req.query.format as string;
