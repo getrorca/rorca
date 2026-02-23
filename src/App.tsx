@@ -57,6 +57,7 @@ function AppContent() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   // Global keyboard shortcuts via useHotkeys
   const hotkeys = useMemo<HotkeyBinding[]>(() => [
@@ -103,7 +104,11 @@ function AppContent() {
   }
 
   return (
-    <Shell sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} />}>
+    <Shell
+      sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />}
+      showMenuButton
+      onMenuToggle={() => setMobileNavOpen((v) => !v)}
+    >
       {activePanel === 'forge'           && <SpecForgePanelPage />}
       {activePanel === 'stack'           && <DirectionStackPanel />}
       {activePanel === 'team-direction'  && <TeamDirectionPanel />}
