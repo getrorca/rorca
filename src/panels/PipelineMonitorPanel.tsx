@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -7,7 +7,7 @@ import { apiFetch } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 
-type DetailTab = 'stories' | 'terminal' | 'graph';
+type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -32,6 +32,8 @@ interface StoryResult {
   log_path: string | null;
   started_at: string;
   finished_at: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
 }
 
 type StoryStatus = 'pending' | 'running' | 'pass' | 'fail' | 'retry';
@@ -43,7 +45,12 @@ interface DerivedStory {
   elapsed: string;
   startedAt: string | null;
   priority: number;  // 1=urgent, 2=high, 3=normal, 4=low
+  inputTokens: number | null;
+  outputTokens: number | null;
 }
+
+const CONTEXT_WINDOW = 200_000; // 200k token context window
+const CONTEXT_WARNING_THRESHOLD = 0.8; // 80% warning
 
 interface SpecStory {
   id: string;
@@ -106,6 +113,35 @@ function elapsedTime(startedAt: string, finishedAt: string | null): string {
   }
 }
 
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+function ContextBudgetBar({ inputTokens, outputTokens }: { inputTokens: number; outputTokens: number }) {
+  const total = inputTokens + outputTokens;
+  const pct = Math.min((total / CONTEXT_WINDOW) * 100, 100);
+  const isWarning = total / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD;
+
+  return (
+    <div className="flex items-center gap-2 min-w-0">
+      <div className="flex-1 h-1.5 bg-[var(--border)] rounded-full overflow-hidden min-w-[60px]">
+        <div
+          className={`h-full rounded-full transition-all duration-300 ${
+            isWarning ? 'bg-amber-500' : 'bg-[var(--accent)]'
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className={`text-[10px] font-mono whitespace-nowrap ${isWarning ? 'text-amber-400' : 'text-[var(--text-muted)]'}`}>
+        {formatTokens(total)}/{formatTokens(CONTEXT_WINDOW)}
+      </span>
+      {isWarning && <AlertTriangle className="w-3 h-3 text-amber-400 flex-shrink-0" />}
+    </div>
+  );
+}
+
 function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
   const storyMap = new Map<string, DerivedStory>();
 
@@ -123,12 +159,16 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           elapsed: '',
           startedAt: e.ts,
           priority: existing?.priority ?? 3,
+          inputTokens: existing?.inputTokens ?? null,
+          outputTokens: existing?.outputTokens ?? null,
         });
         break;
       case 'story_passed':
         if (existing) {
           existing.status = 'pass';
           existing.elapsed = payload.elapsed || elapsedTime(existing.startedAt || e.ts, e.ts);
+          if (payload.input_tokens != null) existing.inputTokens = payload.input_tokens;
+          if (payload.output_tokens != null) existing.outputTokens = payload.output_tokens;
         } else {
           storyMap.set(e.story_id, {
             storyId: e.story_id,
@@ -137,6 +177,8 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
             elapsed: payload.elapsed || '',
             startedAt: e.ts,
             priority: 3,
+            inputTokens: payload.input_tokens ?? null,
+            outputTokens: payload.output_tokens ?? null,
           });
         }
         break;
@@ -144,6 +186,8 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
         if (existing) {
           existing.status = 'fail';
           existing.elapsed = payload.elapsed || elapsedTime(existing.startedAt || e.ts, e.ts);
+          if (payload.input_tokens != null) existing.inputTokens = payload.input_tokens;
+          if (payload.output_tokens != null) existing.outputTokens = payload.output_tokens;
         } else {
           storyMap.set(e.story_id, {
             storyId: e.story_id,
@@ -152,6 +196,8 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
             elapsed: payload.elapsed || '',
             startedAt: e.ts,
             priority: 3,
+            inputTokens: payload.input_tokens ?? null,
+            outputTokens: payload.output_tokens ?? null,
           });
         }
         break;
@@ -247,6 +293,8 @@ export default function PipelineMonitorPanel() {
       elapsed: elapsedTime(s.started_at, s.finished_at),
       startedAt: s.started_at,
       priority: priorityMap.get(s.story_id) ?? 3,
+      inputTokens: s.input_tokens,
+      outputTokens: s.output_tokens,
     }));
 
     const fromSSE = deriveStoriesFromEvents(sseEvents);
@@ -266,6 +314,8 @@ export default function PipelineMonitorPanel() {
           elapsed: '',
           startedAt: null,
           priority: s.priority ?? 3,
+          inputTokens: null,
+          outputTokens: null,
         });
       }
     }
@@ -289,6 +339,18 @@ export default function PipelineMonitorPanel() {
   const completedCount = derivedStories.filter((s) => s.status === 'pass' || s.status === 'fail').length;
   const totalCount = derivedStories.length;
   const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+  // Token usage stats
+  const tokenStats = useMemo(() => {
+    const storiesWithTokens = derivedStories.filter(s => s.inputTokens != null || s.outputTokens != null);
+    const totalInput = storiesWithTokens.reduce((sum, s) => sum + (s.inputTokens ?? 0), 0);
+    const totalOutput = storiesWithTokens.reduce((sum, s) => sum + (s.outputTokens ?? 0), 0);
+    const warningStories = storiesWithTokens.filter(s => {
+      const total = (s.inputTokens ?? 0) + (s.outputTokens ?? 0);
+      return total / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD;
+    });
+    return { storiesWithTokens, totalInput, totalOutput, warningStories, hasData: storiesWithTokens.length > 0 };
+  }, [derivedStories]);
 
   // Update selected run status from SSE (handles finish, pause, resume events)
   const liveRun = useMemo(() => {
@@ -654,6 +716,22 @@ export default function PipelineMonitorPanel() {
                 <GitBranch className="w-3.5 h-3.5" />
                 Graph
               </button>
+              <button
+                onClick={() => setDetailTab('tokens')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  detailTab === 'tokens'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                Tokens
+                {tokenStats.warningStories.length > 0 && (
+                  <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/15 text-amber-400 font-semibold">
+                    {tokenStats.warningStories.length}
+                  </span>
+                )}
+              </button>
             </div>
 
             {/* Terminal tab — xterm.js live output */}
@@ -735,12 +813,46 @@ export default function PipelineMonitorPanel() {
                             <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
                               {story.elapsed && `(${story.elapsed})`}
                             </span>
-                            <span className="text-sm truncate min-w-0">{story.title}</span>
+                            <span className="text-sm truncate min-w-0 flex-1">{story.title}</span>
+                            {(story.inputTokens != null || story.outputTokens != null) && (
+                              <span className="flex-shrink-0 w-36">
+                                <ContextBudgetBar
+                                  inputTokens={story.inputTokens ?? 0}
+                                  outputTokens={story.outputTokens ?? 0}
+                                />
+                              </span>
+                            )}
                           </button>
 
-                          {/* Expanded log tail */}
+                          {/* Expanded log tail + token details */}
                           {expandedStory === story.storyId && (
                             <div className="border-b border-[var(--border)] bg-[var(--bg)]">
+                              {(story.inputTokens != null || story.outputTokens != null) && (
+                                <div className="px-3 pt-3 pb-1 flex items-center gap-4 text-xs">
+                                  <span className="text-[var(--text-muted)]">
+                                    Input: <span className="font-mono text-[var(--text)]">{formatTokens(story.inputTokens ?? 0)}</span>
+                                  </span>
+                                  <span className="text-[var(--text-muted)]">
+                                    Output: <span className="font-mono text-[var(--text)]">{formatTokens(story.outputTokens ?? 0)}</span>
+                                  </span>
+                                  <span className="text-[var(--text-muted)]">
+                                    Total: <span className="font-mono text-[var(--text)]">{formatTokens((story.inputTokens ?? 0) + (story.outputTokens ?? 0))}</span>
+                                  </span>
+                                  <span className="text-[var(--text-muted)]">
+                                    Context used: <span className={`font-mono ${
+                                      ((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD
+                                        ? 'text-amber-400' : 'text-[var(--text)]'
+                                    }`}>
+                                      {Math.round(((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW * 100)}%
+                                    </span>
+                                  </span>
+                                  {((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD && (
+                                    <span className="flex items-center gap-1 text-amber-400">
+                                      <AlertTriangle className="w-3 h-3" /> Near context limit
+                                    </span>
+                                  )}
+                                </div>
+                              )}
                               <div className="max-h-64 overflow-y-auto p-3">
                                 <pre className="text-xs font-mono text-[var(--text-muted)] whitespace-pre-wrap break-all leading-relaxed">
                                   {logLines.length > 0 ? logLines.join('\n') : '(Loading...)'}
@@ -769,6 +881,106 @@ export default function PipelineMonitorPanel() {
                 ) : (
                   <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
                     Select a run to view its dependency graph
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Tokens tab — token consumption summary */}
+            {detailTab === 'tokens' && (
+              <div className="flex-1 overflow-y-auto">
+                {!tokenStats.hasData ? (
+                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                    No token usage data available for this run.
+                  </div>
+                ) : (
+                  <div className="p-4 space-y-4">
+                    {/* Summary cards */}
+                    <div className="grid grid-cols-4 gap-3">
+                      <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
+                        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Total Input</div>
+                        <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalInput)}</div>
+                      </div>
+                      <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
+                        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Total Output</div>
+                        <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalOutput)}</div>
+                      </div>
+                      <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
+                        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Combined</div>
+                        <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalInput + tokenStats.totalOutput)}</div>
+                      </div>
+                      <div className={`p-3 rounded-lg border ${
+                        tokenStats.warningStories.length > 0
+                          ? 'bg-amber-500/10 border-amber-500/30'
+                          : 'bg-[var(--surface)] border-[var(--border)]'
+                      }`}>
+                        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Warnings</div>
+                        <div className={`text-lg font-mono font-medium ${tokenStats.warningStories.length > 0 ? 'text-amber-400' : ''}`}>
+                          {tokenStats.warningStories.length}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Per-story token chart */}
+                    <div className="rounded-lg bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
+                      <div className="px-3 py-2 border-b border-[var(--border)] text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
+                        Token Consumption by Story
+                      </div>
+                      <div className="divide-y divide-[var(--border)]">
+                        {tokenStats.storiesWithTokens
+                          .sort((a, b) => ((b.inputTokens ?? 0) + (b.outputTokens ?? 0)) - ((a.inputTokens ?? 0) + (a.outputTokens ?? 0)))
+                          .map((story) => {
+                            const input = story.inputTokens ?? 0;
+                            const output = story.outputTokens ?? 0;
+                            const total = input + output;
+                            const pct = (total / CONTEXT_WINDOW) * 100;
+                            const isWarning = total / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD;
+                            const inputPct = total > 0 ? (input / CONTEXT_WINDOW) * 100 : 0;
+                            const outputPct = total > 0 ? (output / CONTEXT_WINDOW) * 100 : 0;
+
+                            return (
+                              <div key={story.storyId} className="px-3 py-2.5">
+                                <div className="flex items-center justify-between mb-1.5">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span className="font-mono text-xs text-[var(--text-muted)]">{story.storyId}</span>
+                                    <span className="text-xs truncate text-[var(--text)]">{story.title !== story.storyId ? story.title : ''}</span>
+                                    {isWarning && <AlertTriangle className="w-3 h-3 text-amber-400 flex-shrink-0" />}
+                                  </div>
+                                  <div className="flex items-center gap-3 text-[10px] font-mono text-[var(--text-muted)] flex-shrink-0">
+                                    <span>In: {formatTokens(input)}</span>
+                                    <span>Out: {formatTokens(output)}</span>
+                                    <span className={isWarning ? 'text-amber-400 font-semibold' : ''}>{Math.round(pct)}%</span>
+                                  </div>
+                                </div>
+                                {/* Stacked bar: input (blue) + output (cyan) */}
+                                <div className="h-2 bg-[var(--border)] rounded-full overflow-hidden flex">
+                                  <div
+                                    className="h-full bg-blue-500 transition-all duration-300"
+                                    style={{ width: `${Math.min(inputPct, 100)}%` }}
+                                  />
+                                  <div
+                                    className={`h-full transition-all duration-300 ${isWarning ? 'bg-amber-500' : 'bg-cyan-500'}`}
+                                    style={{ width: `${Math.min(outputPct, 100 - Math.min(inputPct, 100))}%` }}
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                      {/* Legend */}
+                      <div className="px-3 py-2 border-t border-[var(--border)] flex items-center gap-4 text-[10px] text-[var(--text-muted)]">
+                        <span className="flex items-center gap-1">
+                          <span className="w-2 h-2 rounded-sm bg-blue-500" /> Input tokens
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="w-2 h-2 rounded-sm bg-cyan-500" /> Output tokens
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="w-2 h-2 rounded-sm bg-amber-500" /> Warning (&ge;80%)
+                        </span>
+                        <span className="ml-auto">Context window: {formatTokens(CONTEXT_WINDOW)}</span>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
