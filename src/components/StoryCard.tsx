@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest } from 'lucide-react';
 
 export interface Story {
   id: string;
@@ -12,6 +12,7 @@ export interface Story {
   timeoutMinutes?: number;
   passes?: boolean;
   excluded?: boolean;
+  mergedVia?: string;
 }
 
 function getReadinessWarnings(story: Story, allStoryIds?: Set<string>): string[] {
@@ -103,6 +104,19 @@ export function StoryCard({
                   <CheckCircle2 size={9} />
                   DONE
                 </span>
+              )}
+              {story.mergedVia && (
+                <a
+                  href={story.mergedVia}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Passed via PR merge"
+                  className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent hover:bg-accent/25 transition-colors"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <GitPullRequest size={9} />
+                  PR
+                </a>
               )}
               {isDeferred && (
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-muted/15 text-muted">

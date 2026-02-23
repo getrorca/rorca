@@ -17,6 +17,7 @@ import workspaceGithubRouter from './routes/workspace-github';
 import webhooksRouter from './routes/webhooks';
 import authRouter, { authRequired } from './routes/auth';
 import { startScheduler } from './lib/scheduler';
+import { registerWebhookHandlers } from './routes/webhook-handlers';
 
 dotenv.config();
 
@@ -42,6 +43,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/auth', authRouter);
 app.use('/api/webhooks', webhooksRouter);
+registerWebhookHandlers();
 
 // ─── Auth middleware (all routes below require authentication) ───
 app.use(authRequired);
