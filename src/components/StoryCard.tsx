@@ -8,6 +8,7 @@ export interface Story {
   acceptanceCriteria: string[];
   dependencies?: string[];
   dependsOn?: string[];
+  complexity?: number;
   passes?: boolean;
   excluded?: boolean;
 }
@@ -41,6 +42,17 @@ export function StoryCard({
           }`}>
             {story.id}
           </span>
+          {story.complexity != null && (
+            <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded mt-0.5 ${
+              story.complexity <= 2
+                ? 'bg-success/15 text-success'
+                : story.complexity === 3
+                ? 'bg-warning/15 text-warning'
+                : 'bg-error/15 text-error'
+            }`}>
+              C{story.complexity}
+            </span>
+          )}
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className={`text-sm font-semibold truncate ${

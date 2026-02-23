@@ -74,6 +74,7 @@ interface UserStory {
   description: string;
   acceptanceCriteria: string[];
   dependsOn: string[];
+  complexity?: number;
   passes?: boolean;
   excluded?: boolean;
 }
@@ -375,7 +376,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
       '',
       'JSON schema:',
-      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"]}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
       wantDiagrams ? diagramSchema : '',
       '',
       `Rules:`,
@@ -383,6 +384,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Each story needs 3-5 specific testable acceptanceCriteria',
       '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
       '- Stories should be concrete and implementable, not vague',
+      '- Each story must have a "complexity" field: integer 1-5 (1=trivial one-liner, 2=simple, 3=moderate, 4=complex multi-file, 5=epic cross-cutting). Base on acceptance criteria count, description scope, and dependency depth',
       '- Your entire response must be valid JSON parseable by JSON.parse()',
       '- Include a "mermaidDiagram" field: a valid Mermaid flowchart (graph TD) showing story dependency relationships',
       '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
@@ -1503,10 +1505,15 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
-    const { workspaceId, title, description, acceptanceCriteria } = req.body;
+    const { workspaceId, title, description, acceptanceCriteria, complexity } = req.body;
 
     if (!workspaceId) {
       res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    if (complexity !== undefined && (!Number.isInteger(complexity) || complexity < 1 || complexity > 5)) {
+      res.status(400).json({ error: 'complexity must be an integer between 1 and 5' });
       return;
     }
 
@@ -1548,6 +1555,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
     if (title !== undefined) stories[storyIndex].title = title;
     if (description !== undefined) stories[storyIndex].description = description;
     if (acceptanceCriteria !== undefined) stories[storyIndex].acceptanceCriteria = acceptanceCriteria;
+    if (complexity !== undefined) stories[storyIndex].complexity = complexity;
 
     content.userStories = stories;
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');

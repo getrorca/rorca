@@ -12,6 +12,7 @@ export interface GeneratedStory {
   description: string;
   acceptanceCriteria: string[];
   dependsOn: string[];
+  complexity?: number;
 }
 
 export interface GeneratedSpec {
@@ -50,6 +51,7 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
       description: s.description,
       acceptanceCriteria: s.acceptanceCriteria,
       dependsOn: s.dependsOn,
+      ...(s.complexity != null ? { complexity: s.complexity } : {}),
       passes: false
     })),
     ...(spec.mermaidDiagram ? { mermaidDiagram: spec.mermaidDiagram } : {}),

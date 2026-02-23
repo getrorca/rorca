@@ -523,11 +523,34 @@ function PreviewStoriesTab({
     );
   }
 
+  const complexityScores = localStories.map(s => s.complexity).filter((c): c is number => c != null);
+  const hasComplexity = complexityScores.length > 0;
+  const totalComplexity = complexityScores.reduce((sum, c) => sum + c, 0);
+  const avgComplexity = hasComplexity ? totalComplexity / complexityScores.length : 0;
+
   return (
     <div className="p-4 space-y-2">
-      <span className="text-xs text-muted">
-        {localStories.length} {localStories.length === 1 ? 'story' : 'stories'}
-      </span>
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted">
+          {localStories.length} {localStories.length === 1 ? 'story' : 'stories'}
+        </span>
+        {hasComplexity && (
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted">
+              Total: <span className="font-semibold text-text">{totalComplexity} pts</span>
+            </span>
+            <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${
+              avgComplexity <= 2
+                ? 'bg-success/15 text-success'
+                : avgComplexity <= 3
+                ? 'bg-warning/15 text-warning'
+                : 'bg-error/15 text-error'
+            }`}>
+              Avg {avgComplexity.toFixed(1)}
+            </span>
+          </div>
+        )}
+      </div>
       {localStories.map((story) =>
         editingStoryId === story.id ? (
           <InlineStoryEditor
