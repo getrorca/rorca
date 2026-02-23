@@ -803,4 +803,289 @@ router.get('/completion-rates', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/analytics/export — Export analytics data as CSV or JSON ────────
+// Query params:
+//   format     — 'csv' | 'json', required
+//   data_type  — 'usage' | 'costs' | 'velocity' | 'completion', required
+//   from       — ISO date (inclusive), default 30 days ago
+//   to         — ISO date (inclusive), default now
+//   workspace_id — optional filter
+//   page       — page number (1-based), default 1
+//   limit      — rows per page, max 10000, default 10000
+
+const EXPORT_MAX_ROWS = 10000;
+
+/**
+ * Escape a field value for RFC 4180 CSV.
+ * Fields containing commas, double-quotes, or newlines are quoted.
+ * Embedded double-quotes are doubled.
+ */
+function csvField(value: unknown): string {
+  if (value == null) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+function toCsvRows(headers: string[], rows: Record<string, unknown>[]): string {
+  const headerLine = headers.map(h => csvField(h)).join(',');
+  const dataLines = rows.map(row =>
+    headers.map(h => csvField(row[h])).join(',')
+  );
+  return headerLine + '\r\n' + dataLines.join('\r\n') + '\r\n';
+}
+
+interface ExportRow { [key: string]: unknown }
+
+function buildUsageExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): { rows: ExportRow[]; headers: string[]; total: number } {
+  const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
+  const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
+
+  // Count total rows
+  const countSql = `
+    SELECT COUNT(*) AS total FROM token_usage tu
+    WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+  `;
+  const { total } = db.prepare(countSql).get(...params) as { total: number };
+
+  const sql = `
+    SELECT
+      tu.model,
+      tu.story_id,
+      tu.input_tokens,
+      tu.output_tokens,
+      tu.cost_usd,
+      tu.recorded_at,
+      tu.workspace_id,
+      COALESCE(tu.user_id, 'system') AS user_id
+    FROM token_usage tu
+    WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+    ORDER BY tu.recorded_at ASC
+    LIMIT ? OFFSET ?
+  `;
+
+  const rows = db.prepare(sql).all(...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0) as ExportRow[];
+  const headers = ['model', 'story_id', 'input_tokens', 'output_tokens', 'cost_usd', 'recorded_at', 'workspace_id', 'user_id'];
+  return { rows, headers, total };
+}
+
+function buildCostsExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): { rows: ExportRow[]; headers: string[]; total: number } {
+  const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
+  const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
+
+  const countSql = `
+    SELECT COUNT(*) AS total FROM token_usage tu
+    LEFT JOIN model_pricing mp ON tu.model = mp.model_id
+    JOIN pipeline_runs pr ON tu.run_id = pr.id
+    WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+  `;
+  const { total } = db.prepare(countSql).get(...params) as { total: number };
+
+  const sql = `
+    SELECT
+      tu.model,
+      REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug,
+      tu.story_id,
+      tu.input_tokens,
+      tu.output_tokens,
+      CASE WHEN mp.input_cost_per_1m IS NOT NULL
+        THEN (tu.input_tokens * 1.0 / 1000000) * mp.input_cost_per_1m
+        ELSE (tu.input_tokens * 1.0 / 1000) * COALESCE(mp.input_cost_per_1k, 0)
+      END AS input_cost_usd,
+      CASE WHEN mp.output_cost_per_1m IS NOT NULL
+        THEN (tu.output_tokens * 1.0 / 1000000) * mp.output_cost_per_1m
+        ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
+      END AS output_cost_usd,
+      tu.cost_usd AS total_cost_usd,
+      tu.recorded_at,
+      tu.workspace_id
+    FROM token_usage tu
+    LEFT JOIN model_pricing mp ON tu.model = mp.model_id
+    JOIN pipeline_runs pr ON tu.run_id = pr.id
+    WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+    ORDER BY tu.recorded_at ASC
+    LIMIT ? OFFSET ?
+  `;
+
+  const rows = db.prepare(sql).all(...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0) as ExportRow[];
+  const headers = ['model', 'spec_slug', 'story_id', 'input_tokens', 'output_tokens', 'input_cost_usd', 'output_cost_usd', 'total_cost_usd', 'recorded_at', 'workspace_id'];
+  return { rows, headers, total };
+}
+
+function buildVelocityExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): { rows: ExportRow[]; headers: string[]; total: number } {
+  const conditions: string[] = ['sr.finished_at >= ?', 'sr.finished_at <= ?'];
+  const params: (string | number)[] = [from, to];
+
+  if (workspaceId) {
+    conditions.push('pr.workspace_id = ?');
+    params.push(workspaceId);
+  }
+
+  const whereClause = 'WHERE ' + conditions.join(' AND ');
+
+  const countSql = `
+    SELECT COUNT(*) AS total
+    FROM story_results sr
+    JOIN pipeline_runs pr ON sr.run_id = pr.id
+    ${whereClause}
+  `;
+  const { total } = db.prepare(countSql).get(...params) as { total: number };
+
+  const sql = `
+    SELECT
+      sr.story_id,
+      sr.status,
+      sr.finished_at,
+      sr.elapsed_seconds,
+      REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug,
+      strftime('%Y-W%W', sr.finished_at) AS week,
+      pr.workspace_id
+    FROM story_results sr
+    JOIN pipeline_runs pr ON sr.run_id = pr.id
+    ${whereClause}
+    ORDER BY sr.finished_at ASC
+    LIMIT ? OFFSET ?
+  `;
+
+  const rows = db.prepare(sql).all(...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0) as ExportRow[];
+  const headers = ['story_id', 'status', 'finished_at', 'elapsed_seconds', 'spec_slug', 'week', 'workspace_id'];
+  return { rows, headers, total };
+}
+
+function buildCompletionExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): { rows: ExportRow[]; headers: string[]; total: number } {
+  const wsFilter = workspaceId ? 'AND pr.workspace_id = ?' : '';
+  const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
+
+  const countSql = `
+    SELECT COUNT(*) AS total
+    FROM story_results sr
+    JOIN pipeline_runs pr ON sr.run_id = pr.id
+    WHERE sr.finished_at >= ? AND sr.finished_at <= ? ${wsFilter}
+    AND sr.status IN ('pass', 'fail', 'skip')
+  `;
+  const { total } = db.prepare(countSql).get(...params) as { total: number };
+
+  const sql = `
+    SELECT
+      sr.story_id,
+      sr.status,
+      sr.finished_at,
+      sr.elapsed_seconds,
+      sr.input_tokens,
+      sr.output_tokens,
+      REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug,
+      pr.workspace_id
+    FROM story_results sr
+    JOIN pipeline_runs pr ON sr.run_id = pr.id
+    WHERE sr.finished_at >= ? AND sr.finished_at <= ? ${wsFilter}
+    AND sr.status IN ('pass', 'fail', 'skip')
+    ORDER BY sr.finished_at ASC
+    LIMIT ? OFFSET ?
+  `;
+
+  const rows = db.prepare(sql).all(...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0) as ExportRow[];
+  const headers = ['story_id', 'status', 'finished_at', 'elapsed_seconds', 'input_tokens', 'output_tokens', 'spec_slug', 'workspace_id'];
+  return { rows, headers, total };
+}
+
+router.get('/export', (req: Request, res: Response) => {
+  try {
+    const format = req.query.format as string;
+    const dataType = req.query.data_type as string;
+    const workspaceId = req.query.workspace_id as string | undefined;
+
+    if (!format || !['csv', 'json'].includes(format)) {
+      res.status(400).json({ error: 'format must be "csv" or "json"' });
+      return;
+    }
+
+    const validDataTypes = ['usage', 'costs', 'velocity', 'completion'];
+    if (!dataType || !validDataTypes.includes(dataType)) {
+      res.status(400).json({ error: `data_type must be one of: ${validDataTypes.join(', ')}` });
+      return;
+    }
+
+    // Date range defaults
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const from = (req.query.from as string) || thirtyDaysAgo.toISOString();
+    const to = (req.query.to as string) || now.toISOString();
+
+    // Pagination
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(EXPORT_MAX_ROWS, Math.max(1, parseInt(req.query.limit as string, 10) || EXPORT_MAX_ROWS));
+    const offset = (page - 1) * limit;
+
+    // Fetch data
+    let result: { rows: ExportRow[]; headers: string[]; total: number };
+
+    switch (dataType) {
+      case 'usage':
+        result = buildUsageExport(from, to, workspaceId, limit, offset);
+        break;
+      case 'costs':
+        result = buildCostsExport(from, to, workspaceId, limit, offset);
+        break;
+      case 'velocity':
+        result = buildVelocityExport(from, to, workspaceId, limit, offset);
+        break;
+      case 'completion':
+        result = buildCompletionExport(from, to, workspaceId, limit, offset);
+        break;
+      default:
+        res.status(400).json({ error: 'Invalid data_type' });
+        return;
+    }
+
+    const { rows, headers, total } = result;
+
+    // Timestamp for filename
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `rorcha-${dataType}-${ts}`;
+
+    // Link header for pagination when truncated
+    const totalPages = Math.ceil(total / limit);
+    if (page < totalPages) {
+      const nextParams = new URLSearchParams({
+        format,
+        data_type: dataType,
+        from,
+        to,
+        page: String(page + 1),
+        limit: String(limit),
+      });
+      if (workspaceId) nextParams.set('workspace_id', workspaceId);
+      res.setHeader('Link', `</api/analytics/export?${nextParams.toString()}>; rel="next"`);
+    }
+
+    // Set total count header for clients
+    res.setHeader('X-Total-Count', String(total));
+
+    if (format === 'csv') {
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
+      res.send(toCsvRows(headers, rows));
+    } else {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.json"`);
+      res.json({
+        data: rows,
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages,
+          dateRange: { from, to },
+          dataType,
+        },
+      });
+    }
+  } catch (error: any) {
+    console.error('[Analytics] Export error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
