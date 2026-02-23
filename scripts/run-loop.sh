@@ -129,7 +129,8 @@ for s in sorted(stories, key=lambda x: x.get('priority', 3)):
     if all(dep in passed_ids for dep in deps):
         ac = get_acceptance(s).replace(chr(10), '  ')
         desc = s['description'].replace(chr(10), ' ')
-        print(f\"{s['id']}|||{s['title']}|||{desc}|||{ac}\")
+        timeout_min = s.get('timeoutMinutes', 45)
+        print(f\"{s['id']}|||{s['title']}|||{desc}|||{ac}|||{timeout_min}\")
         sys.exit(0)
 
 print('DONE')
@@ -236,7 +237,8 @@ for s in get_stories(d):
     if s['id'] == '$SPECIFIC_STORY':
         ac = get_acceptance(s).replace(chr(10), '  ')
         desc = s['description'].replace(chr(10), ' ')
-        print(f\"{s['id']}|||{s['title']}|||{desc}|||{ac}\")
+        timeout_min = s.get('timeoutMinutes', 45)
+        print(f\"{s['id']}|||{s['title']}|||{desc}|||{ac}|||{timeout_min}\")
         sys.exit(0)
 print('NOT_FOUND')
 ")
@@ -260,6 +262,7 @@ print('NOT_FOUND')
   STORY_TITLE=$(echo "$RESULT" | awk -F'\\|\\|\\|' '{print $2}')
   STORY_DESC=$(echo "$RESULT" | awk -F'\\|\\|\\|' '{print $3}')
   STORY_AC=$(echo "$RESULT" | awk -F'\\|\\|\\|' '{print $4}')
+  STORY_TIMEOUT_MIN=$(echo "$RESULT" | awk -F'\\|\\|\\|' '{print $5}')
   LOG_FILE="$LOG_DIR/${STORY_ID}_$(date +%Y%m%d_%H%M%S).log"
 
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -359,7 +362,10 @@ PROMPT_EOF
   # TIMEOUT_CMD is a bash array — correct quoting, no word-split issues.
   # gtimeout/timeout exit 124 on kill → PIPESTATUS[0]=124 → retry logic fires.
   # No perl fallback — broken when stored in a variable. Install coreutils instead.
-  STORY_TIMEOUT=2700  # 45 minutes
+  # Per-story timeout: read from spec JSON (default 45 min, range 5-120)
+  STORY_TIMEOUT_MIN=${STORY_TIMEOUT_MIN:-45}
+  STORY_TIMEOUT=$((STORY_TIMEOUT_MIN * 60))
+  echo "  Timeout: ${STORY_TIMEOUT_MIN}m (${STORY_TIMEOUT}s)"
   # claude is baked into the array so it's never empty — avoids set -u "unbound variable"
   # on empty arrays. gtimeout/timeout wrap it; fallback runs claude directly (no timeout).
   if command -v gtimeout &>/dev/null; then
@@ -454,6 +460,12 @@ Automated by ralph loop.
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>" || true
     git push origin HEAD || echo "⚠️  Push failed (will retry next iteration)"
+  elif [ $EXIT_CODE -eq 124 ]; then
+    # Exit 124 = gtimeout/timeout killed the process
+    echo "⏰ $STORY_ID timed out after ${STORY_TIMEOUT_MIN}m (exit 124)"
+    echo "   Log: $LOG_FILE"
+    echo "   Consider increasing timeoutMinutes for this story in the spec JSON"
+    mark_story_skipped "$STORY_ID"
   else
     # Track retries per story
     RETRY_VAR="RETRY_COUNT_${STORY_ID//-/_}"

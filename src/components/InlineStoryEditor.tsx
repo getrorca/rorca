@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { Check, X, Sparkles, Loader2, Eye, EyeOff, Plus, Trash2 } from 'lucide-react';
+import { Check, X, Sparkles, Loader2, Eye, EyeOff, Plus, Trash2, Timer } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import type { Story } from './StoryCard';
 
@@ -22,6 +22,7 @@ export function InlineStoryEditor({
   const [description, setDescription] = useState(story.description ?? '');
   const [criteria, setCriteria] = useState<string[]>([...story.acceptanceCriteria]);
   const [complexity, setComplexity] = useState<number | undefined>(story.complexity);
+  const [timeoutMinutes, setTimeoutMinutes] = useState<number>(story.timeoutMinutes ?? 45);
   const [saving, setSaving] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const [instructions, setInstructions] = useState('');
@@ -44,6 +45,7 @@ export function InlineStoryEditor({
             description,
             acceptanceCriteria: criteria.filter(c => c.trim()),
             ...(complexity != null ? { complexity } : {}),
+            timeoutMinutes,
           }),
         }
       );
@@ -55,7 +57,7 @@ export function InlineStoryEditor({
     } finally {
       setSaving(false);
     }
-  }, [specId, story.id, workspaceId, title, description, criteria, complexity, onSave]);
+  }, [specId, story.id, workspaceId, title, description, criteria, complexity, timeoutMinutes, onSave]);
 
   const handleRewrite = useCallback(async () => {
     setRewriting(true);
@@ -204,6 +206,26 @@ export function InlineStoryEditor({
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Timeout */}
+      <div>
+        <label className="text-xs font-medium text-muted flex items-center gap-1 mb-1">
+          <Timer size={11} />
+          Timeout (minutes)
+        </label>
+        <input
+          type="number"
+          min={5}
+          max={120}
+          value={timeoutMinutes}
+          onChange={e => {
+            const v = parseInt(e.target.value, 10);
+            if (!isNaN(v)) setTimeoutMinutes(Math.max(5, Math.min(120, v)));
+          }}
+          className="w-24 px-2 py-1.5 text-sm rounded border border-border bg-bg text-text focus:outline-none focus:border-accent"
+        />
+        <span className="ml-2 text-[10px] text-muted">5–120 min (default 45)</span>
       </div>
 
       {/* AI Rewrite section */}
