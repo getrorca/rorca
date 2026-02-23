@@ -176,6 +176,25 @@ export function runMigrations() {
   if (!tplCols.some(c => c.name === 'usage_count')) {
     db.exec('ALTER TABLE templates ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0');
   }
+
+  // V2-044: Enhance model_pricing with provider, per-1M costs, effective_date (idempotent)
+  const mpCols = db.pragma('table_info(model_pricing)') as { name: string }[];
+  if (!mpCols.some(c => c.name === 'provider')) {
+    db.exec("ALTER TABLE model_pricing ADD COLUMN provider TEXT NOT NULL DEFAULT 'anthropic'");
+  }
+  if (!mpCols.some(c => c.name === 'input_cost_per_1m')) {
+    db.exec('ALTER TABLE model_pricing ADD COLUMN input_cost_per_1m REAL');
+    // Backfill from existing per-1k values (multiply by 1000)
+    db.exec('UPDATE model_pricing SET input_cost_per_1m = input_cost_per_1k * 1000 WHERE input_cost_per_1m IS NULL');
+  }
+  if (!mpCols.some(c => c.name === 'output_cost_per_1m')) {
+    db.exec('ALTER TABLE model_pricing ADD COLUMN output_cost_per_1m REAL');
+    db.exec('UPDATE model_pricing SET output_cost_per_1m = output_cost_per_1k * 1000 WHERE output_cost_per_1m IS NULL');
+  }
+  if (!mpCols.some(c => c.name === 'effective_date')) {
+    db.exec("ALTER TABLE model_pricing ADD COLUMN effective_date TEXT DEFAULT ''");
+    db.exec("UPDATE model_pricing SET effective_date = datetime('now') WHERE effective_date = ''");
+  }
 }
 
 runMigrations();

@@ -18,6 +18,7 @@ import ActivityFeedPanel from './panels/ActivityFeedPanel';
 import TeamDirectionPanel from './panels/TeamDirectionPanel';
 import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
 import UsageDashboardPanel from './panels/UsageDashboardPanel';
+import CostBreakdownPanel from './panels/CostBreakdownPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -85,6 +86,7 @@ function AppContent() {
       {activePanel === 'archive'   && <ArchivePanel onNavigate={setActivePanel} />}
       {activePanel === 'marketplace' && <TemplateMarketplacePanel />}
       {activePanel === 'usage'     && <UsageDashboardPanel />}
+      {activePanel === 'costs'     && <CostBreakdownPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
     </Shell>
