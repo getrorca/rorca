@@ -495,4 +495,124 @@ router.get('/models', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/analytics/velocity — Weekly story completion velocity ──────────
+// Query params:
+//   from         — ISO date (inclusive), default 12 weeks ago
+//   to           — ISO date (inclusive), default now
+//   workspace_id — optional filter
+//   spec_id      — optional filter (spec slug)
+
+interface VelocityWeek {
+  week: string;        // ISO week label e.g. "2026-W08"
+  week_start: string;  // Monday date e.g. "2026-02-16"
+  passed: number;
+  failed: number;
+  skipped: number;
+  total: number;
+  specs: string[];     // spec slugs completed that week
+}
+
+router.get('/velocity', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspace_id as string | undefined;
+    const specId = req.query.spec_id as string | undefined;
+
+    const now = new Date();
+    const twelveWeeksAgo = new Date(now.getTime() - 12 * 7 * 24 * 60 * 60 * 1000);
+    const from = (req.query.from as string) || twelveWeeksAgo.toISOString();
+    const to = (req.query.to as string) || now.toISOString();
+
+    // Build dynamic WHERE clauses
+    const conditions: string[] = ['sr.finished_at >= ?', 'sr.finished_at <= ?'];
+    const params: (string | number)[] = [from, to];
+
+    if (workspaceId) {
+      conditions.push('pr.workspace_id = ?');
+      params.push(workspaceId);
+    }
+
+    if (specId) {
+      conditions.push("REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') = ?");
+      params.push(specId);
+    }
+
+    const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+    // Weekly story counts grouped by status
+    const sql = `
+      SELECT
+        strftime('%Y-W%W', sr.finished_at) AS week,
+        DATE(sr.finished_at, 'weekday 1', '-7 days') AS week_start,
+        SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END) AS passed,
+        SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN sr.status = 'skip' THEN 1 ELSE 0 END) AS skipped,
+        COUNT(*) AS total
+      FROM story_results sr
+      JOIN pipeline_runs pr ON sr.run_id = pr.id
+      ${whereClause}
+      GROUP BY week
+      ORDER BY week ASC
+    `;
+
+    const weeks = db.prepare(sql).all(...params) as VelocityWeek[];
+
+    // Fetch notable specs per week (distinct spec slugs that had stories finish)
+    const specsSql = `
+      SELECT
+        strftime('%Y-W%W', sr.finished_at) AS week,
+        REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug
+      FROM story_results sr
+      JOIN pipeline_runs pr ON sr.run_id = pr.id
+      ${whereClause}
+      GROUP BY week, spec_slug
+      ORDER BY week ASC
+    `;
+
+    const specRows = db.prepare(specsSql).all(...params) as { week: string; spec_slug: string }[];
+
+    // Build a map of week → spec slugs
+    const specsByWeek = new Map<string, string[]>();
+    for (const row of specRows) {
+      const arr = specsByWeek.get(row.week) || [];
+      arr.push(row.spec_slug);
+      specsByWeek.set(row.week, arr);
+    }
+
+    // Attach specs to each week + compute rolling 4-week average
+    const velocityData = weeks.map((w, i) => {
+      // Rolling 4-week average of total stories
+      const windowStart = Math.max(0, i - 3);
+      const window = weeks.slice(windowStart, i + 1);
+      const rollingAvg = window.reduce((sum, wk) => sum + wk.total, 0) / window.length;
+
+      return {
+        ...w,
+        specs: specsByWeek.get(w.week) || [],
+        rollingAvg: Math.round(rollingAvg * 10) / 10,
+      };
+    });
+
+    // Available specs for the filter dropdown
+    const specListSql = `
+      SELECT DISTINCT
+        REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug
+      FROM pipeline_runs pr
+      WHERE pr.spec_path IS NOT NULL
+      ${workspaceId ? 'AND pr.workspace_id = ?' : ''}
+      ORDER BY spec_slug ASC
+    `;
+    const specListParams: string[] = workspaceId ? [workspaceId] : [];
+    const availableSpecs = db.prepare(specListSql).all(...specListParams) as { spec_slug: string }[];
+
+    res.json({
+      velocity: velocityData,
+      availableSpecs: availableSpecs.map(s => s.spec_slug),
+      dateRange: { from, to },
+    });
+  } catch (error: any) {
+    console.error('[Analytics] Velocity query error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
