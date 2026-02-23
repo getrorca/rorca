@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil } from 'lucide-react';
 
 export interface Story {
   id: string;
   title: string;
+  description?: string;
   acceptanceCriteria: string[];
   dependencies?: string[];
+  dependsOn?: string[];
   passes?: boolean;
   excluded?: boolean;
 }
@@ -13,9 +15,11 @@ export interface Story {
 export function StoryCard({
   story,
   onToggleExclude,
+  onEdit,
 }: {
   story: Story;
   onToggleExclude?: () => void;
+  onEdit?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -62,6 +66,16 @@ export function StoryCard({
               )}
             </div>
           </div>
+          {/* Edit button */}
+          {onEdit && (
+            <button
+              onClick={onEdit}
+              title="Edit story"
+              className="shrink-0 mt-0.5 text-muted/40 hover:text-accent transition-colors"
+            >
+              <Pencil size={14} />
+            </button>
+          )}
           {/* Defer / Include toggle — only when not already passed */}
           {!isDone && onToggleExclude && (
             <button
