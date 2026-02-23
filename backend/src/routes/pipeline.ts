@@ -63,6 +63,8 @@ interface StoryResultRow {
   started_at: string;
   finished_at: string | null;
   elapsed_seconds: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
 }
 
 // ─── POST /api/pipeline/trigger — Spawn run-loop.sh for a spec ──────────────
@@ -447,6 +449,10 @@ router.get('/runs/compare', (req: Request, res: Response) => {
       run2Elapsed: number | null;
       run1Retries: number | null;
       run2Retries: number | null;
+      run1InputTokens: number | null;
+      run1OutputTokens: number | null;
+      run2InputTokens: number | null;
+      run2OutputTokens: number | null;
       change: StoryChange;
     }
 
@@ -481,6 +487,10 @@ router.get('/runs/compare', (req: Request, res: Response) => {
         run2Elapsed: s2?.elapsed_seconds ?? null,
         run1Retries: s1?.retries ?? null,
         run2Retries: s2?.retries ?? null,
+        run1InputTokens: s1?.input_tokens ?? null,
+        run1OutputTokens: s1?.output_tokens ?? null,
+        run2InputTokens: s2?.input_tokens ?? null,
+        run2OutputTokens: s2?.output_tokens ?? null,
         change,
       });
     }
@@ -1066,6 +1076,46 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
   });
 });
 
+// ─── POST /api/pipeline/runs/:runId/stories/:storyId/tokens — Record token usage ─
+// Allows run-loop.sh or external callers to report token usage for a story.
+
+router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    const storyId = req.params.storyId;
+    const { inputTokens, outputTokens } = req.body as { inputTokens?: number; outputTokens?: number };
+
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    if (inputTokens == null && outputTokens == null) {
+      res.status(400).json({ error: 'At least one of inputTokens or outputTokens required' });
+      return;
+    }
+
+    // Find the latest story_result row for this run + storyId
+    const row = db.prepare(
+      `SELECT id FROM story_results WHERE run_id = ? AND story_id = ? ORDER BY id DESC LIMIT 1`
+    ).get(runId, storyId) as { id: number } | undefined;
+
+    if (!row) {
+      res.status(404).json({ error: 'Story result not found' });
+      return;
+    }
+
+    db.prepare(
+      `UPDATE story_results SET input_tokens = COALESCE(?, input_tokens), output_tokens = COALESCE(?, output_tokens) WHERE id = ?`
+    ).run(inputTokens ?? null, outputTokens ?? null, row.id);
+
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('[Pipeline] Record tokens error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET /api/pipeline/stream — SSE event stream ─────────────────────────────
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -1116,6 +1166,26 @@ router.get('/stream', (req: Request, res: Response) => {
       for (const event of events as any[]) {
         res.write(`event: wal_event\ndata: ${JSON.stringify(event)}\n\n`);
         lastSeenId = event.id;
+
+        // V2-025: Auto-record token usage from WAL event payloads into story_results
+        if (event.story_id && event.payload && (event.event_type === 'story_passed' || event.event_type === 'story_failed')) {
+          try {
+            const payload = JSON.parse(event.payload);
+            if (payload.input_tokens != null || payload.output_tokens != null) {
+              const runIdFromPayload = payload.run_id;
+              if (runIdFromPayload) {
+                const storyRow = db.prepare(
+                  `SELECT id FROM story_results WHERE run_id = ? AND story_id = ? ORDER BY id DESC LIMIT 1`
+                ).get(runIdFromPayload, event.story_id) as { id: number } | undefined;
+                if (storyRow) {
+                  db.prepare(
+                    `UPDATE story_results SET input_tokens = COALESCE(?, input_tokens), output_tokens = COALESCE(?, output_tokens) WHERE id = ?`
+                  ).run(payload.input_tokens ?? null, payload.output_tokens ?? null, storyRow.id);
+                }
+              }
+            }
+          } catch { /* payload parse error — ignore */ }
+        }
       }
     } catch {
       // DB may be locked briefly, skip this tick
