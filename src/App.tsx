@@ -20,6 +20,7 @@ import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
 import UsageDashboardPanel from './panels/UsageDashboardPanel';
 import CostBreakdownPanel from './panels/CostBreakdownPanel';
 import ModelComparisonPanel from './panels/ModelComparisonPanel';
+import VelocityChartPanel from './panels/VelocityChartPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -89,6 +90,7 @@ function AppContent() {
       {activePanel === 'usage'     && <UsageDashboardPanel />}
       {activePanel === 'costs'     && <CostBreakdownPanel />}
       {activePanel === 'models'    && <ModelComparisonPanel />}
+      {activePanel === 'velocity'  && <VelocityChartPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
     </Shell>
