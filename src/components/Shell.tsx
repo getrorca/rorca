@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import AddWorkspaceModal from './AddWorkspaceModal';
+import ThemeToggle from './ThemeToggle';
 
 function WorkspaceSelector() {
   const { workspaceId, setWorkspaceId, workspaces, addWorkspace } = useWorkspace();
@@ -105,6 +106,7 @@ export default function Shell({ sidebar, children }: { sidebar?: React.ReactNode
         <span className="font-mono font-bold text-accent text-sm tracking-tight">rorcha</span>
         <div className="flex items-center gap-2">
           <WorkspaceSelector />
+          <ThemeToggle />
           <UserMenu />
         </div>
       </header>
