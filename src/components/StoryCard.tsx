@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle } from 'lucide-react';
 
 export interface Story {
   id: string;
@@ -13,23 +13,42 @@ export interface Story {
   excluded?: boolean;
 }
 
+function getReadinessWarnings(story: Story, allStoryIds?: Set<string>): string[] {
+  const warnings: string[] = [];
+  if (story.acceptanceCriteria.length < 3) {
+    warnings.push(`Only ${story.acceptanceCriteria.length} acceptance criteria (needs 3+)`);
+  }
+  if (allStoryIds) {
+    const deps = story.dependsOn ?? story.dependencies ?? [];
+    const unresolved = deps.filter(d => !allStoryIds.has(d));
+    if (unresolved.length > 0) {
+      warnings.push(`Unresolved dependencies: ${unresolved.join(', ')}`);
+    }
+  }
+  return warnings;
+}
+
 export function StoryCard({
   story,
   onToggleExclude,
   onEdit,
+  allStoryIds,
 }: {
   story: Story;
   onToggleExclude?: () => void;
   onEdit?: () => void;
+  allStoryIds?: Set<string>;
 }) {
   const [expanded, setExpanded] = useState(false);
 
   const isDone = story.passes === true;
   const isDeferred = story.excluded === true && !isDone;
+  const warnings = getReadinessWarnings(story, allStoryIds);
+  const isNotReady = warnings.length > 0 && !isDone;
 
   return (
     <div className={`border rounded bg-panel transition-opacity ${
-      isDeferred ? 'border-border/50 opacity-50' : 'border-border'
+      isDeferred ? 'border-border/50 opacity-50' : isNotReady ? 'border-warning/40' : 'border-border'
     }`}>
       <div className="px-3 py-2.5">
         <div className="flex items-start gap-2">
@@ -74,6 +93,15 @@ export function StoryCard({
               {story.dependencies && story.dependencies.length > 0 && (
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
                   depends
+                </span>
+              )}
+              {isNotReady && (
+                <span
+                  className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-warning/15 text-warning cursor-help"
+                  title={warnings.join('\n')}
+                >
+                  <AlertTriangle size={9} />
+                  NOT READY
                 </span>
               )}
             </div>
