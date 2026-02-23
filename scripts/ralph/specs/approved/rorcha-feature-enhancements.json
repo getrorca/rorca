@@ -85,7 +85,8 @@
         "Invalid YAML syntax returns a 422 with line number and column of the parse error"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "US-007",
