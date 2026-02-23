@@ -1,0 +1,116 @@
+{
+  "title": "rorcha-feature-enhancements",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Spec Diff View for Version Comparison",
+      "description": "As a developer, I want to compare two versions of a generated spec side-by-side so I can understand what changed between regenerations and make informed approval decisions.",
+      "acceptanceCriteria": [
+        "GET /api/specs/:specId/versions returns an array of all previously generated versions for that spec slug with timestamps",
+        "GET /api/specs/:specId/diff?v1={version1}&v2={version2} returns a structured diff showing added, removed, and modified stories and acceptance criteria",
+        "The diff output includes per-story change type (added | removed | modified | unchanged) and per-field deltas for modified stories",
+        "Rejected specs are retained as versions (not deleted) so they appear in the version history with rejection reason attached"
+      ],
+      "dependsOn": [],
+      "passes": true,
+      "notes": "Completed by ralph loop"
+    },
+    {
+      "id": "US-002",
+      "title": "Spec Template Library with Reusable Patterns",
+      "description": "As a developer, I want to save successful spec structures as templates so I can reuse proven patterns across projects without rewriting briefs from scratch.",
+      "acceptanceCriteria": [
+        "POST /api/templates creates a template from an approved spec, extracting the brief, story structure, and direction stack layers used",
+        "GET /api/templates lists all templates with name, description, source spec ID, story count, and created_at",
+        "POST /api/specs/generate accepts an optional templateId parameter that pre-populates the generation prompt with the template's structure as a reference pattern",
+        "Templates are workspace-agnostic and available across all workspaces",
+        "DELETE /api/templates/:id removes a template and returns 204"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "US-003",
+      "title": "Multi-Model Support for Spec Generation",
+      "description": "As a developer, I want to choose which LLM model generates my specs so I can compare output quality across models and optimize for cost or capability.",
+      "acceptanceCriteria": [
+        "The /api/specs/generate endpoint accepts an optional 'model' parameter supporting at least 'claude-sonnet-4-5-20250929', 'claude-opus-4-6', and 'claude-haiku-4-5-20251001'",
+        "The model used is recorded in the spec metadata and displayed in the review queue",
+        "Default model is configurable per workspace via PUT /api/direction with a new 'preferred_model' field in L3",
+        "Generation cost estimate (input/output token counts) is returned in the generate response and stored in wal_events payload"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "US-004",
+      "title": "Pipeline Retry with Selective Story Re-execution",
+      "description": "As a developer, I want to retry only the failed stories in a pipeline run instead of re-executing the entire spec so I can save time and LLM costs on partially successful runs.",
+      "acceptanceCriteria": [
+        "POST /api/pipeline/runs/:runId/retry accepts an optional 'storyIds' array; when omitted, retries all failed stories",
+        "Retried stories create new story_result rows linked to the same run with an incremented retry count",
+        "The SSE stream emits 'story_retried' events with the story ID and attempt number",
+        "A run's status transitions from 'partial_failure' back to 'running' during retry and resolves to 'completed' or 'partial_failure' based on retry outcomes",
+        "The original failed story_result rows are preserved (not overwritten) for audit trail"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "US-005",
+      "title": "Spec Search and Discovery Across Archive",
+      "description": "As a developer, I want full-text search across all spec content including story descriptions and acceptance criteria so I can find relevant past work and avoid duplicate specifications.",
+      "acceptanceCriteria": [
+        "GET /api/specs/archive supports a 'q' parameter that searches across spec title, story titles, story descriptions, and acceptance criteria text",
+        "Search results return matching specs with highlighted match snippets showing which field matched",
+        "Results are ranked by relevance with exact title matches weighted higher than body matches",
+        "Search supports filtering by date range (createdAfter, createdBefore) combined with text search",
+        "Search returns results within 200ms for archives containing up to 500 specs"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "US-006",
+      "title": "Direction Stack Validation and Linting",
+      "description": "As a developer, I want the direction stack to validate my YAML content against expected schemas and warn about common mistakes so I can catch configuration errors before they affect spec generation.",
+      "acceptanceCriteria": [
+        "PUT /api/direction validates the content_yaml against a per-layer JSON schema and returns structured validation errors with field paths",
+        "L3 validation checks for required fields: name, type, stack (array), purpose, and key_modules (array)",
+        "GET /api/direction/preview includes a 'warnings' array flagging issues like empty layers, missing L1/L3 for the workspace, or L2 domain mismatch",
+        "Invalid YAML syntax returns a 422 with line number and column of the parse error"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "US-007",
+      "title": "Story Dependency Visualization as DAG",
+      "description": "As a developer, I want to visualize story dependencies as a directed acyclic graph so I can understand execution order and identify parallelizable stories within a spec.",
+      "acceptanceCriteria": [
+        "GET /api/specs/:specId/graph returns a DAG representation with nodes (stories) and edges (dependsOn relationships)",
+        "The response includes a 'parallelGroups' array grouping stories that can execute concurrently based on their dependency resolution order",
+        "Circular dependencies are detected and returned as errors with the cycle path identified",
+        "The graph includes story status (pending/running/passed/failed) when viewed in the context of an active pipeline run via optional runId parameter"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "US-008",
+      "title": "Batch Spec Generation with Brief Queue",
+      "description": "As a developer, I want to queue multiple spec briefs for sequential generation so I can kick off a batch of specs and review them later without babysitting each generation.",
+      "acceptanceCriteria": [
+        "POST /api/specs/generate/batch accepts an array of brief objects (each with brief text, workspace ID, and optional template ID) and returns a batch ID",
+        "GET /api/specs/generate/batch/:batchId returns the batch status including per-brief progress (queued/generating/completed/failed)",
+        "Briefs are processed sequentially to avoid concurrent LLM call conflicts with the Claude CLI",
+        "SSE stream emits 'batch_progress' events with batch ID, current brief index, and status",
+        "Failed briefs do not block remaining briefs in the queue; errors are captured per-brief with the LLM error message"
+      ],
+      "dependsOn": [
+        "US-003"
+      ],
+      "passes": false
+    }
+  ]
+}

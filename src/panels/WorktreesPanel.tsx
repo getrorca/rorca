@@ -65,6 +65,11 @@ export default function WorktreesPanel() {
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
   const [removing, setRemoving] = useState(false);
 
+  // Merge state
+  type MergeState = 'idle' | 'merging' | 'done' | 'conflict' | 'error';
+  const [mergeState, setMergeState] = useState<MergeState>('idle');
+  const [mergeError, setMergeError] = useState('');
+
   // Copy states
   const [copiedPath, setCopiedPath] = useState(false);
   const [copiedTerminal, setCopiedTerminal] = useState(false);
@@ -107,6 +112,12 @@ export default function WorktreesPanel() {
       fetchWorktrees();
     }
   }, [sseEvents, fetchWorktrees]);
+
+  // Reset merge state when selection changes
+  useEffect(() => {
+    setMergeState('idle');
+    setMergeError('');
+  }, [selectedPath]);
 
   // ─── Fetch detail status when selection changes ─────────────────────────
 
@@ -476,6 +487,62 @@ export default function WorktreesPanel() {
                 )}
                 <span>{copiedRalph ? 'Copied!' : 'Run Ralph Loop Here'}</span>
               </button>
+
+              {/* Merge to main — only for non-main worktrees */}
+              {worktrees[0]?.path !== selectedWorktree.path && selectedWorktree.branch && selectedWorktree.branch !== '(detached)' && (
+                <div>
+                  {mergeState === 'done' ? (
+                    <div className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Merged successfully</span>
+                    </div>
+                  ) : mergeState === 'conflict' || mergeState === 'error' ? (
+                    <div className="rounded border border-red-500/30 bg-red-500/10 p-2 space-y-1.5">
+                      <p className="text-xs text-red-400 font-medium">
+                        {mergeState === 'conflict' ? 'Merge conflict — resolve manually' : 'Merge failed'}
+                      </p>
+                      {mergeError && (
+                        <p className="text-[10px] text-red-400/70 font-mono break-all line-clamp-3">{mergeError}</p>
+                      )}
+                      <button
+                        onClick={() => { setMergeState('idle'); setMergeError(''); }}
+                        className="text-[10px] text-red-400 hover:text-red-300 underline"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      disabled={mergeState === 'merging'}
+                      onClick={async () => {
+                        if (!workspaceId || !selectedWorktree.branch) return;
+                        setMergeState('merging');
+                        setMergeError('');
+                        try {
+                          await apiFetch('/api/worktrees/merge', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ workspaceId, branchName: selectedWorktree.branch }),
+                          });
+                          setMergeState('done');
+                        } catch (err: any) {
+                          const isConflict = err?.message?.includes('CONFLICT') || err?.status === 409;
+                          setMergeState(isConflict ? 'conflict' : 'error');
+                          setMergeError(err instanceof Error ? err.message : String(err));
+                        }
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors disabled:opacity-50"
+                    >
+                      {mergeState === 'merging' ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <GitBranch className="w-3.5 h-3.5" />
+                      )}
+                      <span>{mergeState === 'merging' ? 'Merging...' : 'Merge to main'}</span>
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* Remove Worktree */}
               {!selectedWorktree.isBare && (

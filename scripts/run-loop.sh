@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --dry-run) DRY_RUN=true; shift ;;
     --story) SPECIFIC_STORY="$2"; shift 2 ;;
-    --json) JSON_FILE="$SCRIPT_DIR/$2"; shift 2 ;;
+    --json) if [[ "$2" = /* ]]; then JSON_FILE="$2"; else JSON_FILE="$SCRIPT_DIR/$2"; fi; shift 2 ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -330,8 +330,8 @@ Acceptance Criteria:
 $STORY_AC
 PROMPT_EOF
   else
-    # Implementation mode: use dimitri.md skill
-    SKILL_CONTENT=$(cat .claude/skills/dimitri.md 2>/dev/null || echo "")
+    # Implementation mode: use rorcha.md skill (falls back to dimitri.md for legacy projects)
+    SKILL_CONTENT=$(cat .claude/skills/rorcha.md 2>/dev/null || cat .claude/skills/dimitri.md 2>/dev/null || echo "")
     AC_SECTION=""
     if [ -n "$STORY_AC" ]; then
       AC_SECTION="
@@ -376,9 +376,9 @@ PROMPT_EOF
   # is read from PIPESTATUS. Without this, any non-zero claude exit kills the
   # entire loop before the retry logic can run.
   set +e
-  # Unset CLAUDECODE so nested claude subprocess isn't blocked by "nested session" check.
-  # This env var is set when ralph runs inside a Claude Code session (e.g. via Bash tool).
-  env -u CLAUDECODE "${CLAUDE_CMD[@]}" --dangerously-skip-permissions --print --verbose --output-format stream-json "$PROMPT_CONTENT" 2>"$LOG_DIR/${STORY_ID}_debug.log" | python3 -u -c "
+  # Unset ALL Claude Code env vars — unsetting only CLAUDECODE is not enough.
+  # All 4 must be cleared or claude detects a nested session and refuses to run.
+  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_AGENT_SDK_VERSION -u CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING "${CLAUDE_CMD[@]}" --dangerously-skip-permissions --print --verbose --output-format stream-json "$PROMPT_CONTENT" 2>"$LOG_DIR/${STORY_ID}_debug.log" | python3 -u -c "
 import sys, json
 
 for line in sys.stdin:

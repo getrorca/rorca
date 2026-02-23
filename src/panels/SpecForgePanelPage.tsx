@@ -24,6 +24,7 @@ export default function SpecForgePanelPage() {
 
   // Section 3: Spec Parameters
   const [storyCount, setStoryCount] = useState(8);
+  const [storyCountRaw, setStoryCountRaw] = useState('8');
   const [storyPrefix, setStoryPrefix] = useState('US');
   const [includeDiagram, setIncludeDiagram] = useState(true);
   const [diagramType, setDiagramType] = useState<DiagramType>('flowchart');
@@ -49,9 +50,15 @@ export default function SpecForgePanelPage() {
   }, []);
 
   const handleStoryCountChange = (value: string) => {
+    setStoryCountRaw(value);
     const n = parseInt(value, 10);
-    if (isNaN(n)) return;
-    setStoryCount(Math.min(500, Math.max(1, n)));
+    if (!isNaN(n)) setStoryCount(n);
+  };
+
+  const handleStoryCountBlur = () => {
+    const clamped = Math.min(500, Math.max(1, storyCount || 1));
+    setStoryCount(clamped);
+    setStoryCountRaw(String(clamped));
   };
 
   const handleStoryPrefixChange = (value: string) => {
@@ -189,11 +196,11 @@ export default function SpecForgePanelPage() {
                 <div className="flex gap-4">
                   <Field label="Story Count" className="w-28">
                     <input
-                      type="number"
-                      min={3}
-                      max={500}
-                      value={storyCount}
+                      type="text"
+                      inputMode="numeric"
+                      value={storyCountRaw}
                       onChange={(e) => handleStoryCountChange(e.target.value)}
+                      onBlur={handleStoryCountBlur}
                       className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors"
                     />
                   </Field>

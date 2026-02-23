@@ -237,7 +237,7 @@ test('WAL event has hasSchema:false when workspace has no hydrated context', asy
   expect(payload.hasGitMemory).toBe(false);
 });
 
-test('POST /api/specs/generate returns 409 when slug already exists on disk', async () => {
+test('POST /api/specs/generate with existing slug snapshots old version and succeeds', async () => {
   mockChatComplete.mockResolvedValue(validLlmResponse);
 
   // First call succeeds
@@ -251,7 +251,7 @@ test('POST /api/specs/generate returns 409 when slug already exists on disk', as
     });
   expect(res1.status).toBe(200);
 
-  // Second call with same title → 409
+  // Second call with same title → succeeds, old version is snapshotted
   const res2 = await request(app)
     .post('/api/specs/generate')
     .send({
@@ -260,8 +260,18 @@ test('POST /api/specs/generate returns 409 when slug already exists on disk', as
       title: 'Duplicate Check',
       brief: 'Build something again',
     });
-  expect(res2.status).toBe(409);
-  expect(res2.body.error).toContain('duplicate-check');
+  expect(res2.status).toBe(200);
+  expect(res2.body.slug).toBe('duplicate-check');
+
+  // Verify version was created in DB
+  const version = db.prepare(
+    "SELECT * FROM spec_versions WHERE spec_slug = 'duplicate-check'"
+  ).get() as { version: number; status: string; content_json: string } | undefined;
+  expect(version).toBeDefined();
+  expect(version!.version).toBe(1);
+  expect(version!.status).toBe('pending');
+  const content = JSON.parse(version!.content_json);
+  expect(content.title).toBe('Duplicate Check');
 });
 
 // ─── R-001: List / Approve / Reject / Get Detail ──────────────────────────────
@@ -496,5 +506,151 @@ describe('GET /api/specs/:specId (detail)', () => {
   test('missing workspaceId → 400', async () => {
     const res = await request(app).get('/api/specs/some-spec');
     expect(res.status).toBe(400);
+  });
+});
+
+// ─── US-001: Version History + Diff ───────────────────────────────────────────
+
+describe('GET /api/specs/:specId/versions', () => {
+  test('returns empty array when no versions exist', async () => {
+    const res = await request(app).get('/api/specs/nonexistent-slug/versions');
+    expect(res.status).toBe(200);
+    expect(res.body.specSlug).toBe('nonexistent-slug');
+    expect(res.body.versions).toEqual([]);
+  });
+
+  test('returns versions after rejection creates a snapshot', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedSpecFile(pendingDir, 'versioned-spec', {
+      title: 'Versioned Spec',
+      userStories: [
+        { id: 'US-001', title: 'Story one', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [], passes: false },
+        { id: 'US-002', title: 'Story two', description: 'Desc2', acceptanceCriteria: ['AC2'], dependsOn: [], passes: false },
+      ],
+    });
+
+    // Reject the spec (creates a version snapshot)
+    await request(app)
+      .post('/api/specs/versioned-spec/reject')
+      .send({ workspaceId: 'ws-test', reason: 'Needs more stories' });
+
+    const res = await request(app).get('/api/specs/versioned-spec/versions');
+    expect(res.status).toBe(200);
+    expect(res.body.versions).toHaveLength(1);
+    expect(res.body.versions[0].version).toBe(1);
+    expect(res.body.versions[0].status).toBe('rejected');
+    expect(res.body.versions[0].rejectionReason).toBe('Needs more stories');
+    expect(res.body.versions[0].title).toBe('Versioned Spec');
+    expect(res.body.versions[0].storyCount).toBe(2);
+    expect(res.body.versions[0].createdAt).toBeDefined();
+  });
+
+  test('returns multiple versions in ascending order', async () => {
+    // Manually insert two versions
+    db.prepare(
+      `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, ?)`
+    ).run('multi-ver', 1, JSON.stringify({ title: 'V1', userStories: [] }), 'rejected');
+    db.prepare(
+      `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, ?)`
+    ).run('multi-ver', 2, JSON.stringify({ title: 'V2', userStories: [{ id: 'US-001', title: 'S1' }] }), 'pending');
+
+    const res = await request(app).get('/api/specs/multi-ver/versions');
+    expect(res.status).toBe(200);
+    expect(res.body.versions).toHaveLength(2);
+    expect(res.body.versions[0].version).toBe(1);
+    expect(res.body.versions[0].title).toBe('V1');
+    expect(res.body.versions[0].storyCount).toBe(0);
+    expect(res.body.versions[1].version).toBe(2);
+    expect(res.body.versions[1].title).toBe('V2');
+    expect(res.body.versions[1].storyCount).toBe(1);
+  });
+});
+
+describe('GET /api/specs/:specId/diff', () => {
+  beforeEach(() => {
+    // Seed two versions with different stories
+    const v1 = {
+      title: 'Auth System',
+      userStories: [
+        { id: 'US-001', title: 'Login', description: 'Login flow', acceptanceCriteria: ['AC1', 'AC2'], dependsOn: [] },
+        { id: 'US-002', title: 'Signup', description: 'Signup flow', acceptanceCriteria: ['AC3'], dependsOn: ['US-001'] },
+      ],
+    };
+    const v2 = {
+      title: 'Auth System v2',
+      userStories: [
+        { id: 'US-001', title: 'Login', description: 'Improved login', acceptanceCriteria: ['AC1', 'AC2', 'AC4'], dependsOn: [] },
+        { id: 'US-003', title: 'Password Reset', description: 'Reset flow', acceptanceCriteria: ['AC5'], dependsOn: ['US-001'] },
+      ],
+    };
+    db.prepare(
+      `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, ?)`
+    ).run('diff-test', 1, JSON.stringify(v1), 'rejected');
+    db.prepare(
+      `INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES (?, ?, ?, ?, ?)`
+    ).run('diff-test', 2, JSON.stringify(v2), 'pending', null);
+  });
+
+  test('returns structured diff with added, removed, modified, unchanged stories', async () => {
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=2');
+    expect(res.status).toBe(200);
+
+    expect(res.body.specSlug).toBe('diff-test');
+    expect(res.body.v1.version).toBe(1);
+    expect(res.body.v2.version).toBe(2);
+
+    const { diff } = res.body;
+    expect(diff.titleChanged).toBe(true);
+    expect(diff.oldTitle).toBe('Auth System');
+    expect(diff.newTitle).toBe('Auth System v2');
+
+    // US-001: modified (description + AC changed)
+    const us001 = diff.stories.find((s: any) => s.id === 'US-001');
+    expect(us001.changeType).toBe('modified');
+    expect(us001.deltas).toBeDefined();
+    const descDelta = us001.deltas.find((d: any) => d.field === 'description');
+    expect(descDelta.old).toBe('Login flow');
+    expect(descDelta.new).toBe('Improved login');
+    const acDelta = us001.deltas.find((d: any) => d.field === 'acceptanceCriteria');
+    expect(acDelta.added).toContain('AC4');
+    expect(acDelta.removed).toEqual([]);
+
+    // US-002: removed
+    const us002 = diff.stories.find((s: any) => s.id === 'US-002');
+    expect(us002.changeType).toBe('removed');
+    expect(us002.story).toBeDefined();
+
+    // US-003: added
+    const us003 = diff.stories.find((s: any) => s.id === 'US-003');
+    expect(us003.changeType).toBe('added');
+    expect(us003.story.title).toBe('Password Reset');
+
+    // Summary
+    expect(diff.summary).toEqual({ added: 1, removed: 1, modified: 1, unchanged: 0 });
+  });
+
+  test('missing v1/v2 → 400', async () => {
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=1');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('v1 and v2');
+  });
+
+  test('same v1 and v2 → 400', async () => {
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=1');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('different');
+  });
+
+  test('nonexistent version → 404', async () => {
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=99');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('v99');
+  });
+
+  test('both versions missing → 404 mentioning both', async () => {
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=98&v2=99');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('v98');
+    expect(res.body.error).toContain('v99');
   });
 });

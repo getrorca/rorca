@@ -1,6 +1,18 @@
 import { Router, Request, Response } from 'express';
+import { spawn } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
+import simpleGit from 'simple-git';
 import { db } from '../db/index';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
+
+// All Claude Code env vars that block nested invocation (same as llm-client.ts)
+const CLAUDE_ENV_VARS_TO_REMOVE = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_AGENT_SDK_VERSION',
+  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
+];
 
 const router = Router();
 
@@ -26,6 +38,113 @@ interface StoryResultRow {
   started_at: string;
   finished_at: string | null;
 }
+
+// ─── POST /api/pipeline/trigger — Spawn run-loop.sh for a spec ──────────────
+
+router.post('/trigger', async (req: Request, res: Response) => {
+  try {
+    const { specPath, workspaceId, autoWorktree } = req.body;
+
+    if (!specPath || !workspaceId) {
+      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      return;
+    }
+
+    // 1. Look up workspace path
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+      { id: string; label: string; path: string } | undefined;
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // 2. Verify run-loop.sh exists in this workspace
+    const runLoopScript = path.join(workspace.path, 'scripts', 'run-loop.sh');
+    if (!fs.existsSync(runLoopScript)) {
+      res.status(422).json({ error: `run-loop.sh not found at ${runLoopScript}` });
+      return;
+    }
+
+    // 3. Conflict check — is there already an active run for this workspace?
+    const activeRun = db.prepare(
+      `SELECT * FROM pipeline_runs WHERE workspace_id = ? AND status = 'running' LIMIT 1`
+    ).get(workspaceId) as PipelineRunRow | undefined;
+
+    if (activeRun && !autoWorktree) {
+      res.json({ conflict: true, activeRunId: activeRun.id });
+      return;
+    }
+
+    // 4. Build absolute spec path: workspace/scripts/<specPath>
+    const absSpecPath = path.join(workspace.path, 'scripts', specPath);
+
+    // 5. Determine CWD — main workspace or new worktree
+    let cwd = workspace.path;
+    let branchName: string | null = null;
+    let worktreePath: string | null = null;
+
+    if (autoWorktree) {
+      const specSlug = path.basename(specPath, '.json').replace(/[^a-z0-9-]/gi, '-');
+      branchName = `feat/${specSlug}-${Date.now()}`;
+      const repoName = path.basename(workspace.path);
+      const branchSlug = branchName.replace(/\//g, '-');
+      worktreePath = path.resolve(workspace.path, '..', `${repoName}-${branchSlug}`);
+
+      const git = simpleGit(workspace.path);
+      await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
+      cwd = worktreePath;
+    }
+
+    // 6. Create pipeline_runs record
+    const runResult = db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES (?, ?, 'running')`
+    ).run(specPath, workspaceId);
+    const runId = runResult.lastInsertRowid as number;
+
+    // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
+        env[k] = v;
+      }
+    }
+
+    // 8. Spawn run-loop.sh (use the script from cwd — worktree has its own copy)
+    const scriptInCwd = path.join(cwd, 'scripts', 'run-loop.sh');
+    const child = spawn('bash', [scriptInCwd, '--json', absSpecPath], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+
+    // 9. Store PID
+    if (child.pid) {
+      db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, runId);
+    }
+
+    // 10. Update status when process exits
+    child.on('close', (code) => {
+      const status = code === 0 ? 'done' : 'failed';
+      db.prepare(
+        `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
+      ).run(status, runId);
+
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+      ).run(workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code }));
+
+      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walEvent);
+    });
+
+    res.status(201).json({ ok: true, runId, worktreePath, branchName });
+  } catch (error: any) {
+    console.error('[Pipeline] Trigger error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ─── POST /api/pipeline/runs — Create a pipeline run ────────────────────────
 
