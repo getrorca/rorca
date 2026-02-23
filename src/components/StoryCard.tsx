@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 
 export interface Story {
@@ -66,6 +66,8 @@ export function StoryCard({
   const [commitsLoaded, setCommitsLoaded] = useState(false);
   const [branchName, setBranchName] = useState<string | null>(null);
   const [branchLoading, setBranchLoading] = useState(false);
+  const [prBodyCopied, setPrBodyCopied] = useState(false);
+  const [prBodyLoading, setPrBodyLoading] = useState(false);
 
   const isDone = story.passes === true;
   const isDeferred = story.excluded === true && !isDone;
@@ -97,6 +99,24 @@ export function StoryCard({
       }
     } finally {
       setBranchLoading(false);
+    }
+  };
+
+  const handleCopyPrBody = async () => {
+    if (!specId || !workspaceId || prBodyLoading) return;
+    setPrBodyLoading(true);
+    try {
+      const data = await apiFetch<{ body: string }>(
+        `/api/specs/${specId}/stories/${story.id}/pr-body`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) }
+      );
+      await navigator.clipboard.writeText(data.body);
+      setPrBodyCopied(true);
+      setTimeout(() => setPrBodyCopied(false), 2000);
+    } catch {
+      // Silently fail — button returns to default state
+    } finally {
+      setPrBodyLoading(false);
     }
   };
 
@@ -264,6 +284,20 @@ export function StoryCard({
               {branchName}
             </code>
           </div>
+        )}
+
+        {canShowCommits && (
+          <button
+            onClick={handleCopyPrBody}
+            disabled={prBodyLoading}
+            className={`flex items-center gap-1 mt-1 text-xs transition-colors disabled:opacity-50 ${
+              prBodyCopied ? 'text-success' : 'text-muted hover:text-accent'
+            }`}
+            title="Copy PR description to clipboard"
+          >
+            {prBodyCopied ? <Check size={11} /> : <ClipboardCopy size={11} />}
+            {prBodyLoading ? 'Copying...' : prBodyCopied ? 'Copied!' : 'Copy PR Body'}
+          </button>
         )}
       </div>
 
