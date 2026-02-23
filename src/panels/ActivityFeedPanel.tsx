@@ -187,7 +187,7 @@ export default function ActivityFeedPanel() {
               className={`px-2.5 py-1 text-xs rounded-full transition-colors ${
                 typeFilter === f.id
                   ? 'bg-accent text-white'
-                  : 'bg-zinc-800 text-muted hover:text-[var(--text)]'
+                  : 'bg-bg text-muted hover:text-[var(--text)]'
               }`}
             >
               {f.label}
@@ -241,8 +241,8 @@ export default function ActivityFeedPanel() {
                               className="w-6 h-6 rounded-full shrink-0 mt-0.5"
                             />
                           ) : (
-                            <div className="w-6 h-6 rounded-full bg-zinc-700 flex items-center justify-center shrink-0 mt-0.5">
-                              <span className="text-[10px] font-medium text-zinc-300">
+                            <div className="w-6 h-6 rounded-full bg-border flex items-center justify-center shrink-0 mt-0.5">
+                              <span className="text-[10px] font-medium text-muted">
                                 {avatarInitials(item.actor.name)}
                               </span>
                             </div>
@@ -279,7 +279,7 @@ export default function ActivityFeedPanel() {
                 <button
                   onClick={() => fetchActivity(items.length, true)}
                   disabled={loadingMore}
-                  className="flex items-center gap-2 px-4 py-2 text-sm rounded bg-zinc-800 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+                  className="flex items-center gap-2 px-4 py-2 text-sm rounded bg-bg text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
                 >
                   {loadingMore ? (
                     <Loader2 size={14} className="animate-spin" />
