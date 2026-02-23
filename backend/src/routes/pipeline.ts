@@ -2,9 +2,18 @@ import { Router, Request, Response } from 'express';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import simpleGit from 'simple-git';
 import { db } from '../db/index';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
+
+/** Persistent log file path for a run — survives backend restarts */
+const runLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
+
+/** True if the given PID is still alive */
+function isPidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
 
 // All Claude Code env vars that block nested invocation (same as llm-client.ts)
 const CLAUDE_ENV_VARS_TO_REMOVE = [
@@ -120,13 +129,20 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }
     }
 
-    // 8. Spawn run-loop.sh (use the script from cwd — worktree has its own copy)
+    // 8. Spawn run-loop.sh — detached so it survives backend restarts.
+    //    stdout+stderr go directly to the log file via file descriptor (no pipes).
+    //    Pipes break on parent death (SIGPIPE), but file descriptors don't.
     const scriptInCwd = path.join(cwd, 'scripts', 'run-loop.sh');
+    const logPath = runLogPath(runId);
+    const logFd = fs.openSync(logPath, 'a');
     const child = spawn('bash', [scriptInCwd, '--json', absSpecPath], {
       cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', logFd, logFd],
+      detached: true,
       env,
     });
+    fs.closeSync(logFd);  // parent closes its copy; child keeps its own fd
+    child.unref();        // don't keep Node alive waiting for this child
 
     // 9. Store PID + branch info
     if (child.pid) {
@@ -134,20 +150,44 @@ router.post('/trigger', async (req: Request, res: Response) => {
         .run(child.pid, branchName, worktreePath, runId);
     }
 
-    // 10. Set up in-memory output buffer (streams stdout+stderr to xterm.js in browser)
+    // 10. Set up in-memory output buffer — tail the log file at 200ms for live streaming
     const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
     outputBuffers.set(runId, buf);
 
-    const onData = (data: Buffer) => {
-      const text = data.toString('utf8');
-      buf.chunks.push(text);
-      buf.subscribers.forEach(cb => cb(text));
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
+    let tailPos = 0;
+    const tailInterval = setInterval(() => {
+      try {
+        const stat = fs.statSync(logPath);
+        if (stat.size > tailPos) {
+          const fd = fs.openSync(logPath, 'r');
+          const newBytes = Buffer.alloc(stat.size - tailPos);
+          fs.readSync(fd, newBytes, 0, newBytes.length, tailPos);
+          fs.closeSync(fd);
+          tailPos = stat.size;
+          const text = newBytes.toString('utf8');
+          buf.chunks.push(text);
+          buf.subscribers.forEach(cb => cb(text));
+        }
+      } catch { /* file not yet created or transient read error */ }
+    }, 200);
 
     // 11. Update status when process exits
-    child.on('close', (code) => {
+    child.on('exit', (code) => {
+      clearInterval(tailInterval);
+
+      // Flush any remaining bytes not yet picked up by the interval
+      try {
+        const stat = fs.statSync(logPath);
+        if (stat.size > tailPos) {
+          const fd = fs.openSync(logPath, 'r');
+          const remaining = Buffer.alloc(stat.size - tailPos);
+          fs.readSync(fd, remaining, 0, remaining.length, tailPos);
+          fs.closeSync(fd);
+          buf.chunks.push(remaining.toString('utf8'));
+          buf.subscribers.forEach(cb => cb(remaining.toString('utf8')));
+        }
+      } catch { /* ignore */ }
+
       // Guard: DB may be closed if the process exits after test teardown
       if (!db.open) {
         buf.done = true;
@@ -169,11 +209,14 @@ router.post('/trigger', async (req: Request, res: Response) => {
       ) as WalEvent;
       broadcastAll(walEvent);
 
-      // Mark buffer done; notify subscribers; clean up after 30 min
+      // Mark buffer done; notify subscribers; clean up buffer + log after 30 min
       buf.done = true;
       buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
       buf.subscribers.clear();
-      setTimeout(() => outputBuffers.delete(runId), 30 * 60 * 1000);
+      setTimeout(() => {
+        outputBuffers.delete(runId);
+        try { fs.unlinkSync(logPath); } catch { /* already gone */ }
+      }, 30 * 60 * 1000);
     });
 
     res.status(201).json({ ok: true, runId, worktreePath, branchName });
@@ -414,31 +457,58 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       }
     }
 
-    // 10. Spawn run-loop.sh with the retry spec
+    // 10. Spawn run-loop.sh with the retry spec — detached, output to log file
+    const retryLogPath = runLogPath(runId);
+    const retryLogFd = fs.openSync(retryLogPath, 'a');
     const child = spawn('bash', [runLoopScript, '--json', retrySpecPath], {
       cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', retryLogFd, retryLogFd],
+      detached: true,
       env,
     });
+    fs.closeSync(retryLogFd);
+    child.unref();
 
     if (child.pid) {
       db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, runId);
     }
 
-    // 11. Set up output buffer for this retry
+    // 11. Set up output buffer — tail log file for live streaming
     const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
     outputBuffers.set(runId, buf);
 
-    const onData = (data: Buffer) => {
-      const text = data.toString('utf8');
-      buf.chunks.push(text);
-      buf.subscribers.forEach(cb => cb(text));
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
+    let retryTailPos = 0;
+    const retryTailInterval = setInterval(() => {
+      try {
+        const stat = fs.statSync(retryLogPath);
+        if (stat.size > retryTailPos) {
+          const fd = fs.openSync(retryLogPath, 'r');
+          const newBytes = Buffer.alloc(stat.size - retryTailPos);
+          fs.readSync(fd, newBytes, 0, newBytes.length, retryTailPos);
+          fs.closeSync(fd);
+          retryTailPos = stat.size;
+          const text = newBytes.toString('utf8');
+          buf.chunks.push(text);
+          buf.subscribers.forEach(cb => cb(text));
+        }
+      } catch { /* ignore */ }
+    }, 200);
 
     // 12. Handle process exit — determine final status based on story outcomes
-    child.on('close', (code) => {
+    child.on('exit', (code) => {
+      clearInterval(retryTailInterval);
+      try {
+        const stat = fs.statSync(retryLogPath);
+        if (stat.size > retryTailPos) {
+          const fd = fs.openSync(retryLogPath, 'r');
+          const remaining = Buffer.alloc(stat.size - retryTailPos);
+          fs.readSync(fd, remaining, 0, remaining.length, retryTailPos);
+          fs.closeSync(fd);
+          buf.chunks.push(remaining.toString('utf8'));
+          buf.subscribers.forEach(cb => cb(remaining.toString('utf8')));
+        }
+      } catch { /* ignore */ }
+
       // Guard: DB may be closed if the process exits after test teardown
       if (!db.open) {
         buf.done = true;
@@ -482,7 +552,10 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       buf.done = true;
       buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`));
       buf.subscribers.clear();
-      setTimeout(() => outputBuffers.delete(runId), 30 * 60 * 1000);
+      setTimeout(() => {
+        outputBuffers.delete(runId);
+        try { fs.unlinkSync(retryLogPath); } catch { /* already gone */ }
+      }, 30 * 60 * 1000);
 
       // Clean up temporary retry spec
       try { fs.unlinkSync(retrySpecPath); } catch { /* ignore */ }
@@ -518,38 +591,97 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
   res.write(': connected\n\n');
 
   const buf = outputBuffers.get(runId);
-
-  if (!buf) {
-    // Run not in memory (already finished or started before this server process)
-    res.write('event: done\ndata: \n\n');
-    res.end();
-    return;
-  }
-
-  // Replay buffered output
-  for (const chunk of buf.chunks) {
-    const encoded = Buffer.from(chunk).toString('base64');
-    res.write(`event: chunk\ndata: ${encoded}\n\n`);
-  }
-
-  if (buf.done) {
-    res.write('event: done\ndata: \n\n');
-    res.end();
-    return;
-  }
-
-  // Subscribe to live output
-  const onChunk = (chunk: string) => {
-    const encoded = Buffer.from(chunk).toString('base64');
-    res.write(`event: chunk\ndata: ${encoded}\n\n`);
-  };
-  buf.subscribers.add(onChunk);
-
-  // Heartbeat to keep connection alive
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
+  if (buf) {
+    // ── Hot path: in-memory buffer exists ──────────────────────────────────
+    // Replay buffered output
+    for (const chunk of buf.chunks) {
+      const encoded = Buffer.from(chunk).toString('base64');
+      res.write(`event: chunk\ndata: ${encoded}\n\n`);
+    }
+
+    if (buf.done) {
+      clearInterval(hb);
+      res.write('event: done\ndata: \n\n');
+      res.end();
+      return;
+    }
+
+    // Subscribe to live output
+    const onChunk = (chunk: string) => {
+      const encoded = Buffer.from(chunk).toString('base64');
+      res.write(`event: chunk\ndata: ${encoded}\n\n`);
+    };
+    buf.subscribers.add(onChunk);
+
+    req.on('close', () => {
+      buf.subscribers.delete(onChunk);
+      clearInterval(hb);
+    });
+    return;
+  }
+
+  // ── Cold path: buffer not in memory (backend restarted) ──────────────────
+  // Fall back to the persisted log file.
+  const logPath = runLogPath(runId);
+  if (!fs.existsSync(logPath)) {
+    // No log file — run finished before this server started or never ran
+    clearInterval(hb);
+    res.write('event: done\ndata: \n\n');
+    res.end();
+    return;
+  }
+
+  // Replay everything written so far
+  const existing = fs.readFileSync(logPath);
+  if (existing.length > 0) {
+    res.write(`event: chunk\ndata: ${existing.toString('base64')}\n\n`);
+  }
+
+  // Check if the original process is still alive
+  const run = db.prepare('SELECT pid, status FROM pipeline_runs WHERE id = ?')
+    .get(runId) as { pid: number | null; status: string } | undefined;
+  const stillRunning = run?.status === 'running' && run?.pid != null && isPidAlive(run.pid);
+
+  if (!stillRunning) {
+    clearInterval(hb);
+    res.write('event: done\ndata: \n\n');
+    res.end();
+    return;
+  }
+
+  // Tail the log file — poll for new bytes every 200 ms
+  let offset = existing.length;
+  const tailInterval = setInterval(() => {
+    try {
+      const stat = fs.statSync(logPath);
+      if (stat.size > offset) {
+        const newBytes = Buffer.alloc(stat.size - offset);
+        const fd = fs.openSync(logPath, 'r');
+        fs.readSync(fd, newBytes, 0, newBytes.length, offset);
+        fs.closeSync(fd);
+        offset = stat.size;
+        res.write(`event: chunk\ndata: ${newBytes.toString('base64')}\n\n`);
+      }
+
+      // Stop tailing once the process exits
+      if (run?.pid != null && !isPidAlive(run.pid)) {
+        clearInterval(tailInterval);
+        clearInterval(hb);
+        res.write('event: done\ndata: \n\n');
+        res.end();
+      }
+    } catch {
+      clearInterval(tailInterval);
+      clearInterval(hb);
+      res.write('event: done\ndata: \n\n');
+      res.end();
+    }
+  }, 200);
+
   req.on('close', () => {
-    buf.subscribers.delete(onChunk);
+    clearInterval(tailInterval);
     clearInterval(hb);
   });
 });
@@ -586,7 +718,7 @@ router.get('/stream', (req: Request, res: Response) => {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
              AND (payload LIKE ? OR spec_id IS NOT NULL)
            ORDER BY id ASC
            LIMIT 50`
@@ -595,7 +727,7 @@ router.get('/stream', (req: Request, res: Response) => {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
            ORDER BY id ASC
            LIMIT 50`
         ).all(lastSeenId);

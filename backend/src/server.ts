@@ -9,6 +9,7 @@ import contextRouter from './routes/context';
 import pipelineRouter from './routes/pipeline';
 import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
+import authRouter from './routes/auth';
 
 dotenv.config();
 
@@ -30,6 +31,7 @@ app.use('/api/context', contextRouter);
 app.use('/api/pipeline', pipelineRouter);
 app.use('/api/worktrees', worktreesRouter);
 app.use('/api/templates', templatesRouter);
+app.use('/api/auth', authRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {

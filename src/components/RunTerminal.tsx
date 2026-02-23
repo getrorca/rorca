@@ -73,8 +73,10 @@ export default function RunTerminal({ runId }: RunTerminalProps) {
 
     es.addEventListener('chunk', (e: MessageEvent) => {
       try {
-        const text = atob(e.data);
-        term.write(text);
+        const binary = atob(e.data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        term.write(bytes);
       } catch {
         // ignore malformed chunk
       }

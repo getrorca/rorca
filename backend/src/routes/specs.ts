@@ -1,14 +1,44 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
+import * as crypto from 'crypto';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
 import { chatComplete, getActiveProvider, isValidModel, DEFAULT_MODEL, SUPPORTED_MODELS } from '../lib/llm-client';
 import type { SupportedModel } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
+import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 
 const router = Router();
+
+// ─── Batch Queue Types ────────────────────────────────────────────────────────
+
+type BatchBriefStatus = 'queued' | 'generating' | 'completed' | 'failed';
+
+interface BatchBriefItem {
+  brief: string;
+  workspaceId: string;
+  templateId?: string;
+  title?: string;
+  model?: string;
+  storyCount?: number;
+  domain?: string;
+  status: BatchBriefStatus;
+  error?: string;
+  slug?: string;
+}
+
+interface BatchState {
+  id: string;
+  items: BatchBriefItem[];
+  createdAt: string;
+  finishedAt?: string;
+}
+
+/** In-memory batch queue. Batches auto-clean after 1 hour. */
+const batchQueue = new Map<string, BatchState>();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -45,6 +75,7 @@ interface UserStory {
   acceptanceCriteria: string[];
   dependsOn: string[];
   passes?: boolean;
+  excluded?: boolean;
 }
 
 function getWorkspace(workspaceId: string): WorkspaceRow | undefined {
@@ -303,7 +334,37 @@ router.post('/generate', async (req: Request, res: Response) => {
 
     // 7. Build LLM prompt
     const storyPrefix = req.body.storyPrefix || 'US';
+    const wantDiagrams = Array.isArray(diagramTypes) && diagramTypes.some(
+      (t: string) => t !== 'storyDeps'
+    );
+    const diagramSchema = wantDiagrams ? [
+      '',
+      'Also include a "diagrams" key at the top level with Mermaid diagrams for the following types:',
+      (diagramTypes as string[]).filter((t: string) => t !== 'storyDeps').map((t: string) => {
+        const hints: Record<string, string> = {
+          architecture: 'graph TD — system components and their relationships',
+          userFlow: 'graph LR — key user journeys through the product',
+          dataFlow: 'flowchart TD — data movement between services/stores',
+          erd: 'erDiagram — main database entities and their relationships',
+        };
+        return `  "${t}": { "mermaid": "<valid mermaid string using ${hints[t] || 'graph TD'}>" }`;
+      }).join('\n'),
+      'Diagrams schema addition: "diagrams":{"architecture":{"mermaid":"..."},"erd":{"mermaid":"..."}}',
+      'Rules for diagrams:',
+      '- Each mermaid string must be syntactically valid (renderable by mermaid.js)',
+      '- Use \\n for newlines inside the mermaid string',
+      '- Keep node labels short (under 30 chars)',
+      '- Do not use special chars like quotes inside node labels',
+    ].join('\n') : '';
+
     const fullPrompt = [
+      '=== INSTRUCTIONS: READ THIS FIRST ===',
+      'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+      'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+      'If you output anything other than raw JSON, the system will fail.',
+      '=== END INSTRUCTIONS ===',
+      '',
       synthesized,
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
@@ -314,7 +375,8 @@ router.post('/generate', async (req: Request, res: Response) => {
       'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
       '',
       'JSON schema:',
-      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"]}]}`,
+      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"]}]${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+      wantDiagrams ? diagramSchema : '',
       '',
       `Rules:`,
       `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
@@ -416,6 +478,326 @@ router.post('/generate', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[Specs] Generate error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── US-008: POST /generate/batch — Queue multiple briefs for sequential generation ─
+
+interface BatchRequestItem {
+  brief: string;
+  workspaceId: string;
+  templateId?: string;
+  title?: string;
+  model?: string;
+  storyCount?: number;
+  domain?: string;
+}
+
+/**
+ * Process a single brief within a batch. Reuses the same logic as POST /generate
+ * but captures errors per-brief rather than returning HTTP errors.
+ */
+async function processBatchBrief(item: BatchBriefItem): Promise<void> {
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(item.workspaceId) as WorkspaceRow | undefined;
+  if (!workspace) {
+    item.status = 'failed';
+    item.error = 'Workspace not found';
+    return;
+  }
+
+  // Resolve model
+  let resolvedModel: SupportedModel = DEFAULT_MODEL;
+  if (item.model && isValidModel(item.model)) {
+    resolvedModel = item.model;
+  } else if (!item.model) {
+    const l3Pref = db.prepare(
+      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+    ).get(item.workspaceId) as { preferred_model: string | null } | undefined;
+    if (l3Pref?.preferred_model && isValidModel(l3Pref.preferred_model)) {
+      resolvedModel = l3Pref.preferred_model;
+    }
+  }
+
+  // Generate title from brief if not provided
+  const title = item.title || item.brief.slice(0, 60).replace(/[^a-zA-Z0-9 ]/g, '').trim();
+  const storyCount = Math.min(500, Math.max(1, item.storyCount || 8));
+
+  // Fetch direction layers
+  const l1Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+  ).get() as { content_yaml: string } | undefined;
+  const l2Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = ? AND COALESCE(workspace_id, '') = ''`
+  ).get(item.domain ?? '') as { content_yaml: string } | undefined;
+  const l3Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+  ).get(item.workspaceId) as { content_yaml: string } | undefined;
+  const ctx = db.prepare(
+    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
+  ).get(item.workspaceId) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+
+  const synthesized = synthesize({
+    l1: l1Row?.content_yaml,
+    l2: l2Row?.content_yaml,
+    l3: l3Row?.content_yaml,
+    schemaSnapshot: ctx?.schema_snapshot || undefined,
+    gitMemory: ctx?.git_memory || undefined,
+    specBrief: item.brief,
+  });
+
+  // Template context
+  let templateContext = '';
+  if (item.templateId) {
+    const tpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(item.templateId) as
+      { brief: string; story_structure: string } | undefined;
+    if (tpl) {
+      const stories = JSON.parse(tpl.story_structure);
+      const storyOutline = stories.map((s: { id: string; title: string; description: string }) =>
+        `- ${s.id}: ${s.title} — ${s.description}`
+      ).join('\n');
+      templateContext = [
+        '=== REFERENCE TEMPLATE ===',
+        `Template brief: ${tpl.brief}`,
+        '', 'Story structure pattern:', storyOutline, '',
+        'Use this as a structural reference. Adapt story IDs, titles, and details to the new spec brief.',
+        '=== END TEMPLATE ===',
+      ].join('\n');
+    }
+  }
+
+  const storyPrefix = 'US';
+  const fullPrompt = [
+    synthesized,
+    ...(templateContext ? [templateContext, '---'] : []),
+    '---',
+    `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
+    `Spec title: ${title}`,
+    `Spec brief: ${item.brief}`,
+    '',
+    'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
+    '',
+    'JSON schema:',
+    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"]}]}`,
+    '',
+    `Rules:`,
+    `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
+    '- Each story needs 3-5 specific testable acceptanceCriteria',
+    '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
+    '- Stories should be concrete and implementable, not vague',
+    '- Your entire response must be valid JSON parseable by JSON.parse()',
+  ].join('\n');
+
+  // Call LLM
+  const llmResult = await chatComplete([{ role: 'user', content: fullPrompt }], resolvedModel);
+  const rawResponse = llmResult.text;
+
+  // Parse JSON
+  let parsed: { stories: unknown[]; diagrams?: Record<string, unknown> };
+  const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
+  const jsonStart = jsonStr.indexOf('{');
+  parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+
+  if (!Array.isArray(parsed.stories)) {
+    throw new Error('Invalid spec structure from LLM');
+  }
+
+  // Generate diagrams
+  const algorithmicDiagrams = generateDiagramBundle(parsed.stories as any, []);
+  const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
+
+  // Build slug
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+  // WAL event
+  const provider = getActiveProvider();
+  db.prepare(
+    `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', ?, ?)`
+  ).run(slug, JSON.stringify({
+    title, domain: item.domain, storyCount: parsed.stories.length, provider, model: resolvedModel,
+    hasSchema: !!ctx?.schema_snapshot, hasGitMemory: !!ctx?.git_memory,
+    inputTokens: llmResult.usage.inputTokens, outputTokens: llmResult.usage.outputTokens,
+  }));
+
+  // Snapshot existing spec if regenerating
+  const { pendingDir, approvedDir } = specsDirs(workspace.path);
+  const existingPending = path.join(pendingDir, `${slug}.json`);
+  const existingApproved = path.join(approvedDir, `${slug}.json`);
+  if (fs.existsSync(existingPending)) {
+    snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
+    fs.unlinkSync(existingPending);
+  } else if (fs.existsSync(existingApproved)) {
+    snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
+    fs.unlinkSync(existingApproved);
+  }
+
+  // Write spec
+  writeSpec(workspace.path, {
+    slug,
+    title,
+    stories: parsed.stories as any,
+    diagrams: allDiagrams as any,
+    model: resolvedModel,
+  });
+
+  item.slug = slug;
+}
+
+/**
+ * Process all briefs in a batch sequentially. Emits batch_progress WAL events
+ * via broadcastAll so SSE subscribers get real-time updates.
+ */
+async function processBatch(batch: BatchState): Promise<void> {
+  for (let i = 0; i < batch.items.length; i++) {
+    const item = batch.items[i];
+    item.status = 'generating';
+
+    // Broadcast progress: generating
+    const genWalResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('batch_progress', ?, ?)`
+    ).run(item.workspaceId, JSON.stringify({
+      batchId: batch.id,
+      briefIndex: i,
+      totalBriefs: batch.items.length,
+      status: 'generating',
+    }));
+    const genWalEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      genWalResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(genWalEvent);
+
+    try {
+      await processBatchBrief(item);
+      // processBatchBrief may set status to 'failed' internally (e.g. workspace not found)
+      if (item.status as string !== 'failed') {
+        item.status = 'completed';
+      }
+    } catch (error: any) {
+      item.status = 'failed';
+      item.error = error.message;
+    }
+
+    // Broadcast progress: completed or failed
+    const doneWalResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('batch_progress', ?, ?)`
+    ).run(item.workspaceId, JSON.stringify({
+      batchId: batch.id,
+      briefIndex: i,
+      totalBriefs: batch.items.length,
+      status: item.status,
+      slug: item.slug,
+      error: item.error,
+    }));
+    const doneWalEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      doneWalResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(doneWalEvent);
+  }
+
+  batch.finishedAt = new Date().toISOString();
+
+  // Auto-clean batch from memory after 1 hour
+  setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000);
+}
+
+router.post('/generate/batch', (req: Request, res: Response) => {
+  try {
+    const { briefs } = req.body as { briefs?: BatchRequestItem[] };
+
+    if (!Array.isArray(briefs) || briefs.length === 0) {
+      res.status(400).json({ error: 'Missing or empty briefs array' });
+      return;
+    }
+
+    // Validate each brief has required fields
+    for (let i = 0; i < briefs.length; i++) {
+      const b = briefs[i];
+      if (!b.brief || !b.workspaceId) {
+        res.status(400).json({ error: `Brief at index ${i} missing required fields: brief, workspaceId` });
+        return;
+      }
+      if (b.model && !isValidModel(b.model)) {
+        res.status(400).json({ error: `Brief at index ${i} has invalid model: '${b.model}'` });
+        return;
+      }
+    }
+
+    const batchId = crypto.randomUUID();
+    const batch: BatchState = {
+      id: batchId,
+      items: briefs.map(b => ({
+        brief: b.brief,
+        workspaceId: b.workspaceId,
+        templateId: b.templateId,
+        title: b.title,
+        model: b.model,
+        storyCount: b.storyCount,
+        domain: b.domain,
+        status: 'queued' as const,
+      })),
+      createdAt: new Date().toISOString(),
+    };
+
+    batchQueue.set(batchId, batch);
+
+    // Start processing asynchronously — don't await
+    processBatch(batch).catch(err => {
+      console.error('[Specs] Batch processing error:', err);
+    });
+
+    // Emit WAL event for batch start
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, payload) VALUES ('batch_started', ?)`
+    ).run(JSON.stringify({ batchId, briefCount: briefs.length }));
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.status(201).json({ batchId, briefCount: briefs.length });
+  } catch (error: any) {
+    console.error('[Specs] Batch create error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── US-008: GET /generate/batch/:batchId — Batch status ─────────────────────
+
+router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
+  try {
+    const batchId = req.params.batchId as string;
+    const batch = batchQueue.get(batchId);
+
+    if (!batch) {
+      res.status(404).json({ error: 'Batch not found or expired' });
+      return;
+    }
+
+    const items = batch.items.map((item, index) => ({
+      index,
+      brief: item.brief,
+      workspaceId: item.workspaceId,
+      status: item.status,
+      slug: item.slug,
+      error: item.error,
+    }));
+
+    const completed = items.filter(i => i.status === 'completed').length;
+    const failed = items.filter(i => i.status === 'failed').length;
+    const generating = items.filter(i => i.status === 'generating').length;
+    const queued = items.filter(i => i.status === 'queued').length;
+
+    res.json({
+      batchId: batch.id,
+      createdAt: batch.createdAt,
+      finishedAt: batch.finishedAt,
+      totalBriefs: items.length,
+      summary: { completed, failed, generating, queued },
+      items,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Batch status error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -700,6 +1082,15 @@ router.get('/archive', (req: Request, res: Response) => {
       if (!branchBySlug.has(slug)) branchBySlug.set(slug, row.branch_name);
     }
 
+    // Fall back to current git branch for specs that have no worktree branch
+    let currentBranch: string | undefined;
+    try {
+      const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: workspace.path, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8',
+      }).trim();
+      if (branch && branch !== 'HEAD') currentBranch = branch;
+    } catch { /* not a git repo or git unavailable */ }
+
     // Determine matching slugs via FTS or collect all
     let matchingSlugs: Set<string> | null = null;
     if (q) {
@@ -720,7 +1111,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug)));
+          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch));
         } catch {
           // skip unparseable files
         }
@@ -733,7 +1124,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug)));
+          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug) ?? currentBranch));
         } catch {
           // skip unparseable files
         }
@@ -890,6 +1281,12 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     const existingList = existingStories.map(s => `- ${s.id}: ${s.title}`).join('\n');
 
     const fullPrompt = [
+      '=== INSTRUCTIONS: READ THIS FIRST ===',
+      'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+      'Output ONLY the raw JSON object. If you output anything else, you have failed.',
+      '=== END INSTRUCTIONS ===',
+      '',
       synthesized,
       '---',
       `TASK: Add ${storyCount} NEW user stories to an existing spec.`,
@@ -1013,6 +1410,73 @@ router.get('/:specId/diff', (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[Specs] Diff error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── PATCH /:specId/stories/:storyId — Toggle excluded flag ──────────────────
+
+router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
+  try {
+    const { specId, storyId } = req.params;
+    const { workspaceId, excluded } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+
+    let specPath: string;
+    if (fs.existsSync(approvedFile)) {
+      specPath = approvedFile;
+    } else if (fs.existsSync(pendingFile)) {
+      specPath = pendingFile;
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const content = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+    const stories: UserStory[] = content.userStories ?? [];
+    const story = stories.find((s: UserStory) => s.id === storyId);
+
+    if (!story) {
+      res.status(404).json({ error: 'Story not found' });
+      return;
+    }
+
+    story.excluded = excluded === true;
+    fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
+
+    const eventType = excluded ? 'story_excluded' : 'story_included';
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
+    ).run(eventType, workspaceId, specId, storyId, JSON.stringify({ excluded: story.excluded }));
+
+    broadcastAll({
+      id: walResult.lastInsertRowid as number,
+      ts: new Date().toISOString(),
+      event_type: eventType,
+      workspace_id: workspaceId as string,
+      spec_id: specId as string,
+      story_id: storyId as string,
+      actor: 'api',
+      payload: JSON.stringify({ excluded: story.excluded }),
+    });
+
+    res.json({ ok: true, story });
+  } catch (error: any) {
+    console.error('[Specs] Toggle exclude error:', error);
     res.status(500).json({ error: error.message });
   }
 });
