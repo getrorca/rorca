@@ -1,17 +1,18 @@
-import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss } from 'lucide-react';
+import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity';
+export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity';
 
 const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
-  { id: 'forge',     label: 'Spec Forge',       icon: Wand2     },
-  { id: 'stack',     label: 'Direction Stack',   icon: Layers    },
-  { id: 'queue',     label: 'Review Queue',      icon: ListChecks},
-  { id: 'pipeline',  label: 'Pipeline Monitor',  icon: Activity  },
-  { id: 'worktrees', label: 'Worktree Manager',  icon: GitBranch },
-  { id: 'compare',   label: 'Compare Runs',       icon: ArrowLeftRight },
-  { id: 'archive',   label: 'Archive',           icon: Archive   },
-  { id: 'activity',  label: 'Activity Feed',     icon: Rss       },
-  { id: 'github',    label: 'GitHub',            icon: Github    },
+  { id: 'forge',           label: 'Spec Forge',         icon: Wand2          },
+  { id: 'stack',           label: 'Direction Stack',     icon: Layers         },
+  { id: 'team-direction',  label: 'Team Direction',      icon: Users          },
+  { id: 'queue',           label: 'Review Queue',        icon: ListChecks     },
+  { id: 'pipeline',        label: 'Pipeline Monitor',    icon: Activity       },
+  { id: 'worktrees',       label: 'Worktree Manager',    icon: GitBranch      },
+  { id: 'compare',         label: 'Compare Runs',        icon: ArrowLeftRight },
+  { id: 'archive',         label: 'Archive',             icon: Archive        },
+  { id: 'activity',        label: 'Activity Feed',       icon: Rss            },
+  { id: 'github',          label: 'GitHub',              icon: Github         },
 ];
 
 interface SidebarProps {
