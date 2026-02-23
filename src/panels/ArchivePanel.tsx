@@ -13,6 +13,7 @@ import {
   ChevronRight,
   Play,
   GitBranch,
+  GitFork,
   Loader2,
   Plus,
   Sparkles,
@@ -48,6 +49,7 @@ interface ArchiveSpec {
   branchName?: string;
   readinessPercent?: number;
   tags: string[];
+  forkedFrom?: string;
 }
 
 interface ArchiveResponse {
@@ -413,6 +415,12 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                           {spec.branchName.replace('feat/', '')}
                         </span>
                       )}
+                      {spec.forkedFrom && (
+                        <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 border border-accent/20 text-accent font-mono">
+                          <GitFork className="w-2.5 h-2.5" />
+                          {spec.forkedFrom}
+                        </span>
+                      )}
                     </div>
 
                     {/* Tags */}
@@ -517,6 +525,9 @@ function SpecPreviewDrawer({
   const [addCount, setAddCount] = useState(3);
   const [addBrief, setAddBrief] = useState('');
   const [addError, setAddError] = useState('');
+  const [forkState, setForkState] = useState<'idle' | 'forking' | 'done' | 'error'>('idle');
+  const [forkError, setForkError] = useState('');
+  const [forkId, setForkId] = useState('');
   const [localStories, setLocalStories] = useState<Story[]>([]);
 
   // Sync localStories when spec detail loads or changes
@@ -621,6 +632,30 @@ function SpecPreviewDrawer({
     a.download = `${specId}.json`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleFork = async () => {
+    if (!workspaceId || !summary) return;
+    setForkState('forking');
+    setForkError('');
+    try {
+      const res = await apiFetch<{ ok: boolean; forkId: string }>(
+        `/api/specs/${summary.id}/fork`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        }
+      );
+      if (res.ok) {
+        setForkId(res.forkId);
+        setForkState('done');
+        setTimeout(() => setForkState('idle'), 3000);
+      }
+    } catch (err) {
+      setForkError(err instanceof Error ? err.message : 'Failed to fork spec');
+      setForkState('error');
+    }
   };
 
   const cfg = summary ? STATUS_CONFIG[summary.status] : null;
@@ -872,6 +907,29 @@ function SpecPreviewDrawer({
               <Download size={14} />
               Export JSON
             </button>
+
+            {/* Fork Spec */}
+            {forkState === 'done' ? (
+              <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30">
+                <Check size={14} />
+                Forked as {forkId}
+              </div>
+            ) : (
+              <button
+                onClick={handleFork}
+                disabled={forkState === 'forking'}
+                className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors disabled:opacity-60"
+              >
+                {forkState === 'forking' ? (
+                  <><Loader2 size={14} className="animate-spin" /> Forking...</>
+                ) : (
+                  <><GitFork size={14} /> Fork Spec</>
+                )}
+              </button>
+            )}
+            {forkState === 'error' && (
+              <p className="text-xs text-error">{forkError}</p>
+            )}
           </div>
         )}
       </div>
