@@ -375,7 +375,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
       '',
       'JSON schema:',
-      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"]}]${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"]}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
       wantDiagrams ? diagramSchema : '',
       '',
       `Rules:`,
@@ -384,6 +384,9 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
       '- Stories should be concrete and implementable, not vague',
       '- Your entire response must be valid JSON parseable by JSON.parse()',
+      '- Include a "mermaidDiagram" field: a valid Mermaid flowchart (graph TD) showing story dependency relationships',
+      '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
+      '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ].join('\n');
 
     // 8. Call LLM with selected model
@@ -392,7 +395,7 @@ router.post('/generate', async (req: Request, res: Response) => {
     const tokenUsage = llmResult.usage;
 
     // 9. Parse JSON — strip markdown fences and preamble text if present
-    let parsed: { stories: unknown[]; diagrams?: Record<string, unknown> };
+    let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
     try {
       // Extract JSON from ```json ... ``` code block if present
       const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -413,6 +416,11 @@ router.post('/generate', async (req: Request, res: Response) => {
 
     // 11. Generate algorithmic diagrams
     const algorithmicDiagrams = generateDiagramBundle(parsed.stories as any, diagramTypes || []);
+
+    // 11b. Resolve mermaidDiagram: prefer LLM-generated, fall back to algorithmic storyDeps
+    const mermaidDiagram = (typeof parsed.mermaidDiagram === 'string' && parsed.mermaidDiagram.trim())
+      ? parsed.mermaidDiagram
+      : algorithmicDiagrams.storyDeps?.mermaid || '';
 
     // 12. Merge diagrams (algorithmic overwrites LLM for storyDeps)
     const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
@@ -455,6 +463,7 @@ router.post('/generate', async (req: Request, res: Response) => {
         title,
         stories: parsed.stories as any,
         diagrams: allDiagrams as any,
+        mermaidDiagram: mermaidDiagram || undefined,
         model: resolvedModel,
       });
       specPath = writeResult.specPath;
@@ -470,6 +479,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       title,
       stories: parsed.stories,
       diagrams: allDiagrams,
+      mermaidDiagram,
       provider,
       model,
       usage: tokenUsage,
@@ -1325,6 +1335,12 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
     const newStories = parsed.stories;
     specContent.userStories = [...existingStories, ...newStories];
+
+    // Regenerate mermaidDiagram with all stories
+    const { generateStoryDepsDiagram } = await import('../lib/diagram-generator');
+    const depsDiagram = generateStoryDepsDiagram(specContent.userStories);
+    specContent.mermaidDiagram = depsDiagram.mermaid;
+
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
     res.json({ ok: true, addedCount: newStories.length, stories: newStories });
