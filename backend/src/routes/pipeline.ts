@@ -47,6 +47,7 @@ interface PipelineRunRow {
   pid: number | null;
   branch_name: string | null;
   worktree_path: string | null;
+  trigger_type: string;
   started_at: string;
   finished_at: string | null;
 }
@@ -67,7 +68,7 @@ interface StoryResultRow {
 
 router.post('/trigger', async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, dryRun } = req.body;
+    const { specPath, workspaceId, autoWorktree, dryRun, triggerType } = req.body;
 
     if (!specPath || !workspaceId) {
       res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
@@ -152,9 +153,10 @@ router.post('/trigger', async (req: Request, res: Response) => {
     }
 
     // 6. Create pipeline_runs record
+    const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     const runResult = db.prepare(
-      `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES (?, ?, 'running')`
-    ).run(specPath, workspaceId);
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES (?, ?, 'running', ?)`
+    ).run(specPath, workspaceId, validTriggerType);
     const runId = runResult.lastInsertRowid as number;
 
     // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
