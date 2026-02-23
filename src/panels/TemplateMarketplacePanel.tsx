@@ -53,7 +53,7 @@ function renderStars(rating: number, interactive: boolean = false, onRate?: (n: 
         >
           <Star
             size={14}
-            className={n <= Math.round(rating) ? 'text-amber-400 fill-amber-400' : 'text-zinc-600'}
+            className={n <= Math.round(rating) ? 'text-amber-400 fill-amber-400' : 'text-muted'}
           />
         </button>
       ))}
@@ -153,7 +153,7 @@ export default function TemplateMarketplacePanel() {
               className={`px-2.5 py-1 text-xs rounded-full transition-colors capitalize ${
                 scopeFilter === scope
                   ? 'bg-accent text-white'
-                  : 'bg-zinc-800 text-muted hover:text-[var(--text)]'
+                  : 'bg-bg text-muted hover:text-[var(--text)]'
               }`}
             >
               {scope}
@@ -256,7 +256,7 @@ export default function TemplateMarketplacePanel() {
               {/* Brief */}
               <div className="mb-4">
                 <h3 className="text-xs font-medium text-muted uppercase mb-1">Brief</h3>
-                <p className="text-sm text-[var(--text)] bg-zinc-800/50 rounded p-3">{detail.brief}</p>
+                <p className="text-sm text-[var(--text)] bg-bg rounded p-3">{detail.brief}</p>
               </div>
 
               {/* Story structure */}
@@ -351,7 +351,7 @@ function TemplateCard({
         {template.teamId ? (
           <span className="ml-auto px-1.5 py-0.5 text-[10px] rounded bg-blue-500/20 text-blue-400">team</span>
         ) : (
-          <span className="ml-auto px-1.5 py-0.5 text-[10px] rounded bg-zinc-700 text-zinc-400">personal</span>
+          <span className="ml-auto px-1.5 py-0.5 text-[10px] rounded bg-border text-muted">personal</span>
         )}
       </div>
     </button>
