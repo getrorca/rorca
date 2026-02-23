@@ -2,7 +2,7 @@ import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight
 
 export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion';
 
-const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
+export const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'forge',           label: 'Spec Forge',         icon: Wand2          },
   { id: 'stack',           label: 'Direction Stack',     icon: Layers         },
   { id: 'team-direction',  label: 'Team Direction',      icon: Users          },
