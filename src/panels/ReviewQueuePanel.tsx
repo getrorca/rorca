@@ -30,6 +30,7 @@ interface SpecDetail {
   userStories?: Story[];
   stories?: Story[];
   diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
+  model?: string;
   [key: string]: unknown;
 }
 
@@ -382,10 +383,17 @@ function SpecPreview({
       {/* Header */}
       <div className="px-4 py-3 border-b border-border shrink-0">
         <h3 className="text-base font-mono font-semibold text-text">{summary.specName}</h3>
-        <p className="text-xs text-muted mt-0.5 flex items-center gap-1">
-          <Clock size={10} />
-          Generated {relativeTime(summary.generatedAt)}
-        </p>
+        <div className="flex items-center gap-3 mt-0.5">
+          <p className="text-xs text-muted flex items-center gap-1">
+            <Clock size={10} />
+            Generated {relativeTime(summary.generatedAt)}
+          </p>
+          {spec.model && (
+            <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-panel border border-border text-muted">
+              {spec.model}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Tab strip */}

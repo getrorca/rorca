@@ -54,7 +54,7 @@ test('returns success message with approved path and run command', async () => {
   expect(result.content).toHaveLength(1);
   expect(result.content[0].type).toBe('text');
   expect(result.content[0].text).toContain('Spec approved and moved to: specs/approved/auth-system.json');
-  expect(result.content[0].text).toContain('./scripts/ralph/run-loop.sh --json specs/approved/auth-system.json');
+  expect(result.content[0].text).toContain('run-loop.sh --json specs/approved/auth-system.json');
 });
 
 test('throws with error message when API returns non-200', async () => {

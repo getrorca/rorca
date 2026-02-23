@@ -14,6 +14,8 @@ import {
   Play,
   GitBranch,
   Loader2,
+  Plus,
+  Sparkles,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -37,6 +39,8 @@ interface ArchiveSpec {
   rejectedAt?: string;
   rejectReason?: string;
   storyTitles: string[];
+  repoName?: string;
+  branchName?: string;
 }
 
 interface ArchiveResponse {
@@ -352,9 +356,22 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                       </div>
                     </div>
 
-                    {/* Row 2: spec name */}
-                    <div className="text-sm font-mono font-semibold text-text truncate mb-1">
-                      {spec.specName}
+                    {/* Row 2: spec name + repo badge + branch badge */}
+                    <div className="flex items-center gap-2 mb-1 min-w-0">
+                      <span className="text-sm font-mono font-semibold text-text truncate">
+                        {spec.specName}
+                      </span>
+                      {spec.repoName && (
+                        <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted font-mono">
+                          {spec.repoName}
+                        </span>
+                      )}
+                      {spec.branchName && (
+                        <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted font-mono">
+                          <GitBranch className="w-2.5 h-2.5" />
+                          {spec.branchName.replace('feat/', '')}
+                        </span>
+                      )}
                     </div>
 
                     {/* Row 3: first 2 story titles */}
@@ -436,6 +453,34 @@ function SpecPreviewDrawer({
   const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
   const [runState, setRunState] = useState<RunState>('idle');
   const [runError, setRunError] = useState('');
+  const [addState, setAddState] = useState<'idle' | 'form' | 'generating' | 'done' | 'error'>('idle');
+  const [addCount, setAddCount] = useState(3);
+  const [addBrief, setAddBrief] = useState('');
+  const [addError, setAddError] = useState('');
+
+  const handleAddStories = async () => {
+    if (!workspaceId || !summary) return;
+    setAddState('generating');
+    setAddError('');
+    try {
+      const res = await apiFetch<{ ok: boolean; addedCount: number }>(
+        `/api/specs/${summary.id}/add-stories`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId, count: addCount, brief: addBrief || undefined }),
+        }
+      );
+      if (res.ok) {
+        setAddState('done');
+        setAddBrief('');
+        setTimeout(() => setAddState('idle'), 3000);
+      }
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : 'Failed to generate stories');
+      setAddState('error');
+    }
+  };
 
   const handleRun = async (autoWorktree = false) => {
     if (!workspaceId || !summary) return;
@@ -634,6 +679,73 @@ function SpecPreviewDrawer({
                 )}
                 {runState === 'error' && (
                   <p className="text-xs text-error mt-1">{runError}</p>
+                )}
+              </div>
+            )}
+
+            {/* Add Stories — approved specs only */}
+            {summary?.status === 'approved' && (
+              <div>
+                {addState === 'idle' && (
+                  <button
+                    onClick={() => setAddState('form')}
+                    className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors"
+                  >
+                    <Plus size={14} />
+                    Add More Stories
+                  </button>
+                )}
+                {addState === 'form' && (
+                  <div className="rounded border border-border bg-panel p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-muted shrink-0">Stories to add</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={addCount}
+                        onChange={e => setAddCount(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+                        className="w-16 px-2 py-1 text-xs font-mono rounded border border-border bg-bg text-text text-center"
+                      />
+                    </div>
+                    <textarea
+                      placeholder="Optional: describe what to focus on..."
+                      value={addBrief}
+                      onChange={e => setAddBrief(e.target.value)}
+                      rows={2}
+                      className="w-full px-2 py-1.5 text-xs rounded border border-border bg-bg text-text resize-none placeholder:text-muted"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleAddStories}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 transition-opacity"
+                      >
+                        <Sparkles size={12} />
+                        Generate
+                      </button>
+                      <button
+                        onClick={() => { setAddState('idle'); setAddBrief(''); }}
+                        className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {addState === 'generating' && (
+                  <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-muted">
+                    <Loader2 size={14} className="animate-spin" />
+                    Generating stories...
+                  </div>
+                )}
+                {addState === 'done' && (
+                  <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30">
+                    <Check size={14} />
+                    Stories added — reload to see them
+                  </div>
+                )}
+                {addState === 'error' && (
+                  <p className="text-xs text-error">{addError}</p>
                 )}
               </div>
             )}

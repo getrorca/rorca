@@ -16,6 +16,15 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
 
 const router = Router();
 
+// ─── In-memory output buffers (runId → live stdout/stderr stream) ─────────────
+// Chunks are raw text (with ANSI codes). Late-joiners get full buffer replay.
+interface OutputBuffer {
+  chunks: string[];
+  done: boolean;
+  subscribers: Set<(chunk: string) => void>;
+}
+const outputBuffers = new Map<number, OutputBuffer>();
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface PipelineRunRow {
@@ -24,6 +33,8 @@ interface PipelineRunRow {
   workspace_id: string;
   status: string;
   pid: number | null;
+  branch_name: string | null;
+  worktree_path: string | null;
   started_at: string;
   finished_at: string | null;
 }
@@ -117,12 +128,25 @@ router.post('/trigger', async (req: Request, res: Response) => {
       env,
     });
 
-    // 9. Store PID
+    // 9. Store PID + branch info
     if (child.pid) {
-      db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, runId);
+      db.prepare(`UPDATE pipeline_runs SET pid = ?, branch_name = ?, worktree_path = ? WHERE id = ?`)
+        .run(child.pid, branchName, worktreePath, runId);
     }
 
-    // 10. Update status when process exits
+    // 10. Set up in-memory output buffer (streams stdout+stderr to xterm.js in browser)
+    const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
+    outputBuffers.set(runId, buf);
+
+    const onData = (data: Buffer) => {
+      const text = data.toString('utf8');
+      buf.chunks.push(text);
+      buf.subscribers.forEach(cb => cb(text));
+    };
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
+
+    // 11. Update status when process exits
     child.on('close', (code) => {
       const status = code === 0 ? 'done' : 'failed';
       db.prepare(
@@ -137,6 +161,12 @@ router.post('/trigger', async (req: Request, res: Response) => {
         walResult.lastInsertRowid
       ) as WalEvent;
       broadcastAll(walEvent);
+
+      // Mark buffer done; notify subscribers; clean up after 30 min
+      buf.done = true;
+      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
+      buf.subscribers.clear();
+      setTimeout(() => outputBuffers.delete(runId), 30 * 60 * 1000);
     });
 
     res.status(201).json({ ok: true, runId, worktreePath, branchName });
@@ -235,6 +265,61 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
     console.error('[Pipeline] Get run error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
+// Streams raw stdout/stderr (with ANSI codes) to xterm.js on the frontend.
+// Late-joiners receive a full replay of buffered chunks, then live updates.
+
+router.get('/runs/:runId/output', (req: Request, res: Response) => {
+  const runId = parseInt(String(req.params.runId), 10);
+  if (isNaN(runId)) {
+    res.status(400).json({ error: 'Invalid runId' });
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(': connected\n\n');
+
+  const buf = outputBuffers.get(runId);
+
+  if (!buf) {
+    // Run not in memory (already finished or started before this server process)
+    res.write('event: done\ndata: \n\n');
+    res.end();
+    return;
+  }
+
+  // Replay buffered output
+  for (const chunk of buf.chunks) {
+    const encoded = Buffer.from(chunk).toString('base64');
+    res.write(`event: chunk\ndata: ${encoded}\n\n`);
+  }
+
+  if (buf.done) {
+    res.write('event: done\ndata: \n\n');
+    res.end();
+    return;
+  }
+
+  // Subscribe to live output
+  const onChunk = (chunk: string) => {
+    const encoded = Buffer.from(chunk).toString('base64');
+    res.write(`event: chunk\ndata: ${encoded}\n\n`);
+  };
+  buf.subscribers.add(onChunk);
+
+  // Heartbeat to keep connection alive
+  const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
+
+  req.on('close', () => {
+    buf.subscribers.delete(onChunk);
+    clearInterval(hb);
+  });
 });
 
 // ─── GET /api/pipeline/stream — SSE event stream ─────────────────────────────

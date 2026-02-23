@@ -49,24 +49,30 @@ server.registerTool(
       title: z.string().describe('Short title for the spec (used as filename slug)'),
       storyCount: z.number().min(1).max(500).optional().default(8).describe('Target number of user stories (default 8)'),
       includeDiagrams: z.boolean().optional().default(true).describe('Whether to include Mermaid and ASCII diagrams in output'),
+      model: z.enum(['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001']).optional().describe('LLM model to use for generation. If omitted, uses workspace default or claude-sonnet-4-5-20250929.'),
     },
   },
-  async ({ workspaceId, specBrief, title, storyCount, includeDiagrams }) => {
+  async ({ workspaceId, specBrief, title, storyCount, includeDiagrams, model }) => {
     const resolvedStoryCount = storyCount ?? 8;
     const resolvedIncludeDiagrams = includeDiagrams ?? true;
     const res = await fetch(`${RORCHA_API}/api/specs/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspaceId, specBrief, title, storyCount: resolvedStoryCount, includeDiagrams: resolvedIncludeDiagrams }),
+      body: JSON.stringify({
+        workspaceId, specBrief, title,
+        storyCount: resolvedStoryCount,
+        includeDiagrams: resolvedIncludeDiagrams,
+        ...(model ? { model } : {}),
+      }),
     });
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Spec generation failed (${res.status}): ${err}`);
     }
-    const spec = await res.json();
+    const spec = await res.json() as { model?: string; usage?: { inputTokens?: number; outputTokens?: number } };
     return {
       content: [
-        { type: 'text' as const, text: `Generated spec: ${title}\n\n${JSON.stringify(spec, null, 2)}` }
+        { type: 'text' as const, text: `Generated spec: ${title}\nModel: ${spec.model ?? 'unknown'}\nTokens: ${spec.usage?.inputTokens ?? 0} in / ${spec.usage?.outputTokens ?? 0} out\n\n${JSON.stringify(spec, null, 2)}` }
       ]
     };
   }

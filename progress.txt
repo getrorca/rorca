@@ -42,3 +42,45 @@ Key decisions:
 - When templateId is provided to generate, it adds the template as context before the task instructions, not as a hard constraint — LLM adapts the pattern to the new brief
 - If templateId references a nonexistent template, generation proceeds normally without template context (graceful degradation)
 - Updated db.test.ts to expect 8 tables instead of 7
+
+## Story US-003: LLM Model Selection for Spec Generation — DONE
+Files touched:
+- backend/src/lib/llm-client.ts (rewritten — ChatResult return type, model param, --output-format json)
+- backend/src/routes/specs.ts (modified — model param, validation, resolution chain, usage tracking)
+- backend/src/routes/direction.ts (modified — preferredModel for L3, GET /models endpoint)
+- backend/src/lib/spec-writer.ts (modified — model + generatedAt in spec JSON)
+- backend/src/db/index.ts (modified — idempotent preferred_model column addition)
+- backend/src/db/migrations/005_model_selection.sql (new — no-op marker)
+- backend/src/mcp/server.ts (modified — model param on rorcha_generate_spec tool)
+- backend/src/lib/context-extractor.ts (modified — .text accessor for ChatResult)
+- backend/src/lib/git-hydrator.ts (modified — .text accessor for ChatResult, 2 call sites)
+- backend/src/routes/context.ts (modified — .text accessor for ChatResult)
+- src/panels/ReviewQueuePanel.tsx (modified — model badge display)
+- src/panels/SpecForgePanelPage.tsx (modified — model selector dropdown, fetches models + workspace default)
+- backend/src/routes/__tests__/specs.test.ts (modified — 5 new US-003 tests, mock updates)
+- backend/src/routes/__tests__/direction.test.ts (modified — 4 new tests for preferredModel + models endpoint)
+- backend/src/routes/__tests__/templates.test.ts (modified — mock updates for ChatResult)
+- backend/src/lib/__tests__/llm-client.test.ts (rewritten — spawn mocking, ChatResult tests)
+- backend/src/lib/__tests__/git-hydrator.test.ts (modified — mock updates for ChatResult)
+- backend/src/routes/__tests__/context.test.ts (modified — mock updates for ChatResult)
+
+What was built:
+- `chatComplete` rewritten to return `ChatResult { text, usage: { inputTokens, outputTokens } }` instead of plain string
+- Added `SUPPORTED_MODELS`, `SupportedModel` type, `DEFAULT_MODEL`, `isValidModel()` exports to llm-client
+- `POST /api/specs/generate` accepts optional `model` param, validates against SUPPORTED_MODELS
+- Model resolution chain: explicit request param > workspace L3 preferred_model > DEFAULT_MODEL
+- Token usage (inputTokens, outputTokens) returned in generate response and stored in wal_events payload
+- `PUT /api/direction` accepts `preferredModel` for L3 layers, validates and stores in `preferred_model` column
+- `GET /api/direction?layer=3` returns `preferredModel` field
+- `GET /api/direction/models` endpoint returns list of supported models
+- Spec JSON on disk includes `model` and `generatedAt` fields
+- Review queue UI shows model badge next to generation timestamp
+- Spec Forge UI has model selector dropdown populated from API with workspace default pre-selected
+- MCP `rorcha_generate_spec` tool accepts optional model parameter, response includes model and token counts
+
+Key decisions:
+- Complete rewrite of llm-client rather than wrapper — all callers updated to use .text accessor
+- Token usage via `--output-format json` flag on claude CLI, with graceful fallback to zero counts on parse failure
+- preferred_model column added idempotently via pragma table_info check in db/index.ts (SQLite lacks ADD COLUMN IF NOT EXISTS)
+- Migration 005 is a no-op SQL marker; actual schema change in db/index.ts for idempotency
+- Model parameter is optional everywhere — omitting it falls through the resolution chain gracefully

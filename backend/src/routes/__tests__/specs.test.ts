@@ -8,8 +8,12 @@ import request from 'supertest';
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
-  getActiveProvider: jest.fn().mockReturnValue('anthropic'),
-  getActiveModel: jest.fn().mockReturnValue('claude-sonnet-4-6'),
+  getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+  isValidModel: jest.fn().mockImplementation((m: string) =>
+    ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
+  ),
+  DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
 
 let app: Express;
@@ -46,8 +50,12 @@ beforeEach(() => {
   // Keep the mock across resets
   jest.mock('../../lib/llm-client', () => ({
     chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('anthropic'),
-    getActiveModel: jest.fn().mockReturnValue('claude-sonnet-4-6'),
+    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+    isValidModel: jest.fn().mockImplementation((m: string) =>
+      ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
+    ),
+    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-specs-test-'));
@@ -83,7 +91,7 @@ afterEach(() => {
 });
 
 test('POST /api/specs/generate with valid body returns slug, stories, diagrams, provider, model', async () => {
-  mockChatComplete.mockResolvedValue(validLlmResponse);
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
 
   const res = await request(app)
     .post('/api/specs/generate')
@@ -108,8 +116,9 @@ test('POST /api/specs/generate with valid body returns slug, stories, diagrams, 
   expect(res.body.diagrams).toBeDefined();
   expect(res.body.diagrams.storyDeps).toBeDefined();
   expect(res.body.diagrams.storyDeps.mermaid).toContain('US-001');
-  expect(res.body.provider).toBe('anthropic');
-  expect(res.body.model).toBe('claude-sonnet-4-6');
+  expect(res.body.provider).toBe('claude-cli');
+  expect(res.body.model).toBe('claude-sonnet-4-5-20250929');
+  expect(res.body.usage).toEqual({ inputTokens: 100, outputTokens: 200 });
   expect(res.body.specPath).toBeDefined();
   expect(res.body.specPath).toContain('auth-system.json');
   expect(res.body.diagramsPath).toBeDefined();
@@ -117,7 +126,7 @@ test('POST /api/specs/generate with valid body returns slug, stories, diagrams, 
 });
 
 test('LLM returns non-JSON → 500 with error and raw', async () => {
-  mockChatComplete.mockResolvedValue('This is not JSON at all');
+  mockChatComplete.mockResolvedValue({ text: 'This is not JSON at all', usage: { inputTokens: 50, outputTokens: 10 } });
 
   const res = await request(app)
     .post('/api/specs/generate')
@@ -161,7 +170,7 @@ test('workspaceId not in DB → 404', async () => {
 });
 
 test('WAL event inserted with event_type=generate and payload includes provider', async () => {
-  mockChatComplete.mockResolvedValue(validLlmResponse);
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
 
   await request(app)
     .post('/api/specs/generate')
@@ -180,13 +189,15 @@ test('WAL event inserted with event_type=generate and payload includes provider'
   expect(event.event_type).toBe('generate');
   expect(event.spec_id).toBe('wal-test');
   const payload = JSON.parse(event.payload);
-  expect(payload.provider).toBe('anthropic');
-  expect(payload.model).toBe('claude-sonnet-4-6');
+  expect(payload.provider).toBe('claude-cli');
+  expect(payload.model).toBe('claude-sonnet-4-5-20250929');
   expect(payload.storyCount).toBe(2);
+  expect(payload.inputTokens).toBe(100);
+  expect(payload.outputTokens).toBe(200);
 });
 
 test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydrated context', async () => {
-  mockChatComplete.mockResolvedValue(validLlmResponse);
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
 
   // Seed workspace_context with schema + git
   db.prepare(
@@ -214,7 +225,7 @@ test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydr
 });
 
 test('WAL event has hasSchema:false when workspace has no hydrated context', async () => {
-  mockChatComplete.mockResolvedValue(validLlmResponse);
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
 
   // No workspace_context seeded — should gracefully default to false
 
@@ -238,7 +249,7 @@ test('WAL event has hasSchema:false when workspace has no hydrated context', asy
 });
 
 test('POST /api/specs/generate with existing slug snapshots old version and succeeds', async () => {
-  mockChatComplete.mockResolvedValue(validLlmResponse);
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
 
   // First call succeeds
   const res1 = await request(app)
@@ -272,6 +283,116 @@ test('POST /api/specs/generate with existing slug snapshots old version and succ
   expect(version!.status).toBe('pending');
   const content = JSON.parse(version!.content_json);
   expect(content.title).toBe('Duplicate Check');
+});
+
+// ─── US-003: Model Selection ──────────────────────────────────────────────────
+
+test('POST /api/specs/generate with explicit model uses that model', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 50, outputTokens: 100 } });
+
+  const res = await request(app)
+    .post('/api/specs/generate')
+    .send({
+      workspaceId: 'ws-test',
+      title: 'Model Test',
+      brief: 'Test model selection',
+      model: 'claude-opus-4-6',
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.model).toBe('claude-opus-4-6');
+  expect(res.body.usage).toEqual({ inputTokens: 50, outputTokens: 100 });
+
+  // chatComplete should have been called with the model
+  expect(mockChatComplete).toHaveBeenCalledWith(
+    expect.any(Array),
+    'claude-opus-4-6',
+  );
+});
+
+test('POST /api/specs/generate with invalid model returns 400', async () => {
+  const res = await request(app)
+    .post('/api/specs/generate')
+    .send({
+      workspaceId: 'ws-test',
+      title: 'Bad Model',
+      brief: 'Test bad model',
+      model: 'gpt-4o',
+    });
+
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain('Invalid model');
+  expect(res.body.error).toContain('gpt-4o');
+});
+
+test('POST /api/specs/generate without model uses workspace L3 preferred_model', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
+
+  // Set workspace L3 preferred_model
+  db.prepare(`
+    INSERT INTO direction_layers (layer, workspace_id, content_yaml, preferred_model, updated_at)
+    VALUES (3, 'ws-test', 'project: test', 'claude-haiku-4-5-20251001', datetime('now'))
+  `).run();
+
+  const res = await request(app)
+    .post('/api/specs/generate')
+    .send({
+      workspaceId: 'ws-test',
+      title: 'Default Model Test',
+      brief: 'Test default model from L3',
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.model).toBe('claude-haiku-4-5-20251001');
+  expect(mockChatComplete).toHaveBeenCalledWith(
+    expect.any(Array),
+    'claude-haiku-4-5-20251001',
+  );
+});
+
+test('POST /api/specs/generate with explicit model overrides workspace default', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
+
+  // Set workspace L3 preferred_model
+  db.prepare(`
+    INSERT INTO direction_layers (layer, workspace_id, content_yaml, preferred_model, updated_at)
+    VALUES (3, 'ws-test', 'project: test', 'claude-haiku-4-5-20251001', datetime('now'))
+    ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
+    DO UPDATE SET preferred_model = 'claude-haiku-4-5-20251001'
+  `).run();
+
+  const res = await request(app)
+    .post('/api/specs/generate')
+    .send({
+      workspaceId: 'ws-test',
+      title: 'Override Model Test',
+      brief: 'Test explicit model overrides workspace',
+      model: 'claude-opus-4-6',
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.model).toBe('claude-opus-4-6');
+});
+
+test('WAL event payload includes token usage', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 500, outputTokens: 1000 } });
+
+  await request(app)
+    .post('/api/specs/generate')
+    .send({
+      workspaceId: 'ws-test',
+      title: 'Token Usage Test',
+      brief: 'Test token tracking',
+    });
+
+  const event = db.prepare(
+    "SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'token-usage-test'"
+  ).get() as { payload: string };
+
+  expect(event).toBeDefined();
+  const payload = JSON.parse(event.payload);
+  expect(payload.inputTokens).toBe(500);
+  expect(payload.outputTokens).toBe(1000);
 });
 
 // ─── R-001: List / Approve / Reject / Get Detail ──────────────────────────────

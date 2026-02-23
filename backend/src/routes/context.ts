@@ -83,8 +83,8 @@ router.post('/upload', upload.array('files'), async (req: Request, res: Response
 
     const rawInput = await combineMultiSources(sources);
     const prompt = buildExtractionPrompt(rawInput, targetLayer);
-    const llmResponse = await chatComplete([{ role: 'user', content: prompt }]);
-    const parsed = parseExtractionResponse(llmResponse);
+    const llmResult = await chatComplete([{ role: 'user', content: prompt }]);
+    const parsed = parseExtractionResponse(llmResult.text);
 
     res.json({
       yaml: parsed.yaml,

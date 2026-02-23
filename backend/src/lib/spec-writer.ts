@@ -19,6 +19,7 @@ export interface GeneratedSpec {
   slug: string;
   stories: GeneratedStory[];
   diagrams: Record<string, DiagramOutput>;
+  model?: string;
 }
 
 export interface WriteResult {
@@ -38,8 +39,10 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
   fs.mkdirSync(pendingDir, { recursive: true });
 
   // Write spec in run-loop.sh compatible format
-  const specJson = {
+  const specJson: Record<string, unknown> = {
     title: spec.title,
+    generatedAt: new Date().toISOString(),
+    ...(spec.model ? { model: spec.model } : {}),
     userStories: spec.stories.map(s => ({
       id: s.id,
       title: s.title,

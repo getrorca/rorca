@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
@@ -16,6 +16,27 @@ export default function SpecForgePanelPage() {
   const [specName, setSpecName] = useState('');
   const [specNameError, setSpecNameError] = useState('');
   const [domain, setDomain] = useState('');
+
+  // Model selection
+  const [availableModels, setAvailableModels] = useState<{ id: string; label: string }[]>([]);
+  const [selectedModel, setSelectedModel] = useState('');
+  const [workspaceDefaultModel, setWorkspaceDefaultModel] = useState<string | null>(null);
+
+  // Fetch available models + workspace default
+  useEffect(() => {
+    apiFetch<{ models: { id: string; label: string }[] }>('/api/direction/models')
+      .then(data => setAvailableModels(data.models))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<{ preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`)
+      .then(data => {
+        setWorkspaceDefaultModel(data.preferredModel ?? null);
+      })
+      .catch(() => {});
+  }, [workspaceId]);
 
   // Section 2: Direction Stack Overrides
   const [overridesOpen, setOverridesOpen] = useState(false);
@@ -86,6 +107,7 @@ export default function SpecForgePanelPage() {
           diagramType: includeDiagram ? diagramType : undefined,
           outputFormat,
           specBrief,
+          model: selectedModel || undefined,
         }),
       });
       setGeneratedSpec(result);
@@ -193,6 +215,25 @@ export default function SpecForgePanelPage() {
                 Spec Parameters
               </h3>
               <div className="space-y-4">
+                <Field label="LLM Model">
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors"
+                  >
+                    <option value="">
+                      {workspaceDefaultModel
+                        ? `Workspace default (${workspaceDefaultModel})`
+                        : 'Default (claude-sonnet-4-5-20250929)'}
+                    </option>
+                    {availableModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.id}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+
                 <div className="flex gap-4">
                   <Field label="Story Count" className="w-28">
                     <input

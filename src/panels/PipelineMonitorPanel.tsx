@@ -1,9 +1,12 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Play, Terminal, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
+import { Play, Terminal, ChevronDown, ChevronRight, Copy, Check, List } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
+import RunTerminal from '../components/RunTerminal';
+
+type DetailTab = 'stories' | 'terminal';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -151,6 +154,7 @@ export default function PipelineMonitorPanel() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
   const [showStartHelp, setShowStartHelp] = useState(false);
+  const [detailTab, setDetailTab] = useState<DetailTab>('terminal');
 
   // SSE for live updates
   const sseEvents = usePipelineSSE(selectedRunId ? String(selectedRunId) : null);
@@ -387,69 +391,117 @@ export default function PipelineMonitorPanel() {
               </div>
             </div>
 
-            {/* Progress bar */}
-            {totalCount > 0 && (
-              <div className="px-4 py-2 border-b border-[var(--border)]">
-                <div className="flex items-center justify-between text-xs text-[var(--text-muted)] mb-1">
-                  <span>{completedCount}/{totalCount} stories complete</span>
-                  <span>{progressPct}%</span>
-                </div>
-                <div className="h-1.5 bg-[var(--border)] rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-[var(--accent)] rounded-full transition-all duration-300"
-                    style={{ width: `${progressPct}%` }}
-                  />
-                </div>
+            {/* Tab bar: Stories | Terminal */}
+            <div className="flex border-b border-[var(--border)] shrink-0">
+              <button
+                onClick={() => setDetailTab('terminal')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  detailTab === 'terminal'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                }`}
+              >
+                <Terminal className="w-3.5 h-3.5" />
+                Terminal
+              </button>
+              <button
+                onClick={() => setDetailTab('stories')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  detailTab === 'stories'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                }`}
+              >
+                <List className="w-3.5 h-3.5" />
+                Stories
+                {totalCount > 0 && (
+                  <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
+                    {completedCount}/{totalCount}
+                  </span>
+                )}
+              </button>
+            </div>
+
+            {/* Terminal tab — xterm.js live output */}
+            {detailTab === 'terminal' && (
+              <div className="flex-1 min-h-0 overflow-hidden">
+                {selectedRunId ? (
+                  <RunTerminal key={selectedRunId} runId={selectedRunId} />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                    Select a run to view output
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Story list */}
-            <div className="flex-1 overflow-y-auto">
-              {derivedStories.length === 0 ? (
-                <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-                  Waiting for stories...
-                </div>
-              ) : (
-                derivedStories.map((story) => (
-                  <div key={story.storyId}>
-                    <button
-                      onClick={() => handleStoryExpand(story.storyId)}
-                      className="w-full text-left px-4 py-2 border-b border-[var(--border)] hover:bg-[var(--surface)] transition-colors flex items-center gap-3"
-                    >
-                      <span className="w-4 text-center flex-shrink-0">
-                        {expandedStory === story.storyId ? (
-                          <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                        ) : (
-                          <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                        )}
-                      </span>
-                      <span className="font-mono text-xs text-[var(--text-muted)] w-16 flex-shrink-0">
-                        {story.storyId}
-                      </span>
-                      <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
-                      <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
-                        {story.status}
-                      </span>
-                      <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
-                        {story.elapsed && `(${story.elapsed})`}
-                      </span>
-                      <span className="text-sm truncate min-w-0">{story.title}</span>
-                    </button>
-
-                    {/* Expanded log tail */}
-                    {expandedStory === story.storyId && (
-                      <div className="border-b border-[var(--border)] bg-[var(--bg)]">
-                        <div className="max-h-64 overflow-y-auto p-3">
-                          <pre className="text-xs font-mono text-[var(--text-muted)] whitespace-pre-wrap break-all leading-relaxed">
-                            {logLines.length > 0 ? logLines.join('\n') : '(Loading...)'}
-                          </pre>
-                        </div>
-                      </div>
-                    )}
+            {/* Stories tab */}
+            {detailTab === 'stories' && (
+              <>
+                {/* Progress bar */}
+                {totalCount > 0 && (
+                  <div className="px-4 py-2 border-b border-[var(--border)] shrink-0">
+                    <div className="flex items-center justify-between text-xs text-[var(--text-muted)] mb-1">
+                      <span>{completedCount}/{totalCount} stories complete</span>
+                      <span>{progressPct}%</span>
+                    </div>
+                    <div className="h-1.5 bg-[var(--border)] rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--accent)] rounded-full transition-all duration-300"
+                        style={{ width: `${progressPct}%` }}
+                      />
+                    </div>
                   </div>
-                ))
-              )}
-            </div>
+                )}
+
+                <div className="flex-1 overflow-y-auto">
+                  {derivedStories.length === 0 ? (
+                    <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                      Waiting for stories...
+                    </div>
+                  ) : (
+                    derivedStories.map((story) => (
+                      <div key={story.storyId}>
+                        <button
+                          onClick={() => handleStoryExpand(story.storyId)}
+                          className="w-full text-left px-4 py-2 border-b border-[var(--border)] hover:bg-[var(--surface)] transition-colors flex items-center gap-3"
+                        >
+                          <span className="w-4 text-center flex-shrink-0">
+                            {expandedStory === story.storyId ? (
+                              <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                            ) : (
+                              <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                            )}
+                          </span>
+                          <span className="font-mono text-xs text-[var(--text-muted)] w-16 flex-shrink-0">
+                            {story.storyId}
+                          </span>
+                          <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
+                          <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
+                            {story.status}
+                          </span>
+                          <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
+                            {story.elapsed && `(${story.elapsed})`}
+                          </span>
+                          <span className="text-sm truncate min-w-0">{story.title}</span>
+                        </button>
+
+                        {/* Expanded log tail */}
+                        {expandedStory === story.storyId && (
+                          <div className="border-b border-[var(--border)] bg-[var(--bg)]">
+                            <div className="max-h-64 overflow-y-auto p-3">
+                              <pre className="text-xs font-mono text-[var(--text-muted)] whitespace-pre-wrap break-all leading-relaxed">
+                                {logLines.length > 0 ? logLines.join('\n') : '(Loading...)'}
+                              </pre>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
           </>
         )}
       </div>

@@ -397,8 +397,8 @@ export async function extractContext(req: ExtractRequest): Promise<ExtractionRes
   }
 
   const prompt = buildExtractionPrompt(rawInput, req.targetLayer);
-  const llmResponse = await chatComplete([{ role: 'user', content: prompt }]);
-  const parsed = parseExtractionResponse(llmResponse);
+  const llmResult = await chatComplete([{ role: 'user', content: prompt }]);
+  const parsed = parseExtractionResponse(llmResult.text);
 
   return {
     yaml: parsed.yaml,

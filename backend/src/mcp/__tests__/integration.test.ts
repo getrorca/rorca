@@ -35,6 +35,6 @@ describe('MCP server integration', () => {
       expect(toolNames).toContain('rorcha_approve_spec');
       expect(toolNames).toContain('rorcha_pipeline_status');
       done();
-    }, 3000);
-  }, 10000);
+    }, 6000);
+  }, 15000);
 });

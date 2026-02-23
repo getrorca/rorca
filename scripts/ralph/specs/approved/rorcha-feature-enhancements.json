@@ -41,7 +41,8 @@
         "Generation cost estimate (input/output token counts) is returned in the generate response and stored in wal_events payload"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "US-004",
@@ -112,6 +113,60 @@
         "US-003"
       ],
       "passes": false
+    },
+    {
+      "id": "US-009",
+      "title": "Backend Health Check and Diagnostics Endpoint",
+      "description": "Add a /health endpoint that returns backend service status, database connectivity, git availability, and LLM client configuration. This enables monitoring, CI smoke tests, and quick verification that all backend subsystems are operational.",
+      "acceptanceCriteria": [
+        "GET /api/health returns 200 with JSON containing status, uptime, and subsystem checks",
+        "Response includes database connectivity check (SQLite read/write test)",
+        "Response includes git availability check (simple-git version detection)",
+        "Response includes LLM client configuration status (configured models without exposing API keys)",
+        "Endpoint responds within 2 seconds even if a subsystem check fails, returning degraded status for failed checks"
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "US-010",
+      "title": "Command Palette with Fuzzy Search Navigation",
+      "description": "As a developer, I want a global CMD+K command palette that provides instant fuzzy-search access to all specs, actions, and navigation targets so I can operate Rorcha entirely from the keyboard like a power-user IDE.",
+      "acceptanceCriteria": [
+        "CMD+K (or Ctrl+K) opens a floating command palette overlay from any panel with a search input auto-focused",
+        "Palette indexes all navigable targets: specs by title, templates by name, pipeline runs by ID, direction stack layers, and panel names \u2014 returning ranked results within 50ms",
+        "Selecting a spec result navigates to its detail view in the appropriate panel (Archive for approved, Review Queue for pending); selecting a panel name switches to that panel",
+        "Action commands are searchable by keyword (e.g. typing 'generate' surfaces 'Generate New Spec', typing 'approve' surfaces 'Approve Pending Spec') and executing them triggers the corresponding UI action",
+        "Recent selections are persisted to localStorage and displayed as a 'Recent' section when the palette opens with an empty query"
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "US-011",
+      "title": "Inline Story Editor with AI-Powered Rewrite",
+      "description": "As a developer, I want to click on any individual story within a spec and edit its title, description, or acceptance criteria inline \u2014 with an optional AI rewrite assist \u2014 so I can refine generated specs without full regeneration.",
+      "acceptanceCriteria": [
+        "Clicking a story card in Review Queue or Archive enters inline edit mode with contenteditable fields for title, description, and each acceptance criterion",
+        "An 'AI Rewrite' button on each editable field sends the current text plus the spec's direction stack context to the LLM and streams back an improved version that replaces the field content with a visible streaming animation",
+        "PUT /api/specs/:specId/stories/:storyId accepts partial story updates (title, description, acceptanceCriteria) and persists changes without altering other stories in the spec",
+        "Each inline edit creates a version snapshot so the change appears in the spec's version history with a 'manual_edit' change type",
+        "Pressing Escape discards unsaved inline edits and restores the original text; pressing CMD+Enter saves all pending edits on the current story"
+      ],
+      "dependsOn": [
+        "US-001"
+      ]
+    },
+    {
+      "id": "US-012",
+      "title": "Live Activity Feed with Workspace Event Timeline",
+      "description": "As a developer, I want a real-time activity feed that aggregates all workspace events \u2014 spec generations, approvals, rejections, pipeline runs, and direction stack changes \u2014 into a unified chronological timeline so I can see at a glance what happened and when.",
+      "acceptanceCriteria": [
+        "GET /api/activity returns the 50 most recent workspace events with pagination cursor support, each event containing type, actor, timestamp, and a human-readable summary",
+        "The activity feed panel subscribes to the existing SSE stream and prepends new events in real-time without polling or page refresh",
+        "Events are grouped by day with relative timestamps ('2 min ago', 'yesterday') and each event type has a distinct icon and color (green for approvals, red for rejections, blue for generations, orange for pipeline events)",
+        "Clicking an event navigates to the relevant entity: spec detail for spec events, run detail for pipeline events, layer editor for direction stack changes",
+        "GET /api/activity supports a 'type' filter parameter accepting comma-separated event types (spec_generated, spec_approved, spec_rejected, pipeline_started, pipeline_completed, direction_updated) to narrow the feed"
+      ],
+      "dependsOn": []
     }
   ]
 }

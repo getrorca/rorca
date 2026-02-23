@@ -2,6 +2,31 @@ import { spawn } from 'child_process';
 
 export interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface ChatResult {
+  text: string;
+  usage: TokenUsage;
+}
+
+// Supported model IDs — keep in sync with AC for US-003.
+export const SUPPORTED_MODELS = [
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-6',
+  'claude-haiku-4-5-20251001',
+] as const;
+
+export type SupportedModel = typeof SUPPORTED_MODELS[number];
+
+export const DEFAULT_MODEL: SupportedModel = 'claude-sonnet-4-5-20250929';
+
+export function isValidModel(model: string): model is SupportedModel {
+  return (SUPPORTED_MODELS as readonly string[]).includes(model);
+}
+
 // Resolve claude binary — NVM PATH not available in Node child processes.
 // Override via CLAUDE_BIN env var for portability across machines.
 const CLAUDE_BIN = process.env.CLAUDE_BIN ||
@@ -15,7 +40,11 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
   'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
 ];
 
-export function chatComplete(messages: ChatMessage[]): Promise<string> {
+/**
+ * Call the Claude CLI with an optional model override.
+ * Uses --output-format json to capture token usage alongside the response text.
+ */
+export function chatComplete(messages: ChatMessage[], model?: SupportedModel): Promise<ChatResult> {
   const prompt = messages.length === 1
     ? messages[0].content
     : messages.map(m =>
@@ -31,15 +60,17 @@ export function chatComplete(messages: ChatMessage[]): Promise<string> {
   }
 
   return new Promise((resolve, reject) => {
-    // Use spawn (not exec/shell) so the prompt is passed as a raw argv string —
-    // no shell escaping, no special-character issues with $() or backticks.
-    // --dangerously-skip-permissions: required for non-interactive mode.
-    // stdio['ignore',...]: equivalent to < /dev/null, prevents TTY issues.
-    const child = spawn(CLAUDE_BIN, [
+    const args = [
       '--dangerously-skip-permissions',
       '--print',
-      prompt,
-    ], {
+      '--output-format', 'json',
+    ];
+    if (model) {
+      args.push('--model', model);
+    }
+    args.push(prompt);
+
+    const child = spawn(CLAUDE_BIN, args, {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -64,7 +95,20 @@ export function chatComplete(messages: ChatMessage[]): Promise<string> {
         reject(new Error(`claude returned empty output. stderr: ${stderr.slice(0, 300)}`));
         return;
       }
-      resolve(stdout.trim());
+
+      // Parse JSON output to extract text and usage
+      try {
+        const parsed = JSON.parse(stdout.trim());
+        const text = parsed.result ?? parsed.text ?? stdout.trim();
+        const usage: TokenUsage = {
+          inputTokens: parsed.input_tokens ?? parsed.usage?.input_tokens ?? 0,
+          outputTokens: parsed.output_tokens ?? parsed.usage?.output_tokens ?? 0,
+        };
+        resolve({ text: typeof text === 'string' ? text : JSON.stringify(text), usage });
+      } catch {
+        // Fallback: treat entire stdout as plain text (no usage data available)
+        resolve({ text: stdout.trim(), usage: { inputTokens: 0, outputTokens: 0 } });
+      }
     });
   });
 }

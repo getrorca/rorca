@@ -8,8 +8,12 @@ import request from 'supertest';
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
-  getActiveProvider: jest.fn().mockReturnValue('anthropic'),
-  getActiveModel: jest.fn().mockReturnValue('claude-sonnet-4-6'),
+  getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+  isValidModel: jest.fn().mockImplementation((m: string) =>
+    ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
+  ),
+  DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
 
 let app: Express;
@@ -39,8 +43,12 @@ beforeEach(() => {
 
   jest.mock('../../lib/llm-client', () => ({
     chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('anthropic'),
-    getActiveModel: jest.fn().mockReturnValue('claude-sonnet-4-6'),
+    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+    isValidModel: jest.fn().mockImplementation((m: string) =>
+      ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
+    ),
+    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-templates-test-'));
@@ -268,7 +276,7 @@ describe('workspace-agnostic templates', () => {
 
 describe('POST /api/specs/generate with templateId', () => {
   test('includes template context in LLM prompt when templateId is valid', async () => {
-    mockChatComplete.mockResolvedValue(validLlmResponse);
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
     // Seed workspace
     db.prepare(
@@ -304,7 +312,7 @@ describe('POST /api/specs/generate with templateId', () => {
   });
 
   test('generates normally when templateId is not provided', async () => {
-    mockChatComplete.mockResolvedValue(validLlmResponse);
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
     db.prepare(
       "INSERT OR IGNORE INTO workspaces (id, label, path) VALUES ('ws-tpl2', 'TPL WS2', ?)"
@@ -325,7 +333,7 @@ describe('POST /api/specs/generate with templateId', () => {
   });
 
   test('generates normally when templateId does not exist in DB', async () => {
-    mockChatComplete.mockResolvedValue(validLlmResponse);
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
     db.prepare(
       "INSERT OR IGNORE INTO workspaces (id, label, path) VALUES ('ws-tpl3', 'TPL WS3', ?)"
