@@ -19,6 +19,7 @@ import TeamDirectionPanel from './panels/TeamDirectionPanel';
 import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
 import UsageDashboardPanel from './panels/UsageDashboardPanel';
 import CostBreakdownPanel from './panels/CostBreakdownPanel';
+import ModelComparisonPanel from './panels/ModelComparisonPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -87,6 +88,7 @@ function AppContent() {
       {activePanel === 'marketplace' && <TemplateMarketplacePanel />}
       {activePanel === 'usage'     && <UsageDashboardPanel />}
       {activePanel === 'costs'     && <CostBreakdownPanel />}
+      {activePanel === 'models'    && <ModelComparisonPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
     </Shell>
