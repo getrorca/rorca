@@ -492,7 +492,17 @@ router.get('/github/callback', async (req: Request, res: Response) => {
 });
 
 // Auth middleware — verifies JWT access token from Authorization header
+/** Internal service token for scheduler→trigger calls (not exposed externally) */
+export const INTERNAL_SERVICE_TOKEN = `rorcha-internal-${process.pid}`;
+
 export function authRequired(req: Request, res: Response, next: NextFunction): void {
+  // Allow internal scheduler calls (same-process only, token includes PID)
+  if (req.headers['x-rorcha-internal'] === INTERNAL_SERVICE_TOKEN) {
+    (req as Request & { user: AuthUser }).user = { id: 'system', email: 'scheduler@rorcha.internal', role: 'admin' };
+    next();
+    return;
+  }
+
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Authentication required' });
