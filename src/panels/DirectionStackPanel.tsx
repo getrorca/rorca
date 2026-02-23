@@ -3,6 +3,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useDirectionLayer } from '../hooks/useDirectionLayer';
 import { apiFetch } from '../lib/apiFetch';
 import BootstrapContextModal from '../components/BootstrapContextModal';
+import { HelpTooltip } from '../components/HelpTooltip';
 
 type LayerTab = 1 | 2 | 3;
 
@@ -100,13 +101,14 @@ export default function DirectionStackPanel() {
               <button
                 key={n}
                 onClick={() => setActiveTab(n)}
-                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors relative ${
+                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors relative flex items-center justify-center gap-1 ${
                   activeTab === n
                     ? 'text-text border-b-2 border-accent'
                     : 'text-muted hover:text-text'
                 }`}
               >
                 {LAYER_LABELS[n]}
+                <HelpTooltip helpKey={`direction-stack-l${n}`} size={11} />
                 {layers[n].isDirty && (
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-warning ml-1.5 opacity-60" />
                 )}
@@ -161,8 +163,9 @@ export default function DirectionStackPanel() {
       {/* Column 2: L4 Spec Brief + L5 Story Annotations (ephemeral) */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         <div className="flex-1 flex flex-col border-b border-border">
-          <label className="px-3 py-2 text-xs font-medium text-muted border-b border-border">
+          <label className="px-3 py-2 text-xs font-medium text-muted border-b border-border flex items-center gap-1">
             Spec Brief (L4)
+            <HelpTooltip helpKey="direction-stack-l4" size={11} />
           </label>
           <textarea
             value={l4}
@@ -173,8 +176,9 @@ export default function DirectionStackPanel() {
           />
         </div>
         <div className="flex-1 flex flex-col">
-          <label className="px-3 py-2 text-xs font-medium text-muted border-b border-border">
+          <label className="px-3 py-2 text-xs font-medium text-muted border-b border-border flex items-center gap-1">
             Story Annotations (L5)
+            <HelpTooltip helpKey="direction-stack-l5" size={11} />
           </label>
           <textarea
             value={l5}
@@ -189,9 +193,10 @@ export default function DirectionStackPanel() {
       {/* Column 3: Synthesized preview (read-only) */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
-          <span className="text-xs font-medium text-muted">
+          <span className="text-xs font-medium text-muted inline-flex items-center gap-1">
             Synthesized Output
-            <span className="ml-2 text-muted opacity-60">
+            <HelpTooltip helpKey="synthesized-output" size={11} />
+            <span className="ml-1 text-muted opacity-60">
               {synthesized.length.toLocaleString()} chars
             </span>
           </span>
