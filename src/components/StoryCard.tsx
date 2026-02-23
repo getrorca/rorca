@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer } from 'lucide-react';
 
 export interface Story {
   id: string;
@@ -9,6 +9,7 @@ export interface Story {
   dependencies?: string[];
   dependsOn?: string[];
   complexity?: number;
+  timeoutMinutes?: number;
   passes?: boolean;
   excluded?: boolean;
 }
@@ -82,6 +83,12 @@ export function StoryCard({
                 : 'bg-error/15 text-error'
             }`}>
               C{story.complexity}
+            </span>
+          )}
+          {story.timeoutMinutes != null && story.timeoutMinutes !== 45 && (
+            <span className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded mt-0.5 bg-muted/15 text-muted" title={`Timeout: ${story.timeoutMinutes} minutes`}>
+              <Timer size={9} />
+              {story.timeoutMinutes}m
             </span>
           )}
           <div className="min-w-0 flex-1">
