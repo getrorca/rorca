@@ -1497,6 +1497,181 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
   }
 });
 
+// ─── V2-008: PUT /:specId/stories/:storyId — Update a single story ───────────
+
+router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const storyId = req.params.storyId as string;
+    const { workspaceId, title, description, acceptanceCriteria } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+
+    let specPath: string;
+    if (fs.existsSync(approvedFile)) {
+      specPath = approvedFile;
+    } else if (fs.existsSync(pendingFile)) {
+      specPath = pendingFile;
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const raw = fs.readFileSync(specPath, 'utf8');
+    const content = JSON.parse(raw);
+    const stories: UserStory[] = content.userStories ?? [];
+    const storyIndex = stories.findIndex((s: UserStory) => s.id === storyId);
+
+    if (storyIndex === -1) {
+      res.status(404).json({ error: 'Story not found' });
+      return;
+    }
+
+    // Snapshot pre-edit state as a new version
+    const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
+    const version = snapshotVersion(specId, raw, status);
+
+    // Apply edits — only update provided fields
+    if (title !== undefined) stories[storyIndex].title = title;
+    if (description !== undefined) stories[storyIndex].description = description;
+    if (acceptanceCriteria !== undefined) stories[storyIndex].acceptanceCriteria = acceptanceCriteria;
+
+    content.userStories = stories;
+    fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
+
+    // WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
+    ).run('story_edited', workspaceId, specId, storyId, JSON.stringify({
+      title: stories[storyIndex].title,
+      version,
+    }));
+
+    broadcastAll({
+      id: walResult.lastInsertRowid as number,
+      ts: new Date().toISOString(),
+      event_type: 'story_edited',
+      workspace_id: workspaceId as string,
+      spec_id: specId as string,
+      story_id: storyId as string,
+      actor: 'api',
+      payload: JSON.stringify({ title: stories[storyIndex].title, version }),
+    });
+
+    res.json({ ok: true, story: stories[storyIndex], version });
+  } catch (error: any) {
+    console.error('[Specs] Story update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-008: POST /:specId/stories/:storyId/rewrite — AI-assisted rewrite ────
+
+router.post('/:specId/stories/:storyId/rewrite', async (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const storyId = req.params.storyId as string;
+    const { workspaceId, instructions, model } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+
+    let specPath: string;
+    if (fs.existsSync(approvedFile)) {
+      specPath = approvedFile;
+    } else if (fs.existsSync(pendingFile)) {
+      specPath = pendingFile;
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const raw = fs.readFileSync(specPath, 'utf8');
+    const content = JSON.parse(raw);
+    const stories: UserStory[] = content.userStories ?? [];
+    const story = stories.find((s: UserStory) => s.id === storyId);
+
+    if (!story) {
+      res.status(404).json({ error: 'Story not found' });
+      return;
+    }
+
+    // Build LLM prompt
+    const prompt = `You are rewriting a single user story within a software spec. Return ONLY valid JSON matching this exact schema — no markdown fences, no explanation:
+
+{
+  "title": "string",
+  "description": "string (Markdown allowed)",
+  "acceptanceCriteria": ["string", ...]
+}
+
+Current story:
+- ID: ${story.id}
+- Title: ${story.title}
+- Description: ${story.description ?? ''}
+- Acceptance Criteria:
+${story.acceptanceCriteria.map((ac: string) => `  - ${ac}`).join('\n')}
+
+User instructions: ${instructions || 'Improve clarity and completeness.'}
+
+Rewrite the story following the user instructions. Keep the same scope unless told otherwise. Return ONLY the JSON object.`;
+
+    const resolvedModel = model && isValidModel(model) ? model as SupportedModel : undefined;
+    const llmResult = await chatComplete([{ role: 'user', content: prompt }], resolvedModel);
+
+    // Parse LLM response — strip markdown fences if present
+    let cleaned = llmResult.text.trim();
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+    }
+
+    const rewritten = JSON.parse(cleaned);
+
+    if (!rewritten.title || !Array.isArray(rewritten.acceptanceCriteria)) {
+      res.status(422).json({ error: 'LLM returned invalid story structure' });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      rewritten: {
+        title: rewritten.title,
+        description: rewritten.description ?? '',
+        acceptanceCriteria: rewritten.acceptanceCriteria,
+      },
+      usage: llmResult.usage,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Story rewrite error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── R-001: GET /:specId — Return full spec JSON ─────────────────────────────
 
 router.get('/:specId', (req: Request, res: Response) => {

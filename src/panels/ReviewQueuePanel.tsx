@@ -12,6 +12,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
+import { InlineStoryEditor } from '../components/InlineStoryEditor';
 import DependencyGraph from '../components/DependencyGraph';
 import MermaidDiagram from '../components/MermaidDiagram';
 import { useToast, ToastContainer } from '../components/Toast';
@@ -432,7 +433,13 @@ function SpecPreview({
 
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto">
-        {activeTab === 'stories' && <PreviewStoriesTab stories={stories} />}
+        {activeTab === 'stories' && (
+          <PreviewStoriesTab
+            stories={stories}
+            specId={summary.id}
+            workspaceId={workspaceId}
+          />
+        )}
         {activeTab === 'graph' && <DependencyGraph specId={summary.id} workspaceId={workspaceId} />}
         {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-review" />}
         {activeTab === 'json' && <PreviewJsonTab spec={spec} />}
@@ -493,8 +500,22 @@ function SpecPreview({
 
 /* ─── Stories Tab ──────────────────────────────────────────────────── */
 
-function PreviewStoriesTab({ stories }: { stories: Story[] }) {
-  if (stories.length === 0) {
+function PreviewStoriesTab({
+  stories,
+  specId,
+  workspaceId,
+}: {
+  stories: Story[];
+  specId: string;
+  workspaceId: string;
+}) {
+  const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
+  const [localStories, setLocalStories] = useState(stories);
+
+  // Sync when prop changes
+  useEffect(() => { setLocalStories(stories); }, [stories]);
+
+  if (localStories.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-muted text-sm">
         No stories found in this spec
@@ -505,11 +526,29 @@ function PreviewStoriesTab({ stories }: { stories: Story[] }) {
   return (
     <div className="p-4 space-y-2">
       <span className="text-xs text-muted">
-        {stories.length} {stories.length === 1 ? 'story' : 'stories'}
+        {localStories.length} {localStories.length === 1 ? 'story' : 'stories'}
       </span>
-      {stories.map((story) => (
-        <StoryCard key={story.id} story={story} />
-      ))}
+      {localStories.map((story) =>
+        editingStoryId === story.id ? (
+          <InlineStoryEditor
+            key={story.id}
+            story={story}
+            specId={specId}
+            workspaceId={workspaceId}
+            onSave={(updated) => {
+              setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s));
+              setEditingStoryId(null);
+            }}
+            onCancel={() => setEditingStoryId(null)}
+          />
+        ) : (
+          <StoryCard
+            key={story.id}
+            story={story}
+            onEdit={() => setEditingStoryId(story.id)}
+          />
+        )
+      )}
     </div>
   );
 }

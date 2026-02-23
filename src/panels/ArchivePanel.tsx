@@ -21,6 +21,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
+import { InlineStoryEditor } from '../components/InlineStoryEditor';
 import DependencyGraph from '../components/DependencyGraph';
 import MermaidDiagram from '../components/MermaidDiagram';
 import type { PanelId } from '../components/Sidebar';
@@ -664,7 +665,12 @@ function SpecPreviewDrawer({
               {activeTab === 'stories' && (
                 <StoriesTab
                   stories={stories}
+                  specId={specId}
+                  workspaceId={workspaceId ?? ''}
                   onToggleExclude={summary?.status === 'approved' ? handleToggleExclude : undefined}
+                  onStoryUpdated={(updated) => {
+                    setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s));
+                  }}
                 />
               )}
               {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
@@ -815,11 +821,19 @@ function SpecPreviewDrawer({
 
 function StoriesTab({
   stories,
+  specId,
+  workspaceId,
   onToggleExclude,
+  onStoryUpdated,
 }: {
   stories: Story[];
+  specId: string;
+  workspaceId: string;
   onToggleExclude?: (storyId: string) => void;
+  onStoryUpdated?: (story: Story) => void;
 }) {
+  const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
+
   if (stories.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-muted text-sm">
@@ -838,13 +852,28 @@ function StoriesTab({
           <span className="ml-2 text-muted/60">· {deferredCount} deferred</span>
         )}
       </span>
-      {stories.map(story => (
-        <StoryCard
-          key={story.id}
-          story={story}
-          onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
-        />
-      ))}
+      {stories.map(story =>
+        editingStoryId === story.id ? (
+          <InlineStoryEditor
+            key={story.id}
+            story={story}
+            specId={specId}
+            workspaceId={workspaceId}
+            onSave={(updated) => {
+              onStoryUpdated?.(updated);
+              setEditingStoryId(null);
+            }}
+            onCancel={() => setEditingStoryId(null)}
+          />
+        ) : (
+          <StoryCard
+            key={story.id}
+            story={story}
+            onEdit={() => setEditingStoryId(story.id)}
+            onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
+          />
+        )
+      )}
     </div>
   );
 }
