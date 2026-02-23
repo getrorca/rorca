@@ -676,7 +676,8 @@
       "dependsOn": [
         "V2-035"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "V2-041",
@@ -1724,6 +1725,195 @@
       ],
       "dependsOn": [
         "V2-046"
+      ]
+    },
+    {
+      "id": "V2-107",
+      "title": "Run-Loop TypeScript Rewrite for Cross-Platform Compatibility",
+      "description": "As a Windows and Mac user, I want the Ralph execution engine rewritten from bash to TypeScript so Rorcha works natively on any platform without requiring bash, gtimeout, or Python.",
+      "acceptanceCriteria": [
+        "New file backend/src/lib/run-loop.ts replaces scripts/run-loop.sh as the execution engine",
+        "Reads spec JSON, iterates userStories, skips passes:true and excluded:true stories identically to the bash version",
+        "Spawns claude --dangerously-skip-permissions --print <prompt> as a child process per story",
+        "Injects CLAUDE.md, skill file, and progress.txt into each story prompt identically to bash version",
+        "Implements 45-minute story timeout using AbortController (replaces gtimeout --foreground)",
+        "Updates spec JSON passes:true and runs git add/commit/push after each successful story",
+        "Emits story_started, story_passed, story_failed WAL events to Rorcha backend via fetch()",
+        "pipeline.ts trigger route uses run-loop.ts instead of bash run-loop.sh",
+        "All existing pipeline tests pass with the TypeScript implementation"
+      ],
+      "dependsOn": [
+        "V2-106"
+      ]
+    },
+    {
+      "id": "V2-108",
+      "title": "npm Package Distribution (rorcha start CLI)",
+      "description": "As a developer, I want to install Rorcha with a single npm command and start it from the terminal so I can use it on any machine without cloning the repo.",
+      "acceptanceCriteria": [
+        "package.json has a bin entry: { \"rorcha\": \"./cli.js\" } \u2014 runnable as `rorcha start`",
+        "`rorcha start` builds frontend if dist/ is missing, starts Express backend, and opens http://localhost:3030 in the default browser",
+        "SQLite database and config stored in ~/.rorcha/ (not in package directory)",
+        "`rorcha start --port 4040` supports custom port override",
+        "Works on Mac, Windows (with Node 20+), and Linux without additional dependencies",
+        "Published to npm as `rorcha` package with README covering install and first-run steps",
+        "`rorcha --version` prints current version from package.json"
+      ],
+      "dependsOn": [
+        "V2-107"
+      ]
+    },
+    {
+      "id": "V2-109",
+      "title": "Password Reset Flow",
+      "description": "As a user who forgot their password, I want to request a password reset link via email so I can regain access to my account without admin intervention.",
+      "acceptanceCriteria": [
+        "POST /api/auth/forgot-password accepts email, creates a signed reset token (expires 1hr), stores hashed token in DB",
+        "Sends reset email with link: /reset-password?token=<token>",
+        "POST /api/auth/reset-password accepts token + newPassword, validates token, updates bcrypt hash, invalidates token",
+        "Reset page UI at /reset-password with password + confirm fields",
+        "Forgot password link on LoginPage routes to request form",
+        "Expired or already-used tokens return 400 with clear error message",
+        "Rate limited to 3 reset requests per email per hour"
+      ],
+      "dependsOn": [
+        "V2-001",
+        "V2-073"
+      ]
+    },
+    {
+      "id": "V2-110",
+      "title": "Email Verification on Registration",
+      "description": "As a new user, I want to verify my email address after registration so the platform can trust my account and send me notifications.",
+      "acceptanceCriteria": [
+        "On registration, user is created with email_verified: false and a verification token is sent via email",
+        "GET /api/auth/verify-email?token=<token> marks email_verified: true and redirects to app",
+        "Unverified users can log in but see a dismissible banner: 'Please verify your email'",
+        "Resend verification email button available in banner and user settings",
+        "Verification tokens expire after 24 hours",
+        "Pipeline execution is not blocked for unverified users (soft enforcement only)"
+      ],
+      "dependsOn": [
+        "V2-001",
+        "V2-073"
+      ]
+    },
+    {
+      "id": "V2-111",
+      "title": "Stripe Billing and Plan Enforcement",
+      "description": "As a business, I want Stripe-powered subscriptions so users can upgrade from Free to Solo/Pro/Team tiers and plan limits are enforced automatically.",
+      "acceptanceCriteria": [
+        "Stripe Checkout integration for Solo ($10/mo), Pro ($25/mo), Team ($59/mo) plans",
+        "POST /api/billing/checkout creates Stripe checkout session and returns URL",
+        "Stripe webhook handler at POST /api/billing/webhook processes subscription events (created, updated, cancelled)",
+        "users table gains plan column: 'free' | 'solo' | 'pro' | 'team'",
+        "Free tier: pipeline execution blocked with upgrade prompt ('Run in Pipeline' disabled, shows pricing modal)",
+        "Billing portal link in user settings for managing subscription and invoices",
+        "Plan badge shown in sidebar/header indicating current tier"
+      ],
+      "dependsOn": [
+        "V2-085"
+      ]
+    },
+    {
+      "id": "V2-112",
+      "title": "Account and Data Deletion (GDPR)",
+      "description": "As a user, I want to permanently delete my account and all associated data so I can exercise my right to erasure under GDPR and similar regulations.",
+      "acceptanceCriteria": [
+        "DELETE /api/auth/account requires password confirmation before proceeding",
+        "Deletes user row, all owned workspaces, specs, direction layers, pipeline runs, WAL events, and API keys",
+        "Cancels active Stripe subscription if present before deletion",
+        "Account deletion UI in User Settings with explicit 'Delete my account' button behind confirmation dialog",
+        "Deleted users receive a final confirmation email",
+        "Deletion is irreversible \u2014 no soft-delete, data is permanently removed within 30 days per GDPR Article 17"
+      ],
+      "dependsOn": [
+        "V2-085",
+        "V2-111"
+      ]
+    },
+    {
+      "id": "V2-113",
+      "title": "Story Results Backfill for Already-Passing Stories",
+      "description": "As a user monitoring a pipeline run, I want the Stories tab to show accurate progress even for stories that were already passing from a previous run so the progress bar reflects true completion state.",
+      "acceptanceCriteria": [
+        "When a run starts, backend reads the spec JSON and inserts story_results rows with status='skipped' for all stories with passes:true",
+        "Stories tab progress counter (N/total) counts skipped stories as complete",
+        "Skipped stories show a distinct 'Already Passing' badge (not the same as 'passed' in this run)",
+        "WAL event 'story_skipped' emitted for each backfilled story on run start",
+        "Backfill happens synchronously before the run-loop starts processing new stories"
+      ],
+      "dependsOn": [
+        "V2-107"
+      ]
+    },
+    {
+      "id": "V2-114",
+      "title": "Anthropic SDK Provider Path in llm-client",
+      "description": "As a user with an Anthropic API key, I want spec generation and story prompts routed through the official Anthropic SDK so I can use Claude models via API billing instead of the CLI subscription.",
+      "acceptanceCriteria": [
+        "@anthropic-ai/sdk installed as backend dependency",
+        "chatComplete() routes to Anthropic SDK when provider='anthropic' with ANTHROPIC_API_KEY from BYOB vault or env",
+        "Supports all models in SUPPORTED_MODELS list via SDK",
+        "TokenUsage normalized from SDK response (usage.input_tokens, usage.output_tokens)",
+        "Streaming not required \u2014 single response completion only",
+        "Falls back to claude-cli provider if API key is not configured"
+      ],
+      "dependsOn": [
+        "V2-106",
+        "V2-046"
+      ]
+    },
+    {
+      "id": "V2-115",
+      "title": "OpenAI-Compatible Provider Path in llm-client",
+      "description": "As a user with an OpenAI, Groq, DeepSeek, or other OpenAI-compatible API key, I want to route Rorcha's LLM calls through any provider that implements the OpenAI API spec so I can use the cheapest or fastest model for my needs.",
+      "acceptanceCriteria": [
+        "openai npm package installed as backend dependency",
+        "chatComplete() routes to OpenAI SDK when provider='openai-compat' with configurable baseURL and API key from BYOB vault",
+        "baseURL defaults to https://api.openai.com/v1 but is fully configurable per workspace",
+        "Works with: OpenAI, Groq, Together AI, Fireworks, DeepSeek, Mistral, Perplexity, Cerebras, Ollama (local), LM Studio (local)",
+        "Model name passed through as-is (provider-specific model IDs accepted)",
+        "TokenUsage normalized from OpenAI response shape (usage.prompt_tokens, usage.completion_tokens)"
+      ],
+      "dependsOn": [
+        "V2-106",
+        "V2-046"
+      ]
+    },
+    {
+      "id": "V2-116",
+      "title": "OpenRouter Provider Path and Model Catalog",
+      "description": "As a user who wants access to Google Gemini, xAI Grok, or any model not available via direct APIs, I want OpenRouter as a provider option so I have a single fallback that covers 100% of the LLM market.",
+      "acceptanceCriteria": [
+        "chatComplete() routes to OpenRouter when provider='openrouter' using openai package with baseURL='https://openrouter.ai/api/v1'",
+        "OpenRouter API key stored in BYOB vault under provider key 'openrouter'",
+        "GET /api/direction/models returns OpenRouter model catalog (fetched from OpenRouter API) when openrouter provider is configured",
+        "HTTP-Referer and X-Title headers set per OpenRouter requirements",
+        "Google Gemini (gemini-2.0-flash, gemini-1.5-pro) and xAI Grok models appear in model selector",
+        "TokenUsage normalized from OpenRouter response"
+      ],
+      "dependsOn": [
+        "V2-115"
+      ]
+    },
+    {
+      "id": "V2-117",
+      "title": "Provider Configuration UI in User Settings",
+      "description": "As a user, I want a dedicated provider configuration section in settings where I can add API keys, set base URLs, and choose my default provider so I can switch between Claude subscription, API billing, and third-party providers without touching env files.",
+      "acceptanceCriteria": [
+        "Provider Configuration section in User Settings panel lists all 4 providers: claude-cli, anthropic, openai-compat, openrouter",
+        "Each provider shows: connection status (configured/not configured), API key input (masked), base URL input for openai-compat",
+        "Save button per provider \u2014 keys stored via POST /api/byob/keys encrypted at rest",
+        "Test Connection button sends a minimal chatComplete call and shows latency + model response",
+        "Default provider dropdown \u2014 sets workspace-level default used when no per-spec override exists",
+        "Active provider badge shown in Spec Forge panel next to model selector"
+      ],
+      "dependsOn": [
+        "V2-114",
+        "V2-115",
+        "V2-116",
+        "V2-085"
       ]
     }
   ],

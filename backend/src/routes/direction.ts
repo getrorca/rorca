@@ -6,6 +6,29 @@ import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-vali
 
 const router = Router();
 
+/** Look up team L1/L2 for a workspace via workspace_access */
+function getTeamLayers(workspaceId: string): { teamL1?: string; teamL2?: string } {
+  // A workspace may belong to a team via workspace_access
+  const access = db.prepare(
+    'SELECT team_id FROM workspace_access WHERE workspace_id = ? LIMIT 1'
+  ).get(workspaceId) as { team_id: string } | undefined;
+
+  if (!access) return {};
+
+  const teamL1 = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
+  ).get(access.team_id) as { content_yaml: string } | undefined;
+
+  const teamL2 = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
+  ).get(access.team_id) as { content_yaml: string } | undefined;
+
+  return {
+    teamL1: teamL1?.content_yaml,
+    teamL2: teamL2?.content_yaml,
+  };
+}
+
 // GET /api/direction — fetch a single direction layer
 router.get('/', (req: Request, res: Response) => {
   const { layer, workspaceId } = req.query;
@@ -172,6 +195,9 @@ router.get('/preview', (req: Request, res: Response) => {
     }
   }
 
+  // Fetch team L1/L2 if workspace belongs to a team
+  const teamLayers = workspaceId ? getTeamLayers(String(workspaceId)) : {};
+
   const warnings = getPreviewWarnings({
     l1Content: l1Row?.content_yaml,
     l2Content: l2Row?.content_yaml,
@@ -184,6 +210,8 @@ router.get('/preview', (req: Request, res: Response) => {
   const synthesized = synthesize({
     l1: l1Row?.content_yaml,
     l2: l2Row?.content_yaml,
+    teamL1: teamLayers.teamL1,
+    teamL2: teamLayers.teamL2,
     l3: l3Row?.content_yaml,
     schemaSnapshot,
     gitMemory,
@@ -229,9 +257,14 @@ router.post('/synthesize', (req: Request, res: Response) => {
     }
   }
 
+  // Fetch team L1/L2 if workspace belongs to a team
+  const teamLayers = workspaceId ? getTeamLayers(String(workspaceId)) : {};
+
   const synthesized = synthesize({
     l1: l1Row?.content_yaml,
     l2: l2Row?.content_yaml,
+    teamL1: teamLayers.teamL1,
+    teamL2: teamLayers.teamL2,
     l3: l3Row?.content_yaml,
     schemaSnapshot,
     gitMemory,
