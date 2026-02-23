@@ -22,8 +22,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_direction_layers_new_unique
   ON direction_layers_new(layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''));
 
 -- Copy existing data (team_id will be NULL for all existing rows)
-INSERT OR IGNORE INTO direction_layers_new (id, workspace_id, domain, layer, content_yaml, preferred_model, updated_at)
-  SELECT id, workspace_id, domain, layer, content_yaml, preferred_model, updated_at
+-- Note: preferred_model may not exist on old table (added idempotently in db/index.ts),
+-- so we only copy base columns. preferred_model will remain NULL on migrated rows.
+INSERT OR IGNORE INTO direction_layers_new (id, workspace_id, domain, layer, content_yaml, updated_at)
+  SELECT id, workspace_id, domain, layer, content_yaml, updated_at
   FROM direction_layers;
 
 DROP TABLE IF EXISTS direction_layers;

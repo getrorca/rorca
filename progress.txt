@@ -380,5 +380,33 @@ Key decisions:
 - Actor display names resolved via batch lookup against users table (falls back to raw actor string for system actors like 'ralph')
 - Rss icon chosen for sidebar (Activity icon already used by Pipeline Monitor)
 
+## Story V2-041: Shared Direction Layer Library (Template Marketplace) — DONE
+Files touched:
+- backend/src/db/migrations/020_template_marketplace.sql (new — template_ratings table)
+- backend/src/db/migrations/019_team_direction.sql (modified — fixed pre-existing migration bug with preferred_model column reference)
+- backend/src/db/index.ts (modified — idempotent team_id, author_id, usage_count columns on templates)
+- backend/src/routes/templates.ts (rewritten — scope filtering, rating endpoint, author/team support)
+- backend/src/routes/__tests__/templates.test.ts (rewritten — 27 tests covering scope, rating, team templates)
+- backend/src/db/__tests__/db.test.ts (modified — added story_comments + template_ratings to expected tables)
+- src/panels/TemplateMarketplacePanel.tsx (new — marketplace UI with cards, rating, scope filters)
+- src/components/Sidebar.tsx (modified — added 'marketplace' panel with LayoutGrid icon)
+- src/App.tsx (modified — import + render TemplateMarketplacePanel)
+
+What was built:
+- Templates gain optional team_id field; team templates visible to all team members
+- GET /api/templates accepts scope param ('personal', 'team', 'all') to filter visibility
+- POST /api/templates/:id/rate allows 1-5 integer rating with upsert; returns avgRating/ratingCount
+- Featured templates (avgRating >= 4.0) sorted to top of marketplace listing
+- TemplateMarketplacePanel shows cards with usage count, author name, rating stars, scope badge
+- Detail drawer shows brief, story structure, and interactive rating stars
+- 27 backend tests covering all new endpoints + scope filtering + rating validation
+
+Key decisions:
+- Templates table extended with team_id, author_id, usage_count columns (idempotent ALTER TABLE)
+- Separate template_ratings table with UNIQUE(template_id, user_id) for upsert
+- Rating endpoint validates team membership for team templates (non-members get 403)
+- Scope filtering: 'personal' = user's own non-team templates, 'team' = user's team templates, 'all' = both + legacy global
+- Fixed pre-existing migration 019 bug: INSERT...SELECT referenced preferred_model before it existed on fresh DBs
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)

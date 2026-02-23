@@ -81,6 +81,21 @@ afterEach(() => {
   delete process.env.NODE_ENV;
 });
 
+// ─── Helper: get user ID from token ──────────────────────────────────────────
+
+function getUserId(): string {
+  const row = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
+  return row.id;
+}
+
+function createTeam(name: string, slug: string): string {
+  const userId = getUserId();
+  const teamId = require('crypto').randomUUID();
+  db.prepare('INSERT INTO teams (id, name, slug, owner_id) VALUES (?, ?, ?, ?)').run(teamId, name, slug, userId);
+  db.prepare("INSERT INTO team_members (team_id, user_id, role) VALUES (?, ?, 'admin')").run(teamId, userId);
+  return teamId;
+}
+
 // ─── POST /api/templates ──────────────────────────────────────────────────────
 
 describe('POST /api/templates', () => {
@@ -107,6 +122,11 @@ describe('POST /api/templates', () => {
     expect(res.body.directionLayers).toEqual({ l1: true, l2: 'backend' });
     expect(res.body.storyCount).toBe(2);
     expect(res.body.createdAt).toBeDefined();
+    expect(res.body.authorId).toBe(getUserId());
+    expect(res.body.teamId).toBeNull();
+    expect(res.body.usageCount).toBe(0);
+    expect(res.body.avgRating).toBe(0);
+    expect(res.body.ratingCount).toBe(0);
   });
 
   test('creates template without optional fields', async () => {
@@ -124,6 +144,46 @@ describe('POST /api/templates', () => {
     expect(res.body.description).toBeNull();
     expect(res.body.directionLayers).toBeNull();
     expect(res.body.storyCount).toBe(1);
+  });
+
+  test('creates team template when teamId is provided', async () => {
+    const teamId = createTeam('Test Team', 'test-team');
+
+    const res = await request(app)
+      .post('/api/templates')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        name: 'Team Template',
+        sourceSpecId: 'spec-1',
+        brief: 'Team brief',
+        storyStructure: sampleStoryStructure,
+        teamId,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.teamId).toBe(teamId);
+  });
+
+  test('rejects teamId when user is not a member', async () => {
+    // Create a team the user is NOT a member of
+    const teamId = require('crypto').randomUUID();
+    db.prepare('INSERT INTO users (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)').run(
+      'other-user', 'other@test.com', 'Other', '$2a$12$fakeHash'
+    );
+    db.prepare('INSERT INTO teams (id, name, slug, owner_id) VALUES (?, ?, ?, ?)').run(teamId, 'Other Team', 'other', 'other-user');
+
+    const res = await request(app)
+      .post('/api/templates')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        name: 'Forbidden',
+        sourceSpecId: 'spec-1',
+        brief: 'brief',
+        storyStructure: sampleStoryStructure,
+        teamId,
+      });
+
+    expect(res.status).toBe(403);
   });
 
   test('missing required fields → 400', async () => {
@@ -167,7 +227,7 @@ describe('POST /api/templates', () => {
   });
 });
 
-// ─── GET /api/templates ───────────────────────────────────────────────────────
+// ─── GET /api/templates — scope filtering ────────────────────────────────────
 
 describe('GET /api/templates', () => {
   test('returns empty array when no templates exist', async () => {
@@ -176,56 +236,197 @@ describe('GET /api/templates', () => {
     expect(res.body.templates).toEqual([]);
   });
 
-  test('lists all templates with summary fields', async () => {
-    // Create two templates
+  test('scope=all returns personal and team templates', async () => {
+    const teamId = createTeam('My Team', 'my-team');
+
+    // Personal template
     await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
-      name: 'Template A',
-      sourceSpecId: 'spec-a',
-      brief: 'Brief A',
-      storyStructure: sampleStoryStructure,
+      name: 'Personal', sourceSpecId: 'spec-p', brief: 'p', storyStructure: sampleStoryStructure,
+    });
+    // Team template
+    await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Team', sourceSpecId: 'spec-t', brief: 't', storyStructure: sampleStoryStructure, teamId,
+    });
+
+    const res = await request(app).get('/api/templates?scope=all').set('Authorization', `Bearer ${authToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.templates).toHaveLength(2);
+  });
+
+  test('scope=personal returns only personal templates', async () => {
+    const teamId = createTeam('T', 'team-scope');
+
+    await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Personal', sourceSpecId: 'spec-p', brief: 'p', storyStructure: sampleStoryStructure,
     });
     await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
-      name: 'Template B',
-      description: 'Desc B',
-      sourceSpecId: 'spec-b',
-      brief: 'Brief B',
-      storyStructure: [{ id: 'US-001', title: 'S1', description: 'D1' }],
+      name: 'Team', sourceSpecId: 'spec-t', brief: 't', storyStructure: sampleStoryStructure, teamId,
+    });
+
+    const res = await request(app).get('/api/templates?scope=personal').set('Authorization', `Bearer ${authToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.templates).toHaveLength(1);
+    expect(res.body.templates[0].name).toBe('Personal');
+  });
+
+  test('scope=team returns only team templates', async () => {
+    const teamId = createTeam('T', 'team-scope-2');
+
+    await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Personal', sourceSpecId: 'spec-p', brief: 'p', storyStructure: sampleStoryStructure,
+    });
+    await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Team', sourceSpecId: 'spec-t', brief: 't', storyStructure: sampleStoryStructure, teamId,
+    });
+
+    const res = await request(app).get('/api/templates?scope=team').set('Authorization', `Bearer ${authToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.templates).toHaveLength(1);
+    expect(res.body.templates[0].name).toBe('Team');
+  });
+
+  test('featured templates (rating >= 4.0) appear first', async () => {
+    // Create two templates
+    const res1 = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Low Rated', sourceSpecId: 'spec-low', brief: 'low', storyStructure: sampleStoryStructure,
+    });
+    const res2 = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'High Rated', sourceSpecId: 'spec-high', brief: 'high', storyStructure: sampleStoryStructure,
+    });
+
+    // Rate the second one highly
+    await request(app).post(`/api/templates/${res2.body.id}/rate`).set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 5 });
+
+    const listRes = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
+    expect(listRes.body.templates[0].name).toBe('High Rated');
+    expect(listRes.body.templates[0].avgRating).toBeGreaterThanOrEqual(4.0);
+  });
+
+  test('list includes author info, usage count, and rating', async () => {
+    await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Template A', sourceSpecId: 'spec-a', brief: 'Brief A', storyStructure: sampleStoryStructure,
     });
 
     const res = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.templates).toHaveLength(2);
-
-    // Check summary fields are present
     const tpl = res.body.templates[0];
-    expect(tpl.id).toBeDefined();
-    expect(tpl.name).toBeDefined();
-    expect(tpl.sourceSpecId).toBeDefined();
-    expect(tpl.storyCount).toBeDefined();
-    expect(tpl.createdAt).toBeDefined();
+    expect(tpl.authorName).toBe('Auth Test User');
+    expect(tpl.usageCount).toBe(0);
+    expect(tpl.avgRating).toBe(0);
+    expect(tpl.ratingCount).toBe(0);
+  });
+});
 
-    // List endpoint should NOT include full storyStructure or brief
-    expect(tpl.storyStructure).toBeUndefined();
-    expect(tpl.brief).toBeUndefined();
+// ─── POST /api/templates/:id/rate ────────────────────────────────────────────
+
+describe('POST /api/templates/:id/rate', () => {
+  test('rates a template and returns updated rating', async () => {
+    const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Rateable', sourceSpecId: 'spec-r', brief: 'b', storyStructure: sampleStoryStructure,
+    });
+
+    const rateRes = await request(app)
+      .post(`/api/templates/${createRes.body.id}/rate`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 4 });
+
+    expect(rateRes.status).toBe(200);
+    expect(rateRes.body.avgRating).toBe(4);
+    expect(rateRes.body.ratingCount).toBe(1);
+    expect(rateRes.body.userRating).toBe(4);
+  });
+
+  test('updates existing rating (upsert)', async () => {
+    const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Rateable', sourceSpecId: 'spec-r2', brief: 'b', storyStructure: sampleStoryStructure,
+    });
+
+    await request(app).post(`/api/templates/${createRes.body.id}/rate`).set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 3 });
+    const rateRes = await request(app).post(`/api/templates/${createRes.body.id}/rate`).set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 5 });
+
+    expect(rateRes.body.avgRating).toBe(5);
+    expect(rateRes.body.ratingCount).toBe(1); // Still 1 (same user updated)
+    expect(rateRes.body.userRating).toBe(5);
+  });
+
+  test('invalid rating → 400', async () => {
+    const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'R', sourceSpecId: 's', brief: 'b', storyStructure: sampleStoryStructure,
+    });
+
+    const res = await request(app).post(`/api/templates/${createRes.body.id}/rate`).set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 6 });
+    expect(res.status).toBe(400);
+
+    const res2 = await request(app).post(`/api/templates/${createRes.body.id}/rate`).set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 0 });
+    expect(res2.status).toBe(400);
+
+    const res3 = await request(app).post(`/api/templates/${createRes.body.id}/rate`).set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 3.5 });
+    expect(res3.status).toBe(400);
+  });
+
+  test('nonexistent template → 404', async () => {
+    const res = await request(app).post('/api/templates/nonexistent/rate').set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 3 });
+    expect(res.status).toBe(404);
+  });
+
+  test('non-team-member cannot rate team template', async () => {
+    // Create a team the test user is NOT a member of
+    const otherUserId = require('crypto').randomUUID();
+    db.prepare('INSERT INTO users (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)').run(
+      otherUserId, 'owner@test.com', 'Owner', '$2a$12$fakeHash'
+    );
+    const teamId = require('crypto').randomUUID();
+    db.prepare('INSERT INTO teams (id, name, slug, owner_id) VALUES (?, ?, ?, ?)').run(teamId, 'Other Team', 'other-rate', otherUserId);
+
+    // Insert team template directly
+    const tplId = require('crypto').randomUUID();
+    db.prepare(
+      `INSERT INTO templates (id, name, source_spec_id, brief, story_structure, story_count, team_id, author_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(tplId, 'Team TPL', 'spec', 'b', '[]', 0, teamId, otherUserId);
+
+    const res = await request(app).post(`/api/templates/${tplId}/rate`).set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 3 });
+    expect(res.status).toBe(403);
   });
 });
 
 // ─── GET /api/templates/:id ───────────────────────────────────────────────────
 
 describe('GET /api/templates/:id', () => {
-  test('returns full template details', async () => {
+  test('returns full template details with rating info', async () => {
     const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
-      name: 'Detail Template',
-      sourceSpecId: 'spec-d',
-      brief: 'Detailed brief',
-      storyStructure: sampleStoryStructure,
+      name: 'Detail Template', sourceSpecId: 'spec-d', brief: 'Detailed brief', storyStructure: sampleStoryStructure,
     });
+
+    // Rate it
+    await request(app).post(`/api/templates/${createRes.body.id}/rate`).set('Authorization', `Bearer ${authToken}`)
+      .send({ rating: 4 });
 
     const res = await request(app).get(`/api/templates/${createRes.body.id}`).set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.name).toBe('Detail Template');
     expect(res.body.brief).toBe('Detailed brief');
     expect(res.body.storyStructure).toEqual(sampleStoryStructure);
+    expect(res.body.avgRating).toBe(4);
+    expect(res.body.ratingCount).toBe(1);
+    expect(res.body.userRating).toBe(4);
+  });
+
+  test('userRating is null when user has not rated', async () => {
+    const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+      name: 'Unrated', sourceSpecId: 'spec-u', brief: 'b', storyStructure: sampleStoryStructure,
+    });
+
+    const res = await request(app).get(`/api/templates/${createRes.body.id}`).set('Authorization', `Bearer ${authToken}`);
+    expect(res.body.userRating).toBeNull();
   });
 
   test('not found → 404', async () => {
@@ -240,10 +441,7 @@ describe('GET /api/templates/:id', () => {
 describe('DELETE /api/templates/:id', () => {
   test('deletes template and returns 204', async () => {
     const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
-      name: 'To Delete',
-      sourceSpecId: 'spec-del',
-      brief: 'Brief',
-      storyStructure: sampleStoryStructure,
+      name: 'To Delete', sourceSpecId: 'spec-del', brief: 'Brief', storyStructure: sampleStoryStructure,
     });
 
     const deleteRes = await request(app).delete(`/api/templates/${createRes.body.id}`).set('Authorization', `Bearer ${authToken}`);
@@ -261,20 +459,15 @@ describe('DELETE /api/templates/:id', () => {
   });
 });
 
-// ─── Templates are workspace-agnostic ─────────────────────────────────────────
+// ─── workspace-agnostic templates ─────────────────────────────────────────────
 
 describe('workspace-agnostic templates', () => {
   test('templates are available without any workspace context', async () => {
-    // Create template — no workspaceId needed
     const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
-      name: 'Global Template',
-      sourceSpecId: 'any-spec',
-      brief: 'Works anywhere',
-      storyStructure: sampleStoryStructure,
+      name: 'Global Template', sourceSpecId: 'any-spec', brief: 'Works anywhere', storyStructure: sampleStoryStructure,
     });
     expect(createRes.status).toBe(201);
 
-    // List returns it without filtering by workspace
     const listRes = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
     expect(listRes.body.templates).toHaveLength(1);
     expect(listRes.body.templates[0].name).toBe('Global Template');
@@ -294,9 +487,7 @@ describe('POST /api/specs/generate with templateId', () => {
 
     // Create a template
     const tplRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
-      name: 'Auth Pattern',
-      sourceSpecId: 'auth-v1',
-      brief: 'Build auth with login and signup',
+      name: 'Auth Pattern', sourceSpecId: 'auth-v1', brief: 'Build auth with login and signup',
       storyStructure: sampleStoryStructure,
     });
 
@@ -313,7 +504,6 @@ describe('POST /api/specs/generate with templateId', () => {
 
     expect(res.status).toBe(200);
 
-    // Verify the LLM was called with template context in the prompt
     const calledPrompt = mockChatComplete.mock.calls[0][0][0].content;
     expect(calledPrompt).toContain('REFERENCE TEMPLATE');
     expect(calledPrompt).toContain('Build auth with login and signup');
