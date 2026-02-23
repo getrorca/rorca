@@ -15,6 +15,8 @@ All route files are Express routers mounted in `server.ts`. Every mutation must 
 | `templates.ts` | `/api/templates` | Spec template library CRUD |
 | `stories.ts` | `/api/stories` | Cross-spec story search with filters |
 | `wal.ts` | `/api/wal` | Paginated WAL event log |
+| `teams.ts` | `/api/teams` | Team CRUD, member listing, invite creation |
+| `invites.ts` | `/api/invites` | Public invite validation, auth-gated invite acceptance |
 | `health.ts` | `/api/health` | Public health check — no auth |
 
 ## Endpoints Reference
@@ -87,6 +89,21 @@ GET    /api/stories/search?q=&workspaceId=&status=&tags=&limit=&offset=
        — Filters: status (pending|approved|all), tags (comma-separated, match ALL)
        — Paginated: { items, total, hasMore }
 ```
+
+### teams.ts
+```
+POST   /api/teams                    — Create team (name, slug); creator becomes admin owner
+POST   /api/teams/:id/invites        — Send email invite (email, role); max 3 pending on free tier
+GET    /api/teams/:id/members        — List members with roles, join dates, last active timestamps
+```
+**Auth**: All team routes require auth. Invite creation requires admin role on the team.
+
+### invites.ts
+```
+GET    /api/invites/:token           — Validate invite token, return team info (PUBLIC, no auth)
+POST   /api/invites/:token/accept    — Accept invite, join team (requires auth, email must match)
+```
+**Note**: GET is public (mounted before authRequired). POST /accept uses `authRequired` middleware directly.
 
 ### wal.ts
 ```
