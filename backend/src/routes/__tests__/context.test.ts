@@ -9,7 +9,7 @@ import type Database from 'better-sqlite3';
 // Mock llm-client BEFORE requiring app (chatComplete uses claude CLI)
 // ---------------------------------------------------------------------------
 
-const mockChatComplete = jest.fn<Promise<string>, [any]>();
+const mockChatComplete = jest.fn<Promise<{ text: string; usage: { inputTokens: number; outputTokens: number } }>, [any]>();
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: (...args: any[]) => mockChatComplete(args[0]),
@@ -37,6 +37,9 @@ beforeEach(() => {
     chatComplete: (...args: any[]) => mockChatComplete(args[0]),
     getActiveProvider: () => 'mock',
     getActiveModel: () => 'mock-model',
+    isValidModel: () => false,
+    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   }));
   (global as any).fetch = mockFetch;
 
@@ -67,7 +70,10 @@ function mockLlmYaml(yaml: string, meta?: { confidence?: string; extracted?: str
     extracted: meta?.extracted || ['field1'],
     missing: meta?.missing || [],
   };
-  mockChatComplete.mockResolvedValueOnce(`${yaml}\n#meta ${JSON.stringify(metaObj)}`);
+  mockChatComplete.mockResolvedValueOnce({
+    text: `${yaml}\n#meta ${JSON.stringify(metaObj)}`,
+    usage: { inputTokens: 0, outputTokens: 0 },
+  });
 }
 
 // ===========================================================================
@@ -458,9 +464,10 @@ describe('GET /api/context/fetch-preview', () => {
 
 describe('confidence parsing', () => {
   test('#meta line parsed correctly from LLM response', async () => {
-    mockChatComplete.mockResolvedValueOnce(
-      'global:\n  tone: friendly\n#meta {"confidence":"medium","extracted":["global.tone"],"missing":["global.constraints"]}'
-    );
+    mockChatComplete.mockResolvedValueOnce({
+      text: 'global:\n  tone: friendly\n#meta {"confidence":"medium","extracted":["global.tone"],"missing":["global.constraints"]}',
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
 
     const res = await request(app)
       .post('/api/context/extract')
@@ -473,7 +480,10 @@ describe('confidence parsing', () => {
   });
 
   test('missing #meta defaults to low confidence', async () => {
-    mockChatComplete.mockResolvedValueOnce('global:\n  tone: friendly');
+    mockChatComplete.mockResolvedValueOnce({
+      text: 'global:\n  tone: friendly',
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
 
     const res = await request(app)
       .post('/api/context/extract')

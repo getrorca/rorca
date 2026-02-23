@@ -37,7 +37,7 @@ test('gitMapStep returns summaries for a valid git repo', async () => {
     // --stat call
     return Promise.resolve('abc123 feat: add auth\n 1 file changed');
   });
-  mockChatComplete.mockResolvedValue('- Switched from JWT to session auth');
+  mockChatComplete.mockResolvedValue({ text: '- Switched from JWT to session auth', usage: { inputTokens: 0, outputTokens: 0 } });
 
   const result = await gitMapStep({ workspacePath: '/tmp/fake' });
 
@@ -72,7 +72,7 @@ test('gitMapStep passes fromHash to log args', async () => {
     }
     return Promise.resolve('abc123 feat: new stuff\n 1 file changed');
   });
-  mockChatComplete.mockResolvedValue('No significant architectural changes in this chunk.');
+  mockChatComplete.mockResolvedValue({ text: 'No significant architectural changes in this chunk.', usage: { inputTokens: 0, outputTokens: 0 } });
 
   await gitMapStep({ workspacePath: '/tmp/fake', fromHash: 'prev123' });
 
@@ -93,7 +93,7 @@ test('gitMapStep processes chunks with concurrency limit', async () => {
     }
     return Promise.resolve('stat output');
   });
-  mockChatComplete.mockResolvedValue('bullet point');
+  mockChatComplete.mockResolvedValue({ text: 'bullet point', usage: { inputTokens: 0, outputTokens: 0 } });
 
   const result = await gitMapStep({
     workspacePath: '/tmp/fake',
@@ -183,7 +183,7 @@ test('gitReduceStep calls LLM with meaningful summaries and returns YAML', async
     evidence: multiple migration files
 conventions:
   - rule: Use parseISO for date handling`;
-  mockChatComplete.mockResolvedValue(mockYaml);
+  mockChatComplete.mockResolvedValue({ text: mockYaml, usage: { inputTokens: 0, outputTokens: 0 } });
 
   const result = await gitReduceStep({
     summaries,

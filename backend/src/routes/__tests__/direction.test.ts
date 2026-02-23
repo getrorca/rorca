@@ -111,6 +111,60 @@ test('GET /api/direction/preview without workspaceId omits hydrated sections', a
   expect(res.body.gitCommitCount).toBeNull();
 });
 
+// --- US-003: Model Selection ---
+
+test('PUT L3 with preferredModel stores it and GET returns it', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+
+  const putRes = await request(app)
+    .put('/api/direction')
+    .send({
+      layer: 3,
+      workspaceId: 'ws-dir-test',
+      contentYaml: 'goal: ship v2',
+      preferredModel: 'claude-opus-4-6',
+    });
+  expect(putRes.status).toBe(200);
+
+  const getRes = await request(app)
+    .get('/api/direction?layer=3&workspaceId=ws-dir-test');
+  expect(getRes.status).toBe(200);
+  expect(getRes.body.contentYaml).toBe('goal: ship v2');
+  expect(getRes.body.preferredModel).toBe('claude-opus-4-6');
+});
+
+test('PUT L3 with invalid preferredModel returns 400', async () => {
+  const res = await request(app)
+    .put('/api/direction')
+    .send({
+      layer: 3,
+      workspaceId: 'ws-dir-test',
+      contentYaml: 'goal: ship v2',
+      preferredModel: 'gpt-4o',
+    });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain('Invalid preferredModel');
+});
+
+test('PUT L1 with preferredModel returns 400 (only valid for L3)', async () => {
+  const res = await request(app)
+    .put('/api/direction')
+    .send({
+      layer: 1,
+      contentYaml: 'quality: high',
+      preferredModel: 'claude-opus-4-6',
+    });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain('only valid for layer 3');
+});
+
+test('GET /api/direction/models returns supported models', async () => {
+  const res = await request(app).get('/api/direction/models');
+  expect(res.status).toBe(200);
+  expect(res.body.models).toHaveLength(3);
+  expect(res.body.models.map((m: { id: string }) => m.id)).toContain('claude-opus-4-6');
+});
+
 // --- WAL events ---
 
 test('WAL event logged for direction_update on PUT', async () => {

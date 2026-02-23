@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
+import { isValidModel, SUPPORTED_MODELS } from '../lib/llm-client';
 
 const router = Router();
 
@@ -28,11 +29,13 @@ router.get('/', (req: Request, res: Response) => {
         ).get(String(workspaceId)) as { content_yaml: string } | undefined
       : undefined;
   } else {
-    row = workspaceId
+    const l3Row = workspaceId
       ? db.prepare(
-          `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-        ).get(String(workspaceId)) as { content_yaml: string } | undefined
+          `SELECT content_yaml, preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+        ).get(String(workspaceId)) as { content_yaml: string; preferred_model: string | null } | undefined
       : undefined;
+    res.json({ contentYaml: l3Row?.content_yaml ?? '', preferredModel: l3Row?.preferred_model ?? null });
+    return;
   }
 
   res.json({ contentYaml: row?.content_yaml ?? '' });
@@ -40,7 +43,7 @@ router.get('/', (req: Request, res: Response) => {
 
 // PUT /api/direction — upsert a direction layer
 router.put('/', (req: Request, res: Response) => {
-  const { layer, workspaceId, domain, contentYaml } = req.body;
+  const { layer, workspaceId, domain, contentYaml, preferredModel } = req.body;
 
   if (!layer || !contentYaml) {
     res.status(400).json({ error: 'Missing required fields: layer, contentYaml' });
@@ -52,20 +55,41 @@ router.put('/', (req: Request, res: Response) => {
     return;
   }
 
+  // Validate preferredModel if provided (only valid for L3)
+  if (preferredModel !== undefined && preferredModel !== null) {
+    if (layer !== 3) {
+      res.status(400).json({ error: 'preferredModel is only valid for layer 3' });
+      return;
+    }
+    if (!isValidModel(preferredModel)) {
+      res.status(400).json({
+        error: `Invalid preferredModel: '${preferredModel}'. Supported models: ${SUPPORTED_MODELS.join(', ')}`,
+      });
+      return;
+    }
+  }
+
   // Upsert via INSERT OR REPLACE (unique index on layer + coalesced workspace_id + domain)
   db.prepare(`
-    INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, updated_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
+    INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, preferred_model, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
-    DO UPDATE SET content_yaml = excluded.content_yaml, updated_at = datetime('now')
-  `).run(layer, workspaceId || null, domain || null, contentYaml);
+    DO UPDATE SET content_yaml = excluded.content_yaml, preferred_model = excluded.preferred_model, updated_at = datetime('now')
+  `).run(layer, workspaceId || null, domain || null, contentYaml, (layer === 3 ? preferredModel ?? null : null));
 
   // WAL event
   db.prepare(
     `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('direction_update', ?, ?)`
-  ).run(workspaceId || null, JSON.stringify({ layer, domain: domain || null }));
+  ).run(workspaceId || null, JSON.stringify({ layer, domain: domain || null, ...(preferredModel ? { preferredModel } : {}) }));
 
   res.json({ ok: true });
+});
+
+// GET /api/direction/models — list supported models
+router.get('/models', (_req: Request, res: Response) => {
+  res.json({
+    models: SUPPORTED_MODELS.map(id => ({ id, label: id })),
+  });
 });
 
 // GET /api/direction/preview — synthesize the direction stack for a workspace+domain

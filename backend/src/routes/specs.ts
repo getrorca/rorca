@@ -4,7 +4,8 @@ import * as path from 'path';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
-import { chatComplete, getActiveProvider, getActiveModel } from '../lib/llm-client';
+import { chatComplete, getActiveProvider, isValidModel, DEFAULT_MODEL, SUPPORTED_MODELS } from '../lib/llm-client';
+import type { SupportedModel } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
 
 const router = Router();
@@ -206,10 +207,19 @@ router.post('/generate', async (req: Request, res: Response) => {
     const title: string = req.body.title || req.body.specName;
     const brief: string = req.body.brief || req.body.specBrief;
     const storyCount: number = Math.min(500, Math.max(1, parseInt(req.body.storyCount) || 8));
+    const requestedModel: string | undefined = req.body.model;
 
     // 1. Validate required fields
     if (!workspaceId || !title || !brief) {
       res.status(400).json({ error: 'Missing required fields: workspaceId, title (or specName), brief (or specBrief)' });
+      return;
+    }
+
+    // 1b. Validate model if provided
+    if (requestedModel && !isValidModel(requestedModel)) {
+      res.status(400).json({
+        error: `Invalid model: '${requestedModel}'. Supported models: ${SUPPORTED_MODELS.join(', ')}`,
+      });
       return;
     }
 
@@ -218,6 +228,20 @@ router.post('/generate', async (req: Request, res: Response) => {
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
+    }
+
+    // 2b. Resolve model: request param > workspace L3 preferred_model > default
+    let resolvedModel: SupportedModel = DEFAULT_MODEL;
+    if (requestedModel && isValidModel(requestedModel)) {
+      resolvedModel = requestedModel;
+    } else if (!requestedModel) {
+      // Check workspace L3 for preferred_model
+      const l3Pref = db.prepare(
+        `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+      ).get(workspaceId) as { preferred_model: string | null } | undefined;
+      if (l3Pref?.preferred_model && isValidModel(l3Pref.preferred_model)) {
+        resolvedModel = l3Pref.preferred_model;
+      }
     }
 
     // 3. Fetch L1: global brain (no workspace, no domain)
@@ -300,8 +324,10 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Your entire response must be valid JSON parseable by JSON.parse()',
     ].join('\n');
 
-    // 8. Call LLM
-    const rawResponse = await chatComplete([{ role: 'user', content: fullPrompt }]);
+    // 8. Call LLM with selected model
+    const llmResult = await chatComplete([{ role: 'user', content: fullPrompt }], resolvedModel);
+    const rawResponse = llmResult.text;
+    const tokenUsage = llmResult.usage;
 
     // 9. Parse JSON — strip markdown fences and preamble text if present
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown> };
@@ -334,12 +360,13 @@ router.post('/generate', async (req: Request, res: Response) => {
 
     // 14. WAL event
     const provider = getActiveProvider();
-    const model = getActiveModel();
+    const model = resolvedModel;
     db.prepare(
       `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', ?, ?)`
     ).run(slug, JSON.stringify({
       title, domain, storyCount: parsed.stories.length, provider, model,
       hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
+      inputTokens: tokenUsage.inputTokens, outputTokens: tokenUsage.outputTokens,
     }));
 
     // 15. Snapshot existing spec as a version if regenerating same slug
@@ -366,6 +393,7 @@ router.post('/generate', async (req: Request, res: Response) => {
         title,
         stories: parsed.stories as any,
         diagrams: allDiagrams as any,
+        model: resolvedModel,
       });
       specPath = writeResult.specPath;
       diagramsPath = writeResult.diagramsPath;
@@ -382,6 +410,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       diagrams: allDiagrams,
       provider,
       model,
+      usage: tokenUsage,
       specPath,
       diagramsPath,
     });
@@ -450,6 +479,8 @@ interface ArchiveSpecSummary extends SpecSummary {
   rejectedAt?: string;
   rejectReason?: string;
   storyTitles: string[];
+  repoName: string;
+  branchName?: string;
 }
 
 function buildArchiveSummary(
@@ -457,12 +488,14 @@ function buildArchiveSummary(
   fileName: string,
   status: 'pending' | 'approved',
   workspacePath: string,
+  branchName?: string,
 ): ArchiveSpecSummary {
   const base = buildSummary(filePath, fileName, status, workspacePath);
   const content = parseSpecFile(filePath);
   const stories = (content as any).userStories ?? (content as any).stories ?? [];
   const storyTitles = stories.map((s: any) => s.title ?? s.id ?? '').filter(Boolean);
-  return { ...base, storyTitles };
+  const repoName = path.basename(workspacePath);
+  return { ...base, storyTitles, repoName, branchName };
 }
 
 function matchesSearch(spec: ArchiveSpecSummary, q: string): boolean {
@@ -497,11 +530,24 @@ router.get('/archive', (req: Request, res: Response) => {
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
     const allSpecs: ArchiveSpecSummary[] = [];
 
+    // Look up most recent branch_name per spec slug from pipeline_runs
+    const branchRows = db.prepare(
+      `SELECT spec_path, branch_name FROM pipeline_runs
+       WHERE workspace_id = ? AND branch_name IS NOT NULL
+       ORDER BY id DESC`
+    ).all(workspaceId) as { spec_path: string; branch_name: string }[];
+    const branchBySlug = new Map<string, string>();
+    for (const row of branchRows) {
+      const slug = path.basename(row.spec_path, '.json');
+      if (!branchBySlug.has(slug)) branchBySlug.set(slug, row.branch_name);
+    }
+
     // Collect pending specs
     if (statusFilter === 'all' || statusFilter === 'pending') {
       for (const file of safeReaddir(pendingDir)) {
         try {
-          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path));
+          const slug = path.basename(file, '.json');
+          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
@@ -512,7 +558,8 @@ router.get('/archive', (req: Request, res: Response) => {
     if (statusFilter === 'all' || statusFilter === 'approved') {
       for (const file of safeReaddir(approvedDir)) {
         try {
-          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path));
+          const slug = path.basename(file, '.json');
+          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
@@ -545,6 +592,7 @@ router.get('/archive', (req: Request, res: Response) => {
           rejectedAt: evt.ts,
           rejectReason: payload.reason ?? undefined,
           workspacePath: workspace.path,
+          repoName: path.basename(workspace.path),
           storyTitles: [],
         });
       }
@@ -569,6 +617,106 @@ router.get('/archive', (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[Specs] Archive error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /:specId/add-stories — Generate more stories for an existing spec ───
+
+router.post('/:specId/add-stories', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId, count, brief } = req.body;
+
+    const storyCount = Math.min(20, Math.max(1, parseInt(count) || 3));
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFilePath: string;
+    if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
+    else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
+    else { res.status(404).json({ error: 'Spec not found' }); return; }
+
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    const existingStories: Array<{ id: string; title: string }> =
+      specContent.userStories ?? specContent.stories ?? [];
+
+    const storyPrefix = existingStories[0]?.id?.match(/^([A-Z]+)/)?.[1] ?? 'US';
+    const maxN = existingStories.reduce((max, s) => {
+      const n = parseInt(s.id?.replace(/\D/g, '') || '0', 10);
+      return n > max ? n : max;
+    }, 0);
+    const startN = maxN + 1;
+
+    const l1Row = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+    ).get() as { content_yaml: string } | undefined;
+    const l3Row = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+    ).get(workspaceId) as { content_yaml: string } | undefined;
+
+    const { synthesize } = await import('../lib/direction-stack');
+    const synthesized = synthesize({ l1: l1Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: specContent.title ?? specId });
+
+    const existingList = existingStories.map(s => `- ${s.id}: ${s.title}`).join('\n');
+
+    const fullPrompt = [
+      synthesized,
+      '---',
+      `TASK: Add ${storyCount} NEW user stories to an existing spec.`,
+      `Spec title: ${specContent.title ?? specId}`,
+      brief ? `Additional brief: ${brief}` : '',
+      '',
+      'Existing stories (do NOT duplicate these):',
+      existingList,
+      '',
+      `Generate exactly ${storyCount} new stories, numbered ${storyPrefix}-${String(startN).padStart(3, '0')} through ${storyPrefix}-${String(startN + storyCount - 1).padStart(3, '0')}.`,
+      '',
+      'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown. No preamble. Start with { and end with }.',
+      'JSON schema: {"stories":[{"id":"string","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["string"]}]}',
+      'Rules: 3-5 testable acceptanceCriteria per story. dependsOn lists IDs this story requires first (empty array if none).',
+    ].filter(Boolean).join('\n');
+
+    const { chatComplete } = await import('../lib/llm-client');
+    const rawResponse = await chatComplete([{ role: 'user', content: fullPrompt }]);
+
+    let parsed: { stories: unknown[] };
+    try {
+      const responseText = rawResponse.text;
+      const fenceMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonStr = fenceMatch ? fenceMatch[1].trim() : responseText.trim();
+      const jsonStart = jsonStr.indexOf('{');
+      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+    } catch {
+      res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse.text });
+      return;
+    }
+
+    if (!Array.isArray(parsed.stories)) {
+      res.status(500).json({ error: 'Invalid structure from LLM' });
+      return;
+    }
+
+    const newStories = parsed.stories;
+    specContent.userStories = [...existingStories, ...newStories];
+    fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+
+    res.json({ ok: true, addedCount: newStories.length, stories: newStories });
+  } catch (error: any) {
+    console.error('[Specs] Add stories error:', error);
     res.status(500).json({ error: error.message });
   }
 });

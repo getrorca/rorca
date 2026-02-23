@@ -81,7 +81,7 @@ export async function gitMapStep(
         // Truncate to 8000 chars to stay within cheap model token budget
         const truncated = statOutput.slice(0, 8000);
 
-        const summary = await chatComplete(
+        const summaryResult = await chatComplete(
           [
             {
               role: 'user',
@@ -94,7 +94,7 @@ export async function gitMapStep(
           fromHash: fromH,
           toHash: toH,
           commitCount: chunk.length,
-          summary,
+          summary: summaryResult.text,
         };
       })
     );
@@ -162,5 +162,5 @@ export async function gitReduceStep(
   const result = await chatComplete(
     [{ role: 'user', content: prompt }]
   );
-  return result;
+  return result.text;
 }
