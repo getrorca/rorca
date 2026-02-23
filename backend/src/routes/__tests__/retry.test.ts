@@ -4,12 +4,14 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 let app: Express;
 let db: Database.Database;
 let tmpDir: string;
+let authToken: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-retry-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
@@ -19,6 +21,7 @@ beforeEach(() => {
   app = serverMod.default;
   const dbMod = require('../../db/index');
   db = dbMod.db;
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -80,6 +83,7 @@ test('POST /api/pipeline/runs/:runId/retry retries all failed stories when story
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   expect(res.status).toBe(200);
@@ -102,6 +106,7 @@ test('POST /api/pipeline/runs/:runId/retry retries only specified storyIds', asy
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-002'] });
 
   expect(res.status).toBe(200);
@@ -118,6 +123,7 @@ test('Retry creates new story_result rows with incremented retry count', async (
 
   await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-002'] });
 
   const stories = db.prepare(
@@ -145,6 +151,7 @@ test('Original failed story_result rows are preserved (audit trail)', async () =
 
   await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   const afterStories = db.prepare(
@@ -167,6 +174,7 @@ test('Retry emits story_retried WAL events for each retried story', async () => 
 
   await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   const events = db.prepare(
@@ -192,6 +200,7 @@ test('POST /api/pipeline/runs/:runId/retry returns 409 for running run', async (
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   expect(res.status).toBe(409);
@@ -203,6 +212,7 @@ test('POST /api/pipeline/runs/:runId/retry returns 409 for running run', async (
 test('POST /api/pipeline/runs/:runId/retry returns 404 for nonexistent run', async () => {
   const res = await request(app)
     .post('/api/pipeline/runs/99999/retry')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   expect(res.status).toBe(404);
@@ -225,6 +235,7 @@ test('POST /api/pipeline/runs/:runId/retry returns 422 when no stories have fail
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   expect(res.status).toBe(422);
@@ -239,6 +250,7 @@ test('POST /api/pipeline/runs/:runId/retry returns 422 when storyIds do not matc
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-001'] }); // US-001 passed, not failed
 
   expect(res.status).toBe(422);
@@ -259,6 +271,7 @@ test('story_retried events are broadcast to SSE subscribers', async () => {
 
   await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-002'] });
 
   const retryEvents = received.filter((e: any) => e.event_type === 'story_retried');
@@ -293,6 +306,7 @@ test('Second retry increments attempt number to 2', async () => {
   // First retry
   await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-002'] });
 
   // Simulate the retry failing again: update the retry row to 'fail'
@@ -306,6 +320,7 @@ test('Second retry increments attempt number to 2', async () => {
   // Second retry
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-002'] });
 
   expect(res.status).toBe(200);

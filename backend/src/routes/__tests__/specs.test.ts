@@ -4,6 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -20,6 +21,7 @@ let app: Express;
 let db: Database.Database;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
+let authToken: string;
 
 const validLlmResponse = JSON.stringify({
   stories: [
@@ -44,7 +46,7 @@ const validLlmResponse = JSON.stringify({
   },
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
 
   // Keep the mock across resets
@@ -71,10 +73,18 @@ beforeEach(() => {
   const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
 
+  // Clean up any stale spec files from prior test suites that share os.tmpdir()
+  const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
+  if (fs.existsSync(specsRoot)) {
+    fs.rmSync(specsRoot, { recursive: true, force: true });
+  }
+
   // Seed a workspace for tests
   db.prepare(
     "INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', ?)"
   ).run(os.tmpdir());
+
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -95,6 +105,7 @@ test('POST /api/specs/generate with valid body returns slug, stories, diagrams, 
 
   const res = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       domain: 'backend',
@@ -130,6 +141,7 @@ test('LLM returns non-JSON → 500 with error and raw', async () => {
 
   const res = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       domain: 'backend',
@@ -145,6 +157,7 @@ test('LLM returns non-JSON → 500 with error and raw', async () => {
 test('Missing workspaceId in body → 400', async () => {
   const res = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       domain: 'backend',
       title: 'No Workspace',
@@ -158,6 +171,7 @@ test('Missing workspaceId in body → 400', async () => {
 test('workspaceId not in DB → 404', async () => {
   const res = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'nonexistent',
       domain: 'backend',
@@ -174,6 +188,7 @@ test('WAL event inserted with event_type=generate and payload includes provider'
 
   await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       domain: 'backend',
@@ -207,6 +222,7 @@ test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydr
 
   await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       domain: 'backend',
@@ -231,6 +247,7 @@ test('WAL event has hasSchema:false when workspace has no hydrated context', asy
 
   await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       domain: 'backend',
@@ -254,6 +271,7 @@ test('POST /api/specs/generate with existing slug snapshots old version and succ
   // First call succeeds
   const res1 = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       domain: 'backend',
@@ -265,6 +283,7 @@ test('POST /api/specs/generate with existing slug snapshots old version and succ
   // Second call with same title → succeeds, old version is snapshotted
   const res2 = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       domain: 'backend',
@@ -292,6 +311,7 @@ test('POST /api/specs/generate with explicit model uses that model', async () =>
 
   const res = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       title: 'Model Test',
@@ -313,6 +333,7 @@ test('POST /api/specs/generate with explicit model uses that model', async () =>
 test('POST /api/specs/generate with invalid model returns 400', async () => {
   const res = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       title: 'Bad Model',
@@ -336,6 +357,7 @@ test('POST /api/specs/generate without model uses workspace L3 preferred_model',
 
   const res = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       title: 'Default Model Test',
@@ -363,6 +385,7 @@ test('POST /api/specs/generate with explicit model overrides workspace default',
 
   const res = await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       title: 'Override Model Test',
@@ -379,6 +402,7 @@ test('WAL event payload includes token usage', async () => {
 
   await request(app)
     .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
       title: 'Token Usage Test',
@@ -414,13 +438,17 @@ function seedSpecFile(dir: string, slug: string, overrides?: Record<string, unkn
 
 describe('GET /api/specs (list)', () => {
   test('returns pending and approved specs with correct status', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    // Clean dirs to avoid cross-suite contamination (batch tests share os.tmpdir())
+    const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
+    if (fs.existsSync(specsRoot)) fs.rmSync(specsRoot, { recursive: true, force: true });
+
+    const pendingDir = path.join(specsRoot, 'pending');
+    const approvedDir = path.join(specsRoot, 'approved');
 
     seedSpecFile(pendingDir, 'my-pending-spec');
     seedSpecFile(approvedDir, 'my-approved-spec', { generatedAt: '2026-02-19T10:00:00.000Z' });
 
-    const res = await request(app).get('/api/specs?workspaceId=ws-test');
+    const res = await request(app).get('/api/specs?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(2);
@@ -444,7 +472,7 @@ describe('GET /api/specs (list)', () => {
     seedSpecFile(pendingDir, 'pend-only');
     seedSpecFile(approvedDir, 'appr-only');
 
-    const res = await request(app).get('/api/specs?workspaceId=ws-test&status=pending');
+    const res = await request(app).get('/api/specs?workspaceId=ws-test&status=pending').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -458,7 +486,7 @@ describe('GET /api/specs (list)', () => {
     seedSpecFile(pendingDir, 'pend-only2');
     seedSpecFile(approvedDir, 'appr-only2');
 
-    const res = await request(app).get('/api/specs?workspaceId=ws-test&status=approved');
+    const res = await request(app).get('/api/specs?workspaceId=ws-test&status=approved').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -466,18 +494,18 @@ describe('GET /api/specs (list)', () => {
   });
 
   test('returns empty array when no specs exist', async () => {
-    const res = await request(app).get('/api/specs?workspaceId=ws-test');
+    const res = await request(app).get('/api/specs?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.specs).toEqual([]);
   });
 
   test('missing workspaceId → 400', async () => {
-    const res = await request(app).get('/api/specs');
+    const res = await request(app).get('/api/specs').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(400);
   });
 
   test('unknown workspaceId → 404', async () => {
-    const res = await request(app).get('/api/specs?workspaceId=nonexistent');
+    const res = await request(app).get('/api/specs?workspaceId=nonexistent').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
   });
 });
@@ -491,6 +519,7 @@ describe('POST /api/specs/:id/approve', () => {
 
     const res = await request(app)
       .post('/api/specs/to-approve/approve')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test' });
 
     expect(res.status).toBe(200);
@@ -509,6 +538,7 @@ describe('POST /api/specs/:id/approve', () => {
 
     await request(app)
       .post('/api/specs/wal-approve/approve')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test' });
 
     const event = db.prepare(
@@ -532,6 +562,7 @@ describe('POST /api/specs/:id/approve', () => {
 
     const res = await request(app)
       .post('/api/specs/auto-mkdir/approve')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test' });
 
     expect(res.status).toBe(200);
@@ -541,6 +572,7 @@ describe('POST /api/specs/:id/approve', () => {
   test('spec not found → 404', async () => {
     const res = await request(app)
       .post('/api/specs/ghost/approve')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test' });
 
     expect(res.status).toBe(404);
@@ -549,6 +581,7 @@ describe('POST /api/specs/:id/approve', () => {
   test('missing workspaceId → 400', async () => {
     const res = await request(app)
       .post('/api/specs/whatever/approve')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({});
 
     expect(res.status).toBe(400);
@@ -562,6 +595,7 @@ describe('POST /api/specs/:id/reject', () => {
 
     const res = await request(app)
       .post('/api/specs/to-reject/reject')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test' });
 
     expect(res.status).toBe(200);
@@ -575,6 +609,7 @@ describe('POST /api/specs/:id/reject', () => {
 
     await request(app)
       .post('/api/specs/wal-reject/reject')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', reason: 'Too many stories' });
 
     const event = db.prepare(
@@ -591,6 +626,7 @@ describe('POST /api/specs/:id/reject', () => {
   test('spec not found → 404', async () => {
     const res = await request(app)
       .post('/api/specs/ghost/reject')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test' });
 
     expect(res.status).toBe(404);
@@ -602,7 +638,7 @@ describe('GET /api/specs/:specId (detail)', () => {
     const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
     const seeded = seedSpecFile(pendingDir, 'detail-spec');
 
-    const res = await request(app).get('/api/specs/detail-spec?workspaceId=ws-test');
+    const res = await request(app).get('/api/specs/detail-spec?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.title).toBe(seeded.title);
@@ -613,19 +649,19 @@ describe('GET /api/specs/:specId (detail)', () => {
     const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
     const seeded = seedSpecFile(approvedDir, 'approved-detail');
 
-    const res = await request(app).get('/api/specs/approved-detail?workspaceId=ws-test');
+    const res = await request(app).get('/api/specs/approved-detail?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.title).toBe(seeded.title);
   });
 
   test('spec not found → 404', async () => {
-    const res = await request(app).get('/api/specs/nonexistent?workspaceId=ws-test');
+    const res = await request(app).get('/api/specs/nonexistent?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
   });
 
   test('missing workspaceId → 400', async () => {
-    const res = await request(app).get('/api/specs/some-spec');
+    const res = await request(app).get('/api/specs/some-spec').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(400);
   });
 });
@@ -634,7 +670,7 @@ describe('GET /api/specs/:specId (detail)', () => {
 
 describe('GET /api/specs/:specId/versions', () => {
   test('returns empty array when no versions exist', async () => {
-    const res = await request(app).get('/api/specs/nonexistent-slug/versions');
+    const res = await request(app).get('/api/specs/nonexistent-slug/versions').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.specSlug).toBe('nonexistent-slug');
     expect(res.body.versions).toEqual([]);
@@ -653,9 +689,10 @@ describe('GET /api/specs/:specId/versions', () => {
     // Reject the spec (creates a version snapshot)
     await request(app)
       .post('/api/specs/versioned-spec/reject')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', reason: 'Needs more stories' });
 
-    const res = await request(app).get('/api/specs/versioned-spec/versions');
+    const res = await request(app).get('/api/specs/versioned-spec/versions').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.versions).toHaveLength(1);
     expect(res.body.versions[0].version).toBe(1);
@@ -675,7 +712,7 @@ describe('GET /api/specs/:specId/versions', () => {
       `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, ?)`
     ).run('multi-ver', 2, JSON.stringify({ title: 'V2', userStories: [{ id: 'US-001', title: 'S1' }] }), 'pending');
 
-    const res = await request(app).get('/api/specs/multi-ver/versions');
+    const res = await request(app).get('/api/specs/multi-ver/versions').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.versions).toHaveLength(2);
     expect(res.body.versions[0].version).toBe(1);
@@ -713,7 +750,7 @@ describe('GET /api/specs/:specId/diff', () => {
   });
 
   test('returns structured diff with added, removed, modified, unchanged stories', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=2');
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=2').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
 
     expect(res.body.specSlug).toBe('diff-test');
@@ -751,25 +788,25 @@ describe('GET /api/specs/:specId/diff', () => {
   });
 
   test('missing v1/v2 → 400', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1');
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=1').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('v1 and v2');
   });
 
   test('same v1 and v2 → 400', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=1');
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=1').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('different');
   });
 
   test('nonexistent version → 404', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=99');
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=1&v2=99').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('v99');
   });
 
   test('both versions missing → 404 mentioning both', async () => {
-    const res = await request(app).get('/api/specs/diff-test/diff?v1=98&v2=99');
+    const res = await request(app).get('/api/specs/diff-test/diff?v1=98&v2=99').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('v98');
     expect(res.body.error).toContain('v99');
@@ -805,7 +842,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     seedRichSpec(pendingDir, 'auth-system', { title: 'Authentication System' });
     seedRichSpec(pendingDir, 'payment-flow', { title: 'Payment Processing' });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=authentication');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=authentication').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -826,7 +863,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
       ],
     });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=analytics');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=analytics').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -845,7 +882,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
       ],
     });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=OAuth2');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=OAuth2').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -864,7 +901,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
       ],
     });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=invalidation');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=invalidation').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -891,7 +928,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
       ],
     });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=login');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=login').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(2);
@@ -905,7 +942,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     seedRichSpec(pendingDir, 'old-spec', { title: 'Old Spec', generatedAt: '2026-01-01T00:00:00.000Z' });
     seedRichSpec(pendingDir, 'new-spec', { title: 'New Spec', generatedAt: '2026-02-15T00:00:00.000Z' });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&createdAfter=2026-02-01T00:00:00.000Z');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&createdAfter=2026-02-01T00:00:00.000Z').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -917,7 +954,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     seedRichSpec(pendingDir, 'jan-spec', { title: 'January Spec', generatedAt: '2026-01-15T00:00:00.000Z' });
     seedRichSpec(pendingDir, 'feb-spec', { title: 'February Spec', generatedAt: '2026-02-15T00:00:00.000Z' });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&createdBefore=2026-02-01T00:00:00.000Z');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&createdBefore=2026-02-01T00:00:00.000Z').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -930,9 +967,9 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     seedRichSpec(pendingDir, 'auth-new', { title: 'Auth System v2', generatedAt: '2026-02-20T00:00:00.000Z' });
     seedRichSpec(pendingDir, 'payment-new', { title: 'Payment System', generatedAt: '2026-02-20T00:00:00.000Z' });
 
-    const res = await request(app).get(
-      '/api/specs/archive?workspaceId=ws-test&q=auth&createdAfter=2026-02-01T00:00:00.000Z'
-    );
+    const res = await request(app)
+      .get('/api/specs/archive?workspaceId=ws-test&q=auth&createdAfter=2026-02-01T00:00:00.000Z')
+      .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -944,7 +981,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     seedRichSpec(pendingDir, 'spec-a', { title: 'Spec A' });
     seedRichSpec(pendingDir, 'spec-b', { title: 'Spec B' });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(2);
@@ -957,7 +994,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
     seedRichSpec(pendingDir, 'some-spec', { title: 'Some Feature' });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=zzzznonexistent');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=zzzznonexistent').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(0);
@@ -970,7 +1007,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     seedRichSpec(pendingDir, 'auth-pending', { title: 'Auth Pending' });
     seedRichSpec(approvedDir, 'auth-approved', { title: 'Auth Approved' });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&status=approved');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&status=approved').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(1);
@@ -983,7 +1020,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     seedRichSpec(pendingDir, 'auth-two', { title: 'Auth Two', generatedAt: '2026-02-21T12:00:00.000Z' });
     seedRichSpec(pendingDir, 'auth-three', { title: 'Auth Three', generatedAt: '2026-02-22T12:00:00.000Z' });
 
-    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&limit=2&offset=0');
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&limit=2&offset=0').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.specs).toHaveLength(2);
@@ -991,7 +1028,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     expect(res.body.hasMore).toBe(true);
 
     // Second page
-    const res2 = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&limit=2&offset=2');
+    const res2 = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&limit=2&offset=2').set('Authorization', `Bearer ${authToken}`);
     expect(res2.status).toBe(200);
     expect(res2.body.specs).toHaveLength(1);
     expect(res2.body.hasMore).toBe(false);
@@ -1006,6 +1043,7 @@ describe('POST /api/specs/generate/batch', () => {
 
     const res = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Build user auth', workspaceId: 'ws-test', title: 'Auth Feature' },
@@ -1022,6 +1060,7 @@ describe('POST /api/specs/generate/batch', () => {
   test('missing briefs array → 400', async () => {
     const res = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({});
 
     expect(res.status).toBe(400);
@@ -1031,6 +1070,7 @@ describe('POST /api/specs/generate/batch', () => {
   test('empty briefs array → 400', async () => {
     const res = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ briefs: [] });
 
     expect(res.status).toBe(400);
@@ -1040,6 +1080,7 @@ describe('POST /api/specs/generate/batch', () => {
   test('brief missing required fields → 400 with index', async () => {
     const res = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Valid brief', workspaceId: 'ws-test' },
@@ -1055,6 +1096,7 @@ describe('POST /api/specs/generate/batch', () => {
   test('brief with invalid model → 400 with index', async () => {
     const res = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Test', workspaceId: 'ws-test', model: 'gpt-4o' },
@@ -1071,6 +1113,7 @@ describe('POST /api/specs/generate/batch', () => {
 
     const res = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Build auth', workspaceId: 'ws-test', title: 'Batch WAL Test' },
@@ -1096,6 +1139,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
 
     const createRes = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Build auth', workspaceId: 'ws-test', title: 'Batch Status A' },
@@ -1109,7 +1153,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     // Wait for processing to complete
     await new Promise(resolve => setTimeout(resolve, 500));
 
-    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
     expect(statusRes.status).toBe(200);
     expect(statusRes.body.batchId).toBe(batchId);
@@ -1124,7 +1168,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
   });
 
   test('nonexistent batchId → 404', async () => {
-    const res = await request(app).get('/api/specs/generate/batch/nonexistent-id');
+    const res = await request(app).get('/api/specs/generate/batch/nonexistent-id').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('not found');
@@ -1135,6 +1179,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
 
     const createRes = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Single brief', workspaceId: 'ws-test', title: 'Finished Batch' },
@@ -1146,7 +1191,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     // Wait for processing to complete
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
     expect(statusRes.status).toBe(200);
     expect(statusRes.body.finishedAt).toBeDefined();
@@ -1165,6 +1210,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
 
     const createRes = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Will fail', workspaceId: 'ws-test', title: 'Failing Brief' },
@@ -1177,7 +1223,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     // Wait for both to process
     await new Promise(resolve => setTimeout(resolve, 1500));
 
-    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
     expect(statusRes.status).toBe(200);
     expect(statusRes.body.finishedAt).toBeDefined();
@@ -1200,6 +1246,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
 
     const createRes = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Bad workspace', workspaceId: 'nonexistent-ws', title: 'Bad WS' },
@@ -1210,7 +1257,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     const { batchId } = createRes.body;
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+    const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
     expect(statusRes.status).toBe(200);
     expect(statusRes.body.summary.failed).toBe(1);
@@ -1226,6 +1273,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
 
     const createRes = await request(app)
       .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
           { brief: 'Progress test', workspaceId: 'ws-test', title: 'Progress Brief' },

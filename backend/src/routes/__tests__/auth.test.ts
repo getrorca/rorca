@@ -396,31 +396,30 @@ describe('POST /api/auth/logout', () => {
   });
 });
 
-// ─── requireAuth middleware ───
+// ─── authRequired middleware ───
 
-describe('requireAuth middleware', () => {
-  test('returns 401 for missing Authorization header', async () => {
-    // We need a protected route to test middleware — use a simple test
-    const { requireAuth } = require('../auth');
+describe('authRequired middleware', () => {
+  test('returns 401 with "Authentication required" for missing Authorization header', async () => {
+    const { authRequired } = require('../auth');
     const express = require('express');
     const testApp = express();
     testApp.use(express.json());
-    testApp.get('/protected', requireAuth, (_req: any, res: any) => {
-      res.json({ ok: true, userId: _req.userId });
+    testApp.get('/protected', authRequired, (_req: any, res: any) => {
+      res.json({ ok: true });
     });
 
     const res = await request(testApp).get('/protected');
     expect(res.status).toBe(401);
-    expect(res.body.error).toBe('Authorization required');
+    expect(res.body.error).toBe('Authentication required');
   });
 
-  test('returns 401 with "Token expired" for expired access token', async () => {
+  test('returns 401 with "Invalid token" for expired access token', async () => {
     const jwt = require('jsonwebtoken');
-    const { JWT_SECRET, requireAuth } = require('../auth');
+    const { JWT_SECRET, authRequired } = require('../auth');
     const express = require('express');
     const testApp = express();
     testApp.use(express.json());
-    testApp.get('/protected', requireAuth, (_req: any, res: any) => {
+    testApp.get('/protected', authRequired, (_req: any, res: any) => {
       res.json({ ok: true });
     });
 
@@ -432,15 +431,15 @@ describe('requireAuth middleware', () => {
 
     const res = await request(testApp).get('/protected').set('Authorization', `Bearer ${expiredToken}`);
     expect(res.status).toBe(401);
-    expect(res.body.error).toBe('Token expired');
+    expect(res.body.error).toBe('Invalid token');
   });
 
   test('returns 401 with "Invalid token" for malformed JWT', async () => {
-    const { requireAuth } = require('../auth');
+    const { authRequired } = require('../auth');
     const express = require('express');
     const testApp = express();
     testApp.use(express.json());
-    testApp.get('/protected', requireAuth, (_req: any, res: any) => {
+    testApp.get('/protected', authRequired, (_req: any, res: any) => {
       res.json({ ok: true });
     });
 
@@ -449,21 +448,72 @@ describe('requireAuth middleware', () => {
     expect(res.body.error).toBe('Invalid token');
   });
 
-  test('passes with valid access token and populates userId', async () => {
+  test('passes with valid access token and populates req.user', async () => {
     const { accessToken, user } = await registerUser();
 
-    const { requireAuth } = require('../auth');
+    const { authRequired } = require('../auth');
     const express = require('express');
     const testApp = express();
     testApp.use(express.json());
-    testApp.get('/protected', requireAuth, (req: any, res: any) => {
-      res.json({ ok: true, userId: req.userId, userEmail: req.userEmail });
+    testApp.get('/protected', authRequired, (req: any, res: any) => {
+      res.json({ ok: true, user: req.user });
     });
 
     const res = await request(testApp).get('/protected').set('Authorization', `Bearer ${accessToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.userId).toBe(user.id);
-    expect(res.body.userEmail).toBe('test@example.com');
+    expect(res.body.user.id).toBe(user.id);
+    expect(res.body.user.email).toBe('test@example.com');
+    expect(res.body.user.role).toBe('user');
+  });
+
+  test('returns 401 when user no longer exists in database', async () => {
+    const { accessToken } = await registerUser();
+
+    // Delete the user from DB
+    db.prepare('DELETE FROM users').run();
+
+    const { authRequired } = require('../auth');
+    const express = require('express');
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.get('/protected', authRequired, (_req: any, res: any) => {
+      res.json({ ok: true });
+    });
+
+    const res = await request(testApp).get('/protected').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('Invalid token');
+  });
+});
+
+// ─── Global auth middleware integration ───
+
+describe('Global auth middleware', () => {
+  test('public routes are accessible without auth', async () => {
+    // Health endpoint
+    const healthRes = await request(app).get('/api/health');
+    expect(healthRes.status).toBe(200);
+    expect(healthRes.body.ok).toBe(true);
+
+    // Auth endpoints — login returns 401 for bad creds but with route-specific error, not middleware's "Authentication required"
+    const loginRes = await request(app).post('/api/auth/login').send({ email: 'x@y.com', password: 'test' });
+    expect(loginRes.body.error).not.toBe('Authentication required');
+
+    // Register is accessible without auth (returns 400 for missing fields, not 401)
+    const registerRes = await request(app).post('/api/auth/register').send({});
+    expect(registerRes.status).toBe(400);
+  });
+
+  test('protected routes return 401 without auth token', async () => {
+    const res = await request(app).get('/api/workspaces');
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('Authentication required');
+  });
+
+  test('protected routes succeed with valid auth token', async () => {
+    const { accessToken } = await registerUser();
+    const res = await request(app).get('/api/workspaces').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
   });
 });
 

@@ -29,8 +29,15 @@ interface UserRow {
   display_name: string;
   password_hash: string;
   github_id: string | null;
+  role: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  role: string;
 }
 
 interface GitHubConnectionRow {
@@ -465,10 +472,10 @@ router.get('/github/callback', async (req: Request, res: Response) => {
 });
 
 // Auth middleware — verifies JWT access token from Authorization header
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+export function authRequired(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Authorization required' });
+    res.status(401).json({ error: 'Authentication required' });
     return;
   }
 
@@ -476,16 +483,33 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as { sub: string; email: string };
-    (req as Request & { userId: string; userEmail: string }).userId = decoded.sub;
-    (req as Request & { userId: string; userEmail: string }).userEmail = decoded.email;
+
+    // Look up user to get role
+    const user = db.prepare('SELECT id, email, role FROM users WHERE id = ?').get(decoded.sub) as
+      | Pick<UserRow, 'id' | 'email' | 'role'>
+      | undefined;
+
+    if (!user) {
+      res.status(401).json({ error: 'Invalid token' });
+      return;
+    }
+
+    (req as Request & { user: AuthUser }).user = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    };
     next();
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) {
-      res.status(401).json({ error: 'Token expired' });
+      res.status(401).json({ error: 'Invalid token' });
       return;
     }
     res.status(401).json({ error: 'Invalid token' });
   }
 }
+
+/** @deprecated Use authRequired instead */
+export const requireAuth = authRequired;
 
 export default router;

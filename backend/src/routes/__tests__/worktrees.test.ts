@@ -4,6 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 // ─── Mock simple-git ────────────────────────────────────────────────────────
 
@@ -24,8 +25,9 @@ let app: Express;
 let db: Database.Database;
 let tmpDir: string;
 let dbPath: string;
+let authToken: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   jest.clearAllMocks();
 
@@ -49,6 +51,11 @@ beforeEach(() => {
   db.prepare(
     'INSERT INTO workspaces (id, label, path, domains) VALUES (?, ?, ?, ?)'
   ).run('ws-1', 'Test Workspace', tmpDir, '["frontend"]');
+
+  authToken = await getAuthToken(app);
+
+  // Clear WAL events from user registration so tests start with a clean slate
+  db.prepare('DELETE FROM wal_events').run();
 });
 
 afterEach(() => {
@@ -75,7 +82,7 @@ const PORCELAIN_OUTPUT = [
 test('GET /api/worktrees parses porcelain output correctly', async () => {
   mockRaw.mockResolvedValue(PORCELAIN_OUTPUT);
 
-  const res = await request(app).get('/api/worktrees?workspaceId=ws-1');
+  const res = await request(app).get('/api/worktrees?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.worktrees).toHaveLength(2);
@@ -114,7 +121,7 @@ test('GET /api/worktrees parses bare and detached worktrees', async () => {
 
   mockRaw.mockResolvedValue(output);
 
-  const res = await request(app).get('/api/worktrees?workspaceId=ws-1');
+  const res = await request(app).get('/api/worktrees?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.worktrees[0].isBare).toBe(true);
@@ -122,14 +129,14 @@ test('GET /api/worktrees parses bare and detached worktrees', async () => {
 });
 
 test('GET /api/worktrees returns 400 without workspaceId', async () => {
-  const res = await request(app).get('/api/worktrees');
+  const res = await request(app).get('/api/worktrees').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(400);
   expect(res.body.error).toContain('workspaceId');
 });
 
 test('GET /api/worktrees returns 404 for nonexistent workspace', async () => {
-  const res = await request(app).get('/api/worktrees?workspaceId=no-such');
+  const res = await request(app).get('/api/worktrees?workspaceId=no-such').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(404);
   expect(res.body.error).toBe('Workspace not found');
@@ -140,7 +147,7 @@ test('GET /api/worktrees returns 404 for nonexistent workspace', async () => {
 test('POST /api/worktrees calls git worktree add with correct args', async () => {
   mockRaw.mockResolvedValue('');
 
-  const res = await request(app).post('/api/worktrees').send({
+  const res = await request(app).post('/api/worktrees').set('Authorization', `Bearer ${authToken}`).send({
     workspaceId: 'ws-1',
     branchName: 'feat/user-auth',
     baseBranch: 'main',
@@ -163,7 +170,7 @@ test('POST /api/worktrees calls git worktree add with correct args', async () =>
 test('POST /api/worktrees defaults baseBranch to HEAD', async () => {
   mockRaw.mockResolvedValue('');
 
-  await request(app).post('/api/worktrees').send({
+  await request(app).post('/api/worktrees').set('Authorization', `Bearer ${authToken}`).send({
     workspaceId: 'ws-1',
     branchName: 'fix/bug',
   });
@@ -179,7 +186,7 @@ test('POST /api/worktrees uses custom worktreePath if provided', async () => {
   mockRaw.mockResolvedValue('');
   const customPath = path.join(tmpDir, 'custom-wt');
 
-  const res = await request(app).post('/api/worktrees').send({
+  const res = await request(app).post('/api/worktrees').set('Authorization', `Bearer ${authToken}`).send({
     workspaceId: 'ws-1',
     branchName: 'feat/custom',
     worktreePath: customPath,
@@ -197,7 +204,7 @@ test('POST /api/worktrees uses custom worktreePath if provided', async () => {
 test('POST /api/worktrees returns 409 when branch already exists', async () => {
   mockRaw.mockRejectedValue(new Error("A branch named 'feat/existing' already exists"));
 
-  const res = await request(app).post('/api/worktrees').send({
+  const res = await request(app).post('/api/worktrees').set('Authorization', `Bearer ${authToken}`).send({
     workspaceId: 'ws-1',
     branchName: 'feat/existing',
   });
@@ -209,7 +216,7 @@ test('POST /api/worktrees returns 409 when branch already exists', async () => {
 test('POST /api/worktrees emits WAL event', async () => {
   mockRaw.mockResolvedValue('');
 
-  await request(app).post('/api/worktrees').send({
+  await request(app).post('/api/worktrees').set('Authorization', `Bearer ${authToken}`).send({
     workspaceId: 'ws-1',
     branchName: 'feat/wal-test',
   });
@@ -226,7 +233,7 @@ test('POST /api/worktrees emits WAL event', async () => {
 });
 
 test('POST /api/worktrees returns 400 without required fields', async () => {
-  const res = await request(app).post('/api/worktrees').send({ workspaceId: 'ws-1' });
+  const res = await request(app).post('/api/worktrees').set('Authorization', `Bearer ${authToken}`).send({ workspaceId: 'ws-1' });
 
   expect(res.status).toBe(400);
   expect(res.body.error).toContain('branchName');
@@ -240,7 +247,7 @@ test('DELETE /api/worktrees/:path calls git worktree remove', async () => {
   const wtPath = '/home/user/project-feat-auth';
   const encoded = encodeURIComponent(wtPath);
 
-  const res = await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`);
+  const res = await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.ok).toBe(true);
@@ -253,7 +260,7 @@ test('DELETE /api/worktrees/:path with force=true passes --force', async () => {
   const wtPath = '/home/user/project-dirty';
   const encoded = encodeURIComponent(wtPath);
 
-  await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1&force=true`);
+  await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1&force=true`).set('Authorization', `Bearer ${authToken}`);
 
   expect(mockRaw).toHaveBeenCalledWith(['worktree', 'remove', wtPath, '--force']);
 });
@@ -262,7 +269,7 @@ test('DELETE /api/worktrees/:path returns 409 on dirty worktree', async () => {
   mockRaw.mockRejectedValue(new Error('contains modified or untracked files, use --force to delete'));
 
   const encoded = encodeURIComponent('/some/dirty/path');
-  const res = await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`);
+  const res = await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(409);
   expect(res.body.error).toContain('modified');
@@ -274,7 +281,7 @@ test('DELETE /api/worktrees/:path emits WAL event', async () => {
   const wtPath = '/home/user/project-remove';
   const encoded = encodeURIComponent(wtPath);
 
-  await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`);
+  await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`).set('Authorization', `Bearer ${authToken}`);
 
   const events = db
     .prepare("SELECT * FROM wal_events WHERE event_type = 'worktree_removed'")
@@ -298,7 +305,7 @@ test('GET /api/worktrees/status returns git status for worktree', async () => {
   });
 
   const wtPath = encodeURIComponent('/home/user/project-feat-auth');
-  const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`);
+  const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body).toEqual({
@@ -320,7 +327,7 @@ test('GET /api/worktrees/status returns clean status', async () => {
   });
 
   const wtPath = encodeURIComponent('/home/user/project');
-  const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`);
+  const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.isClean).toBe(true);
@@ -328,7 +335,7 @@ test('GET /api/worktrees/status returns clean status', async () => {
 });
 
 test('GET /api/worktrees/status returns 400 without required params', async () => {
-  const res = await request(app).get('/api/worktrees/status?workspaceId=ws-1');
+  const res = await request(app).get('/api/worktrees/status?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(400);
   expect(res.body.error).toContain('path');
@@ -341,7 +348,7 @@ describe('Integration: full round-trip', () => {
     // 1. POST — create a new worktree
     mockRaw.mockResolvedValueOnce(''); // git worktree add succeeds
 
-    const createRes = await request(app).post('/api/worktrees').send({
+    const createRes = await request(app).post('/api/worktrees').set('Authorization', `Bearer ${authToken}`).send({
       workspaceId: 'ws-1',
       branchName: 'feat/round-trip',
       baseBranch: 'main',
@@ -366,7 +373,7 @@ describe('Integration: full round-trip', () => {
       ].join('\n')
     );
 
-    const listRes = await request(app).get('/api/worktrees?workspaceId=ws-1');
+    const listRes = await request(app).get('/api/worktrees?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
     expect(listRes.status).toBe(200);
     expect(listRes.body.worktrees).toHaveLength(2);
@@ -384,7 +391,7 @@ describe('Integration: full round-trip', () => {
     mockRaw.mockResolvedValueOnce(''); // git worktree remove succeeds
 
     const encoded = encodeURIComponent(createdPath);
-    const deleteRes = await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`);
+    const deleteRes = await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`).set('Authorization', `Bearer ${authToken}`);
 
     expect(deleteRes.status).toBe(200);
     expect(deleteRes.body.ok).toBe(true);
@@ -399,7 +406,7 @@ describe('Integration: full round-trip', () => {
       ].join('\n')
     );
 
-    const listAfterDelete = await request(app).get('/api/worktrees?workspaceId=ws-1');
+    const listAfterDelete = await request(app).get('/api/worktrees?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
     expect(listAfterDelete.status).toBe(200);
     expect(listAfterDelete.body.worktrees).toHaveLength(1);
@@ -427,7 +434,7 @@ describe('Integration: /api/worktrees/status response shape', () => {
     });
 
     const wtPath = encodeURIComponent('/home/user/project-feat-status');
-    const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`);
+    const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`).set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
 
@@ -460,7 +467,7 @@ describe('Integration: /api/worktrees/status response shape', () => {
     });
 
     const wtPath = encodeURIComponent('/home/user/project');
-    const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`);
+    const res = await request(app).get(`/api/worktrees/status?workspaceId=ws-1&path=${wtPath}`).set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.isClean).toBe(true);

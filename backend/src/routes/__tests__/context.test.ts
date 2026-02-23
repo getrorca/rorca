@@ -4,6 +4,7 @@ import * as path from 'path';
 import request from 'supertest';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
+import { getAuthToken } from './helpers/auth-helper';
 
 // ---------------------------------------------------------------------------
 // Mock llm-client BEFORE requiring app (chatComplete uses claude CLI)
@@ -27,8 +28,9 @@ const mockFetch = jest.fn<Promise<Response>, [any, any]>();
 let app: Express;
 let db: Database.Database;
 let tmpDir: string;
+let authToken: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   jest.clearAllMocks();
 
@@ -51,6 +53,8 @@ beforeEach(() => {
   app = serverMod.default;
   const dbMod = require('../../db/index');
   db = dbMod.db;
+
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -86,6 +90,7 @@ describe('POST /api/context/extract — paste mode', () => {
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: 'TestApp is a task manager built with React', targetLayer: 3 });
 
     expect(res.status).toBe(200);
@@ -103,6 +108,7 @@ describe('POST /api/context/extract — paste mode', () => {
 
     await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: longText, targetLayer: 1 });
 
     expect(mockChatComplete).toHaveBeenCalledTimes(1);
@@ -128,6 +134,7 @@ describe('POST /api/context/extract — qa mode', () => {
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'qa', answers, targetLayer: 3 });
 
     expect(res.status).toBe(200);
@@ -152,6 +159,7 @@ describe('POST /api/context/extract — filepath mode', () => {
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'filepath', filePath, targetLayer: 3 });
 
     expect(res.status).toBe(200);
@@ -161,6 +169,7 @@ describe('POST /api/context/extract — filepath mode', () => {
   test('returns 400 if file does not exist', async () => {
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'filepath', filePath: '/nonexistent/file.md', targetLayer: 3 });
 
     expect(res.status).toBe(400);
@@ -170,6 +179,7 @@ describe('POST /api/context/extract — filepath mode', () => {
   test('returns 400 if path is a directory', async () => {
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'filepath', filePath: tmpDir, targetLayer: 3 });
 
     expect(res.status).toBe(400);
@@ -202,6 +212,7 @@ CREATE TABLE posts (
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'filepath', filePath, targetLayer: 3 });
 
     expect(res.status).toBe(200);
@@ -236,6 +247,7 @@ const x = 42;
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'filepath', filePath, targetLayer: 3 });
 
     expect(res.status).toBe(200);
@@ -253,6 +265,7 @@ const x = 42;
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'filepath', filePath, targetLayer: 3 });
 
     expect(res.status).toBe(200);
@@ -276,6 +289,7 @@ describe('POST /api/context/extract — url mode', () => {
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'url', url: 'https://example.com/about', targetLayer: 3 });
 
     expect(res.status).toBe(200);
@@ -294,6 +308,7 @@ describe('POST /api/context/extract — url mode', () => {
 
     await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         mode: 'url',
         url: 'https://github.com/user/repo/blob/main/README.md',
@@ -310,6 +325,7 @@ describe('POST /api/context/extract — url mode', () => {
   test('blocks localhost URLs with 400', async () => {
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'url', url: 'http://localhost:3000/api/secret', targetLayer: 3 });
 
     expect(res.status).toBe(400);
@@ -320,6 +336,7 @@ describe('POST /api/context/extract — url mode', () => {
   test('blocks 192.168.x.x URLs with 400', async () => {
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'url', url: 'http://192.168.1.1/admin', targetLayer: 3 });
 
     expect(res.status).toBe(400);
@@ -329,6 +346,7 @@ describe('POST /api/context/extract — url mode', () => {
   test('blocks 10.x.x.x URLs with 400', async () => {
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'url', url: 'http://10.0.0.1/internal', targetLayer: 3 });
 
     expect(res.status).toBe(400);
@@ -355,6 +373,7 @@ describe('POST /api/context/extract — multi mode', () => {
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         mode: 'multi',
         targetLayer: 3,
@@ -389,6 +408,7 @@ describe('POST /api/context/upload', () => {
 
     const res = await request(app)
       .post('/api/context/upload')
+      .set('Authorization', `Bearer ${authToken}`)
       .field('targetLayer', '3')
       .attach('files', Buffer.from('# README\nProject overview'), { filename: 'README.md' })
       .attach('files', Buffer.from('interface Foo { bar: string; }'), { filename: 'types.ts' });
@@ -404,6 +424,7 @@ describe('POST /api/context/upload', () => {
   test('returns 400 when no files uploaded', async () => {
     const res = await request(app)
       .post('/api/context/upload')
+      .set('Authorization', `Bearer ${authToken}`)
       .field('targetLayer', '3');
 
     expect(res.status).toBe(400);
@@ -413,6 +434,7 @@ describe('POST /api/context/upload', () => {
   test('returns 400 when targetLayer missing', async () => {
     const res = await request(app)
       .post('/api/context/upload')
+      .set('Authorization', `Bearer ${authToken}`)
       .attach('files', Buffer.from('hello'), { filename: 'test.md' });
 
     expect(res.status).toBe(400);
@@ -434,7 +456,8 @@ describe('GET /api/context/fetch-preview', () => {
     } as any);
 
     const res = await request(app)
-      .get('/api/context/fetch-preview?url=https://example.com/readme.md');
+      .get('/api/context/fetch-preview?url=https://example.com/readme.md')
+      .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.preview.length).toBe(500);
@@ -443,7 +466,7 @@ describe('GET /api/context/fetch-preview', () => {
   });
 
   test('returns 400 when url param missing', async () => {
-    const res = await request(app).get('/api/context/fetch-preview');
+    const res = await request(app).get('/api/context/fetch-preview').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('url');
@@ -451,7 +474,8 @@ describe('GET /api/context/fetch-preview', () => {
 
   test('blocks private URLs', async () => {
     const res = await request(app)
-      .get('/api/context/fetch-preview?url=http://localhost:8080/secret');
+      .get('/api/context/fetch-preview?url=http://localhost:8080/secret')
+      .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Private');
@@ -471,6 +495,7 @@ describe('confidence parsing', () => {
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: 'Be friendly and concise', targetLayer: 1 });
 
     expect(res.status).toBe(200);
@@ -487,6 +512,7 @@ describe('confidence parsing', () => {
 
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: 'Something vague', targetLayer: 1 });
 
     expect(res.status).toBe(200);
@@ -504,6 +530,7 @@ describe('validation', () => {
   test('rejects missing mode', async () => {
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ targetLayer: 3 });
 
     expect(res.status).toBe(400);
@@ -513,6 +540,7 @@ describe('validation', () => {
   test('rejects invalid targetLayer', async () => {
     const res = await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: 'hello', targetLayer: 5 });
 
     expect(res.status).toBe(400);
@@ -524,6 +552,7 @@ describe('validation', () => {
 
     await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: 'Be terse', targetLayer: 1 });
 
     const callArg = mockChatComplete.mock.calls[0][0][0].content as string;
@@ -536,6 +565,7 @@ describe('validation', () => {
 
     await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: 'Fintech regulatory', targetLayer: 2 });
 
     const callArg = mockChatComplete.mock.calls[0][0][0].content as string;
@@ -548,6 +578,7 @@ describe('validation', () => {
 
     await request(app)
       .post('/api/context/extract')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: 'Foo is a project', targetLayer: 3 });
 
     const callArg = mockChatComplete.mock.calls[0][0][0].content as string;
