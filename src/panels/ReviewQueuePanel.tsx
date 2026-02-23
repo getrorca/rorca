@@ -301,6 +301,7 @@ export default function ReviewQueuePanel() {
             onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
             onConfirmReject={() => handleReject(selectedId)}
             onApprove={() => handleApprove(selectedId)}
+            workspaceId={workspaceId!}
           />
         )}
       </div>
@@ -331,6 +332,7 @@ export default function ReviewQueuePanel() {
               onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
               onConfirmReject={() => handleReject(selectedId)}
               onApprove={() => handleApprove(selectedId)}
+              workspaceId={workspaceId!}
             />
           </div>
         </div>

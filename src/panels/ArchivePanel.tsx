@@ -21,13 +21,14 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
+import DependencyGraph from '../components/DependencyGraph';
 import type { PanelId } from '../components/Sidebar';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
 type SpecStatus = 'pending' | 'approved' | 'rejected';
 type StatusFilter = 'all' | SpecStatus;
-type PreviewTab = 'stories' | 'diagram' | 'json';
+type PreviewTab = 'stories' | 'graph' | 'diagram' | 'json';
 
 interface ArchiveSpec {
   id: string;
@@ -521,6 +522,7 @@ function SpecPreviewDrawer({
 
   const tabs: { id: PreviewTab; label: string; badge?: string }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
+    { id: 'graph', label: 'Graph' },
     { id: 'diagram', label: 'Diagram' },
     { id: 'json', label: 'Raw JSON' },
   ];
@@ -628,6 +630,7 @@ function SpecPreviewDrawer({
             {/* Tab content */}
             <div className="flex-1 overflow-y-auto">
               {activeTab === 'stories' && <StoriesTab stories={stories} />}
+              {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
               {activeTab === 'diagram' && <DiagramTab diagram={diagram} />}
               {activeTab === 'json' && <JsonTab spec={detail} />}
             </div>
