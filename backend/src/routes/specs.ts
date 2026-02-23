@@ -51,6 +51,13 @@ interface WorkspaceRow {
 
 type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
 
+interface AssigneeInfo {
+  id: string;
+  displayName: string;
+  email: string;
+  avatarUrl: string | null;
+}
+
 interface SpecSummary {
   id: string;
   specName: string;
@@ -63,6 +70,7 @@ interface SpecSummary {
   tags: string[];
   forkedFrom?: string;
   reviewStatus: ReviewStatus;
+  assignee?: AssigneeInfo;
 }
 
 interface SpecVersionRow {
@@ -137,6 +145,17 @@ function getSpecTags(specId: string, workspaceId: string): string[] {
   return rows.map(r => r.tag_name);
 }
 
+function getSpecAssignee(specId: string, workspaceId: string): AssigneeInfo | undefined {
+  const row = db.prepare(`
+    SELECT u.id, u.display_name, u.email, u.avatar_url
+    FROM spec_assignments sa
+    JOIN users u ON u.id = sa.assignee_id
+    WHERE sa.spec_id = ? AND sa.workspace_id = ? AND sa.story_id = ''
+  `).get(specId, workspaceId) as { id: string; display_name: string; email: string; avatar_url: string | null } | undefined;
+  if (!row) return undefined;
+  return { id: row.id, displayName: row.display_name, email: row.email, avatarUrl: row.avatar_url };
+}
+
 function buildSummary(
   filePath: string,
   fileName: string,
@@ -148,6 +167,7 @@ function buildSummary(
   const stat = fs.statSync(filePath);
   const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
   const specId = fileName.replace('.json', '');
+  const assignee = workspaceId ? getSpecAssignee(specId, workspaceId) : undefined;
   return {
     id: specId,
     specName: content.title ?? specId,
@@ -160,6 +180,7 @@ function buildSummary(
     tags: workspaceId ? getSpecTags(specId, workspaceId) : [],
     ...(content.forkedFrom ? { forkedFrom: content.forkedFrom } : {}),
     reviewStatus: content.reviewStatus ?? 'draft',
+    ...(assignee ? { assignee } : {}),
   };
 }
 
@@ -910,6 +931,17 @@ router.get('/', (req: Request, res: Response) => {
     const reviewStatusFilter = req.query.reviewStatus as string | undefined;
     if (reviewStatusFilter && VALID_REVIEW_STATUSES.includes(reviewStatusFilter as ReviewStatus)) {
       filtered = filtered.filter(s => s.reviewStatus === reviewStatusFilter);
+    }
+
+    // V2-042: Filter by assignee (user ID)
+    const assigneeFilter = req.query.assignee as string | undefined;
+    if (assigneeFilter) {
+      const assignedSpecIds = new Set(
+        (db.prepare(
+          "SELECT DISTINCT spec_id FROM spec_assignments WHERE workspace_id = ? AND assignee_id = ? AND story_id = ''"
+        ).all(workspaceId, assigneeFilter) as { spec_id: string }[]).map(r => r.spec_id)
+      );
+      filtered = filtered.filter(s => assignedSpecIds.has(s.id));
     }
 
     // Sort by generatedAt DESC
@@ -3262,6 +3294,271 @@ router.get('/:specId/comments/counts', (req: Request, res: Response) => {
     res.json({ counts });
   } catch (error: any) {
     console.error('[StoryComments] Counts error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-042: PUT /:specId/assign — Assign spec to a user ──────────────────────
+
+interface AssignmentRow {
+  id: number;
+  spec_id: string;
+  story_id: string;
+  workspace_id: string;
+  assignee_id: string;
+  assigned_at: string;
+  assigned_by: string | null;
+}
+
+router.put('/:specId/assign', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const { workspaceId, assigneeId } = req.body;
+    const user = (req as Request & { user: { id: string; email: string } }).user;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Verify spec exists
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    if (!fs.existsSync(path.join(pendingDir, `${specId}.json`)) &&
+        !fs.existsSync(path.join(approvedDir, `${specId}.json`))) {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    // If assigneeId is null/empty, remove assignment
+    if (!assigneeId) {
+      db.prepare(
+        "DELETE FROM spec_assignments WHERE spec_id = ? AND story_id = '' AND workspace_id = ?"
+      ).run(specId, workspaceId);
+
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES (?, ?, ?, ?, ?)`
+      ).run('spec_unassigned', workspaceId, specId, user?.id ?? 'api', JSON.stringify({ specId }));
+
+      broadcastAll({
+        id: walResult.lastInsertRowid as number,
+        ts: new Date().toISOString(),
+        event_type: 'spec_unassigned',
+        workspace_id: workspaceId,
+        spec_id: specId,
+        story_id: null,
+        actor: user?.id ?? 'api',
+        payload: JSON.stringify({ specId }),
+      });
+
+      res.json({ ok: true, assigneeId: null });
+      return;
+    }
+
+    // Verify assignee exists
+    const assignee = db.prepare('SELECT id, display_name, email, avatar_url FROM users WHERE id = ?').get(assigneeId) as
+      | { id: string; display_name: string; email: string; avatar_url: string | null }
+      | undefined;
+    if (!assignee) {
+      res.status(404).json({ error: 'Assignee user not found' });
+      return;
+    }
+
+    // Upsert assignment
+    db.prepare(`
+      INSERT INTO spec_assignments (spec_id, story_id, workspace_id, assignee_id, assigned_by)
+      VALUES (?, '', ?, ?, ?)
+      ON CONFLICT(spec_id, story_id, workspace_id) DO UPDATE SET
+        assignee_id = excluded.assignee_id,
+        assigned_by = excluded.assigned_by,
+        assigned_at = datetime('now')
+    `).run(specId, workspaceId, assigneeId, user?.id ?? null);
+
+    // WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES (?, ?, ?, ?, ?)`
+    ).run('spec_assigned', workspaceId, specId, user?.id ?? 'api', JSON.stringify({
+      assigneeId,
+      assigneeName: assignee.display_name,
+    }));
+
+    broadcastAll({
+      id: walResult.lastInsertRowid as number,
+      ts: new Date().toISOString(),
+      event_type: 'spec_assigned',
+      workspace_id: workspaceId,
+      spec_id: specId,
+      story_id: null,
+      actor: user?.id ?? 'api',
+      payload: JSON.stringify({ assigneeId, assigneeName: assignee.display_name }),
+    });
+
+    res.json({ ok: true, assignee: { id: assignee.id, displayName: assignee.display_name, email: assignee.email, avatarUrl: assignee.avatar_url } });
+  } catch (error: any) {
+    console.error('[Specs] Assign spec error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-042: PUT /:specId/stories/:storyId/assign — Assign story to a user ───
+
+router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const storyId = req.params.storyId as string;
+    const { workspaceId, assigneeId } = req.body;
+    const user = (req as Request & { user: { id: string; email: string } }).user;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Verify spec + story exists
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+
+    let specPath: string | null = null;
+    if (fs.existsSync(approvedFile)) specPath = approvedFile;
+    else if (fs.existsSync(pendingFile)) specPath = pendingFile;
+
+    if (!specPath) {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const content = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+    const stories: UserStory[] = content.userStories ?? [];
+    if (!stories.some(s => s.id === storyId)) {
+      res.status(404).json({ error: 'Story not found' });
+      return;
+    }
+
+    // If assigneeId is null/empty, remove assignment
+    if (!assigneeId) {
+      db.prepare(
+        'DELETE FROM spec_assignments WHERE spec_id = ? AND story_id = ? AND workspace_id = ?'
+      ).run(specId, storyId, workspaceId);
+
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run('story_unassigned', workspaceId, specId, storyId, user?.id ?? 'api', JSON.stringify({ storyId }));
+
+      broadcastAll({
+        id: walResult.lastInsertRowid as number,
+        ts: new Date().toISOString(),
+        event_type: 'story_unassigned',
+        workspace_id: workspaceId,
+        spec_id: specId,
+        story_id: storyId,
+        actor: user?.id ?? 'api',
+        payload: JSON.stringify({ storyId }),
+      });
+
+      res.json({ ok: true, assigneeId: null });
+      return;
+    }
+
+    // Verify assignee exists
+    const assignee = db.prepare('SELECT id, display_name, email, avatar_url FROM users WHERE id = ?').get(assigneeId) as
+      | { id: string; display_name: string; email: string; avatar_url: string | null }
+      | undefined;
+    if (!assignee) {
+      res.status(404).json({ error: 'Assignee user not found' });
+      return;
+    }
+
+    // Upsert assignment
+    db.prepare(`
+      INSERT INTO spec_assignments (spec_id, story_id, workspace_id, assignee_id, assigned_by)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(spec_id, story_id, workspace_id) DO UPDATE SET
+        assignee_id = excluded.assignee_id,
+        assigned_by = excluded.assigned_by,
+        assigned_at = datetime('now')
+    `).run(specId, storyId, workspaceId, assigneeId, user?.id ?? null);
+
+    // WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run('story_assigned', workspaceId, specId, storyId, user?.id ?? 'api', JSON.stringify({
+      assigneeId,
+      assigneeName: assignee.display_name,
+    }));
+
+    broadcastAll({
+      id: walResult.lastInsertRowid as number,
+      ts: new Date().toISOString(),
+      event_type: 'story_assigned',
+      workspace_id: workspaceId,
+      spec_id: specId,
+      story_id: storyId,
+      actor: user?.id ?? 'api',
+      payload: JSON.stringify({ assigneeId, assigneeName: assignee.display_name }),
+    });
+
+    res.json({ ok: true, assignee: { id: assignee.id, displayName: assignee.display_name, email: assignee.email, avatarUrl: assignee.avatar_url } });
+  } catch (error: any) {
+    console.error('[Specs] Assign story error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-042: GET /:specId/assignments — Get all assignments for a spec ────────
+
+router.get('/:specId/assignments', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const workspaceId = req.query.workspaceId as string;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const rows = db.prepare(`
+      SELECT sa.spec_id, sa.story_id, sa.assignee_id, sa.assigned_at,
+             u.display_name, u.email, u.avatar_url
+      FROM spec_assignments sa
+      JOIN users u ON u.id = sa.assignee_id
+      WHERE sa.spec_id = ? AND sa.workspace_id = ?
+    `).all(specId, workspaceId) as {
+      spec_id: string;
+      story_id: string | null;
+      assignee_id: string;
+      assigned_at: string;
+      display_name: string;
+      email: string;
+      avatar_url: string | null;
+    }[];
+
+    const assignments = rows.map(r => ({
+      specId: r.spec_id,
+      storyId: r.story_id || null,  // '' → null for API response
+      assignee: {
+        id: r.assignee_id,
+        displayName: r.display_name,
+        email: r.email,
+        avatarUrl: r.avatar_url,
+      },
+      assignedAt: r.assigned_at,
+    }));
+
+    res.json({ assignments });
+  } catch (error: any) {
+    console.error('[Specs] Get assignments error:', error);
     res.status(500).json({ error: error.message });
   }
 });
