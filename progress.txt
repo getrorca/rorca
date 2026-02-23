@@ -226,5 +226,30 @@ Key decisions:
 - Silent refresh deduplication: concurrent 401s share a single refresh promise to avoid token rotation races
 - requireAuth exported as named export alongside default router for flexible middleware usage
 
+## Story V2-003: GitHub OAuth Login — DONE
+Files touched:
+- backend/src/db/migrations/008_github_connections.sql (new — github_connections table)
+- backend/src/db/index.ts (modified — idempotent github_id column on users table)
+- backend/src/routes/auth.ts (modified — GitHub OAuth routes, token encryption/decryption)
+- backend/src/routes/__tests__/auth.test.ts (modified — 14 new tests for GitHub OAuth + encryption)
+- backend/src/db/__tests__/db.test.ts (modified — expect github_connections in table list)
+
+What was built:
+- `github_connections` table (id, user_id FK, github_user_id UNIQUE, encrypted_token, scopes, github_username, created_at, updated_at)
+- `github_id` column on users table for account linking (idempotent ALTER TABLE)
+- GET /api/auth/github: redirects to GitHub OAuth with client_id, scope (user:email repo), state parameter; returns 500 if GITHUB_CLIENT_ID not configured
+- GET /api/auth/github/callback: exchanges auth code for GitHub access token, fetches user profile + verified primary email, creates or links user account, returns same JWT access/refresh token pair as email login
+- Account linking: if user with same GitHub email exists, links GitHub to existing account (no duplicate); if github_user_id already connected, updates token on return login
+- Token encryption at rest: AES-256-GCM with random 12-byte IV, auth tag, key derived from JWT_SECRET via SHA256; stored as hex `iv:authTag:ciphertext`
+- encryptToken/decryptToken exported for use and testing
+- github_login WAL event emitted on every GitHub login
+
+Key decisions:
+- Encryption key derived from JWT_SECRET (single secret to manage); production should use strong JWT_SECRET
+- GitHub-only users get an unusable password_hash (`github:` prefix + 32 random bytes) — can't login via email/password
+- GitHub user profile email used if available; falls back to /user/emails endpoint for verified primary
+- State parameter generated but not validated (stateless OAuth — no session store needed for this flow)
+- GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_CALLBACK_URL from env vars; graceful 500 if unconfigured
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
