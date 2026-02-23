@@ -68,6 +68,12 @@ export function runMigrations() {
     db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
   }
 
+  // V2-005: Add avatar_url column to users (idempotent)
+  const userColsV2005 = db.pragma('table_info(users)') as { name: string }[];
+  if (!userColsV2005.some(c => c.name === 'avatar_url')) {
+    db.exec('ALTER TABLE users ADD COLUMN avatar_url TEXT');
+  }
+
   // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
   const tableSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`

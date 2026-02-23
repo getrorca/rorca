@@ -79,7 +79,8 @@
         "All foreign keys have ON DELETE CASCADE and indexes exist on lookup columns (email, team_id, user_id)"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "V2-006",

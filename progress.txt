@@ -251,5 +251,25 @@ Key decisions:
 - State parameter generated but not validated (stateless OAuth — no session store needed for this flow)
 - GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_CALLBACK_URL from env vars; graceful 500 if unconfigured
 
+## Story V2-005: Database Schema for Teams and Multi-User — DONE
+Files touched:
+- backend/src/db/migrations/009_teams.sql (new — teams, team_members, workspace_access tables)
+- backend/src/db/index.ts (modified — idempotent avatar_url column on users)
+- backend/src/db/__tests__/db.test.ts (modified — expect teams, team_members, workspace_access in table list)
+
+What was built:
+- `teams` table (id, name, slug UNIQUE, owner_id FK→users CASCADE, created_at) with indexes on owner_id and slug
+- `team_members` table (team_id FK→teams CASCADE, user_id FK→users CASCADE, role CHECK admin/editor/viewer, invited_at, accepted_at) with composite PK and indexes on both FKs
+- `workspace_access` table (workspace_id FK→workspaces CASCADE, team_id FK→teams CASCADE, permission CHECK read/write/admin) with composite PK and indexes on both FKs
+- `avatar_url` TEXT column on users table (idempotent ALTER TABLE)
+- All foreign keys use ON DELETE CASCADE per AC
+
+Key decisions:
+- `github_user_id` AC requirement satisfied by existing `github_id` column (added in V2-003) — same purpose, already in use across auth routes
+- `avatar_url` added idempotently via pragma table_info check (same pattern as other V2 columns)
+- `workspace_access.permission` uses read/write/admin levels (more granular than boolean)
+- `team_members.role` restricted to admin/editor/viewer via CHECK constraint
+- teams.slug is UNIQUE indexed for URL-friendly team lookups
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
