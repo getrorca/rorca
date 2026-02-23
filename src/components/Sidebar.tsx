@@ -1,6 +1,6 @@
-import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins } from 'lucide-react';
+import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'marketplace' | 'usage';
+export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'marketplace' | 'usage' | 'costs';
 
 const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'forge',           label: 'Spec Forge',         icon: Wand2          },
@@ -13,6 +13,7 @@ const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'archive',         label: 'Archive',             icon: Archive        },
   { id: 'marketplace',     label: 'Template Marketplace', icon: LayoutGrid     },
   { id: 'usage',           label: 'Token Usage',          icon: Coins          },
+  { id: 'costs',           label: 'Cost Breakdown',       icon: DollarSign     },
   { id: 'activity',        label: 'Activity Feed',       icon: Rss            },
   { id: 'github',          label: 'GitHub',              icon: Github         },
 ];
