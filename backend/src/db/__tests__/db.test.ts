@@ -37,6 +37,7 @@ test('all core tables plus FTS5 tables exist in sqlite_master', () => {
   expect(names).toEqual([
     'direction_layers',
     'github_connections',
+    'pipeline_hooks',
     'pipeline_runs',
     'refresh_tokens',
     'spec_search_index',
