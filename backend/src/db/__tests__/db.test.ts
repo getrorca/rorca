@@ -35,6 +35,7 @@ test('all core tables plus FTS5 tables exist in sqlite_master', () => {
     .all() as { name: string }[];
   const names = tables.map(t => t.name).sort();
   expect(names).toEqual([
+    'budget_config',
     'direction_layers',
     'github_connections',
     'model_pricing',
