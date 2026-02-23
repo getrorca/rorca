@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 
 export interface Story {
@@ -64,6 +64,8 @@ export function StoryCard({
   const [commitsExpanded, setCommitsExpanded] = useState(false);
   const [commits, setCommits] = useState<StoryCommit[]>([]);
   const [commitsLoaded, setCommitsLoaded] = useState(false);
+  const [branchName, setBranchName] = useState<string | null>(null);
+  const [branchLoading, setBranchLoading] = useState(false);
 
   const isDone = story.passes === true;
   const isDeferred = story.excluded === true && !isDone;
@@ -71,6 +73,32 @@ export function StoryCard({
   const isNotReady = warnings.length > 0 && !isDone;
 
   const canShowCommits = !!(specId && workspaceId);
+  const canCreateBranch = !!(specId && workspaceId && !isDone);
+
+  const handleCreateBranch = async () => {
+    if (!specId || !workspaceId || branchLoading) return;
+    setBranchLoading(true);
+    try {
+      const data = await apiFetch<{ branchName: string; checkoutCommand: string }>(
+        `/api/specs/${specId}/stories/${story.id}/branch`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) }
+      );
+      setBranchName(data.branchName);
+    } catch (err: any) {
+      // 409 means branch already exists — parse branchName from error body
+      const msg = err?.message || '';
+      try {
+        const body = JSON.parse(msg.slice(msg.indexOf('{')));
+        if (body.branchName) {
+          setBranchName(body.branchName);
+        }
+      } catch {
+        // Not parseable, ignore
+      }
+    } finally {
+      setBranchLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!commitsExpanded || commitsLoaded || !specId || !workspaceId) return;
@@ -216,6 +244,26 @@ export function StoryCard({
             <GitCommit size={11} />
             Commits{commitsLoaded ? ` (${commits.length})` : ''}
           </button>
+        )}
+
+        {canCreateBranch && !branchName && (
+          <button
+            onClick={handleCreateBranch}
+            disabled={branchLoading}
+            className="flex items-center gap-1 mt-1 text-xs text-muted hover:text-accent transition-colors disabled:opacity-50"
+          >
+            <GitBranch size={11} />
+            {branchLoading ? 'Creating...' : 'Create Branch'}
+          </button>
+        )}
+
+        {branchName && (
+          <div className="flex items-center gap-1.5 mt-1">
+            <GitBranch size={11} className="shrink-0 text-accent" />
+            <code className="text-[10px] font-mono text-accent bg-accent/10 px-1.5 py-0.5 rounded truncate">
+              {branchName}
+            </code>
+          </div>
         )}
       </div>
 
