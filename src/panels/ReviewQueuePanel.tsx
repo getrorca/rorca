@@ -738,6 +738,8 @@ function PreviewStoriesTab({
             onEdit={() => setEditingStoryId(story.id)}
             selected={selectedIds.has(story.id)}
             onToggleSelect={() => toggleSelect(story.id)}
+            specId={specId}
+            workspaceId={workspaceId}
           />
         )
       )}
