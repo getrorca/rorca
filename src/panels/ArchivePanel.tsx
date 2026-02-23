@@ -11,11 +11,15 @@ import {
   Copy,
   Check,
   ChevronRight,
+  Play,
+  GitBranch,
+  Loader2,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
+import type { PanelId } from '../components/Sidebar';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -108,7 +112,7 @@ function extractDiagramText(spec: SpecDetail): { text: string; type: 'mermaid' |
 
 /* ─── Main Component ──────────────────────────────────────────────── */
 
-export default function ArchivePanel() {
+export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: PanelId) => void }) {
   const { workspaceId } = useWorkspace();
 
   const [specs, setSpecs] = useState<ArchiveSpec[]>([]);
@@ -402,6 +406,7 @@ export default function ArchivePanel() {
           detail={specDetail}
           detailLoading={detailLoading}
           onClose={() => { setSelectedId(null); setSpecDetail(null); }}
+          onNavigate={onNavigate}
         />
       )}
     </div>
@@ -410,20 +415,56 @@ export default function ArchivePanel() {
 
 /* ─── Spec Preview Drawer ──────────────────────────────────────────── */
 
+type RunState = 'idle' | 'triggering' | 'conflict' | 'success' | 'error';
+
 function SpecPreviewDrawer({
   specId,
   summary,
   detail,
   detailLoading,
   onClose,
+  onNavigate,
 }: {
   specId: string;
   summary: ArchiveSpec | null;
   detail: SpecDetail | null;
   detailLoading: boolean;
   onClose: () => void;
+  onNavigate: (panel: PanelId) => void;
 }) {
+  const { workspaceId } = useWorkspace();
   const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
+  const [runState, setRunState] = useState<RunState>('idle');
+  const [runError, setRunError] = useState('');
+
+  const handleRun = async (autoWorktree = false) => {
+    if (!workspaceId || !summary) return;
+    setRunState('triggering');
+    setRunError('');
+    try {
+      const res = await apiFetch<{ ok?: boolean; conflict?: boolean; activeRunId?: number; runId?: number }>(
+        '/api/pipeline/trigger',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            specPath: `ralph/specs/approved/${summary.id}.json`,
+            workspaceId,
+            autoWorktree,
+          }),
+        }
+      );
+      if (res.conflict) {
+        setRunState('conflict');
+      } else {
+        setRunState('success');
+        setTimeout(() => onNavigate('pipeline'), 1200);
+      }
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : 'Failed to trigger run');
+      setRunState('error');
+    }
+  };
 
   // Reset tab when spec changes
   useEffect(() => {
@@ -550,7 +591,53 @@ function SpecPreviewDrawer({
 
         {/* Footer actions */}
         {detail && summary?.status !== 'rejected' && (
-          <div className="px-4 py-3 border-t border-border shrink-0 bg-bg">
+          <div className="px-4 py-3 border-t border-border shrink-0 bg-bg space-y-2">
+            {/* Run in Pipeline button — approved specs only */}
+            {summary?.status === 'approved' && (
+              <div>
+                {runState === 'conflict' ? (
+                  <div className="rounded border border-warning/30 bg-warning/10 p-3 space-y-2">
+                    <p className="text-xs text-warning font-medium">Active run in progress. Run in a new worktree?</p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleRun(true)}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 transition-opacity"
+                      >
+                        <GitBranch size={12} />
+                        Run in worktree
+                      </button>
+                      <button
+                        onClick={() => setRunState('idle')}
+                        className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : runState === 'success' ? (
+                  <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30">
+                    <Check size={14} />
+                    Switching to Pipeline Monitor...
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => handleRun(false)}
+                    disabled={runState === 'triggering'}
+                    className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-60"
+                  >
+                    {runState === 'triggering' ? (
+                      <><Loader2 size={14} className="animate-spin" /> Starting run...</>
+                    ) : (
+                      <><Play size={14} /> Run in Pipeline</>
+                    )}
+                  </button>
+                )}
+                {runState === 'error' && (
+                  <p className="text-xs text-error mt-1">{runError}</p>
+                )}
+              </div>
+            )}
+
             <button
               onClick={handleExportJson}
               className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors"

@@ -1,0 +1,20 @@
+## Story US-001: Spec Version Comparison — DONE
+Files touched:
+- backend/src/db/migrations/003_spec_versions.sql (new)
+- backend/src/routes/specs.ts (modified)
+- backend/src/routes/__tests__/specs.test.ts (modified)
+- backend/src/db/__tests__/db.test.ts (modified)
+
+What was built:
+- `spec_versions` table (SQLite) stores versioned snapshots of spec content with status and rejection reason
+- `GET /api/specs/:specId/versions` returns all historical versions for a spec slug with metadata (version number, status, rejection reason, timestamp, title, story count)
+- `GET /api/specs/:specId/diff?v1=N&v2=M` returns structured diff with per-story change type (added/removed/modified/unchanged) and per-field deltas for modified stories (including added/removed acceptance criteria)
+- Rejected specs are now snapshotted into spec_versions before file deletion, preserving content + rejection reason
+- Regenerating an existing slug auto-versions the old spec (no more 409 on duplicate slugs)
+
+Key decisions:
+- Versioning stored in SQLite (spec_versions table) rather than filesystem to keep it durable across file deletions
+- Version numbers are monotonically increasing per spec_slug (not global)
+- The versions endpoint doesn't require workspaceId since versions are keyed by spec_slug (global across workspaces)
+- Changed generate behavior: regenerating same slug now versions the old file instead of returning 409 conflict
+- Updated existing db.test.ts to expect 7 tables instead of 6

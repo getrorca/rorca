@@ -47,7 +47,7 @@ function AppContent() {
       {activePanel === 'queue'     && <ReviewQueuePanel />}
       {activePanel === 'pipeline'  && <PipelineMonitorPanel />}
       {activePanel === 'worktrees' && <WorktreesPanel />}
-      {activePanel === 'archive'   && <ArchivePanel />}
+      {activePanel === 'archive'   && <ArchivePanel onNavigate={setActivePanel} />}
     </Shell>
   );
 }

@@ -135,10 +135,13 @@ The generated spec appears in the **Review Queue**. Read through the stories, ch
 
 ### 6. Run the Ralph Loop
 
-From your workspace directory:
+**From the UI (recommended):** Open the **Archive** panel, click any approved spec to expand the drawer, then click **Run in Pipeline**. Rorcha finds `scripts/run-loop.sh` in the registered workspace directory and spawns it automatically — no terminal needed.
 
+If a run is already active for that workspace, Rorcha detects the conflict and prompts: *"Run in a new worktree instead?"* Clicking **Run in worktree** creates a fresh git worktree branch (e.g. `feat/my-spec-1234567890`) and runs the loop there in parallel.
+
+**From the terminal** (also works):
 ```bash
-/path/to/cashflow-app/scripts/ralph/run-loop.sh --json specs/approved/your-spec.json
+/path/to/workspace/scripts/run-loop.sh --json specs/approved/your-spec.json
 ```
 
 Or use `rorcha_approve_spec` from Claude Code (see MCP section) — it prints the exact command.
@@ -147,7 +150,13 @@ Or use `rorcha_approve_spec` from Claude Code (see MCP section) — it prints th
 
 The **Pipeline Monitor** panel streams live story-by-story progress via SSE as the Ralph Loop runs. Each story shows status, elapsed time, and expandable log output.
 
-### 8. Review history
+After clicking **Run in Pipeline**, Rorcha automatically navigates you to Pipeline Monitor once the run starts.
+
+### 8. Merge worktrees
+
+When a spec running in a dedicated worktree is complete, open the **Worktrees** panel, select the worktree branch, and click **Merge to main**. Rorcha runs a `--no-ff` merge into your main branch. If there are merge conflicts, an inline error appears with the conflict details so you can resolve them manually.
+
+### 9. Review history
 
 The **Archive** panel shows all completed runs with full-text search across spec names, story titles, and acceptance criteria.
 
@@ -190,11 +199,21 @@ Claude will inject your full Direction Stack, generate a structured spec aware o
 
 ---
 
+## Multi-Workspace & Parallel Runs
+
+Rorcha's `workspaces` table stores the filesystem `path` of each registered project (e.g. `/Users/me/cashflow-app`, `/Users/me/rorcha`). When you trigger a run, the backend resolves `scripts/run-loop.sh` from that path and runs it in the correct project directory — so any workspace can run its own loop without any manual path configuration.
+
+Multiple specs can run simultaneously:
+- **Different workspaces**: Each has its own `pipeline_runs` row, its own spawned process, and its own SSE stream.
+- **Same workspace, multiple specs**: Rorcha detects the active run and prompts you to use a worktree, keeping both specs isolated in parallel git branches.
+
 ## Git Worktrees
 
 The **Worktrees** panel manages git worktrees for your registered workspaces. Each spec can run in its own worktree so multiple specs can be in-progress simultaneously without conflicts.
 
-Create a worktree from the panel — Rorcha creates the branch and directory. The panel shows branch status, ahead/behind counts, and modified files in real time.
+You can create worktrees manually from the panel, or let Rorcha create them automatically when you trigger a run and a conflict is detected. The panel shows branch status, ahead/behind counts, and modified files for each worktree.
+
+When a worktree branch is ready to land, click **Merge to main** in the detail panel. Rorcha merges with `--no-ff` into the workspace's main branch. Merge conflicts surface inline so you know exactly what needs resolution.
 
 ---
 
@@ -262,6 +281,48 @@ npm run mcp              # Run MCP server standalone (for debugging)
 npm run self-register    # Register ~/rorcha/ as its own workspace
 ```
 
+---
+
+## The Ralph Loop (`scripts/run-loop.sh`)
+
+`run-loop.sh` is the execution engine that drives Claude Code story-by-story through a spec. It lives in the **project workspace** (e.g. your app's repo), not in Rorcha itself.
+
+### CLI usage
+
+```bash
+./scripts/run-loop.sh                                          # Run next pending story (prd-implement.json)
+./scripts/run-loop.sh --json specs/approved/my-spec.json      # Relative path (resolved from scripts/)
+./scripts/run-loop.sh --json /abs/path/to/my-spec.json        # Absolute path (from UI trigger)
+./scripts/run-loop.sh --story US-005                          # Run a specific story by ID
+./scripts/run-loop.sh --dry-run                               # Preview next story without running
+```
+
+### Context files (auto-discovered in the project working directory)
+
+When the loop runs, it looks for these files in the workspace root and includes them automatically — no manual configuration needed:
+
+| File | Where it's used |
+|------|----------------|
+| `CLAUDE.md` | Injected into every story prompt — architecture, gotchas, critical conventions |
+| `.claude/skills/rorcha.md` | Workflow skill injected into implementation mode prompts (falls back to `dimitri.md`) |
+| `AGENTS.md` | Referenced in the skill prompt — agents read directory-level `AGENTS.md` before touching code |
+| `progress.txt` | Read at start of each story so Claude can resume without re-loading context after compaction |
+
+The skill (`rorcha.md` / `dimitri.md`) instructs the agent to: check `progress.txt` first, use subagents for codebase research, run type checks + lint + build after every story, and write back to `progress.txt` on completion.
+
+### Modes (auto-detected from JSON structure)
+
+| Mode | JSON shape | Behavior |
+|------|-----------|----------|
+| **Implementation** | `{ userStories: [...] }` | Uses `rorcha.md`/`dimitri.md` skill, writes `feat:` commits |
+| **QA** | `{ phases: [{ stories: [...] }] }` | Test-writing focused prompt, references playbook, `test:` commits |
+
+### Process isolation
+
+Each story invocation gets a completely fresh Claude context — no conversation accumulates between stories. Claude Code environment variables (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_AGENT_SDK_VERSION`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`) are stripped before spawning so nested invocations work when run from inside Claude Code itself.
+
+A 45-minute per-story timeout is enforced via `gtimeout --foreground` (macOS: `brew install coreutils`). Failed stories are retried up to 2× before being skipped.
+
 ### Database
 
 SQLite at `backend/rorcha.db`, auto-created on first run. Tables:
@@ -299,6 +360,15 @@ claude mcp add rorcha -- npx tsx /absolute/path/to/rorcha/backend/src/mcp/server
 
 **Pipeline Monitor not updating**
 The SSE connection opens on panel mount. Navigate away and back to reconnect.
+
+**"Run in Pipeline" button not visible**
+The button only appears for approved specs (those in `specs/approved/`). Specs still in `specs/pending/` show no run button — approve them via the Review Queue first.
+
+**"Run in Pipeline" fails with 422**
+`scripts/run-loop.sh` was not found in the registered workspace path. Make sure the workspace you selected has `scripts/run-loop.sh` checked in and the workspace `path` in Rorcha points to the correct project root.
+
+**Merge to main conflicts**
+Rorcha will show the conflict details inline. Resolve conflicts manually in the worktree directory, commit the resolution, then re-attempt the merge — or discard the worktree if you want to start fresh.
 
 ---
 

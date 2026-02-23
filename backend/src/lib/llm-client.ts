@@ -1,43 +1,72 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import { spawn } from 'child_process';
 
 export interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 
-const execAsync = promisify(exec);
+// Resolve claude binary — NVM PATH not available in Node child processes.
+// Override via CLAUDE_BIN env var for portability across machines.
+const CLAUDE_BIN = process.env.CLAUDE_BIN ||
+  '/Users/dimitriteravanessian/.nvm/versions/node/v20.19.6/bin/claude';
 
-// Uses your Claude subscription via the claude CLI.
-// Writes prompt to a temp file and uses shell expansion — required because
-// claude --print produces empty output when spawned without a TTY.
-export async function chatComplete(messages: ChatMessage[]): Promise<string> {
+// All Claude Code env vars that block nested invocation.
+const CLAUDE_ENV_VARS_TO_REMOVE = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_AGENT_SDK_VERSION',
+  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
+];
+
+export function chatComplete(messages: ChatMessage[]): Promise<string> {
   const prompt = messages.length === 1
     ? messages[0].content
     : messages.map(m =>
         m.role === 'user' ? m.content : `[Previous response: ${m.content}]`
       ).join('\n\n---\n\n');
 
-  // Write prompt to temp file (avoids shell injection and TTY issues)
-  const tmpFile = path.join(os.tmpdir(), `rorcha-prompt-${Date.now()}.txt`);
-  fs.writeFileSync(tmpFile, prompt, 'utf8');
-
-  try {
-    // env -u CLAUDECODE: unset so nested invocation isn't blocked
-    // < /dev/null: signal non-interactive mode (prevents SIGTTOU when backend runs in bg)
-    const { stdout } = await execAsync(
-      `env -u CLAUDECODE claude --print "$(cat ${tmpFile})" < /dev/null`,
-      {
-        shell: '/bin/bash',
-        maxBuffer: 10 * 1024 * 1024,
-        timeout: 180_000,
-      }
-    );
-
-    return stdout.trim();
-  } finally {
-    fs.unlinkSync(tmpFile);
+  // Build clean env — delete all Claude Code vars so the subprocess isn't blocked.
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
+      env[k] = v;
+    }
   }
+
+  return new Promise((resolve, reject) => {
+    // Use spawn (not exec/shell) so the prompt is passed as a raw argv string —
+    // no shell escaping, no special-character issues with $() or backticks.
+    // --dangerously-skip-permissions: required for non-interactive mode.
+    // stdio['ignore',...]: equivalent to < /dev/null, prevents TTY issues.
+    const child = spawn(CLAUDE_BIN, [
+      '--dangerously-skip-permissions',
+      '--print',
+      prompt,
+    ], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+    child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    child.on('error', (err) => {
+      reject(new Error(`Failed to spawn claude: ${err.message}`));
+    });
+
+    child.on('close', (code) => {
+      if (stderr) console.warn('[LLM] claude stderr:', stderr.slice(0, 500));
+      if (code !== 0) {
+        reject(new Error(`claude exited with code ${code}. stderr: ${stderr.slice(0, 300)}`));
+        return;
+      }
+      if (!stdout.trim()) {
+        reject(new Error(`claude returned empty output. stderr: ${stderr.slice(0, 300)}`));
+        return;
+      }
+      resolve(stdout.trim());
+    });
+  });
 }
 
 export function getActiveProvider(): string { return 'claude-cli'; }

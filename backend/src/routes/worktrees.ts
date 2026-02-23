@@ -197,6 +197,39 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/worktrees/merge ───────────────────────────────────────────────
+
+router.post('/merge', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, branchName } = req.body;
+
+    if (!workspaceId || !branchName) {
+      res.status(400).json({ error: 'Missing required fields: workspaceId, branchName' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const git = simpleGit(workspace.path);
+    await git.merge([branchName, '--no-ff']);
+
+    emitWalEvent('worktree_merged', workspaceId, { branchName });
+
+    res.json({ ok: true });
+  } catch (error: any) {
+    if (error.message?.includes('CONFLICT')) {
+      res.status(409).json({ conflict: true, details: error.message });
+      return;
+    }
+    console.error('[Worktrees] Merge error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET /api/worktrees/status?workspaceId=&path= ──────────────────────────
 
 router.get('/status', async (req: Request, res: Response) => {
