@@ -21,6 +21,7 @@ export function InlineStoryEditor({
   const [title, setTitle] = useState(story.title);
   const [description, setDescription] = useState(story.description ?? '');
   const [criteria, setCriteria] = useState<string[]>([...story.acceptanceCriteria]);
+  const [complexity, setComplexity] = useState<number | undefined>(story.complexity);
   const [saving, setSaving] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const [instructions, setInstructions] = useState('');
@@ -42,6 +43,7 @@ export function InlineStoryEditor({
             title,
             description,
             acceptanceCriteria: criteria.filter(c => c.trim()),
+            ...(complexity != null ? { complexity } : {}),
           }),
         }
       );
@@ -53,7 +55,7 @@ export function InlineStoryEditor({
     } finally {
       setSaving(false);
     }
-  }, [specId, story.id, workspaceId, title, description, criteria, onSave]);
+  }, [specId, story.id, workspaceId, title, description, criteria, complexity, onSave]);
 
   const handleRewrite = useCallback(async () => {
     setRewriting(true);
@@ -179,6 +181,28 @@ export function InlineStoryEditor({
             <Plus size={12} />
             Add criterion
           </button>
+        </div>
+      </div>
+
+      {/* Complexity */}
+      <div>
+        <label className="text-xs font-medium text-muted block mb-1">Complexity (1-5)</label>
+        <div className="flex gap-1">
+          {[1, 2, 3, 4, 5].map(v => (
+            <button
+              key={v}
+              onClick={() => setComplexity(v)}
+              className={`w-8 h-8 rounded text-xs font-semibold transition-colors ${
+                complexity === v
+                  ? v <= 2 ? 'bg-success/20 text-success border border-success/40'
+                    : v === 3 ? 'bg-warning/20 text-warning border border-warning/40'
+                    : 'bg-error/20 text-error border border-error/40'
+                  : 'bg-panel border border-border text-muted hover:text-text'
+              }`}
+            >
+              {v}
+            </button>
+          ))}
         </div>
       </div>
 
