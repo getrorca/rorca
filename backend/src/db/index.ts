@@ -106,6 +106,15 @@ export function runMigrations() {
     db.exec('ALTER TABLE story_results ADD COLUMN elapsed_seconds INTEGER');
   }
 
+  // V2-025: Add input_tokens and output_tokens columns to story_results (idempotent)
+  const srColsV2025 = db.pragma('table_info(story_results)') as { name: string }[];
+  if (!srColsV2025.some(c => c.name === 'input_tokens')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN input_tokens INTEGER');
+  }
+  if (!srColsV2025.some(c => c.name === 'output_tokens')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN output_tokens INTEGER');
+  }
+
   // V2-020: Add trigger_type column to pipeline_runs (idempotent)
   const runColsV2020 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
   if (!runColsV2020.some(c => c.name === 'trigger_type')) {
