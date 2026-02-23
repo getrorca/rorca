@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import Anthropic from '@anthropic-ai/sdk';
 
 export interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 
@@ -10,6 +11,11 @@ export interface TokenUsage {
 export interface ChatResult {
   text: string;
   usage: TokenUsage;
+}
+
+export interface ChatOptions {
+  model?: SupportedModel;
+  apiKey?: string;
 }
 
 // Supported model IDs — keep in sync with AC for US-003.
@@ -41,10 +47,47 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
 ];
 
 /**
- * Call the Claude CLI with an optional model override.
- * Uses --output-format json to capture token usage alongside the response text.
+ * Call the Claude CLI or Anthropic SDK depending on whether an API key is provided.
+ * When apiKey is set, uses the Anthropic SDK directly (BYOB path).
+ * Otherwise falls back to `claude --print` CLI (subscription path).
  */
-export function chatComplete(messages: ChatMessage[], model?: SupportedModel): Promise<ChatResult> {
+export function chatComplete(messages: ChatMessage[], modelOrOpts?: SupportedModel | ChatOptions): Promise<ChatResult> {
+  // Normalize overloaded parameter
+  const opts: ChatOptions = typeof modelOrOpts === 'string'
+    ? { model: modelOrOpts }
+    : modelOrOpts ?? {};
+
+  // If an API key is provided, use the Anthropic SDK directly
+  if (opts.apiKey) {
+    return chatCompleteSDK(messages, opts.model ?? DEFAULT_MODEL, opts.apiKey);
+  }
+
+  return chatCompleteCLI(messages, opts.model);
+}
+
+async function chatCompleteSDK(messages: ChatMessage[], model: SupportedModel, apiKey: string): Promise<ChatResult> {
+  const client = new Anthropic({ apiKey });
+  const response = await client.messages.create({
+    model,
+    max_tokens: 16384,
+    messages: messages.map(m => ({ role: m.role, content: m.content })),
+  });
+
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+    .map(b => b.text)
+    .join('');
+
+  return {
+    text,
+    usage: {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    },
+  };
+}
+
+function chatCompleteCLI(messages: ChatMessage[], model?: SupportedModel): Promise<ChatResult> {
   const prompt = messages.length === 1
     ? messages[0].content
     : messages.map(m =>
