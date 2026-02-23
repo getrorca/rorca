@@ -4,13 +4,15 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 let app: Express;
 let db: Database.Database;
 let tmpDir: string;
 let dbPath: string;
+let authToken: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-ws-test-'));
   dbPath = path.join(tmpDir, 'test.db');
@@ -20,6 +22,7 @@ beforeEach(() => {
   app = serverMod.default;
   const dbMod = require('../../db/index');
   db = dbMod.db;
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -37,7 +40,7 @@ const validWorkspace = {
 };
 
 test('POST /api/workspaces with valid path returns 201', async () => {
-  const res = await request(app).post('/api/workspaces').send(validWorkspace);
+  const res = await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
   expect(res.status).toBe(201);
   expect(res.body.workspace).toMatchObject({
@@ -52,6 +55,7 @@ test('POST /api/workspaces with valid path returns 201', async () => {
 test('POST /api/workspaces with non-existent path returns 400', async () => {
   const res = await request(app)
     .post('/api/workspaces')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ ...validWorkspace, path: '/does/not/exist/xyz' });
 
   expect(res.status).toBe(400);
@@ -61,6 +65,7 @@ test('POST /api/workspaces with non-existent path returns 400', async () => {
 test('POST /api/workspaces missing required field returns 400', async () => {
   const res = await request(app)
     .post('/api/workspaces')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ id: 'ws-1', label: 'Test' });
 
   expect(res.status).toBe(400);
@@ -68,9 +73,9 @@ test('POST /api/workspaces missing required field returns 400', async () => {
 });
 
 test('GET /api/workspaces returns array containing created workspace', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
-  const res = await request(app).get('/api/workspaces');
+  const res = await request(app).get('/api/workspaces').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.workspaces).toHaveLength(1);
@@ -79,34 +84,34 @@ test('GET /api/workspaces returns array containing created workspace', async () 
 });
 
 test('GET /api/workspaces/:id returns workspace', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
-  const res = await request(app).get('/api/workspaces/ws-test-1');
+  const res = await request(app).get('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.workspace.id).toBe('ws-test-1');
 });
 
 test('GET /api/workspaces/:id returns 404 for nonexistent', async () => {
-  const res = await request(app).get('/api/workspaces/nonexistent');
+  const res = await request(app).get('/api/workspaces/nonexistent').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(404);
   expect(res.body.error).toBe('Workspace not found');
 });
 
 test('DELETE /api/workspaces/:id returns 204 and workspace is gone', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
-  const delRes = await request(app).delete('/api/workspaces/ws-test-1');
+  const delRes = await request(app).delete('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
   expect(delRes.status).toBe(204);
 
-  const getRes = await request(app).get('/api/workspaces/ws-test-1');
+  const getRes = await request(app).get('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
   expect(getRes.status).toBe(404);
 });
 
 test('WAL events logged for workspace_create and workspace_delete', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
-  await request(app).delete('/api/workspaces/ws-test-1');
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
+  await request(app).delete('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
 
   const events = db
     .prepare("SELECT event_type, workspace_id FROM wal_events WHERE workspace_id = 'ws-test-1' ORDER BY id")
@@ -118,9 +123,9 @@ test('WAL events logged for workspace_create and workspace_delete', async () => 
 });
 
 test('GET /api/workspaces/:id/context returns 200 with null fields before hydration', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
-  const res = await request(app).get('/api/workspaces/ws-test-1/context');
+  const res = await request(app).get('/api/workspaces/ws-test-1/context').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.schemaSnapshot).toBeNull();
@@ -131,14 +136,14 @@ test('GET /api/workspaces/:id/context returns 200 with null fields before hydrat
 });
 
 test('GET /api/workspaces/:id/context returns populated fields after INSERT', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
   db.prepare(
     `INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_snapshot_at, schema_table_count, git_memory, git_memory_updated_at, last_ingested_commit_hash, git_commit_count)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run('ws-test-1', 'CREATE TABLE users (id TEXT);', '2026-02-21T00:00:00Z', 1, 'some memory', '2026-02-21T00:00:00Z', 'abc123', 5);
 
-  const res = await request(app).get('/api/workspaces/ws-test-1/context');
+  const res = await request(app).get('/api/workspaces/ws-test-1/context').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.schemaSnapshot).toBe('CREATE TABLE users (id TEXT);');

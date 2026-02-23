@@ -4,13 +4,15 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 let app: Express;
 let db: Database.Database;
 let tmpDir: string;
 let workspacePath: string;
+let authToken: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-graph-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
@@ -27,6 +29,7 @@ beforeEach(() => {
   fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending'), { recursive: true });
   db.prepare('INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)').run('ws-1', 'Test', workspacePath);
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -51,7 +54,7 @@ test('returns DAG with nodes, edges, and parallelGroups for a linear dependency 
     ],
   });
 
-  const res = await request(app).get('/api/specs/my-spec/graph?workspaceId=ws-1');
+  const res = await request(app).get('/api/specs/my-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.nodes).toHaveLength(3);
@@ -73,7 +76,7 @@ test('groups independent stories into the same parallel group', async () => {
     ],
   });
 
-  const res = await request(app).get('/api/specs/parallel-spec/graph?workspaceId=ws-1');
+  const res = await request(app).get('/api/specs/parallel-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   // US-001 and US-002 have no deps, should be in first group
@@ -93,7 +96,7 @@ test('detects circular dependencies and returns 422 with cycle path', async () =
     ],
   });
 
-  const res = await request(app).get('/api/specs/cycle-spec/graph?workspaceId=ws-1');
+  const res = await request(app).get('/api/specs/cycle-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(422);
   expect(res.body.error).toMatch(/[Cc]ircular dependency/);
@@ -123,7 +126,7 @@ test('includes story status from pipeline run when runId is provided', async () 
     `INSERT INTO story_results (run_id, story_id, status, started_at) VALUES (?, ?, ?, datetime('now'))`
   ).run(1, 'US-002', 'fail');
 
-  const res = await request(app).get('/api/specs/status-spec/graph?workspaceId=ws-1&runId=1');
+  const res = await request(app).get('/api/specs/status-spec/graph?workspaceId=ws-1&runId=1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   const nodeMap = new Map<string, any>(res.body.nodes.map((n: any) => [n.id, n]));
@@ -133,13 +136,13 @@ test('includes story status from pipeline run when runId is provided', async () 
 });
 
 test('returns 400 when workspaceId is missing', async () => {
-  const res = await request(app).get('/api/specs/some-spec/graph');
+  const res = await request(app).get('/api/specs/some-spec/graph').set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(400);
   expect(res.body.error).toMatch(/workspaceId/);
 });
 
 test('returns 404 when spec does not exist', async () => {
-  const res = await request(app).get('/api/specs/nonexistent/graph?workspaceId=ws-1');
+  const res = await request(app).get('/api/specs/nonexistent/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(404);
   expect(res.body.error).toMatch(/not found/i);
 });
@@ -147,7 +150,7 @@ test('returns 404 when spec does not exist', async () => {
 test('returns empty graph for spec with no stories', async () => {
   writeSpec('empty-spec', { title: 'Empty', userStories: [] });
 
-  const res = await request(app).get('/api/specs/empty-spec/graph?workspaceId=ws-1');
+  const res = await request(app).get('/api/specs/empty-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.nodes).toEqual([]);
@@ -164,7 +167,7 @@ test('ignores dependsOn references to non-existent story IDs', async () => {
     ],
   });
 
-  const res = await request(app).get('/api/specs/dangling-spec/graph?workspaceId=ws-1');
+  const res = await request(app).get('/api/specs/dangling-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   // US-999 doesn't exist, so US-001 has no valid deps — it's in first group
@@ -183,7 +186,7 @@ test('reads spec from pending directory when not in approved', async () => {
     ],
   }, 'pending');
 
-  const res = await request(app).get('/api/specs/pending-spec/graph?workspaceId=ws-1');
+  const res = await request(app).get('/api/specs/pending-spec/graph?workspaceId=ws-1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.nodes).toHaveLength(1);

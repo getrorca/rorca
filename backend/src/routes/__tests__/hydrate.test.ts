@@ -4,6 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 // Mock git-hydrator
 const mockGitMapStep = jest.fn();
@@ -25,8 +26,9 @@ let app: Express;
 let db: Database.Database;
 let tmpDir: string;
 let dbPath: string;
+let authToken: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   jest.clearAllMocks();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-hydrate-test-'));
@@ -37,6 +39,7 @@ beforeEach(() => {
   app = serverMod.default;
   const dbMod = require('../../db/index');
   db = dbMod.db;
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -54,7 +57,7 @@ const validWorkspace = {
 };
 
 async function createWorkspace() {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 }
 
 // --- Basic endpoint tests ---
@@ -79,6 +82,7 @@ test('POST /api/workspaces/:id/hydrate with valid workspace runs both hydrators'
 
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   expect(res.status).toBe(200);
@@ -102,6 +106,7 @@ test('POST with types=[schema] only runs schema hydration', async () => {
 
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['schema'] });
 
   expect(res.status).toBe(200);
@@ -122,6 +127,7 @@ test('POST with types=[git] only runs git hydration', async () => {
 
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['git'] });
 
   expect(res.status).toBe(200);
@@ -134,6 +140,7 @@ test('POST with types=[git] only runs git hydration', async () => {
 test('POST workspace not in DB returns 404', async () => {
   const res = await request(app)
     .post('/api/workspaces/nonexistent/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   expect(res.status).toBe(404);
@@ -150,6 +157,7 @@ test('gitMapStep returns [] (no commits) returns 200 with newCommits=0', async (
 
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['git'] });
 
   expect(res.status).toBe(200);
@@ -171,6 +179,7 @@ test('hydrateSchema returns empty snapshot returns 200 with tableCount=0', async
 
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['schema'] });
 
   expect(res.status).toBe(200);
@@ -190,6 +199,7 @@ test('UPSERT: calling hydrate twice does not duplicate workspace_context rows', 
   // First call
   await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['schema'] });
 
   // Update return
@@ -203,6 +213,7 @@ test('UPSERT: calling hydrate twice does not duplicate workspace_context rows', 
   // Second call
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['schema'] });
 
   expect(res.status).toBe(200);
@@ -232,6 +243,7 @@ test('delta sync: uses last_ingested_commit_hash from workspace_context', async 
 
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['git'] });
 
   expect(res.status).toBe(200);
@@ -270,6 +282,7 @@ test('WAL events inserted for both hydrate_schema and hydrate_git', async () => 
 
   await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   const events = db
@@ -298,6 +311,7 @@ test('gitMapStep throws "Not a git repository" returns 422', async () => {
 
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['git'] });
 
   expect(res.status).toBe(422);
@@ -314,6 +328,7 @@ test('chatComplete throws during reduce returns 502', async () => {
 
   const res = await request(app)
     .post('/api/workspaces/ws-hydrate/hydrate')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ types: ['git'] });
 
   expect(res.status).toBe(502);
