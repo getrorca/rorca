@@ -27,6 +27,8 @@ import MermaidDiagram from '../components/MermaidDiagram';
 import { useToast, ToastContainer } from '../components/Toast';
 import { ReadinessRing } from '../components/ReadinessRing';
 import { TagChipsReadonly } from '../components/TagChips';
+import { AssigneeDropdown, AssigneeAvatar } from '../components/AssigneeDropdown';
+import type { Assignee } from '../components/AssigneeDropdown';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -43,6 +45,7 @@ interface SpecSummary {
   readinessPercent?: number;
   tags?: string[];
   reviewStatus?: ReviewStatus;
+  assignee?: Assignee;
 }
 
 const REVIEW_STATUS_CONFIG: Record<ReviewStatus, { label: string; className: string; icon: typeof Eye }> = {
@@ -383,6 +386,7 @@ export default function ReviewQueuePanel() {
                   })()}
                 </div>
                 <div className="flex items-center gap-2">
+                  {spec.assignee && <AssigneeAvatar assignee={spec.assignee} size="sm" />}
                   {spec.readinessPercent != null && (
                     <ReadinessRing percent={spec.readinessPercent} size={28} />
                   )}
@@ -441,6 +445,7 @@ export default function ReviewQueuePanel() {
             onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
             onConfirmReview={(action) => handleReview(selectedId, action)}
             workspaceId={workspaceId!}
+            onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
           />
         )}
       </div>
@@ -479,6 +484,7 @@ export default function ReviewQueuePanel() {
               onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
               onConfirmReview={(action) => handleReview(selectedId, action)}
               workspaceId={workspaceId!}
+              onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
             />
           </div>
         </div>
@@ -512,6 +518,7 @@ function SpecPreview({
   onCancelReview,
   onConfirmReview,
   workspaceId,
+  onAssignSpec,
 }: {
   spec: SpecDetail;
   summary: SpecSummary;
@@ -533,9 +540,33 @@ function SpecPreview({
   onCancelReview: () => void;
   onConfirmReview: (action: 'approve' | 'request_changes') => void;
   workspaceId: string;
+  onAssignSpec?: (assignee: Assignee | null) => void;
 }) {
   const stories = spec.userStories ?? spec.stories ?? [];
   const diagram = extractDiagramText(spec);
+
+  const [specAssignee, setSpecAssignee] = useState<Assignee | null>(summary.assignee ?? null);
+
+  // Sync when summary changes
+  useEffect(() => {
+    setSpecAssignee(summary.assignee ?? null);
+  }, [summary.assignee]);
+
+  const handleAssignSpec = async (userId: string | null) => {
+    const result = await apiFetch<{ ok: boolean; assignee?: Assignee; assigneeId?: null }>(
+      `/api/specs/${summary.id}/assign`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, assigneeId: userId }),
+      },
+    );
+    if (result.ok) {
+      const newAssignee = result.assignee ?? null;
+      setSpecAssignee(newAssignee);
+      onAssignSpec?.(newAssignee);
+    }
+  };
 
   const tabs: { id: PreviewTab; label: string; badge?: string }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
@@ -548,7 +579,15 @@ function SpecPreview({
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="px-4 py-3 border-b border-border shrink-0">
-        <h3 className="text-base font-mono font-semibold text-text">{summary.specName}</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-mono font-semibold text-text">{summary.specName}</h3>
+          <AssigneeDropdown
+            assignee={specAssignee}
+            onAssign={handleAssignSpec}
+            workspaceId={workspaceId}
+            size="md"
+          />
+        </div>
         <div className="flex items-center gap-3 mt-0.5">
           <p className="text-xs text-muted flex items-center gap-1">
             <Clock size={10} />
@@ -764,6 +803,13 @@ function SpecPreview({
 
 /* ─── Stories Tab ──────────────────────────────────────────────────── */
 
+interface SpecAssignment {
+  specId: string;
+  storyId: string | null;
+  assignee: Assignee;
+  assignedAt: string;
+}
+
 function PreviewStoriesTab({
   stories,
   specId,
@@ -781,6 +827,20 @@ function PreviewStoriesTab({
   const [showPriorityPicker, setShowPriorityPicker] = useState(false);
   const [commentCounts, setCommentCounts] = useState<Record<string, number>>({});
   const [commentsOpenFor, setCommentsOpenFor] = useState<string | null>(null);
+  const [storyAssignees, setStoryAssignees] = useState<Record<string, Assignee>>({});
+
+  // Fetch assignments for this spec
+  useEffect(() => {
+    apiFetch<{ assignments: SpecAssignment[] }>(`/api/specs/${specId}/assignments?workspaceId=${workspaceId}`)
+      .then(data => {
+        const map: Record<string, Assignee> = {};
+        for (const a of data.assignments) {
+          if (a.storyId) map[a.storyId] = a.assignee;
+        }
+        setStoryAssignees(map);
+      })
+      .catch(() => {});
+  }, [specId, workspaceId]);
 
   // Fetch unresolved comment counts per story
   useEffect(() => {
@@ -996,6 +1056,22 @@ function PreviewStoriesTab({
               workspaceId={workspaceId}
               commentCount={commentCounts[story.id] ?? 0}
               onOpenComments={() => setCommentsOpenFor(commentsOpenFor === story.id ? null : story.id)}
+              assignee={storyAssignees[story.id] ?? null}
+              onAssignStory={async (userId) => {
+                const result = await apiFetch<{ ok: boolean; assignee?: Assignee }>(`/api/specs/${specId}/stories/${story.id}/assign`, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ workspaceId, assigneeId: userId }),
+                });
+                if (result.ok) {
+                  setStoryAssignees(prev => {
+                    const next = { ...prev };
+                    if (result.assignee) next[story.id] = result.assignee;
+                    else delete next[story.id];
+                    return next;
+                  });
+                }
+              }}
             />
             {commentsOpenFor === story.id && (
               <StoryComments
