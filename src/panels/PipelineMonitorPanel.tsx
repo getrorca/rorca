@@ -64,12 +64,17 @@ function specName(specPath: string): string {
   return file.replace(/\.json$/, '').replace(/-/g, ' ');
 }
 
+// SQLite returns timestamps without timezone (UTC but no 'Z') — append 'Z' to parse correctly
+function parseUtc(ts: string): Date {
+  return new Date(ts.includes('Z') || ts.includes('+') ? ts : ts + 'Z');
+}
+
 function elapsedTime(startedAt: string, finishedAt: string | null): string {
   if (!startedAt) return '';
   try {
-    const start = new Date(startedAt);
+    const start = parseUtc(startedAt);
     if (finishedAt) {
-      const end = new Date(finishedAt);
+      const end = parseUtc(finishedAt);
       const ms = end.getTime() - start.getTime();
       if (ms < 1000) return `${ms}ms`;
       const s = Math.floor(ms / 1000);
@@ -384,7 +389,7 @@ export default function PipelineMonitorPanel() {
                 </span>
               </div>
               <div className="mt-1 text-xs text-[var(--text-muted)]">
-                Started {formatDistanceToNow(new Date(liveRun.started_at), { addSuffix: true })}
+                Started {formatDistanceToNow(parseUtc(liveRun.started_at), { addSuffix: true })}
                 {liveRun.status === 'running' && (
                   <span> &middot; running for {elapsedTime(liveRun.started_at, null)}</span>
                 )}
