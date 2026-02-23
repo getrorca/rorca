@@ -57,6 +57,7 @@ interface SpecSummary {
   approvedAt?: string;
   workspacePath: string;
   readinessPercent: number;
+  tags: string[];
 }
 
 interface SpecVersionRow {
@@ -122,24 +123,34 @@ function computeReadiness(stories: any[]): number {
   return Math.round((readyCount / stories.length) * 100);
 }
 
+function getSpecTags(specId: string, workspaceId: string): string[] {
+  const rows = db.prepare(
+    'SELECT tag_name FROM spec_tags WHERE spec_id = ? AND workspace_id = ? ORDER BY tag_name'
+  ).all(specId, workspaceId) as { tag_name: string }[];
+  return rows.map(r => r.tag_name);
+}
+
 function buildSummary(
   filePath: string,
   fileName: string,
   status: 'pending' | 'approved',
   workspacePath: string,
+  workspaceId?: string,
 ): SpecSummary {
   const content = parseSpecFile(filePath);
   const stat = fs.statSync(filePath);
   const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
+  const specId = fileName.replace('.json', '');
   return {
-    id: fileName.replace('.json', ''),
-    specName: content.title ?? fileName.replace('.json', ''),
+    id: specId,
+    specName: content.title ?? specId,
     storyCount: stories.length,
     status,
     generatedAt: content.generatedAt ?? stat.birthtime.toISOString(),
     ...(status === 'approved' ? { approvedAt: stat.mtime.toISOString() } : {}),
     workspacePath,
     readinessPercent: computeReadiness(stories),
+    tags: workspaceId ? getSpecTags(specId, workspaceId) : [],
   };
 }
 
@@ -857,10 +868,14 @@ router.get('/', (req: Request, res: Response) => {
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
     const specs: SpecSummary[] = [];
 
+    // Parse optional tags filter (comma-separated, match ALL)
+    const tagsParam = req.query.tags as string | undefined;
+    const filterTags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
+
     if (statusFilter !== 'approved') {
       for (const file of safeReaddir(pendingDir)) {
         try {
-          specs.push(buildSummary(path.join(pendingDir, file), file, 'pending', workspace.path));
+          specs.push(buildSummary(path.join(pendingDir, file), file, 'pending', workspace.path, workspaceId));
         } catch {
           // skip unparseable files
         }
@@ -870,19 +885,24 @@ router.get('/', (req: Request, res: Response) => {
     if (statusFilter !== 'pending') {
       for (const file of safeReaddir(approvedDir)) {
         try {
-          specs.push(buildSummary(path.join(approvedDir, file), file, 'approved', workspace.path));
+          specs.push(buildSummary(path.join(approvedDir, file), file, 'approved', workspace.path, workspaceId));
         } catch {
           // skip unparseable files
         }
       }
     }
 
+    // Filter by tags (must match ALL specified tags)
+    const filtered = filterTags.length > 0
+      ? specs.filter(s => filterTags.every(t => s.tags.includes(t)))
+      : specs;
+
     // Sort by generatedAt DESC
-    specs.sort((a, b) =>
+    filtered.sort((a, b) =>
       new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
     );
 
-    res.json({ specs });
+    res.json({ specs: filtered });
   } catch (error: any) {
     console.error('[Specs] List error:', error);
     res.status(500).json({ error: error.message });
@@ -913,8 +933,9 @@ function buildArchiveSummary(
   status: 'pending' | 'approved',
   workspacePath: string,
   branchName?: string,
+  workspaceId?: string,
 ): ArchiveSpecSummary {
-  const base = buildSummary(filePath, fileName, status, workspacePath);
+  const base = buildSummary(filePath, fileName, status, workspacePath, workspaceId);
   const content = parseSpecFile(filePath);
   const stories = (content as any).userStories ?? (content as any).stories ?? [];
   const storyTitles = stories.map((s: any) => s.title ?? s.id ?? '').filter(Boolean);
@@ -1087,6 +1108,8 @@ router.get('/archive', (req: Request, res: Response) => {
     const offset = parseInt(req.query.offset as string) || 0;
     const createdAfter = req.query.createdAfter as string | undefined;
     const createdBefore = req.query.createdBefore as string | undefined;
+    const tagsParam = req.query.tags as string | undefined;
+    const filterTags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
 
     if (!workspaceId) {
       res.status(400).json({ error: 'Missing required query param: workspaceId' });
@@ -1145,7 +1168,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch));
+          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId));
         } catch {
           // skip unparseable files
         }
@@ -1158,7 +1181,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug) ?? currentBranch));
+          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId));
         } catch {
           // skip unparseable files
         }
@@ -1194,6 +1217,7 @@ router.get('/archive', (req: Request, res: Response) => {
           repoName: path.basename(workspace.path),
           storyTitles: [],
           readinessPercent: 0,
+          tags: getSpecTags(evt.spec_id, workspaceId),
         });
       }
     }
@@ -1207,6 +1231,11 @@ router.get('/archive', (req: Request, res: Response) => {
     if (createdBefore) {
       const beforeDate = new Date(createdBefore).getTime();
       filtered = filtered.filter(s => new Date(s.generatedAt).getTime() <= beforeDate);
+    }
+
+    // Apply tag filter (must match ALL specified tags)
+    if (filterTags.length > 0) {
+      filtered = filtered.filter(s => filterTags.every(t => s.tags.includes(t)));
     }
 
     // If searching, generate snippets and rank by relevance
@@ -1699,6 +1728,40 @@ Rewrite the story following the user instructions. Keep the same scope unless to
     });
   } catch (error: any) {
     console.error('[Specs] Story rewrite error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-012: GET /tags/autocomplete — must be before /:specId to avoid capture ─
+
+router.get('/tags/autocomplete', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspaceId as string;
+    const q = (req.query.q as string) || '';
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    let rows: { tag_name: string; count: number }[];
+    if (q) {
+      rows = db.prepare(
+        `SELECT tag_name, COUNT(*) as count FROM spec_tags
+         WHERE workspace_id = ? AND tag_name LIKE ? || '%'
+         GROUP BY tag_name ORDER BY count DESC, tag_name ASC LIMIT 20`
+      ).all(workspaceId, q.trim().toLowerCase()) as { tag_name: string; count: number }[];
+    } else {
+      rows = db.prepare(
+        `SELECT tag_name, COUNT(*) as count FROM spec_tags
+         WHERE workspace_id = ?
+         GROUP BY tag_name ORDER BY count DESC, tag_name ASC LIMIT 20`
+      ).all(workspaceId) as { tag_name: string; count: number }[];
+    }
+
+    res.json({ tags: rows.map(r => ({ name: r.tag_name, count: r.count })) });
+  } catch (error: any) {
+    console.error('[Specs] Tag autocomplete error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2212,6 +2275,96 @@ router.get('/:specId/graph', (req: Request, res: Response) => {
     res.json({ nodes, edges, parallelGroups } as GraphResponse);
   } catch (error: any) {
     console.error('[Specs] Graph error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-012: Tag management ──────────────────────────────────────────────────
+
+// POST /:specId/tags — Add one or more tags to a spec
+router.post('/:specId/tags', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const { workspaceId, tags } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+    if (!tags || !Array.isArray(tags) || tags.length === 0) {
+      res.status(400).json({ error: 'Missing required field: tags (array of strings)' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const insert = db.prepare(
+      'INSERT OR IGNORE INTO spec_tags (spec_id, workspace_id, tag_name) VALUES (?, ?, ?)'
+    );
+    const added: string[] = [];
+    for (const tag of tags) {
+      const name = String(tag).trim().toLowerCase();
+      if (!name) continue;
+      const result = insert.run(specId, workspaceId, name);
+      if (result.changes > 0) added.push(name);
+    }
+
+    // Emit WAL event for tag changes
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
+       VALUES ('tags_updated', ?, ?, ?, datetime('now'))`
+    ).run(specId, workspaceId, JSON.stringify({ added, action: 'add' }));
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({ tags: getSpecTags(specId, workspaceId) });
+  } catch (error: any) {
+    console.error('[Specs] Add tags error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /:specId/tags/:tag — Remove a tag from a spec
+router.delete('/:specId/tags/:tag', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const tag = req.params.tag as string;
+    const workspaceId = req.query.workspaceId as string;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const tagName = tag.trim().toLowerCase();
+    const result = db.prepare(
+      'DELETE FROM spec_tags WHERE spec_id = ? AND workspace_id = ? AND tag_name = ?'
+    ).run(specId, workspaceId, tagName);
+
+    if (result.changes === 0) {
+      res.status(404).json({ error: 'Tag not found on this spec' });
+      return;
+    }
+
+    // Emit WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
+       VALUES ('tags_updated', ?, ?, ?, datetime('now'))`
+    ).run(specId, workspaceId, JSON.stringify({ removed: [tagName], action: 'remove' }));
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({ tags: getSpecTags(specId, workspaceId) });
+  } catch (error: any) {
+    console.error('[Specs] Remove tag error:', error);
     res.status(500).json({ error: error.message });
   }
 });

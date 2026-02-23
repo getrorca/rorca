@@ -26,6 +26,7 @@ import DependencyGraph from '../components/DependencyGraph';
 import MermaidDiagram from '../components/MermaidDiagram';
 import type { PanelId } from '../components/Sidebar';
 import { ReadinessRing } from '../components/ReadinessRing';
+import { TagChipsReadonly, TagChips } from '../components/TagChips';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -46,6 +47,7 @@ interface ArchiveSpec {
   repoName?: string;
   branchName?: string;
   readinessPercent?: number;
+  tags: string[];
 }
 
 interface ArchiveResponse {
@@ -140,6 +142,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
   const [searchText, setSearchText] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [specDetail, setSpecDetail] = useState<SpecDetail | null>(null);
@@ -171,6 +174,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
         offset: String(offset),
       });
       if (debouncedSearch) params.set('q', debouncedSearch);
+      if (tagFilter.length > 0) params.set('tags', tagFilter.join(','));
 
       const res = await apiFetch<ArchiveResponse>(`/api/specs/archive?${params}`);
       if (append) {
@@ -186,7 +190,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [workspaceId, statusFilter, debouncedSearch]);
+  }, [workspaceId, statusFilter, debouncedSearch, tagFilter]);
 
   useEffect(() => {
     setSelectedId(null);
@@ -296,6 +300,29 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
               </button>
             ))}
           </div>
+
+          {/* Active tag filters */}
+          {tagFilter.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] text-muted">Tags:</span>
+              {tagFilter.map(t => (
+                <button
+                  key={t}
+                  onClick={() => setTagFilter(prev => prev.filter(x => x !== t))}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/15 text-accent border border-accent/30 hover:bg-accent/25 transition-colors"
+                >
+                  {t}
+                  <X size={8} />
+                </button>
+              ))}
+              <button
+                onClick={() => setTagFilter([])}
+                className="text-[10px] text-muted hover:text-text transition-colors"
+              >
+                Clear all
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Results */}
@@ -388,6 +415,20 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                       )}
                     </div>
 
+                    {/* Tags */}
+                    {spec.tags?.length > 0 && (
+                      <div className="mb-1">
+                        <TagChipsReadonly
+                          tags={spec.tags}
+                          onTagClick={tag => {
+                            if (!tagFilter.includes(tag)) {
+                              setTagFilter(prev => [...prev, tag]);
+                            }
+                          }}
+                        />
+                      </div>
+                    )}
+
                     {/* Row 3: first 2 story titles */}
                     {spec.storyTitles.length > 0 && (
                       <div className="space-y-0.5">
@@ -438,6 +479,9 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
           detailLoading={detailLoading}
           onClose={() => { setSelectedId(null); setSpecDetail(null); }}
           onNavigate={onNavigate}
+          onTagsChange={(newTags) => {
+            setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, tags: newTags } : s));
+          }}
         />
       )}
     </div>
@@ -455,6 +499,7 @@ function SpecPreviewDrawer({
   detailLoading,
   onClose,
   onNavigate,
+  onTagsChange,
 }: {
   specId: string;
   summary: ArchiveSpec | null;
@@ -462,6 +507,7 @@ function SpecPreviewDrawer({
   detailLoading: boolean;
   onClose: () => void;
   onNavigate: (panel: PanelId) => void;
+  onTagsChange: (tags: string[]) => void;
 }) {
   const { workspaceId } = useWorkspace();
   const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
@@ -616,6 +662,16 @@ function SpecPreviewDrawer({
                 {formatDate(summary.generatedAt)}
               </span>
               <span>{summary.storyCount} {summary.storyCount === 1 ? 'story' : 'stories'}</span>
+            </div>
+          )}
+          {summary && workspaceId && (
+            <div className="mt-2">
+              <TagChips
+                specId={specId}
+                workspaceId={workspaceId}
+                tags={summary.tags ?? []}
+                onTagsChange={onTagsChange}
+              />
             </div>
           )}
         </div>
