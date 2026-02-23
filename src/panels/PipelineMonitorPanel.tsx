@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -15,11 +15,13 @@ interface PipelineRun {
   id: number;
   spec_path: string;
   workspace_id: string;
-  status: 'running' | 'paused' | 'done' | 'failed';
+  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure';
   pid: number | null;
   started_at: string;
   finished_at: string | null;
 }
+
+type RunStatus = PipelineRun['status'];
 
 interface StoryResult {
   id: number;
@@ -55,6 +57,7 @@ const STATUS_DOTS: Record<string, string> = {
   running: 'bg-blue-500 animate-pulse',
   done: 'bg-emerald-500',
   failed: 'bg-red-500',
+  partial_failure: 'bg-orange-500',
   paused: 'bg-yellow-500',
 };
 
@@ -287,15 +290,29 @@ export default function PipelineMonitorPanel() {
   const totalCount = derivedStories.length;
   const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
-  // Update selected run status from SSE
+  // Update selected run status from SSE (handles finish, pause, resume events)
   const liveRun = useMemo(() => {
     if (!selectedRunDetail) return null;
-    const runEvents = sseEvents.filter((e) => e.event_type === 'run_finished');
-    if (runEvents.length > 0) {
-      const payload = JSON.parse(runEvents[runEvents.length - 1].payload || '{}');
-      return { ...selectedRunDetail.run, status: payload.status || 'done' as const, finished_at: runEvents[runEvents.length - 1].ts };
+    let run = selectedRunDetail.run;
+
+    // Check lifecycle events in order — last one wins
+    const lifecycleEvents = sseEvents.filter(
+      (e) => e.event_type === 'run_finished' || e.event_type === 'run_paused' || e.event_type === 'run_resumed'
+    );
+
+    if (lifecycleEvents.length > 0) {
+      const last = lifecycleEvents[lifecycleEvents.length - 1];
+      if (last.event_type === 'run_finished') {
+        const payload = JSON.parse(last.payload || '{}');
+        run = { ...run, status: (payload.status || 'done') as RunStatus, finished_at: last.ts };
+      } else if (last.event_type === 'run_paused') {
+        run = { ...run, status: 'paused' };
+      } else if (last.event_type === 'run_resumed') {
+        run = { ...run, status: 'running' };
+      }
     }
-    return selectedRunDetail.run;
+
+    return run;
   }, [selectedRunDetail, sseEvents]);
 
   // Derive specId from selected run for graph tab
@@ -346,6 +363,29 @@ export default function PipelineMonitorPanel() {
       setLogLines(storyEvents.length > 0 ? storyEvents.slice(-50) : ['(No log data available yet)']);
     }
   };
+
+  // ─── Pause / Resume handler ──────────────────────────────────────────
+  const [pauseLoading, setPauseLoading] = useState(false);
+
+  const handlePauseResume = useCallback(async () => {
+    if (!selectedRunId || !liveRun) return;
+    const action = liveRun.status === 'paused' ? 'resume' : 'pause';
+    setPauseLoading(true);
+    try {
+      await apiFetch(`/api/pipeline/runs/${selectedRunId}/${action}`, { method: 'POST' });
+      // Re-fetch run detail and run list to pick up status change immediately
+      const [detail, runList] = await Promise.all([
+        apiFetch<{ run: PipelineRun; stories: StoryResult[] }>(`/api/pipeline/runs/${selectedRunId}`),
+        apiFetch<{ runs: PipelineRun[] }>(`/api/pipeline/runs?workspaceId=${workspaceId}`),
+      ]);
+      setSelectedRunDetail(detail);
+      setRuns(runList.runs);
+    } catch (err) {
+      console.error(`[Pipeline] ${action} failed:`, err);
+    } finally {
+      setPauseLoading(false);
+    }
+  }, [selectedRunId, liveRun, workspaceId]);
 
   const handleCopyCommand = () => {
     const cmd = `./scripts/ralph/run-loop.sh --json specs/approved/<spec>.json`;
@@ -534,18 +574,42 @@ export default function PipelineMonitorPanel() {
                       ? 'bg-blue-500/20 text-blue-400'
                       : liveRun.status === 'done'
                         ? 'bg-emerald-500/20 text-emerald-400'
-                        : liveRun.status === 'failed'
+                        : liveRun.status === 'failed' || liveRun.status === 'partial_failure'
                           ? 'bg-red-500/20 text-red-400'
                           : 'bg-yellow-500/20 text-yellow-400'
                   }`}
                 >
-                  {liveRun.status}
+                  {liveRun.status === 'partial_failure' ? 'partial failure' : liveRun.status}
                 </span>
+                {(liveRun.status === 'running' || liveRun.status === 'paused') && (
+                  <button
+                    onClick={handlePauseResume}
+                    disabled={pauseLoading}
+                    className={`ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 ${
+                      liveRun.status === 'paused'
+                        ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
+                        : 'bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30'
+                    } disabled:opacity-50`}
+                    title={liveRun.status === 'paused' ? 'Resume pipeline' : 'Pause pipeline'}
+                  >
+                    {liveRun.status === 'paused' ? (
+                      <>
+                        <Play className="w-3 h-3" />
+                        Resume
+                      </>
+                    ) : (
+                      <>
+                        <Pause className="w-3 h-3" />
+                        Pause
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
               <div className="mt-1 text-xs text-[var(--text-muted)]">
                 Started {formatDistanceToNow(parseUtc(liveRun.started_at), { addSuffix: true })}
-                {liveRun.status === 'running' && (
-                  <span> &middot; running for {elapsedTime(liveRun.started_at, null)}</span>
+                {(liveRun.status === 'running' || liveRun.status === 'paused') && (
+                  <span> &middot; {liveRun.status === 'paused' ? 'paused' : 'running'} for {elapsedTime(liveRun.started_at, null)}</span>
                 )}
               </div>
             </div>
