@@ -5,12 +5,17 @@ import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
 
+// Mock global fetch for GitHub OAuth tests
+const mockFetch = jest.fn();
+global.fetch = mockFetch as unknown as typeof fetch;
+
 let app: Express;
 let db: Database.Database;
 let tmpDir: string;
 
 beforeEach(() => {
   jest.resetModules();
+  mockFetch.mockReset();
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-auth-test-'));
   process.env.DB_PATH = path.join(tmpDir, 'test.db');
@@ -459,5 +464,277 @@ describe('requireAuth middleware', () => {
     expect(res.status).toBe(200);
     expect(res.body.userId).toBe(user.id);
     expect(res.body.userEmail).toBe('test@example.com');
+  });
+});
+
+// ─── Token encryption helpers ───
+
+describe('encryptToken / decryptToken', () => {
+  test('round-trips a token correctly', () => {
+    const { encryptToken, decryptToken } = require('../auth');
+    const original = 'gho_abc123XYZ';
+    const encrypted = encryptToken(original);
+    expect(encrypted).not.toBe(original);
+    expect(encrypted.split(':')).toHaveLength(3);
+    const decrypted = decryptToken(encrypted);
+    expect(decrypted).toBe(original);
+  });
+
+  test('produces different ciphertexts for the same input (random IV)', () => {
+    const { encryptToken } = require('../auth');
+    const token = 'gho_test_token';
+    const enc1 = encryptToken(token);
+    const enc2 = encryptToken(token);
+    expect(enc1).not.toBe(enc2);
+  });
+});
+
+// ─── GET /api/auth/github ───
+
+describe('GET /api/auth/github', () => {
+  test('returns 500 when GITHUB_CLIENT_ID is not configured', async () => {
+    // By default in tests, GITHUB_CLIENT_ID is not set
+    const res = await request(app).get('/api/auth/github');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain('GITHUB_CLIENT_ID missing');
+  });
+
+  test('redirects to GitHub OAuth URL when configured', async () => {
+    jest.resetModules();
+    process.env.GITHUB_CLIENT_ID = 'test-client-id';
+    process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
+    db = require('../../db').db;
+    app = require('../../server').default;
+
+    const res = await request(app).get('/api/auth/github');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain('https://github.com/login/oauth/authorize');
+    expect(res.headers.location).toContain('client_id=test-client-id');
+    expect(res.headers.location).toContain('scope=user%3Aemail+repo');
+    expect(res.headers.location).toContain('state=');
+
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
+  });
+});
+
+// ─── GET /api/auth/github/callback ───
+
+describe('GET /api/auth/github/callback', () => {
+  function setupGitHubEnv() {
+    jest.resetModules();
+    process.env.GITHUB_CLIENT_ID = 'test-client-id';
+    process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
+    mockFetch.mockReset();
+    db = require('../../db').db;
+    app = require('../../server').default;
+  }
+
+  function mockGitHubOAuthFlow(opts: {
+    tokenResponse?: Partial<{ access_token: string; token_type: string; scope: string; error: string; error_description: string }>;
+    userResponse?: Partial<{ id: number; login: string; email: string | null }>;
+    emailsResponse?: Array<{ email: string; primary: boolean; verified: boolean }>;
+  } = {}) {
+    const tokenResponse = {
+      access_token: 'gho_test_access_token_123',
+      token_type: 'bearer',
+      scope: 'user:email,repo',
+      ...opts.tokenResponse,
+    };
+    const userResponse = {
+      id: 12345,
+      login: 'octocat',
+      email: null,
+      ...opts.userResponse,
+    };
+    const emailsResponse = opts.emailsResponse || [
+      { email: 'octocat@github.com', primary: true, verified: true },
+    ];
+
+    mockFetch.mockImplementation((url: string) => {
+      if (url === 'https://github.com/login/oauth/access_token') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(tokenResponse) });
+      }
+      if (url === 'https://api.github.com/user') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(userResponse) });
+      }
+      if (url === 'https://api.github.com/user/emails') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(emailsResponse) });
+      }
+      return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
+    });
+  }
+
+  afterEach(() => {
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
+  });
+
+  test('returns 400 when code query param is missing', async () => {
+    setupGitHubEnv();
+    const res = await request(app).get('/api/auth/github/callback');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Authorization code is required');
+  });
+
+  test('creates new user and returns JWT tokens on first GitHub login', async () => {
+    setupGitHubEnv();
+    mockGitHubOAuthFlow();
+
+    const res = await request(app).get('/api/auth/github/callback?code=test-auth-code');
+
+    expect(res.status).toBe(200);
+    expect(res.body.user).toBeDefined();
+    expect(res.body.user.email).toBe('octocat@github.com');
+    expect(res.body.user.githubUsername).toBe('octocat');
+    expect(res.body.accessToken).toBeDefined();
+    expect(res.body.refreshToken).toBeDefined();
+
+    // Verify user was created in DB
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get('octocat@github.com') as Record<string, unknown>;
+    expect(user).toBeDefined();
+    expect(user.github_id).toBe('12345');
+
+    // Verify github_connection was created
+    const conn = db.prepare('SELECT * FROM github_connections WHERE user_id = ?').get(user.id as string) as Record<string, unknown>;
+    expect(conn).toBeDefined();
+    expect(conn.github_user_id).toBe('12345');
+    expect(conn.github_username).toBe('octocat');
+    expect(conn.scopes).toBeDefined();
+    // Token should be encrypted (not the raw token)
+    expect(conn.encrypted_token).not.toBe('gho_test_access_token_123');
+    expect((conn.encrypted_token as string).split(':')).toHaveLength(3);
+  });
+
+  test('links GitHub account to existing email user', async () => {
+    setupGitHubEnv();
+
+    // First, register a user with email
+    await request(app).post('/api/auth/register').send({
+      email: 'octocat@github.com',
+      password: 'securepass123',
+      displayName: 'Email User',
+    });
+
+    // Now login via GitHub with the same email
+    mockGitHubOAuthFlow();
+
+    const res = await request(app).get('/api/auth/github/callback?code=test-auth-code');
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.email).toBe('octocat@github.com');
+    expect(res.body.user.displayName).toBe('Email User'); // Keeps original name
+    expect(res.body.accessToken).toBeDefined();
+
+    // Verify only 1 user exists (no duplicate)
+    const users = db.prepare('SELECT * FROM users WHERE email = ?').all('octocat@github.com') as Record<string, unknown>[];
+    expect(users).toHaveLength(1);
+    expect(users[0].github_id).toBe('12345');
+
+    // Verify github_connection was created
+    const conn = db.prepare('SELECT * FROM github_connections WHERE user_id = ?').get(users[0].id as string) as Record<string, unknown>;
+    expect(conn).toBeDefined();
+  });
+
+  test('returning GitHub user updates token and reuses account', async () => {
+    setupGitHubEnv();
+    mockGitHubOAuthFlow();
+
+    // First login
+    const res1 = await request(app).get('/api/auth/github/callback?code=first-code');
+    expect(res1.status).toBe(200);
+    const userId = res1.body.user.id;
+
+    // Second login (returning user) with new token
+    mockGitHubOAuthFlow({ tokenResponse: { access_token: 'gho_new_token_456' } });
+    const res2 = await request(app).get('/api/auth/github/callback?code=second-code');
+    expect(res2.status).toBe(200);
+    expect(res2.body.user.id).toBe(userId); // Same user
+
+    // Token should be updated
+    const conn = db.prepare('SELECT * FROM github_connections WHERE user_id = ?').get(userId) as Record<string, unknown>;
+    const { decryptToken } = require('../auth');
+    expect(decryptToken(conn.encrypted_token as string)).toBe('gho_new_token_456');
+  });
+
+  test('returns 401 when GitHub token exchange fails', async () => {
+    setupGitHubEnv();
+    mockFetch.mockImplementation((url: string) => {
+      if (url === 'https://github.com/login/oauth/access_token') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ error: 'bad_verification_code', error_description: 'The code passed is incorrect' }),
+        });
+      }
+      return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
+    });
+
+    const res = await request(app).get('/api/auth/github/callback?code=invalid-code');
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('The code passed is incorrect');
+  });
+
+  test('returns 400 when no verified primary email on GitHub', async () => {
+    setupGitHubEnv();
+    mockGitHubOAuthFlow({
+      emailsResponse: [
+        { email: 'unverified@github.com', primary: true, verified: false },
+      ],
+    });
+
+    const res = await request(app).get('/api/auth/github/callback?code=test-code');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('No verified primary email found on GitHub account');
+  });
+
+  test('uses email from user profile if available', async () => {
+    setupGitHubEnv();
+    mockGitHubOAuthFlow({
+      userResponse: { id: 99999, login: 'directemail', email: 'Direct@Example.Com' },
+    });
+
+    const res = await request(app).get('/api/auth/github/callback?code=test-code');
+    expect(res.status).toBe(200);
+    expect(res.body.user.email).toBe('direct@example.com'); // Normalized
+  });
+
+  test('emits github_login WAL event', async () => {
+    setupGitHubEnv();
+    mockGitHubOAuthFlow();
+
+    await request(app).get('/api/auth/github/callback?code=test-code');
+
+    const event = db.prepare("SELECT * FROM wal_events WHERE event_type = 'github_login'").get() as Record<string, unknown>;
+    expect(event).toBeDefined();
+    const payload = JSON.parse(event.payload as string);
+    expect(payload.githubUserId).toBe('12345');
+    expect(payload.githubUsername).toBe('octocat');
+  });
+
+  test('access token is a valid JWT with correct claims', async () => {
+    setupGitHubEnv();
+    mockGitHubOAuthFlow();
+
+    const res = await request(app).get('/api/auth/github/callback?code=test-code');
+    const decoded = JSON.parse(
+      Buffer.from(res.body.accessToken.split('.')[1], 'base64').toString()
+    );
+    expect(decoded.sub).toBe(res.body.user.id);
+    expect(decoded.email).toBe('octocat@github.com');
+    expect(decoded.exp).toBeDefined();
+  });
+
+  test('refresh token is stored and usable', async () => {
+    setupGitHubEnv();
+    mockGitHubOAuthFlow();
+
+    const res = await request(app).get('/api/auth/github/callback?code=test-code');
+    expect(res.body.refreshToken).toBeDefined();
+
+    // Use the refresh token
+    const refreshRes = await request(app).post('/api/auth/refresh').send({ refreshToken: res.body.refreshToken });
+    expect(refreshRes.status).toBe(200);
+    expect(refreshRes.body.accessToken).toBeDefined();
+    expect(refreshRes.body.refreshToken).toBeDefined();
   });
 });

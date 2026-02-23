@@ -56,6 +56,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE refresh_tokens ADD COLUMN revoked_at TEXT');
   }
 
+  // V2-003: Add github_id column to users for account linking (idempotent)
+  const userCols = db.pragma('table_info(users)') as { name: string }[];
+  if (!userCols.some(c => c.name === 'github_id')) {
+    db.exec('ALTER TABLE users ADD COLUMN github_id TEXT');
+  }
+
   // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
   const tableSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
