@@ -115,7 +115,7 @@ with open('$JSON_FILE') as f:
 stories = get_stories(d)
 passed_ids = {s['id'] for s in stories if is_passed(s)}
 
-for s in sorted(stories, key=lambda x: x.get('priority', 999)):
+for s in sorted(stories, key=lambda x: x.get('priority', 3)):
     if is_passed(s):
         continue
     # Skip permanently failed stories (marked skipped after max retries)

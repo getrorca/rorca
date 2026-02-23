@@ -13,6 +13,7 @@ export interface GeneratedStory {
   acceptanceCriteria: string[];
   dependsOn: string[];
   complexity?: number;
+  priority?: number;  // 1=urgent, 2=high, 3=normal (default), 4=low
 }
 
 export interface GeneratedSpec {
@@ -52,6 +53,7 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
       acceptanceCriteria: s.acceptanceCriteria,
       dependsOn: s.dependsOn,
       ...(s.complexity != null ? { complexity: s.complexity } : {}),
+      ...(s.priority != null ? { priority: s.priority } : {}),
       passes: false
     })),
     ...(spec.mermaidDiagram ? { mermaidDiagram: spec.mermaidDiagram } : {}),
