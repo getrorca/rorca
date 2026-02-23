@@ -202,7 +202,7 @@ interface SpecDiffResult {
 
 router.post('/generate', async (req: Request, res: Response) => {
   try {
-    const { workspaceId, domain, diagramTypes, storyAnnotations } = req.body;
+    const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
     const title: string = req.body.title || req.body.specName;
     const brief: string = req.body.brief || req.body.specBrief;
     const storyCount: number = Math.min(500, Math.max(1, parseInt(req.body.storyCount) || 8));
@@ -254,10 +254,34 @@ router.post('/generate', async (req: Request, res: Response) => {
       storyAnnotations,
     });
 
+    // 6b. Fetch template if templateId provided
+    let templateContext = '';
+    if (templateId) {
+      const tpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId) as
+        { brief: string; story_structure: string; direction_layers: string | null } | undefined;
+      if (tpl) {
+        const stories = JSON.parse(tpl.story_structure);
+        const storyOutline = stories.map((s: { id: string; title: string; description: string }) =>
+          `- ${s.id}: ${s.title} — ${s.description}`
+        ).join('\n');
+        templateContext = [
+          '=== REFERENCE TEMPLATE ===',
+          `Template brief: ${tpl.brief}`,
+          '',
+          'Story structure pattern:',
+          storyOutline,
+          '',
+          'Use this as a structural reference. Adapt story IDs, titles, and details to the new spec brief.',
+          '=== END TEMPLATE ===',
+        ].join('\n');
+      }
+    }
+
     // 7. Build LLM prompt
     const storyPrefix = req.body.storyPrefix || 'US';
     const fullPrompt = [
       synthesized,
+      ...(templateContext ? [templateContext, '---'] : []),
       '---',
       `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
       `Spec title: ${title}`,

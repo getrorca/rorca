@@ -18,3 +18,27 @@ Key decisions:
 - The versions endpoint doesn't require workspaceId since versions are keyed by spec_slug (global across workspaces)
 - Changed generate behavior: regenerating same slug now versions the old file instead of returning 409 conflict
 - Updated existing db.test.ts to expect 7 tables instead of 6
+
+## Story US-002: Spec Template System — DONE
+Files touched:
+- backend/src/db/migrations/004_templates.sql (new)
+- backend/src/routes/templates.ts (new)
+- backend/src/routes/specs.ts (modified — templateId in generate)
+- backend/src/server.ts (modified — mount templates router)
+- backend/src/routes/__tests__/templates.test.ts (new — 19 tests)
+- backend/src/db/__tests__/db.test.ts (modified — expect 8 tables)
+
+What was built:
+- `templates` table (SQLite) stores reusable spec structures with name, description, source_spec_id, brief, story_structure JSON, direction_layers JSON, story_count
+- `POST /api/templates` creates a template from an approved spec's brief and story structure
+- `GET /api/templates` lists all templates with summary fields (name, description, sourceSpecId, storyCount, createdAt)
+- `GET /api/templates/:id` returns full template details including storyStructure and brief
+- `DELETE /api/templates/:id` removes a template (returns 204)
+- `POST /api/specs/generate` accepts optional `templateId` that injects the template's brief + story structure as a "REFERENCE TEMPLATE" section in the LLM prompt
+
+Key decisions:
+- Templates are workspace-agnostic (no workspace_id FK) — available across all workspaces per AC
+- Template stores story structure as stripped-down array (id, title, description) not full stories with AC/deps
+- When templateId is provided to generate, it adds the template as context before the task instructions, not as a hard constraint — LLM adapts the pattern to the new brief
+- If templateId references a nonexistent template, generation proceeds normally without template context (graceful degradation)
+- Updated db.test.ts to expect 8 tables instead of 7
