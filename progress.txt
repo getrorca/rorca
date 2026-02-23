@@ -357,5 +357,28 @@ Key decisions:
 - 409 response includes branchName so UI can still display it (branch exists = useful info, not error)
 - Frontend parses 409 error body JSON to extract branchName from apiFetch error message string
 
+## Story V2-039: Activity Feed — DONE
+Files touched:
+- backend/src/routes/activity.ts (new — GET /api/activity endpoint)
+- backend/src/server.ts (modified — mount activityRouter at /api/activity)
+- backend/src/routes/__tests__/activity.test.ts (new — 10 tests)
+- src/panels/ActivityFeedPanel.tsx (new — timeline UI with filters, pagination, auto-refresh)
+- src/components/Sidebar.tsx (modified — added 'activity' to PanelId, Rss icon nav item)
+- src/App.tsx (modified — import + render ActivityFeedPanel)
+
+What was built:
+- GET /api/activity returns paginated activity feed sourced from wal_events table, with type and workspace filtering
+- Each item includes: actor (id, name, avatarUrl), activityType, target (spec/run/story with id), timestamp, description
+- Activity types mapped from WAL events: spec_created, spec_approved, spec_rejected, spec_edited, run_triggered, run_completed, comment_added, member_joined
+- ActivityFeedPanel renders a timeline grouped by date with avatar initials, colored icons per type, relative timestamps, and target links
+- Filter chips for each activity type, load-more pagination, 15s auto-refresh
+- 10 backend tests covering pagination, type filtering, workspace filtering, response shape, target mapping, limit clamping, and auth
+
+Key decisions:
+- No new DB table — activity feed reads directly from existing wal_events table (already has actor, event_type, spec_id, story_id, workspace_id, payload)
+- ACTIVITY_EVENT_TYPES whitelist filters out low-level noise (story_started, batch_progress, hydrate_*, etc.)
+- Actor display names resolved via batch lookup against users table (falls back to raw actor string for system actors like 'ralph')
+- Rss icon chosen for sidebar (Activity icon already used by Pipeline Monitor)
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
