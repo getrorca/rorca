@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   ChevronRight,
   Inbox,
@@ -13,6 +13,7 @@ import { apiFetch } from '../lib/apiFetch';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
 import DependencyGraph from '../components/DependencyGraph';
+import MermaidDiagram from '../components/MermaidDiagram';
 import { useToast, ToastContainer } from '../components/Toast';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -31,6 +32,7 @@ interface SpecDetail {
   userStories?: Story[];
   stories?: Story[];
   diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
+  mermaidDiagram?: string;
   model?: string;
   [key: string]: unknown;
 }
@@ -52,6 +54,10 @@ function relativeTime(iso: string): string {
 }
 
 function extractDiagramText(spec: SpecDetail): { text: string; type: 'mermaid' | 'ascii' } | null {
+  // Prefer the dedicated mermaidDiagram field (story dependency diagram)
+  if (spec.mermaidDiagram && typeof spec.mermaidDiagram === 'string' && spec.mermaidDiagram.trim()) {
+    return { text: spec.mermaidDiagram, type: 'mermaid' };
+  }
   if (!spec.diagrams) return null;
   for (const value of Object.values(spec.diagrams)) {
     if (typeof value === 'object' && value !== null) {
@@ -380,7 +386,7 @@ function SpecPreview({
   const tabs: { id: PreviewTab; label: string; badge?: string }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
     { id: 'graph', label: 'Graph' },
-    { id: 'diagram', label: 'Diagram' },
+    { id: 'diagram', label: 'Dependencies' },
     { id: 'json', label: 'Raw JSON' },
   ];
 
@@ -428,7 +434,7 @@ function SpecPreview({
       <div className="flex-1 overflow-y-auto">
         {activeTab === 'stories' && <PreviewStoriesTab stories={stories} />}
         {activeTab === 'graph' && <DependencyGraph specId={summary.id} workspaceId={workspaceId} />}
-        {activeTab === 'diagram' && <PreviewDiagramTab diagram={diagram} />}
+        {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-review" />}
         {activeTab === 'json' && <PreviewJsonTab spec={spec} />}
       </div>
 
@@ -509,87 +515,7 @@ function PreviewStoriesTab({ stories }: { stories: Story[] }) {
 }
 
 /* ─── Diagram Tab ─────────────────────────────────────────────────── */
-
-function PreviewDiagramTab({
-  diagram,
-}: {
-  diagram: { text: string; type: 'mermaid' | 'ascii' } | null;
-}) {
-  const mermaidRef = useRef<HTMLDivElement>(null);
-  const [svgContent, setSvgContent] = useState('');
-  const [renderError, setRenderError] = useState('');
-
-  useEffect(() => {
-    if (!diagram || diagram.type !== 'mermaid' || !mermaidRef.current) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const mermaid = (await import('mermaid')).default;
-        mermaid.initialize({
-          startOnLoad: false,
-          theme: 'dark',
-          themeVariables: {
-            primaryColor: '#6366f1',
-            primaryTextColor: '#fafafa',
-            primaryBorderColor: '#3f3f46',
-            lineColor: '#a1a1aa',
-            secondaryColor: '#1c1c21',
-            tertiaryColor: '#0f0f11',
-          },
-        });
-        const id = `mermaid-review-${Date.now()}`;
-        const { svg } = await mermaid.render(id, diagram.text);
-        if (!cancelled) {
-          setSvgContent(svg);
-          setRenderError('');
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setRenderError(err instanceof Error ? err.message : 'Failed to render');
-          setSvgContent('');
-        }
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [diagram]);
-
-  if (!diagram) {
-    return (
-      <div className="flex items-center justify-center h-full text-muted text-sm">
-        No diagram available for this spec
-      </div>
-    );
-  }
-
-  if (diagram.type === 'ascii') {
-    return (
-      <div className="p-4">
-        <pre className="p-4 text-xs font-mono bg-panel border border-border rounded overflow-x-auto text-text whitespace-pre">
-          {diagram.text}
-        </pre>
-      </div>
-    );
-  }
-
-  return (
-    <div className="p-4">
-      {renderError ? (
-        <div className="text-sm text-error">
-          <p className="font-medium mb-1">Render error</p>
-          <pre className="text-xs font-mono whitespace-pre-wrap">{renderError}</pre>
-        </div>
-      ) : (
-        <div
-          ref={mermaidRef}
-          className="border border-border rounded bg-panel p-4 overflow-x-auto"
-          dangerouslySetInnerHTML={{ __html: svgContent }}
-        />
-      )}
-    </div>
-  );
-}
+/* Uses shared MermaidDiagram component with zoom/pan/copy controls */
 
 /* ─── Raw JSON Tab ────────────────────────────────────────────────── */
 
