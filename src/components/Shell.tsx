@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Menu } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import AddWorkspaceModal from './AddWorkspaceModal';
@@ -17,33 +18,36 @@ function WorkspaceSelector() {
         onClick={() => setOpen(!open)}
         className="flex items-center gap-2 px-3 py-1.5 rounded text-sm bg-bg border border-border hover:border-accent transition-colors"
       >
-        <span className="truncate max-w-[160px]">{selected?.name ?? 'Select workspace'}</span>
+        <span className="truncate max-w-[100px] sm:max-w-[160px]">{selected?.name ?? 'Select workspace'}</span>
         <svg className="w-3 h-3 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-1 w-56 bg-panel border border-border rounded shadow-lg z-50">
-          {workspaces.map((w) => (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 mt-1 w-56 bg-panel border border-border rounded shadow-lg z-50">
+            {workspaces.map((w) => (
+              <button
+                key={w.id}
+                onClick={() => { setWorkspaceId(w.id); setOpen(false); }}
+                className={`w-full text-left px-3 py-2 text-sm hover:bg-bg transition-colors ${
+                  w.id === workspaceId ? 'text-accent' : 'text-[var(--text)]'
+                }`}
+              >
+                {w.name}
+              </button>
+            ))}
+            {workspaces.length > 0 && <div className="border-t border-border" />}
             <button
-              key={w.id}
-              onClick={() => { setWorkspaceId(w.id); setOpen(false); }}
-              className={`w-full text-left px-3 py-2 text-sm hover:bg-bg transition-colors ${
-                w.id === workspaceId ? 'text-accent' : 'text-[var(--text)]'
-              }`}
+              onClick={() => { setOpen(false); setShowAddModal(true); }}
+              className="w-full text-left px-3 py-2 text-sm text-muted hover:bg-bg transition-colors"
             >
-              {w.name}
+              + Add Workspace
             </button>
-          ))}
-          {workspaces.length > 0 && <div className="border-t border-border" />}
-          <button
-            onClick={() => { setOpen(false); setShowAddModal(true); }}
-            className="w-full text-left px-3 py-2 text-sm text-muted hover:bg-bg transition-colors"
-          >
-            + Add Workspace
-          </button>
-        </div>
+          </div>
+        </>
       )}
 
       {showAddModal && (
@@ -98,13 +102,32 @@ function UserMenu() {
   );
 }
 
-export default function Shell({ sidebar, children }: { sidebar?: React.ReactNode; children?: React.ReactNode }) {
+interface ShellProps {
+  sidebar?: React.ReactNode;
+  children?: React.ReactNode;
+  onMenuToggle?: () => void;
+  showMenuButton?: boolean;
+}
+
+export default function Shell({ sidebar, children, onMenuToggle, showMenuButton }: ShellProps) {
   return (
     <div className="h-screen flex flex-col bg-bg">
       {/* Top Nav — 48px */}
-      <header className="h-12 flex items-center justify-between px-4 bg-panel border-b border-border shrink-0">
-        <span className="font-mono font-bold text-accent text-sm tracking-tight">rorcha</span>
+      <header className="h-12 flex items-center justify-between px-3 sm:px-4 bg-panel border-b border-border shrink-0">
         <div className="flex items-center gap-2">
+          {/* Hamburger — mobile only, when sidebar exists */}
+          {showMenuButton && (
+            <button
+              onClick={onMenuToggle}
+              className="md:hidden w-11 h-11 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors"
+              aria-label="Open navigation menu"
+            >
+              <Menu size={20} />
+            </button>
+          )}
+          <span className="font-mono font-bold text-accent text-sm tracking-tight">rorcha</span>
+        </div>
+        <div className="flex items-center gap-1 sm:gap-2">
           <WorkspaceSelector />
           <ThemeToggle />
           <UserMenu />

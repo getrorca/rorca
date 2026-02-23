@@ -72,10 +72,11 @@ export default function RunTerminal({ runId }: RunTerminalProps) {
     esRef.current?.close();
 
     const xtermTheme = resolved === 'light' ? lightTheme : darkTheme;
+    const isMobile = window.innerWidth < 768;
 
     const term = new Terminal({
       theme: xtermTheme,
-      fontSize: 12,
+      fontSize: isMobile ? 10 : 12,
       fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
       lineHeight: 1.3,
       scrollback: 50000,
@@ -133,8 +134,8 @@ export default function RunTerminal({ runId }: RunTerminalProps) {
   return (
     <div
       ref={containerRef}
-      className="h-full w-full"
-      style={{ background: resolved === 'light' ? lightTheme.background : darkTheme.background, padding: '8px 4px' }}
+      className="h-full w-full overflow-x-auto"
+      style={{ background: resolved === 'light' ? lightTheme.background : darkTheme.background, padding: '8px 4px', WebkitOverflowScrolling: 'touch' }}
     />
   );
 }
