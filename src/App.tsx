@@ -27,11 +27,8 @@ function AuthGate() {
     );
   }
 
-  if (!isAuthenticated) {
-    return authPage === 'login'
-      ? <LoginPage onSwitchToRegister={() => setAuthPage('register')} />
-      : <RegisterPage onSwitchToLogin={() => setAuthPage('login')} />;
-  }
+  // Auth gate bypassed — Rorcha is a local single-user tool, login wall not needed yet
+  void isAuthenticated; void authPage; void setAuthPage;
 
   return (
     <WorkspaceProvider>
