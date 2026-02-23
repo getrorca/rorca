@@ -336,5 +336,26 @@ Key decisions:
 - Single WAL event per PR merge (not per story) with all matched story IDs in payload
 - Handler registered at server startup via `registerWebhookHandlers()` called from server.ts
 
+## Story V2-030: One-Click Story Branch Creation — DONE
+Files touched:
+- backend/src/routes/specs.ts (modified — added simpleGit import + POST /:specId/stories/:storyId/branch endpoint)
+- src/components/StoryCard.tsx (modified — added GitBranch icon, Create Branch button, branch display)
+
+What was built:
+- POST /api/specs/:specId/stories/:storyId/branch creates a git branch `feat/<story-id-slug>` in the workspace repo
+- Auto-detects default branch (main/master) and creates from its HEAD
+- Returns 201 with branchName, baseBranch, and checkoutCommand
+- Returns 409 with branchName and checkoutCommand if branch already exists
+- StoryCard UI shows "Create Branch" button (only when specId + workspaceId provided and story not done)
+- On success/409, button is replaced with styled branch name badge
+- Uses simpleGit (same library as worktrees.ts) for git operations
+
+Key decisions:
+- Branch naming: `feat/<story-id-slug>` where slug is the story ID lowercased with non-alphanumeric chars replaced by hyphens
+- Endpoint added to existing specs.ts router (follows pattern of /:specId/stories/:storyId/commits)
+- No WAL event emitted — branch creation is a lightweight local git operation, not a pipeline state change
+- 409 response includes branchName so UI can still display it (branch exists = useful info, not error)
+- Frontend parses 409 error body JSON to extract branchName from apiFetch error message string
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
