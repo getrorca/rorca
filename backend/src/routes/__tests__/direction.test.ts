@@ -4,12 +4,14 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 let app: Express;
 let db: Database.Database;
 let tmpDir: string;
+let authToken: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-direction-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
@@ -19,6 +21,7 @@ beforeEach(() => {
   app = serverMod.default;
   const dbMod = require('../../db/index');
   db = dbMod.db;
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -51,6 +54,7 @@ key_modules:
 test('PUT layer=1 + GET returns matching contentYaml', async () => {
   const putRes = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 1, contentYaml: 'quality: high' });
   expect(putRes.status).toBe(200);
   expect(putRes.body).toEqual({ ok: true });
@@ -59,11 +63,13 @@ test('PUT layer=1 + GET returns matching contentYaml', async () => {
 test('PUT layer=2 with domain + GET returns correct row', async () => {
   await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 2, domain: 'backend', contentYaml: 'style: concise' });
 
   // Verify via preview that L2 is included
   const res = await request(app)
-    .get('/api/direction/preview?brief=test&domain=backend');
+    .get('/api/direction/preview?brief=test&domain=backend')
+    .set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(200);
   expect(res.body.synthesized).toContain('style: concise');
 });
@@ -72,11 +78,12 @@ test('PUT layer=2 with domain + GET returns correct row', async () => {
 
 test('GET /api/direction/preview with hydrated workspace includes schema section', async () => {
   // Create workspace
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
   // Set L3
   await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 3, workspaceId: 'ws-dir-test', contentYaml: validL3Yaml });
 
   // Seed workspace_context with schema + git
@@ -86,7 +93,8 @@ test('GET /api/direction/preview with hydrated workspace includes schema section
   ).run('ws-dir-test', 'CREATE TABLE users (id TEXT);', 1, 'conventions:\n  - use snake_case', 42);
 
   const res = await request(app)
-    .get('/api/direction/preview?brief=build+auth&workspaceId=ws-dir-test');
+    .get('/api/direction/preview?brief=build+auth&workspaceId=ws-dir-test')
+    .set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.synthesized).toContain('=== DATABASE SCHEMA (Auto-Hydrated) ===');
@@ -99,10 +107,11 @@ test('GET /api/direction/preview with hydrated workspace includes schema section
 
 test('GET /api/direction/preview with no workspace_context omits schema/git sections gracefully', async () => {
   // Create workspace but do NOT seed workspace_context
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
   const res = await request(app)
-    .get('/api/direction/preview?brief=build+auth&workspaceId=ws-dir-test');
+    .get('/api/direction/preview?brief=build+auth&workspaceId=ws-dir-test')
+    .set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.synthesized).not.toContain('=== DATABASE SCHEMA (Auto-Hydrated) ===');
@@ -113,7 +122,8 @@ test('GET /api/direction/preview with no workspace_context omits schema/git sect
 
 test('GET /api/direction/preview without workspaceId omits hydrated sections', async () => {
   const res = await request(app)
-    .get('/api/direction/preview?brief=generic+spec');
+    .get('/api/direction/preview?brief=generic+spec')
+    .set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.synthesized).toContain('=== SPEC BRIEF (L4) ===');
@@ -125,10 +135,11 @@ test('GET /api/direction/preview without workspaceId omits hydrated sections', a
 // --- US-003: Model Selection ---
 
 test('PUT L3 with preferredModel stores it and GET returns it', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
   const putRes = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       layer: 3,
       workspaceId: 'ws-dir-test',
@@ -138,7 +149,8 @@ test('PUT L3 with preferredModel stores it and GET returns it', async () => {
   expect(putRes.status).toBe(200);
 
   const getRes = await request(app)
-    .get('/api/direction?layer=3&workspaceId=ws-dir-test');
+    .get('/api/direction?layer=3&workspaceId=ws-dir-test')
+    .set('Authorization', `Bearer ${authToken}`);
   expect(getRes.status).toBe(200);
   expect(getRes.body.contentYaml).toBe(validL3Yaml);
   expect(getRes.body.preferredModel).toBe('claude-opus-4-6');
@@ -147,6 +159,7 @@ test('PUT L3 with preferredModel stores it and GET returns it', async () => {
 test('PUT L3 with invalid preferredModel returns 400', async () => {
   const res = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       layer: 3,
       workspaceId: 'ws-dir-test',
@@ -160,6 +173,7 @@ test('PUT L3 with invalid preferredModel returns 400', async () => {
 test('PUT L1 with preferredModel returns 400 (only valid for L3)', async () => {
   const res = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       layer: 1,
       contentYaml: 'quality: high',
@@ -170,7 +184,7 @@ test('PUT L1 with preferredModel returns 400 (only valid for L3)', async () => {
 });
 
 test('GET /api/direction/models returns supported models', async () => {
-  const res = await request(app).get('/api/direction/models');
+  const res = await request(app).get('/api/direction/models').set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(200);
   expect(res.body.models).toHaveLength(3);
   expect(res.body.models.map((m: { id: string }) => m.id)).toContain('claude-opus-4-6');
@@ -181,6 +195,7 @@ test('GET /api/direction/models returns supported models', async () => {
 test('WAL event logged for direction_update on PUT', async () => {
   await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 1, contentYaml: 'quality: high' });
 
   const events = db
@@ -196,6 +211,7 @@ test('WAL event logged for direction_update on PUT', async () => {
 test('PUT with invalid YAML syntax returns 422 with line/column', async () => {
   const res = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 1, contentYaml: 'foo: [bad yaml\n  bar: baz' });
   expect(res.status).toBe(422);
   expect(res.body.error).toBe('Invalid YAML syntax');
@@ -207,6 +223,7 @@ test('PUT with invalid YAML syntax returns 422 with line/column', async () => {
 test('PUT L3 missing required fields returns 422 with field paths', async () => {
   const res = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 3, workspaceId: 'ws-test', contentYaml: 'goal: ship v2' });
   expect(res.status).toBe(422);
   expect(res.body.error).toBe('Direction content failed schema validation');
@@ -222,6 +239,7 @@ test('PUT L3 missing required fields returns 422 with field paths', async () => 
 test('PUT L3 with valid schema passes', async () => {
   const res = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 3, workspaceId: 'ws-test', contentYaml: validL3Yaml });
   expect(res.status).toBe(200);
   expect(res.body.ok).toBe(true);
@@ -236,6 +254,7 @@ key_modules:
   - auth`;
   const res = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 3, workspaceId: 'ws-test', contentYaml: badYaml });
   expect(res.status).toBe(422);
   const msgs = res.body.validationErrors.map((e: { message: string }) => e.message);
@@ -245,11 +264,13 @@ key_modules:
 test('PUT L1/L2 with plain text YAML passes (no required fields)', async () => {
   const res1 = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 1, contentYaml: 'just plain text' });
   expect(res1.status).toBe(200);
 
   const res2 = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 2, domain: 'backend', contentYaml: 'also plain text' });
   expect(res2.status).toBe(200);
 });
@@ -257,6 +278,7 @@ test('PUT L1/L2 with plain text YAML passes (no required fields)', async () => {
 test('PUT L3 with scalar YAML returns 422 (must be mapping)', async () => {
   const res = await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 3, workspaceId: 'ws-test', contentYaml: 'just a string' });
   expect(res.status).toBe(422);
   expect(res.body.validationErrors[0].message).toContain('YAML mapping');
@@ -266,59 +288,67 @@ test('PUT L3 with scalar YAML returns 422 (must be mapping)', async () => {
 
 test('GET /api/direction/preview includes EMPTY_L1 warning when no L1 set', async () => {
   const res = await request(app)
-    .get('/api/direction/preview?brief=test');
+    .get('/api/direction/preview?brief=test')
+    .set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(200);
   expect(res.body.warnings).toBeDefined();
   expect(res.body.warnings.some((w: { code: string }) => w.code === 'EMPTY_L1')).toBe(true);
 });
 
 test('GET /api/direction/preview includes MISSING_L3 warning for workspace without L3', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
   const res = await request(app)
-    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test');
+    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test')
+    .set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(200);
   expect(res.body.warnings.some((w: { code: string }) => w.code === 'MISSING_L3')).toBe(true);
 });
 
 test('GET /api/direction/preview includes DOMAIN_MISMATCH when domain not in workspace domains', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace); // domains: ['backend']
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace); // domains: ['backend']
 
   const res = await request(app)
-    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test&domain=frontend');
+    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test&domain=frontend')
+    .set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(200);
   expect(res.body.warnings.some((w: { code: string }) => w.code === 'DOMAIN_MISMATCH')).toBe(true);
 });
 
 test('GET /api/direction/preview has no DOMAIN_MISMATCH when domain matches', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace); // domains: ['backend']
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace); // domains: ['backend']
 
   // Set L2 for backend domain
   await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 2, domain: 'backend', contentYaml: 'style: concise' });
 
   const res = await request(app)
-    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test&domain=backend');
+    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test&domain=backend')
+    .set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(200);
   expect(res.body.warnings.some((w: { code: string }) => w.code === 'DOMAIN_MISMATCH')).toBe(false);
 });
 
 test('GET /api/direction/preview no warnings when fully configured', async () => {
-  await request(app).post('/api/workspaces').send(validWorkspace);
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
   // Set L1
   await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 1, contentYaml: 'quality: high' });
 
   // Set L3
   await request(app)
     .put('/api/direction')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 3, workspaceId: 'ws-dir-test', contentYaml: validL3Yaml });
 
   const res = await request(app)
-    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test');
+    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test')
+    .set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(200);
   expect(res.body.warnings).toEqual([]);
 });

@@ -62,6 +62,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE users ADD COLUMN github_id TEXT');
   }
 
+  // V2-004: Add role column to users (idempotent)
+  const userColsV2004 = db.pragma('table_info(users)') as { name: string }[];
+  if (!userColsV2004.some(c => c.name === 'role')) {
+    db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
+  }
+
   // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
   const tableSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`

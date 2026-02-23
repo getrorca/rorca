@@ -4,6 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -20,6 +21,7 @@ let app: Express;
 let db: Database.Database;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
+let authToken: string;
 
 const sampleStoryStructure = [
   { id: 'US-001', title: 'User login', description: 'Allow users to log in' },
@@ -38,7 +40,7 @@ const validLlmResponse = JSON.stringify({
   ],
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
 
   jest.mock('../../lib/llm-client', () => ({
@@ -63,6 +65,8 @@ beforeEach(() => {
 
   const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
+
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -83,6 +87,7 @@ describe('POST /api/templates', () => {
   test('creates a template and returns 201 with full body', async () => {
     const res = await request(app)
       .post('/api/templates')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         name: 'Auth Template',
         description: 'Template for auth features',
@@ -107,6 +112,7 @@ describe('POST /api/templates', () => {
   test('creates template without optional fields', async () => {
     const res = await request(app)
       .post('/api/templates')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         name: 'Minimal Template',
         sourceSpecId: 'some-spec',
@@ -123,6 +129,7 @@ describe('POST /api/templates', () => {
   test('missing required fields → 400', async () => {
     const res = await request(app)
       .post('/api/templates')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({ name: 'Incomplete' });
 
     expect(res.status).toBe(400);
@@ -132,6 +139,7 @@ describe('POST /api/templates', () => {
   test('empty storyStructure array → 400', async () => {
     const res = await request(app)
       .post('/api/templates')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         name: 'Bad Template',
         sourceSpecId: 'spec-1',
@@ -146,6 +154,7 @@ describe('POST /api/templates', () => {
   test('storyStructure not an array → 400', async () => {
     const res = await request(app)
       .post('/api/templates')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         name: 'Bad Template',
         sourceSpecId: 'spec-1',
@@ -162,20 +171,20 @@ describe('POST /api/templates', () => {
 
 describe('GET /api/templates', () => {
   test('returns empty array when no templates exist', async () => {
-    const res = await request(app).get('/api/templates');
+    const res = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.templates).toEqual([]);
   });
 
   test('lists all templates with summary fields', async () => {
     // Create two templates
-    await request(app).post('/api/templates').send({
+    await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'Template A',
       sourceSpecId: 'spec-a',
       brief: 'Brief A',
       storyStructure: sampleStoryStructure,
     });
-    await request(app).post('/api/templates').send({
+    await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'Template B',
       description: 'Desc B',
       sourceSpecId: 'spec-b',
@@ -183,7 +192,7 @@ describe('GET /api/templates', () => {
       storyStructure: [{ id: 'US-001', title: 'S1', description: 'D1' }],
     });
 
-    const res = await request(app).get('/api/templates');
+    const res = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.templates).toHaveLength(2);
 
@@ -205,14 +214,14 @@ describe('GET /api/templates', () => {
 
 describe('GET /api/templates/:id', () => {
   test('returns full template details', async () => {
-    const createRes = await request(app).post('/api/templates').send({
+    const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'Detail Template',
       sourceSpecId: 'spec-d',
       brief: 'Detailed brief',
       storyStructure: sampleStoryStructure,
     });
 
-    const res = await request(app).get(`/api/templates/${createRes.body.id}`);
+    const res = await request(app).get(`/api/templates/${createRes.body.id}`).set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
     expect(res.body.name).toBe('Detail Template');
     expect(res.body.brief).toBe('Detailed brief');
@@ -220,7 +229,7 @@ describe('GET /api/templates/:id', () => {
   });
 
   test('not found → 404', async () => {
-    const res = await request(app).get('/api/templates/nonexistent-id');
+    const res = await request(app).get('/api/templates/nonexistent-id').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Template not found');
   });
@@ -230,23 +239,23 @@ describe('GET /api/templates/:id', () => {
 
 describe('DELETE /api/templates/:id', () => {
   test('deletes template and returns 204', async () => {
-    const createRes = await request(app).post('/api/templates').send({
+    const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'To Delete',
       sourceSpecId: 'spec-del',
       brief: 'Brief',
       storyStructure: sampleStoryStructure,
     });
 
-    const deleteRes = await request(app).delete(`/api/templates/${createRes.body.id}`);
+    const deleteRes = await request(app).delete(`/api/templates/${createRes.body.id}`).set('Authorization', `Bearer ${authToken}`);
     expect(deleteRes.status).toBe(204);
 
     // Verify it's gone
-    const getRes = await request(app).get(`/api/templates/${createRes.body.id}`);
+    const getRes = await request(app).get(`/api/templates/${createRes.body.id}`).set('Authorization', `Bearer ${authToken}`);
     expect(getRes.status).toBe(404);
   });
 
   test('not found → 404', async () => {
-    const res = await request(app).delete('/api/templates/nonexistent-id');
+    const res = await request(app).delete('/api/templates/nonexistent-id').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Template not found');
   });
@@ -257,7 +266,7 @@ describe('DELETE /api/templates/:id', () => {
 describe('workspace-agnostic templates', () => {
   test('templates are available without any workspace context', async () => {
     // Create template — no workspaceId needed
-    const createRes = await request(app).post('/api/templates').send({
+    const createRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'Global Template',
       sourceSpecId: 'any-spec',
       brief: 'Works anywhere',
@@ -266,7 +275,7 @@ describe('workspace-agnostic templates', () => {
     expect(createRes.status).toBe(201);
 
     // List returns it without filtering by workspace
-    const listRes = await request(app).get('/api/templates');
+    const listRes = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
     expect(listRes.body.templates).toHaveLength(1);
     expect(listRes.body.templates[0].name).toBe('Global Template');
   });
@@ -284,7 +293,7 @@ describe('POST /api/specs/generate with templateId', () => {
     ).run(os.tmpdir());
 
     // Create a template
-    const tplRes = await request(app).post('/api/templates').send({
+    const tplRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'Auth Pattern',
       sourceSpecId: 'auth-v1',
       brief: 'Build auth with login and signup',
@@ -294,6 +303,7 @@ describe('POST /api/specs/generate with templateId', () => {
     // Generate spec using template
     const res = await request(app)
       .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: 'ws-tpl',
         title: 'New Auth',
@@ -320,6 +330,7 @@ describe('POST /api/specs/generate with templateId', () => {
 
     const res = await request(app)
       .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: 'ws-tpl2',
         title: 'No Template',
@@ -341,6 +352,7 @@ describe('POST /api/specs/generate with templateId', () => {
 
     const res = await request(app)
       .post('/api/specs/generate')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         workspaceId: 'ws-tpl3',
         title: 'Bad Template Ref',

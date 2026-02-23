@@ -9,7 +9,7 @@ import contextRouter from './routes/context';
 import pipelineRouter from './routes/pipeline';
 import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
-import authRouter from './routes/auth';
+import authRouter, { authRequired } from './routes/auth';
 
 dotenv.config();
 
@@ -19,10 +19,17 @@ const PORT = process.env.PORT || 3030;
 app.use(cors({ origin: 'http://localhost:5210' }));
 app.use(express.json());
 
+// ─── Public routes (no auth required) ───
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
+app.use('/api/auth', authRouter);
+
+// ─── Auth middleware (all routes below require authentication) ───
+app.use(authRequired);
+
+// ─── Protected routes ───
 app.use('/api/workspaces', workspacesRouter);
 app.use('/api/direction', directionRouter);
 app.use('/api/specs', specsRouter);
@@ -31,7 +38,6 @@ app.use('/api/context', contextRouter);
 app.use('/api/pipeline', pipelineRouter);
 app.use('/api/worktrees', worktreesRouter);
 app.use('/api/templates', templatesRouter);
-app.use('/api/auth', authRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {

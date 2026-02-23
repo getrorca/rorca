@@ -4,6 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -20,6 +21,7 @@ let app: Express;
 let db: Database.Database;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
+let authToken: string;
 
 const validLlmResponse = JSON.stringify({
   stories: [
@@ -33,7 +35,7 @@ const validLlmResponse = JSON.stringify({
   ],
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
 
   jest.mock('../../lib/llm-client', () => ({
@@ -63,6 +65,8 @@ beforeEach(() => {
   db.prepare(
     "INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', ?)"
   ).run(os.tmpdir());
+
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -84,6 +88,7 @@ test('POST /api/specs/generate/batch returns batchId and briefCount', async () =
 
   const res = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
         { brief: 'Build auth system', workspaceId: 'ws-test', title: 'Auth System' },
@@ -100,6 +105,7 @@ test('POST /api/specs/generate/batch returns batchId and briefCount', async () =
 test('POST /api/specs/generate/batch with empty briefs → 400', async () => {
   const res = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ briefs: [] });
 
   expect(res.status).toBe(400);
@@ -109,6 +115,7 @@ test('POST /api/specs/generate/batch with empty briefs → 400', async () => {
 test('POST /api/specs/generate/batch with missing briefs field → 400', async () => {
   const res = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
   expect(res.status).toBe(400);
@@ -118,6 +125,7 @@ test('POST /api/specs/generate/batch with missing briefs field → 400', async (
 test('POST /api/specs/generate/batch validates brief fields', async () => {
   const res = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
         { brief: 'Good brief', workspaceId: 'ws-test' },
@@ -132,6 +140,7 @@ test('POST /api/specs/generate/batch validates brief fields', async () => {
 test('POST /api/specs/generate/batch validates model per brief', async () => {
   const res = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
         { brief: 'Build auth', workspaceId: 'ws-test', model: 'gpt-4o' },
@@ -148,6 +157,7 @@ test('POST /api/specs/generate/batch emits batch_started WAL event', async () =>
 
   const res = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [{ brief: 'Build auth', workspaceId: 'ws-test', title: 'Auth' }],
     });
@@ -171,6 +181,7 @@ test('GET /api/specs/generate/batch/:batchId returns batch status', async () => 
 
   const createRes = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [{ brief: 'Build auth', workspaceId: 'ws-test', title: 'Auth Check' }],
     });
@@ -180,7 +191,7 @@ test('GET /api/specs/generate/batch/:batchId returns batch status', async () => 
   // Wait for async processing to complete
   await new Promise(resolve => setTimeout(resolve, 200));
 
-  const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`);
+  const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(statusRes.status).toBe(200);
   expect(statusRes.body.batchId).toBe(batchId);
@@ -193,7 +204,7 @@ test('GET /api/specs/generate/batch/:batchId returns batch status', async () => 
 });
 
 test('GET /api/specs/generate/batch/:batchId with unknown ID → 404', async () => {
-  const res = await request(app).get('/api/specs/generate/batch/nonexistent-id');
+  const res = await request(app).get('/api/specs/generate/batch/nonexistent-id').set('Authorization', `Bearer ${authToken}`);
   expect(res.status).toBe(404);
   expect(res.body.error).toContain('not found');
 });
@@ -208,6 +219,7 @@ test('failed brief does not block subsequent briefs', async () => {
 
   const createRes = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
         { brief: 'Will fail', workspaceId: 'ws-test', title: 'Fail Spec' },
@@ -220,7 +232,7 @@ test('failed brief does not block subsequent briefs', async () => {
   // Wait for both to process
   await new Promise(resolve => setTimeout(resolve, 500));
 
-  const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`);
+  const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(statusRes.body.items[0].status).toBe('failed');
   expect(statusRes.body.items[0].error).toBe('LLM timeout');
@@ -235,6 +247,7 @@ test('batch emits batch_progress WAL events for each brief', async () => {
 
   const createRes = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
         { brief: 'Brief one', workspaceId: 'ws-test', title: 'Spec One' },
@@ -277,6 +290,7 @@ test('batch with invalid workspace captures error per-brief', async () => {
 
   const createRes = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
         { brief: 'Bad workspace', workspaceId: 'nonexistent', title: 'Ghost' },
@@ -288,7 +302,7 @@ test('batch with invalid workspace captures error per-brief', async () => {
 
   await new Promise(resolve => setTimeout(resolve, 500));
 
-  const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`);
+  const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(statusRes.body.items[0].status).toBe('failed');
   expect(statusRes.body.items[0].error).toContain('Workspace not found');
@@ -300,6 +314,7 @@ test('batch writes spec and emits generate WAL event', async () => {
 
   const createRes = await request(app)
     .post('/api/specs/generate/batch')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [{ brief: 'Build auth', workspaceId: 'ws-test', title: 'Batch Auth' }],
     });
@@ -307,7 +322,7 @@ test('batch writes spec and emits generate WAL event', async () => {
   await new Promise(resolve => setTimeout(resolve, 300));
 
   // Verify via batch status that the spec was generated with the correct slug
-  const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`);
+  const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`).set('Authorization', `Bearer ${authToken}`);
   expect(statusRes.body.items[0].status).toBe('completed');
   expect(statusRes.body.items[0].slug).toBe('batch-auth');
 
