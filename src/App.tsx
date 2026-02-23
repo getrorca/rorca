@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
 import AddWorkspaceModal from './components/AddWorkspaceModal';
+import CommandPalette from './components/CommandPalette';
 import LoginPage from './components/LoginPage';
 import RegisterPage from './components/RegisterPage';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
@@ -51,6 +52,19 @@ function AppContent() {
   const [activePanel, setActivePanel] = useState<PanelId>('forge');
   const { workspaces, addWorkspace } = useWorkspace();
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+
+  // Global Cmd+K / Ctrl+K listener
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setShowCommandPalette((prev) => !prev);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   if (workspaces.length === 0) {
     return (
@@ -95,6 +109,12 @@ function AppContent() {
       {activePanel === 'completion' && <CompletionRatePanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
+      {showCommandPalette && (
+        <CommandPalette
+          onNavigate={setActivePanel}
+          onClose={() => setShowCommandPalette(false)}
+        />
+      )}
     </Shell>
   );
 }
