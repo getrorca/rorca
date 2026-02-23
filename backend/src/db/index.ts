@@ -106,6 +106,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE story_results ADD COLUMN elapsed_seconds INTEGER');
   }
 
+  // V2-020: Add trigger_type column to pipeline_runs (idempotent)
+  const runColsV2020 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsV2020.some(c => c.name === 'trigger_type')) {
+    db.exec("ALTER TABLE pipeline_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'");
+  }
+
   // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
   const tableSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
@@ -122,13 +128,20 @@ export function runMigrations() {
         started_at TEXT NOT NULL DEFAULT (datetime('now')),
         finished_at TEXT,
         branch_name TEXT,
-        worktree_path TEXT
+        worktree_path TEXT,
+        trigger_type TEXT NOT NULL DEFAULT 'manual'
       );
-      INSERT INTO pipeline_runs_new SELECT id, spec_path, workspace_id, status, pid, started_at, finished_at, branch_name, worktree_path FROM pipeline_runs;
+      INSERT INTO pipeline_runs_new SELECT id, spec_path, workspace_id, status, pid, started_at, finished_at, branch_name, worktree_path, COALESCE(trigger_type, 'manual') FROM pipeline_runs;
       DROP TABLE pipeline_runs;
       ALTER TABLE pipeline_runs_new RENAME TO pipeline_runs;
     `);
     db.pragma('foreign_keys = ON');
+  }
+
+  // V2-020: Ensure trigger_type exists after potential rebuild (idempotent)
+  const runColsPost = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsPost.some(c => c.name === 'trigger_type')) {
+    db.exec("ALTER TABLE pipeline_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'");
   }
 }
 

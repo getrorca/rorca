@@ -11,7 +11,9 @@ import hooksRouter from './routes/hooks';
 import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
 import storiesRouter from './routes/stories';
+import schedulesRouter from './routes/schedules';
 import authRouter, { authRequired } from './routes/auth';
+import { startScheduler } from './lib/scheduler';
 
 dotenv.config();
 
@@ -39,6 +41,7 @@ app.use('/api/wal', walRouter);
 app.use('/api/context', contextRouter);
 app.use('/api/pipeline', pipelineRouter);
 app.use('/api/pipeline/hooks', hooksRouter);
+app.use('/api/pipeline/schedules', schedulesRouter);
 app.use('/api/worktrees', worktreesRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/stories', storiesRouter);
@@ -47,6 +50,7 @@ app.use('/api/stories', storiesRouter);
 if (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
     console.log(`Rorcha backend listening on port ${PORT}`);
+    startScheduler();
   });
 }
 
