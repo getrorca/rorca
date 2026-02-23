@@ -35,6 +35,17 @@ const validWorkspace = {
   domains: ['backend'],
 };
 
+// Valid L3 YAML that passes schema validation
+const validL3Yaml = `name: MyProject
+type: web-app
+stack:
+  - React
+  - Node.js
+purpose: Ship v2 of the dashboard
+key_modules:
+  - auth
+  - billing`;
+
 // --- PUT + GET basic tests ---
 
 test('PUT layer=1 + GET returns matching contentYaml', async () => {
@@ -66,7 +77,7 @@ test('GET /api/direction/preview with hydrated workspace includes schema section
   // Set L3
   await request(app)
     .put('/api/direction')
-    .send({ layer: 3, workspaceId: 'ws-dir-test', contentYaml: 'goal: ship v2' });
+    .send({ layer: 3, workspaceId: 'ws-dir-test', contentYaml: validL3Yaml });
 
   // Seed workspace_context with schema + git
   db.prepare(
@@ -121,7 +132,7 @@ test('PUT L3 with preferredModel stores it and GET returns it', async () => {
     .send({
       layer: 3,
       workspaceId: 'ws-dir-test',
-      contentYaml: 'goal: ship v2',
+      contentYaml: validL3Yaml,
       preferredModel: 'claude-opus-4-6',
     });
   expect(putRes.status).toBe(200);
@@ -129,7 +140,7 @@ test('PUT L3 with preferredModel stores it and GET returns it', async () => {
   const getRes = await request(app)
     .get('/api/direction?layer=3&workspaceId=ws-dir-test');
   expect(getRes.status).toBe(200);
-  expect(getRes.body.contentYaml).toBe('goal: ship v2');
+  expect(getRes.body.contentYaml).toBe(validL3Yaml);
   expect(getRes.body.preferredModel).toBe('claude-opus-4-6');
 });
 
@@ -139,7 +150,7 @@ test('PUT L3 with invalid preferredModel returns 400', async () => {
     .send({
       layer: 3,
       workspaceId: 'ws-dir-test',
-      contentYaml: 'goal: ship v2',
+      contentYaml: validL3Yaml,
       preferredModel: 'gpt-4o',
     });
   expect(res.status).toBe(400);
@@ -178,4 +189,136 @@ test('WAL event logged for direction_update on PUT', async () => {
 
   expect(events).toHaveLength(1);
   expect(events[0].event_type).toBe('direction_update');
+});
+
+// --- US-006: YAML Validation ---
+
+test('PUT with invalid YAML syntax returns 422 with line/column', async () => {
+  const res = await request(app)
+    .put('/api/direction')
+    .send({ layer: 1, contentYaml: 'foo: [bad yaml\n  bar: baz' });
+  expect(res.status).toBe(422);
+  expect(res.body.error).toBe('Invalid YAML syntax');
+  expect(res.body.yamlError).toBeDefined();
+  expect(res.body.yamlError.line).toBeGreaterThan(0);
+  expect(res.body.yamlError.message).toBeTruthy();
+});
+
+test('PUT L3 missing required fields returns 422 with field paths', async () => {
+  const res = await request(app)
+    .put('/api/direction')
+    .send({ layer: 3, workspaceId: 'ws-test', contentYaml: 'goal: ship v2' });
+  expect(res.status).toBe(422);
+  expect(res.body.error).toBe('Direction content failed schema validation');
+  expect(res.body.validationErrors).toBeDefined();
+  expect(res.body.validationErrors.length).toBeGreaterThan(0);
+  // Should flag missing name, type, stack, purpose, key_modules
+  const paths = res.body.validationErrors.map((e: { path: string }) => e.path);
+  expect(paths).toContain('name');
+  expect(paths).toContain('stack');
+  expect(paths).toContain('key_modules');
+});
+
+test('PUT L3 with valid schema passes', async () => {
+  const res = await request(app)
+    .put('/api/direction')
+    .send({ layer: 3, workspaceId: 'ws-test', contentYaml: validL3Yaml });
+  expect(res.status).toBe(200);
+  expect(res.body.ok).toBe(true);
+});
+
+test('PUT L3 with stack as non-array returns 422', async () => {
+  const badYaml = `name: MyProject
+type: web-app
+stack: not-an-array
+purpose: Ship v2
+key_modules:
+  - auth`;
+  const res = await request(app)
+    .put('/api/direction')
+    .send({ layer: 3, workspaceId: 'ws-test', contentYaml: badYaml });
+  expect(res.status).toBe(422);
+  const msgs = res.body.validationErrors.map((e: { message: string }) => e.message);
+  expect(msgs.some((m: string) => m.includes('stack'))).toBe(true);
+});
+
+test('PUT L1/L2 with plain text YAML passes (no required fields)', async () => {
+  const res1 = await request(app)
+    .put('/api/direction')
+    .send({ layer: 1, contentYaml: 'just plain text' });
+  expect(res1.status).toBe(200);
+
+  const res2 = await request(app)
+    .put('/api/direction')
+    .send({ layer: 2, domain: 'backend', contentYaml: 'also plain text' });
+  expect(res2.status).toBe(200);
+});
+
+test('PUT L3 with scalar YAML returns 422 (must be mapping)', async () => {
+  const res = await request(app)
+    .put('/api/direction')
+    .send({ layer: 3, workspaceId: 'ws-test', contentYaml: 'just a string' });
+  expect(res.status).toBe(422);
+  expect(res.body.validationErrors[0].message).toContain('YAML mapping');
+});
+
+// --- US-006: Preview Warnings ---
+
+test('GET /api/direction/preview includes EMPTY_L1 warning when no L1 set', async () => {
+  const res = await request(app)
+    .get('/api/direction/preview?brief=test');
+  expect(res.status).toBe(200);
+  expect(res.body.warnings).toBeDefined();
+  expect(res.body.warnings.some((w: { code: string }) => w.code === 'EMPTY_L1')).toBe(true);
+});
+
+test('GET /api/direction/preview includes MISSING_L3 warning for workspace without L3', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+
+  const res = await request(app)
+    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test');
+  expect(res.status).toBe(200);
+  expect(res.body.warnings.some((w: { code: string }) => w.code === 'MISSING_L3')).toBe(true);
+});
+
+test('GET /api/direction/preview includes DOMAIN_MISMATCH when domain not in workspace domains', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace); // domains: ['backend']
+
+  const res = await request(app)
+    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test&domain=frontend');
+  expect(res.status).toBe(200);
+  expect(res.body.warnings.some((w: { code: string }) => w.code === 'DOMAIN_MISMATCH')).toBe(true);
+});
+
+test('GET /api/direction/preview has no DOMAIN_MISMATCH when domain matches', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace); // domains: ['backend']
+
+  // Set L2 for backend domain
+  await request(app)
+    .put('/api/direction')
+    .send({ layer: 2, domain: 'backend', contentYaml: 'style: concise' });
+
+  const res = await request(app)
+    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test&domain=backend');
+  expect(res.status).toBe(200);
+  expect(res.body.warnings.some((w: { code: string }) => w.code === 'DOMAIN_MISMATCH')).toBe(false);
+});
+
+test('GET /api/direction/preview no warnings when fully configured', async () => {
+  await request(app).post('/api/workspaces').send(validWorkspace);
+
+  // Set L1
+  await request(app)
+    .put('/api/direction')
+    .send({ layer: 1, contentYaml: 'quality: high' });
+
+  // Set L3
+  await request(app)
+    .put('/api/direction')
+    .send({ layer: 3, workspaceId: 'ws-dir-test', contentYaml: validL3Yaml });
+
+  const res = await request(app)
+    .get('/api/direction/preview?brief=test&workspaceId=ws-dir-test');
+  expect(res.status).toBe(200);
+  expect(res.body.warnings).toEqual([]);
 });

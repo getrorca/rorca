@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { isValidModel, SUPPORTED_MODELS } from '../lib/llm-client';
+import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 
 const router = Router();
 
@@ -67,6 +68,23 @@ router.put('/', (req: Request, res: Response) => {
       });
       return;
     }
+  }
+
+  // Validate YAML syntax and per-layer schema
+  const validation = validateDirectionYaml(layer, contentYaml);
+  if (validation.yamlError) {
+    res.status(422).json({
+      error: 'Invalid YAML syntax',
+      yamlError: validation.yamlError,
+    });
+    return;
+  }
+  if (!validation.valid) {
+    res.status(422).json({
+      error: 'Direction content failed schema validation',
+      validationErrors: validation.errors,
+    });
+    return;
   }
 
   // Upsert via INSERT OR REPLACE (unique index on layer + coalesced workspace_id + domain)
@@ -143,6 +161,26 @@ router.get('/preview', (req: Request, res: Response) => {
     }
   }
 
+  // Look up workspace domains for mismatch detection
+  let workspaceDomains: string[] | undefined;
+  if (workspaceId) {
+    const wsRow = db.prepare(
+      `SELECT domains FROM workspaces WHERE id = ?`
+    ).get(String(workspaceId)) as { domains: string | null } | undefined;
+    if (wsRow?.domains) {
+      try { workspaceDomains = JSON.parse(wsRow.domains); } catch { /* ignore */ }
+    }
+  }
+
+  const warnings = getPreviewWarnings({
+    l1Content: l1Row?.content_yaml,
+    l2Content: l2Row?.content_yaml,
+    l3Content: l3Row?.content_yaml,
+    workspaceId: workspaceId ? String(workspaceId) : undefined,
+    domain: domain ? String(domain) : undefined,
+    workspaceDomains,
+  });
+
   const synthesized = synthesize({
     l1: l1Row?.content_yaml,
     l2: l2Row?.content_yaml,
@@ -152,7 +190,7 @@ router.get('/preview', (req: Request, res: Response) => {
     specBrief: String(brief),
   });
 
-  res.json({ synthesized, schemaTableCount, gitCommitCount });
+  res.json({ synthesized, schemaTableCount, gitCommitCount, warnings });
 });
 
 // POST /api/direction/synthesize — synthesize with L4/L5 in body
