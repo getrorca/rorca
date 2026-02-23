@@ -11,6 +11,8 @@ import { estimateDryRunCost } from '../lib/cost-estimator';
 import { DEFAULT_MODEL, isValidModel, type SupportedModel } from '../lib/llm-client';
 import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
+import { getVaultKey } from './vault';
+import type { AuthUser } from './auth';
 
 /** Persistent log file path for a run — survives backend restarts */
 const runLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
@@ -187,6 +189,13 @@ router.post('/trigger', async (req: Request, res: Response) => {
     const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
     for (const [k, v] of Object.entries(workspaceEnvVars)) {
       env[k] = v;
+    }
+
+    // 7c. Inject vault API key if user has one stored for Anthropic
+    const pipelineUser = (req as Request & { user: AuthUser }).user;
+    const anthropicVaultKey = getVaultKey(pipelineUser.id, 'anthropic');
+    if (anthropicVaultKey) {
+      env['ANTHROPIC_API_KEY'] = anthropicVaultKey;
     }
 
     // 8. Run pre-run hooks — abort if any exit non-zero

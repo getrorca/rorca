@@ -11,6 +11,8 @@ import { chatComplete, getActiveProvider, isValidModel, DEFAULT_MODEL, SUPPORTED
 import type { SupportedModel } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
+import { getVaultKey } from './vault';
+import type { AuthUser } from './auth';
 
 const router = Router();
 
@@ -26,6 +28,7 @@ interface BatchBriefItem {
   model?: string;
   storyCount?: number;
   domain?: string;
+  userId?: string;
   status: BatchBriefStatus;
   error?: string;
   slug?: string;
@@ -454,8 +457,13 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ].join('\n');
 
-    // 8. Call LLM with selected model
-    const llmResult = await chatComplete([{ role: 'user', content: fullPrompt }], resolvedModel);
+    // 8. Call LLM with selected model (use vault key if available)
+    const user = (req as Request & { user: AuthUser }).user;
+    const vaultApiKey = getVaultKey(user.id, 'anthropic');
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: fullPrompt }],
+      { model: resolvedModel, apiKey: vaultApiKey ?? undefined },
+    );
     const rawResponse = llmResult.text;
     const tokenUsage = llmResult.usage;
 
@@ -663,8 +671,12 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     '- Your entire response must be valid JSON parseable by JSON.parse()',
   ].join('\n');
 
-  // Call LLM
-  const llmResult = await chatComplete([{ role: 'user', content: fullPrompt }], resolvedModel);
+  // Call LLM (use vault key if available for this user)
+  const batchVaultKey = item.userId ? getVaultKey(item.userId, 'anthropic') : null;
+  const llmResult = await chatComplete(
+    [{ role: 'user', content: fullPrompt }],
+    { model: resolvedModel, apiKey: batchVaultKey ?? undefined },
+  );
   const rawResponse = llmResult.text;
 
   // Parse JSON
@@ -799,6 +811,7 @@ router.post('/generate/batch', (req: Request, res: Response) => {
     }
 
     const batchId = crypto.randomUUID();
+    const batchUser = (req as Request & { user: AuthUser }).user;
     const batch: BatchState = {
       id: batchId,
       items: briefs.map(b => ({
@@ -809,6 +822,7 @@ router.post('/generate/batch', (req: Request, res: Response) => {
         model: b.model,
         storyCount: b.storyCount,
         domain: b.domain,
+        userId: batchUser.id,
         status: 'queued' as const,
       })),
       createdAt: new Date().toISOString(),
@@ -1417,8 +1431,13 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
       'Rules: 3-5 testable acceptanceCriteria per story. dependsOn lists IDs this story requires first (empty array if none).',
     ].filter(Boolean).join('\n');
 
-    const { chatComplete } = await import('../lib/llm-client');
-    const rawResponse = await chatComplete([{ role: 'user', content: fullPrompt }]);
+    const { chatComplete: chatCompleteFn } = await import('../lib/llm-client');
+    const addStoriesUser = (req as Request & { user: AuthUser }).user;
+    const addStoriesVaultKey = getVaultKey(addStoriesUser.id, 'anthropic');
+    const rawResponse = await chatCompleteFn(
+      [{ role: 'user', content: fullPrompt }],
+      { apiKey: addStoriesVaultKey ?? undefined },
+    );
 
     let parsed: { stories: unknown[] };
     try {
@@ -1764,7 +1783,12 @@ User instructions: ${instructions || 'Improve clarity and completeness.'}
 Rewrite the story following the user instructions. Keep the same scope unless told otherwise. Return ONLY the JSON object.`;
 
     const resolvedModel = model && isValidModel(model) ? model as SupportedModel : undefined;
-    const llmResult = await chatComplete([{ role: 'user', content: prompt }], resolvedModel);
+    const rewriteUser = (req as Request & { user: AuthUser }).user;
+    const rewriteVaultKey = getVaultKey(rewriteUser.id, 'anthropic');
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: prompt }],
+      { model: resolvedModel, apiKey: rewriteVaultKey ?? undefined },
+    );
 
     // Parse LLM response — strip markdown fences if present
     let cleaned = llmResult.text.trim();
