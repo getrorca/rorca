@@ -3111,4 +3111,159 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
   }
 });
 
+// ─── Story Comments ──────────────────────────────────────────────────────────
+
+interface StoryCommentRow {
+  id: string;
+  spec_id: string;
+  story_id: string;
+  user_id: string;
+  body: string;
+  created_at: string;
+  resolved_at: string | null;
+  display_name: string;
+  avatar_url: string | null;
+}
+
+// GET /api/specs/:specId/stories/:storyId/comments — list all comments for a story
+router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) => {
+  try {
+    const { specId, storyId } = req.params;
+
+    const comments = db.prepare(`
+      SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
+             sc.created_at, sc.resolved_at,
+             u.display_name, u.avatar_url
+      FROM story_comments sc
+      JOIN users u ON u.id = sc.user_id
+      WHERE sc.spec_id = ? AND sc.story_id = ?
+      ORDER BY sc.created_at ASC
+    `).all(specId, storyId) as StoryCommentRow[];
+
+    res.json({ comments });
+  } catch (error: any) {
+    console.error('[StoryComments] List error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/specs/:specId/stories/:storyId/comments — create a comment
+router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) => {
+  try {
+    const { specId, storyId } = req.params;
+    const { body } = req.body;
+    const user = (req as Request & { user: { id: string; email: string } }).user;
+
+    if (!body || typeof body !== 'string' || body.trim().length === 0) {
+      res.status(400).json({ error: 'body is required' });
+      return;
+    }
+
+    const id = crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO story_comments (id, spec_id, story_id, user_id, body)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, specId, storyId, user.id, body.trim());
+
+    // Emit WAL event
+    const walResult = db.prepare(`
+      INSERT INTO wal_events (ts, event_type, spec_id, story_id, actor, payload)
+      VALUES (datetime('now'), 'comment_added', ?, ?, ?, ?)
+    `).run(specId, storyId, user.email, JSON.stringify({ commentId: id }));
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    // Return the created comment with author info
+    const comment = db.prepare(`
+      SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
+             sc.created_at, sc.resolved_at,
+             u.display_name, u.avatar_url
+      FROM story_comments sc
+      JOIN users u ON u.id = sc.user_id
+      WHERE sc.id = ?
+    `).get(id) as StoryCommentRow;
+
+    res.status(201).json(comment);
+  } catch (error: any) {
+    console.error('[StoryComments] Create error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/specs/:specId/stories/:storyId/comments/:commentId/resolve — resolve a comment
+router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Request, res: Response) => {
+  try {
+    const { specId, storyId, commentId } = req.params;
+    const user = (req as Request & { user: { id: string; email: string } }).user;
+
+    const existing = db.prepare(
+      'SELECT id, resolved_at FROM story_comments WHERE id = ? AND spec_id = ? AND story_id = ?'
+    ).get(commentId, specId, storyId) as { id: string; resolved_at: string | null } | undefined;
+
+    if (!existing) {
+      res.status(404).json({ error: 'Comment not found' });
+      return;
+    }
+
+    if (existing.resolved_at) {
+      res.status(400).json({ error: 'Comment is already resolved' });
+      return;
+    }
+
+    db.prepare(
+      "UPDATE story_comments SET resolved_at = datetime('now') WHERE id = ?"
+    ).run(commentId);
+
+    // Emit WAL event
+    const walResult = db.prepare(`
+      INSERT INTO wal_events (ts, event_type, spec_id, story_id, actor, payload)
+      VALUES (datetime('now'), 'comment_resolved', ?, ?, ?, ?)
+    `).run(specId, storyId, user.email, JSON.stringify({ commentId }));
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    const comment = db.prepare(`
+      SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
+             sc.created_at, sc.resolved_at,
+             u.display_name, u.avatar_url
+      FROM story_comments sc
+      JOIN users u ON u.id = sc.user_id
+      WHERE sc.id = ?
+    `).get(commentId) as StoryCommentRow;
+
+    res.json(comment);
+  } catch (error: any) {
+    console.error('[StoryComments] Resolve error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/specs/:specId/comments/counts — unresolved comment counts per story
+router.get('/:specId/comments/counts', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+
+    const rows = db.prepare(`
+      SELECT story_id, COUNT(*) as count
+      FROM story_comments
+      WHERE spec_id = ? AND resolved_at IS NULL
+      GROUP BY story_id
+    `).all(specId) as { story_id: string; count: number }[];
+
+    const counts: Record<string, number> = {};
+    for (const row of rows) {
+      counts[row.story_id] = row.count;
+    }
+
+    res.json({ counts });
+  } catch (error: any) {
+    console.error('[StoryComments] Counts error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check, MessageSquare } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 
 export interface Story {
@@ -50,6 +50,8 @@ export function StoryCard({
   onToggleSelect,
   specId,
   workspaceId,
+  commentCount,
+  onOpenComments,
 }: {
   story: Story;
   onToggleExclude?: () => void;
@@ -59,6 +61,8 @@ export function StoryCard({
   onToggleSelect?: () => void;
   specId?: string;
   workspaceId?: string;
+  commentCount?: number;
+  onOpenComments?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [commitsExpanded, setCommitsExpanded] = useState(false);
@@ -202,6 +206,16 @@ export function StoryCard({
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-muted/15 text-muted">
                   DEFERRED
                 </span>
+              )}
+              {(commentCount ?? 0) > 0 && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onOpenComments?.(); }}
+                  className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent hover:bg-accent/25 transition-colors"
+                  title={`${commentCount} unresolved comment${commentCount === 1 ? '' : 's'}`}
+                >
+                  <MessageSquare size={9} />
+                  {commentCount}
+                </button>
               )}
               {story.dependencies && story.dependencies.length > 0 && (
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
