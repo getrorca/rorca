@@ -4,12 +4,14 @@ import * as path from 'path';
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 let app: Express;
 let db: Database.Database;
 let tmpDir: string;
+let authToken: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-sse-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
@@ -19,6 +21,7 @@ beforeEach(() => {
   app = serverMod.default;
   const dbMod = require('../../db/index');
   db = dbMod.db;
+  authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
@@ -49,6 +52,7 @@ test('POST /api/pipeline/runs creates run and broadcasts WAL event to subscriber
   // Create a pipeline run
   const res = await request(app)
     .post('/api/pipeline/runs')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ specPath: 'specs/pending/test-spec.json', workspaceId: 'ws-sse-1' });
 
   expect(res.status).toBe(201);
@@ -94,12 +98,13 @@ test('GET /api/pipeline/runs/:runId returns the run with empty story_results arr
   // Create a run first
   const createRes = await request(app)
     .post('/api/pipeline/runs')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ specPath: 'specs/pending/my-spec.json', workspaceId: 'ws-sse-1' });
 
   const runId = createRes.body.run.id;
 
   // Fetch the run by ID
-  const res = await request(app).get(`/api/pipeline/runs/${runId}`);
+  const res = await request(app).get(`/api/pipeline/runs/${runId}`).set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
   expect(res.body.run).toBeDefined();
@@ -115,6 +120,7 @@ test('GET /api/pipeline/runs/:runId returns the run with empty story_results arr
 test('POST /api/pipeline/runs missing specPath returns 400', async () => {
   const res = await request(app)
     .post('/api/pipeline/runs')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ workspaceId: 'ws-sse-1' });
 
   expect(res.status).toBe(400);
@@ -124,7 +130,7 @@ test('POST /api/pipeline/runs missing specPath returns 400', async () => {
 // ─── Test 5: GET /api/pipeline/runs/:runId returns 404 for nonexistent ──────
 
 test('GET /api/pipeline/runs/:runId returns 404 for nonexistent run', async () => {
-  const res = await request(app).get('/api/pipeline/runs/99999');
+  const res = await request(app).get('/api/pipeline/runs/99999').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(404);
   expect(res.body.error).toBe('Run not found');
@@ -137,6 +143,7 @@ test('POST /api/pipeline/runs persists run_started WAL event in wal_events table
 
   await request(app)
     .post('/api/pipeline/runs')
+    .set('Authorization', `Bearer ${authToken}`)
     .send({ specPath: 'specs/pending/wal-check.json', workspaceId: 'ws-sse-1' });
 
   const events = db.prepare(
@@ -155,6 +162,7 @@ test('POST /api/pipeline/runs persists run_started WAL event in wal_events table
 test('GET /api/pipeline/stream returns text/event-stream content type', async () => {
   const res = await request(app)
     .get('/api/pipeline/stream')
+    .set('Authorization', `Bearer ${authToken}`)
     .buffer(true)
     .parse((res: any, callback: any) => {
       let data = '';
