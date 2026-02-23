@@ -993,6 +993,8 @@ function StoriesTab({
             allStoryIds={allStoryIds}
             onEdit={() => setEditingStoryId(story.id)}
             onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
+            specId={specId}
+            workspaceId={workspaceId}
           />
         )
       )}
