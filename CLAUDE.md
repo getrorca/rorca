@@ -197,7 +197,7 @@ WAL mode + FK constraints are enabled on every DB connection in `backend/src/db/
 2. **better-sqlite3 is synchronous** — never use async in DB calls. `db.prepare(sql).get()` returns T|undefined, `.all()` returns T[], `.run()` returns RunResult.
 3. **spec `id` ≠ spec `specName`** — `id` is the filename slug (`rorcha-feature-enhancements`), `specName` is the human title. Use `spec.id` to construct file paths.
 4. **run-loop.sh lives in the PROJECT workspace** — Rorcha finds it at `workspace.path/scripts/run-loop.sh`, not in Rorcha's own repo.
-5. **Backend requires restart** — `ts-node` has no hot-reload. Always `lsof -ti:3030 | xargs kill -9 && npm run dev` after any backend changes.
+5. **Backend requires restart** — `tsx` has no hot-reload. Always `lsof -ti:3030 | xargs kill -9 && npm run dev` after any backend changes.
 
 ### Spec Path Construction
 ```typescript
@@ -272,7 +272,15 @@ Multiple workspaces can run simultaneously. Same-workspace parallel runs require
 
 **Frontend** (`.env.local`, root): No required env vars — backend is always `http://localhost:3030`
 
-**Backend** (`backend/.env`): No required vars — uses `claude --print` (reads from `~/.claude/` auth)
+**Backend** (`backend/.env`):
+```bash
+SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
+ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
+OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
+PORT=3030                     # Optional override
+DB_PATH=./rorcha.db           # Optional override
+```
+When `SPEC_PROVIDER=claude` (default), no API key is needed — uses `claude --print` via `~/.claude/` auth.
 
 ## Performance Targets
 - Spec generation: < 60s (LLM call)
