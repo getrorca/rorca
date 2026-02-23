@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
+import simpleGit from 'simple-git';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
@@ -2527,6 +2528,69 @@ router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) =>
     res.json({ commits });
   } catch (error: any) {
     console.error('[Specs] Story commits error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/specs/:specId/stories/:storyId/branch ────────────────────────
+
+router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const storyId = req.params.storyId as string;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Build branch name: feat/STORY-ID-slug
+    const slug = storyId.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    const branchName = `feat/${slug}`;
+
+    const git = simpleGit(workspace.path);
+
+    // Auto-detect default branch (main or master)
+    let defaultBranch = 'main';
+    try {
+      const branches = await git.branchLocal();
+      if (branches.all.includes('main')) {
+        defaultBranch = 'main';
+      } else if (branches.all.includes('master')) {
+        defaultBranch = 'master';
+      }
+    } catch {
+      // Fall back to 'main'
+    }
+
+    // Check if branch already exists
+    const allBranches = await git.branchLocal();
+    if (allBranches.all.includes(branchName)) {
+      res.status(409).json({
+        error: 'Branch already exists',
+        branchName,
+        checkoutCommand: `git checkout ${branchName}`,
+      });
+      return;
+    }
+
+    // Create branch from HEAD of default branch
+    await git.raw(['branch', branchName, defaultBranch]);
+
+    res.status(201).json({
+      branchName,
+      baseBranch: defaultBranch,
+      checkoutCommand: `git checkout ${branchName}`,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Create story branch error:', error);
     res.status(500).json({ error: error.message });
   }
 });
