@@ -39,6 +39,8 @@ Note: GET L3 also returns `preferredModel`. Synthesize is the main input for spe
 ```
 GET    /api/specs?workspaceId=&status=pending|approved  — List specs from disk
 POST   /api/specs                                       — Generate spec from brief (writes to pending/)
+POST   /api/specs/generate/batch                        — Queue multiple briefs for sequential generation
+GET    /api/specs/generate/batch/:batchId               — Batch status with per-brief progress
 PUT    /api/specs/:id/approve                           — Move pending → approved, bump version
 GET    /api/specs/:id/reject                            — Reject spec (with reason)
 POST   /api/specs/:id/add-stories                       — Generate N more stories, append to spec file

@@ -458,6 +458,31 @@ function SpecPreviewDrawer({
   const [addCount, setAddCount] = useState(3);
   const [addBrief, setAddBrief] = useState('');
   const [addError, setAddError] = useState('');
+  const [localStories, setLocalStories] = useState<Story[]>([]);
+
+  // Sync localStories when spec detail loads or changes
+  useEffect(() => {
+    setLocalStories(detail?.userStories ?? detail?.stories ?? []);
+  }, [detail]);
+
+  const handleToggleExclude = async (storyId: string) => {
+    if (!workspaceId) return;
+    const story = localStories.find(s => s.id === storyId);
+    if (!story) return;
+    const newExcluded = !story.excluded;
+    // Optimistic update
+    setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: newExcluded } : s));
+    try {
+      await apiFetch(`/api/specs/${specId}/stories/${storyId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, excluded: newExcluded }),
+      });
+    } catch {
+      // Revert on failure
+      setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s));
+    }
+  };
 
   const handleAddStories = async () => {
     if (!workspaceId || !summary) return;
@@ -517,8 +542,9 @@ function SpecPreviewDrawer({
     setActiveTab('stories');
   }, [specId]);
 
-  const stories = detail?.userStories ?? detail?.stories ?? [];
+  const stories = localStories;
   const diagram = detail ? extractDiagramText(detail) : null;
+  const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
 
   const tabs: { id: PreviewTab; label: string; badge?: string }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
@@ -629,7 +655,12 @@ function SpecPreviewDrawer({
 
             {/* Tab content */}
             <div className="flex-1 overflow-y-auto">
-              {activeTab === 'stories' && <StoriesTab stories={stories} />}
+              {activeTab === 'stories' && (
+                <StoriesTab
+                  stories={stories}
+                  onToggleExclude={summary?.status === 'approved' ? handleToggleExclude : undefined}
+                />
+              )}
               {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
               {activeTab === 'diagram' && <DiagramTab diagram={diagram} />}
               {activeTab === 'json' && <JsonTab spec={detail} />}
@@ -676,7 +707,14 @@ function SpecPreviewDrawer({
                     {runState === 'triggering' ? (
                       <><Loader2 size={14} className="animate-spin" /> Starting run...</>
                     ) : (
-                      <><Play size={14} /> Run in Pipeline</>
+                      <>
+                        <Play size={14} /> Run in Pipeline
+                        {deferredCount > 0 && (
+                          <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-white/20">
+                            {deferredCount} deferred
+                          </span>
+                        )}
+                      </>
                     )}
                   </button>
                 )}
@@ -769,7 +807,13 @@ function SpecPreviewDrawer({
 
 /* ─── Stories Tab ──────────────────────────────────────────────────── */
 
-function StoriesTab({ stories }: { stories: Story[] }) {
+function StoriesTab({
+  stories,
+  onToggleExclude,
+}: {
+  stories: Story[];
+  onToggleExclude?: (storyId: string) => void;
+}) {
   if (stories.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-muted text-sm">
@@ -778,13 +822,22 @@ function StoriesTab({ stories }: { stories: Story[] }) {
     );
   }
 
+  const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
+
   return (
     <div className="p-4 space-y-2">
       <span className="text-xs text-muted">
         {stories.length} {stories.length === 1 ? 'story' : 'stories'}
+        {deferredCount > 0 && (
+          <span className="ml-2 text-muted/60">· {deferredCount} deferred</span>
+        )}
       </span>
       {stories.map(story => (
-        <StoryCard key={story.id} story={story} />
+        <StoryCard
+          key={story.id}
+          story={story}
+          onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
+        />
       ))}
     </div>
   );
