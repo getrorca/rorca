@@ -958,7 +958,8 @@
         "GET /api/docs/openapi.json returns the raw OpenAPI spec for programmatic consumption"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "V2-058",
