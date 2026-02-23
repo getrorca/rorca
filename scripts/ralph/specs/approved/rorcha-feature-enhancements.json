@@ -85,8 +85,7 @@
         "Invalid YAML syntax returns a 422 with line number and column of the parse error"
       ],
       "dependsOn": [],
-      "passes": true,
-      "notes": "Completed by ralph loop"
+      "passes": false
     },
     {
       "id": "US-007",
@@ -99,7 +98,8 @@
         "The graph includes story status (pending/running/passed/failed) when viewed in the context of an active pipeline run via optional runId parameter"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "US-008",
@@ -168,6 +168,19 @@
         "Events are grouped by day with relative timestamps ('2 min ago', 'yesterday') and each event type has a distinct icon and color (green for approvals, red for rejections, blue for generations, orange for pipeline events)",
         "Clicking an event navigates to the relevant entity: spec detail for spec events, run detail for pipeline events, layer editor for direction stack changes",
         "GET /api/activity supports a 'type' filter parameter accepting comma-separated event types (spec_generated, spec_approved, spec_rejected, pipeline_started, pipeline_completed, direction_updated) to narrow the feed"
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "US-013",
+      "title": "Spec Generation Cost Tracking and Budget Alerts",
+      "description": "Track LLM token usage and estimated cost for each spec generation call, display cumulative costs per workspace, and alert users when spending approaches configurable budget thresholds. This enables teams to monitor AI usage across workspaces and prevent unexpected billing surprises.",
+      "acceptanceCriteria": [
+        "GET /api/specs/:id returns a `usage` object with `inputTokens`, `outputTokens`, `model`, and `estimatedCostUsd` fields populated from the ChatResult.usage data captured during generation",
+        "GET /api/workspaces/:id/usage returns aggregated token counts and estimated cost for the trailing 7-day and 30-day periods, responding within 200ms",
+        "PUT /api/workspaces/:id/budget accepts a `monthlyBudgetUsd` number; when cumulative monthly cost exceeds 80% of budget, the next GET /api/workspaces/:id/usage response includes a `budgetWarning` field with percentage used",
+        "The Spec Forge panel displays per-generation cost inline after spec generation completes, showing token counts and estimated USD cost",
+        "A new `spec_usage` table stores per-generation usage rows with foreign key to `pipeline_runs` or `spec_versions`, and the schema migration runs idempotently on startup"
       ],
       "dependsOn": []
     }

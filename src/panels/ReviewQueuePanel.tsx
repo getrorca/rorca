@@ -12,6 +12,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
+import DependencyGraph from '../components/DependencyGraph';
 import { useToast, ToastContainer } from '../components/Toast';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -34,7 +35,7 @@ interface SpecDetail {
   [key: string]: unknown;
 }
 
-type PreviewTab = 'stories' | 'diagram' | 'json';
+type PreviewTab = 'stories' | 'graph' | 'diagram' | 'json';
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
 
@@ -355,6 +356,7 @@ function SpecPreview({
   onCancelReject,
   onConfirmReject,
   onApprove,
+  workspaceId,
 }: {
   spec: SpecDetail;
   summary: SpecSummary;
@@ -368,12 +370,14 @@ function SpecPreview({
   onCancelReject: () => void;
   onConfirmReject: () => void;
   onApprove: () => void;
+  workspaceId: string;
 }) {
   const stories = spec.userStories ?? spec.stories ?? [];
   const diagram = extractDiagramText(spec);
 
   const tabs: { id: PreviewTab; label: string; badge?: string }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
+    { id: 'graph', label: 'Graph' },
     { id: 'diagram', label: 'Diagram' },
     { id: 'json', label: 'Raw JSON' },
   ];
@@ -421,6 +425,7 @@ function SpecPreview({
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto">
         {activeTab === 'stories' && <PreviewStoriesTab stories={stories} />}
+        {activeTab === 'graph' && <DependencyGraph specId={summary.id} workspaceId={workspaceId} />}
         {activeTab === 'diagram' && <PreviewDiagramTab diagram={diagram} />}
         {activeTab === 'json' && <PreviewJsonTab spec={spec} />}
       </div>
