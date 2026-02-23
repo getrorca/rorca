@@ -1956,6 +1956,160 @@ function computeParallelGroups(stories: UserStory[]): string[][] {
   return groups;
 }
 
+// ─── V2-011: POST /:specId/stories/bulk — Bulk story actions ─────────────────
+
+router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const { workspaceId, action, storyIds, priority } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const validActions = ['exclude', 'include', 'delete', 'set_priority'] as const;
+    type BulkAction = typeof validActions[number];
+
+    if (!action || !validActions.includes(action as BulkAction)) {
+      res.status(400).json({ error: `Invalid action. Must be one of: ${validActions.join(', ')}` });
+      return;
+    }
+
+    if (!Array.isArray(storyIds) || storyIds.length === 0) {
+      res.status(400).json({ error: 'storyIds must be a non-empty array' });
+      return;
+    }
+
+    if (action === 'set_priority') {
+      if (priority === undefined || !Number.isInteger(priority) || priority < 1 || priority > 5) {
+        res.status(400).json({ error: 'priority must be an integer between 1 and 5 for set_priority action' });
+        return;
+      }
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+
+    let specPath: string;
+    if (fs.existsSync(approvedFile)) {
+      specPath = approvedFile;
+    } else if (fs.existsSync(pendingFile)) {
+      specPath = pendingFile;
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const raw = fs.readFileSync(specPath, 'utf8');
+    const content = JSON.parse(raw);
+    let stories: UserStory[] = content.userStories ?? [];
+
+    // Validate all storyIds exist
+    const storyIdSet = new Set(storyIds as string[]);
+    const foundIds = stories.filter(s => storyIdSet.has(s.id)).map(s => s.id);
+    if (foundIds.length !== storyIdSet.size) {
+      const missing = [...storyIdSet].filter(id => !foundIds.includes(id));
+      res.status(404).json({ error: `Stories not found: ${missing.join(', ')}` });
+      return;
+    }
+
+    // Snapshot pre-mutation state
+    const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
+    const version = snapshotVersion(specId, raw, status);
+
+    let eventType: string;
+
+    switch (action as BulkAction) {
+      case 'exclude':
+        eventType = 'stories_bulk_excluded';
+        for (const s of stories) {
+          if (storyIdSet.has(s.id)) s.excluded = true;
+        }
+        break;
+
+      case 'include':
+        eventType = 'stories_bulk_included';
+        for (const s of stories) {
+          if (storyIdSet.has(s.id)) s.excluded = false;
+        }
+        break;
+
+      case 'delete':
+        eventType = 'stories_bulk_deleted';
+        stories = stories.filter(s => !storyIdSet.has(s.id));
+        // Reindex story IDs to maintain sequential order (US-001, US-002, ...)
+        stories = stories.map((s, i) => ({
+          ...s,
+          id: `US-${String(i + 1).padStart(3, '0')}`,
+          // Update dependsOn references: remove deleted deps, remap surviving ones
+          dependsOn: (s.dependsOn ?? [])
+            .filter(dep => !storyIdSet.has(dep))
+            .map(dep => {
+              // Find the original story that had this id, get its new index
+              const origStories: UserStory[] = content.userStories ?? [];
+              const origIndex = origStories.filter(os => !storyIdSet.has(os.id)).findIndex(os => os.id === dep);
+              return origIndex >= 0 ? `US-${String(origIndex + 1).padStart(3, '0')}` : dep;
+            }),
+        }));
+        break;
+
+      case 'set_priority':
+        eventType = 'stories_bulk_priority';
+        for (const s of stories) {
+          if (storyIdSet.has(s.id)) s.complexity = priority;
+        }
+        break;
+
+      default:
+        res.status(400).json({ error: 'Unknown action' });
+        return;
+    }
+
+    content.userStories = stories;
+    fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
+
+    // WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
+    ).run(eventType, workspaceId, specId, null, JSON.stringify({
+      action,
+      storyIds,
+      version,
+      ...(action === 'set_priority' ? { priority } : {}),
+    }));
+
+    broadcastAll({
+      id: walResult.lastInsertRowid as number,
+      ts: new Date().toISOString(),
+      event_type: eventType,
+      workspace_id: workspaceId as string,
+      spec_id: specId as string,
+      story_id: null as unknown as string,
+      actor: 'api',
+      payload: JSON.stringify({ action, storyIds, version }),
+    });
+
+    res.json({
+      ok: true,
+      action,
+      affectedCount: storyIds.length,
+      version,
+      stories: content.userStories,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Bulk story action error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/:specId/graph', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
