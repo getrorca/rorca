@@ -50,6 +50,12 @@ export function runMigrations() {
     `);
   }
 
+  // V2-002: Add revoked_at column to refresh_tokens (idempotent)
+  const rtCols = db.pragma('table_info(refresh_tokens)') as { name: string }[];
+  if (!rtCols.some(c => c.name === 'revoked_at')) {
+    db.exec('ALTER TABLE refresh_tokens ADD COLUMN revoked_at TEXT');
+  }
+
   // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
   const tableSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
