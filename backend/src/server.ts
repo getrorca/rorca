@@ -24,6 +24,7 @@ import budgetRouter from './routes/budget';
 import vaultRouter from './routes/vault';
 import usersRouter from './routes/users';
 import authRouter, { authRequired } from './routes/auth';
+import onboardingRouter from './routes/onboarding';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
 
@@ -78,6 +79,7 @@ app.use('/api/activity', activityRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/vault/keys', vaultRouter);
 app.use('/api/users', usersRouter);
+app.use('/api/onboarding', onboardingRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {

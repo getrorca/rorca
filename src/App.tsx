@@ -4,7 +4,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
-import AddWorkspaceModal from './components/AddWorkspaceModal';
+import OnboardingWizard from './components/OnboardingWizard';
 import CommandPalette from './components/CommandPalette';
 import KeyboardShortcutsPanel from './components/KeyboardShortcutsPanel';
 import LoginPage from './components/LoginPage';
@@ -53,8 +53,7 @@ function AuthGate() {
 
 function AppContent() {
   const [activePanel, setActivePanel] = useState<PanelId>('forge');
-  const { workspaces, addWorkspace } = useWorkspace();
-  const [showAddModal, setShowAddModal] = useState(false);
+  const { workspaces } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -81,24 +80,7 @@ function AppContent() {
   if (workspaces.length === 0) {
     return (
       <Shell>
-        <div className="flex flex-col items-center justify-center h-full gap-4">
-          <p className="text-muted">No workspace configured.</p>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="px-4 py-2 text-sm rounded bg-accent text-white hover:opacity-90 transition-opacity"
-          >
-            Add Workspace
-          </button>
-        </div>
-        {showAddModal && (
-          <AddWorkspaceModal
-            onClose={() => setShowAddModal(false)}
-            onSuccess={(ws) => {
-              addWorkspace(ws);
-              setShowAddModal(false);
-            }}
-          />
-        )}
+        <OnboardingWizard />
       </Shell>
     );
   }
