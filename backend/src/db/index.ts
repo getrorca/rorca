@@ -164,6 +164,18 @@ export function runMigrations() {
   if (!tmCols.some(c => c.name === 'last_active_at')) {
     db.exec('ALTER TABLE team_members ADD COLUMN last_active_at TEXT');
   }
+
+  // V2-041: Add team_id + author_id + usage_count to templates (idempotent)
+  const tplCols = db.pragma('table_info(templates)') as { name: string }[];
+  if (!tplCols.some(c => c.name === 'team_id')) {
+    db.exec('ALTER TABLE templates ADD COLUMN team_id TEXT REFERENCES teams(id) ON DELETE SET NULL');
+  }
+  if (!tplCols.some(c => c.name === 'author_id')) {
+    db.exec('ALTER TABLE templates ADD COLUMN author_id TEXT REFERENCES users(id) ON DELETE SET NULL');
+  }
+  if (!tplCols.some(c => c.name === 'usage_count')) {
+    db.exec('ALTER TABLE templates ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0');
+  }
 }
 
 runMigrations();
