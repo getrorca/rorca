@@ -1,0 +1,182 @@
+import { Router, Request, Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
+import { db } from '../db/index';
+
+const router = Router();
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface WorkspaceRow {
+  id: string;
+  label: string;
+  path: string;
+}
+
+interface StorySearchResult {
+  storyId: string;
+  storyTitle: string;
+  storyDescription: string;
+  acceptanceCriteria: string[];
+  specId: string;
+  specTitle: string;
+  specStatus: 'pending' | 'approved';
+  workspaceId: string;
+  workspaceName: string;
+  tags: string[];
+  matchSnippet?: string;
+}
+
+// ─── Helpers (mirrored from specs.ts to avoid cross-import) ─────────────────
+
+function specsDirs(workspacePath: string) {
+  const pendingDir = path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending');
+  const approvedDir = path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved');
+  return { pendingDir, approvedDir };
+}
+
+function safeReaddir(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  } catch {
+    return [];
+  }
+}
+
+function getSpecTags(specId: string, workspaceId: string): string[] {
+  const rows = db.prepare(
+    'SELECT tag_name FROM spec_tags WHERE spec_id = ? AND workspace_id = ? ORDER BY tag_name'
+  ).all(specId, workspaceId) as { tag_name: string }[];
+  return rows.map(r => r.tag_name);
+}
+
+// ─── GET /api/stories/search ─────────────────────────────────────────────────
+
+router.get('/search', (req: Request, res: Response) => {
+  try {
+    const q = (req.query.q as string || '').trim();
+    const workspaceId = req.query.workspaceId as string | undefined;
+    const statusFilter = (req.query.status as string) || 'all';
+    const tagsParam = req.query.tags as string | undefined;
+    const filterTags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    if (!q) {
+      res.status(400).json({ error: 'Missing required query param: q' });
+      return;
+    }
+
+    // Determine which workspaces to search
+    let workspaces: WorkspaceRow[];
+    if (workspaceId) {
+      const ws = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+      if (!ws) {
+        res.status(404).json({ error: 'Workspace not found' });
+        return;
+      }
+      workspaces = [ws];
+    } else {
+      workspaces = db.prepare('SELECT id, label, path FROM workspaces ORDER BY label').all() as WorkspaceRow[];
+    }
+
+    const lowerQ = q.toLowerCase();
+    const allResults: StorySearchResult[] = [];
+
+    for (const ws of workspaces) {
+      const { pendingDir, approvedDir } = specsDirs(ws.path);
+
+      const dirsToScan: { dir: string; status: 'pending' | 'approved' }[] = [];
+      if (statusFilter === 'all' || statusFilter === 'pending') {
+        dirsToScan.push({ dir: pendingDir, status: 'pending' });
+      }
+      if (statusFilter === 'all' || statusFilter === 'approved') {
+        dirsToScan.push({ dir: approvedDir, status: 'approved' });
+      }
+
+      for (const { dir, status } of dirsToScan) {
+        for (const file of safeReaddir(dir)) {
+          try {
+            const filePath = path.join(dir, file);
+            const raw = fs.readFileSync(filePath, 'utf8');
+            const content = JSON.parse(raw);
+            const specId = file.replace('.json', '');
+            const specTitle = content.title ?? specId;
+            const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
+
+            const specTags = getSpecTags(specId, ws.id);
+
+            // Apply tag filter at spec level
+            if (filterTags.length > 0) {
+              if (!filterTags.every(t => specTags.includes(t))) continue;
+            }
+
+            for (const story of stories) {
+              const title: string = story.title ?? '';
+              const description: string = story.description ?? '';
+              const ac: string[] = Array.isArray(story.acceptanceCriteria) ? story.acceptanceCriteria : [];
+
+              // Search across title, description, and acceptance criteria
+              const titleMatch = title.toLowerCase().includes(lowerQ);
+              const descMatch = description.toLowerCase().includes(lowerQ);
+              const acMatch = ac.some(a => a.toLowerCase().includes(lowerQ));
+
+              if (titleMatch || descMatch || acMatch) {
+                // Generate a snippet showing the first match
+                let matchSnippet: string | undefined;
+                if (titleMatch) {
+                  matchSnippet = title;
+                } else if (descMatch) {
+                  matchSnippet = description;
+                } else {
+                  matchSnippet = ac.find(a => a.toLowerCase().includes(lowerQ));
+                }
+
+                allResults.push({
+                  storyId: story.id ?? '',
+                  storyTitle: title,
+                  storyDescription: description,
+                  acceptanceCriteria: ac,
+                  specId,
+                  specTitle,
+                  specStatus: status,
+                  workspaceId: ws.id,
+                  workspaceName: ws.label,
+                  tags: specTags,
+                  matchSnippet,
+                });
+              }
+            }
+          } catch {
+            // skip unparseable spec files
+          }
+        }
+      }
+    }
+
+    // Sort: title matches first, then description, then AC
+    allResults.sort((a, b) => {
+      const aTitle = a.storyTitle.toLowerCase().includes(lowerQ) ? 0 : 1;
+      const bTitle = b.storyTitle.toLowerCase().includes(lowerQ) ? 0 : 1;
+      if (aTitle !== bTitle) return aTitle - bTitle;
+      const aDesc = a.storyDescription.toLowerCase().includes(lowerQ) ? 0 : 1;
+      const bDesc = b.storyDescription.toLowerCase().includes(lowerQ) ? 0 : 1;
+      return aDesc - bDesc;
+    });
+
+    // Paginate
+    const total = allResults.length;
+    const items = allResults.slice(offset, offset + limit);
+
+    res.json({
+      items,
+      total,
+      hasMore: offset + limit < total,
+    });
+  } catch (error: any) {
+    console.error('[Stories] Search error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+export default router;
