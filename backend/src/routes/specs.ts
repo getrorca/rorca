@@ -473,7 +473,7 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── W-003: GET /archive — Searchable, filterable spec archive ────────────────
+// ─── W-003 / US-005: GET /archive — Full-text searchable spec archive ─────────
 
 interface ArchiveSpecSummary extends SpecSummary {
   rejectedAt?: string;
@@ -481,6 +481,14 @@ interface ArchiveSpecSummary extends SpecSummary {
   storyTitles: string[];
   repoName: string;
   branchName?: string;
+  matchSnippets?: MatchSnippet[];
+  relevanceScore?: number;
+}
+
+interface MatchSnippet {
+  field: 'title' | 'storyTitle' | 'storyDescription' | 'acceptanceCriteria';
+  text: string;
+  storyId?: string;
 }
 
 function buildArchiveSummary(
@@ -498,14 +506,160 @@ function buildArchiveSummary(
   return { ...base, storyTitles, repoName, branchName };
 }
 
-function matchesSearch(spec: ArchiveSpecSummary, q: string): boolean {
-  const lower = q.toLowerCase();
-  if (spec.specName.toLowerCase().includes(lower)) return true;
-  if (spec.id.toLowerCase().includes(lower)) return true;
-  for (const title of spec.storyTitles) {
-    if (title.toLowerCase().includes(lower)) return true;
+/** Extract searchable text fields from a parsed spec */
+function extractSearchableFields(content: any): {
+  storyTitles: string;
+  storyDescriptions: string;
+  acceptanceCriteria: string;
+} {
+  const stories: any[] = content.userStories ?? content.stories ?? [];
+  return {
+    storyTitles: stories.map((s: any) => s.title ?? '').filter(Boolean).join(' | '),
+    storyDescriptions: stories.map((s: any) => s.description ?? '').filter(Boolean).join(' | '),
+    acceptanceCriteria: stories
+      .flatMap((s: any) => s.acceptanceCriteria ?? [])
+      .join(' | '),
+  };
+}
+
+/** Rebuild FTS index for a workspace's specs from filesystem + WAL rejected specs */
+function rebuildSearchIndex(workspaceId: string, workspacePath: string): void {
+  // Clear existing entries for this workspace
+  db.prepare(`DELETE FROM spec_search_index WHERE workspace_id = ?`).run(workspaceId);
+
+  const { pendingDir, approvedDir } = specsDirs(workspacePath);
+
+  // Index pending specs
+  for (const file of safeReaddir(pendingDir)) {
+    try {
+      const filePath = path.join(pendingDir, file);
+      const content = parseSpecFile(filePath);
+      const slug = file.replace('.json', '');
+      const fields = extractSearchableFields(content);
+      const stat = fs.statSync(filePath);
+      db.prepare(
+        `INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(slug, workspaceId, content.title ?? slug, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'pending', content.generatedAt ?? stat.birthtime.toISOString());
+    } catch {
+      // skip unparseable
+    }
   }
-  return false;
+
+  // Index approved specs
+  for (const file of safeReaddir(approvedDir)) {
+    try {
+      const filePath = path.join(approvedDir, file);
+      const content = parseSpecFile(filePath);
+      const slug = file.replace('.json', '');
+      const fields = extractSearchableFields(content);
+      const stat = fs.statSync(filePath);
+      db.prepare(
+        `INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(slug, workspaceId, content.title ?? slug, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'approved', content.generatedAt ?? stat.birthtime.toISOString());
+    } catch {
+      // skip unparseable
+    }
+  }
+
+  // Index rejected specs from WAL (most recent rejection per slug only)
+  const rejectedEvents = db.prepare(
+    `SELECT spec_id, ts, payload FROM wal_events
+     WHERE event_type = 'spec_rejected' AND payload LIKE '%' || ? || '%'
+     ORDER BY ts DESC`
+  ).all(workspaceId) as { spec_id: string; ts: string; payload: string }[];
+
+  const seenRejected = new Set<string>();
+  for (const evt of rejectedEvents) {
+    if (seenRejected.has(evt.spec_id)) continue;
+    seenRejected.add(evt.spec_id);
+
+    // Skip if a pending/approved spec already covers this slug
+    const existing = db.prepare(
+      `SELECT spec_slug FROM spec_search_index WHERE spec_slug = ? AND workspace_id = ?`
+    ).get(evt.spec_id, workspaceId);
+    if (existing) continue;
+
+    // Try to get content from spec_versions for richer indexing
+    const versionRow = db.prepare(
+      `SELECT content_json FROM spec_versions WHERE spec_slug = ? ORDER BY version DESC LIMIT 1`
+    ).get(evt.spec_id) as { content_json: string } | undefined;
+
+    if (versionRow) {
+      const content = JSON.parse(versionRow.content_json);
+      const fields = extractSearchableFields(content);
+      db.prepare(
+        `INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(evt.spec_id, workspaceId, content.title ?? evt.spec_id, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'rejected', evt.ts);
+    } else {
+      // Minimal entry from WAL event only
+      db.prepare(
+        `INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(evt.spec_id, workspaceId, evt.spec_id, '', '', '', 'rejected', evt.ts);
+    }
+  }
+}
+
+/** Generate match snippets showing which fields matched the query */
+function generateSnippets(spec: ArchiveSpecSummary, query: string, content: any): MatchSnippet[] {
+  const snippets: MatchSnippet[] = [];
+  const lower = query.toLowerCase();
+  const stories: any[] = content?.userStories ?? content?.stories ?? [];
+
+  // Check spec title
+  if (spec.specName.toLowerCase().includes(lower)) {
+    snippets.push({ field: 'title', text: highlightMatch(spec.specName, query) });
+  }
+
+  // Check story titles
+  for (const story of stories) {
+    const title = story.title ?? '';
+    if (title.toLowerCase().includes(lower)) {
+      snippets.push({ field: 'storyTitle', text: highlightMatch(title, query), storyId: story.id });
+    }
+  }
+
+  // Check story descriptions
+  for (const story of stories) {
+    const desc = story.description ?? '';
+    if (desc.toLowerCase().includes(lower)) {
+      snippets.push({ field: 'storyDescription', text: highlightMatch(desc, query), storyId: story.id });
+    }
+  }
+
+  // Check acceptance criteria
+  for (const story of stories) {
+    for (const ac of story.acceptanceCriteria ?? []) {
+      if (ac.toLowerCase().includes(lower)) {
+        snippets.push({ field: 'acceptanceCriteria', text: highlightMatch(ac, query), storyId: story.id });
+      }
+    }
+  }
+
+  return snippets;
+}
+
+/** Wrap matching text in <mark> tags for highlighting */
+function highlightMatch(text: string, query: string): string {
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(`(${escaped})`, 'gi'), '<mark>$1</mark>');
+}
+
+/** Compute relevance score: title matches weighted higher */
+function computeRelevanceScore(snippets: MatchSnippet[]): number {
+  let score = 0;
+  for (const s of snippets) {
+    switch (s.field) {
+      case 'title': score += 10; break;
+      case 'storyTitle': score += 5; break;
+      case 'storyDescription': score += 2; break;
+      case 'acceptanceCriteria': score += 1; break;
+    }
+  }
+  return score;
 }
 
 router.get('/archive', (req: Request, res: Response) => {
@@ -515,6 +669,8 @@ router.get('/archive', (req: Request, res: Response) => {
     const statusFilter = (req.query.status as string) || 'all';
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const offset = parseInt(req.query.offset as string) || 0;
+    const createdAfter = req.query.createdAfter as string | undefined;
+    const createdBefore = req.query.createdBefore as string | undefined;
 
     if (!workspaceId) {
       res.status(400).json({ error: 'Missing required query param: workspaceId' });
@@ -528,7 +684,9 @@ router.get('/archive', (req: Request, res: Response) => {
     }
 
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
-    const allSpecs: ArchiveSpecSummary[] = [];
+
+    // Rebuild FTS index for this workspace (fast: synchronous SQLite ops on local files)
+    rebuildSearchIndex(workspaceId, workspace.path);
 
     // Look up most recent branch_name per spec slug from pipeline_runs
     const branchRows = db.prepare(
@@ -542,11 +700,26 @@ router.get('/archive', (req: Request, res: Response) => {
       if (!branchBySlug.has(slug)) branchBySlug.set(slug, row.branch_name);
     }
 
+    // Determine matching slugs via FTS or collect all
+    let matchingSlugs: Set<string> | null = null;
+    if (q) {
+      // Use FTS5 for full-text search — escape quotes in query
+      const ftsQuery = q.replace(/"/g, '""');
+      const ftsRows = db.prepare(
+        `SELECT spec_slug FROM spec_search_index
+         WHERE workspace_id = ? AND spec_search_index MATCH ?`
+      ).all(workspaceId, `"${ftsQuery}"`) as { spec_slug: string }[];
+      matchingSlugs = new Set(ftsRows.map(r => r.spec_slug));
+    }
+
+    const allSpecs: ArchiveSpecSummary[] = [];
+
     // Collect pending specs
     if (statusFilter === 'all' || statusFilter === 'pending') {
       for (const file of safeReaddir(pendingDir)) {
         try {
           const slug = path.basename(file, '.json');
+          if (matchingSlugs && !matchingSlugs.has(slug)) continue;
           allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug)));
         } catch {
           // skip unparseable files
@@ -559,6 +732,7 @@ router.get('/archive', (req: Request, res: Response) => {
       for (const file of safeReaddir(approvedDir)) {
         try {
           const slug = path.basename(file, '.json');
+          if (matchingSlugs && !matchingSlugs.has(slug)) continue;
           allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug)));
         } catch {
           // skip unparseable files
@@ -579,8 +753,8 @@ router.get('/archive', (req: Request, res: Response) => {
       for (const evt of rejectedEvents) {
         if (seenRejected.has(evt.spec_id)) continue;
         seenRejected.add(evt.spec_id);
-        // Skip if spec still exists (re-generated after rejection)
         if (allSpecs.some(s => s.id === evt.spec_id)) continue;
+        if (matchingSlugs && !matchingSlugs.has(evt.spec_id)) continue;
 
         const payload = JSON.parse(evt.payload);
         allSpecs.push({
@@ -598,13 +772,55 @@ router.get('/archive', (req: Request, res: Response) => {
       }
     }
 
-    // Sort by generatedAt DESC
-    allSpecs.sort((a, b) =>
-      new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
-    );
+    // Apply date range filters
+    let filtered = allSpecs;
+    if (createdAfter) {
+      const afterDate = new Date(createdAfter).getTime();
+      filtered = filtered.filter(s => new Date(s.generatedAt).getTime() >= afterDate);
+    }
+    if (createdBefore) {
+      const beforeDate = new Date(createdBefore).getTime();
+      filtered = filtered.filter(s => new Date(s.generatedAt).getTime() <= beforeDate);
+    }
 
-    // Apply search filter
-    const filtered = q ? allSpecs.filter(s => matchesSearch(s, q)) : allSpecs;
+    // If searching, generate snippets and rank by relevance
+    if (q) {
+      for (const spec of filtered) {
+        // Load spec content for snippet generation
+        let content: any = null;
+        const pendingFile = path.join(pendingDir, `${spec.id}.json`);
+        const approvedFile = path.join(approvedDir, `${spec.id}.json`);
+        try {
+          if (fs.existsSync(pendingFile)) content = parseSpecFile(pendingFile);
+          else if (fs.existsSync(approvedFile)) content = parseSpecFile(approvedFile);
+          else {
+            // Rejected spec — try spec_versions
+            const vRow = db.prepare(
+              `SELECT content_json FROM spec_versions WHERE spec_slug = ? ORDER BY version DESC LIMIT 1`
+            ).get(spec.id) as { content_json: string } | undefined;
+            if (vRow) content = JSON.parse(vRow.content_json);
+          }
+        } catch {
+          // skip
+        }
+
+        const snippets = generateSnippets(spec, q, content);
+        spec.matchSnippets = snippets;
+        spec.relevanceScore = computeRelevanceScore(snippets);
+      }
+
+      // Sort by relevance DESC, then generatedAt DESC for tie-breaking
+      filtered.sort((a, b) => {
+        const scoreDiff = (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0);
+        if (scoreDiff !== 0) return scoreDiff;
+        return new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime();
+      });
+    } else {
+      // No search — sort by generatedAt DESC
+      filtered.sort((a, b) =>
+        new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
+      );
+    }
 
     // Paginate
     const total = filtered.length;

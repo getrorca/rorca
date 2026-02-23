@@ -29,7 +29,7 @@ test('PRAGMA journal_mode returns wal', () => {
   expect(result[0].journal_mode).toBe('wal');
 });
 
-test('all 8 tables exist in sqlite_master', () => {
+test('all core tables plus FTS5 tables exist in sqlite_master', () => {
   const tables = db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     .all() as { name: string }[];
@@ -37,6 +37,12 @@ test('all 8 tables exist in sqlite_master', () => {
   expect(names).toEqual([
     'direction_layers',
     'pipeline_runs',
+    'spec_search_index',
+    'spec_search_index_config',
+    'spec_search_index_content',
+    'spec_search_index_data',
+    'spec_search_index_docsize',
+    'spec_search_index_idx',
     'spec_versions',
     'story_results',
     'templates',

@@ -775,3 +775,225 @@ describe('GET /api/specs/:specId/diff', () => {
     expect(res.body.error).toContain('v99');
   });
 });
+
+// ─── US-005: Full-Text Search Archive ──────────────────────────────────────────
+
+/** Seed a spec with rich content for search tests */
+function seedRichSpec(dir: string, slug: string, overrides?: Record<string, unknown>) {
+  fs.mkdirSync(dir, { recursive: true });
+  const spec = {
+    title: overrides?.title ?? slug.replace(/-/g, ' '),
+    userStories: overrides?.userStories ?? [
+      {
+        id: 'US-001',
+        title: 'Story one',
+        description: 'A basic description',
+        acceptanceCriteria: ['Criterion alpha', 'Criterion beta'],
+        dependsOn: [],
+        passes: false,
+      },
+    ],
+    generatedAt: overrides?.generatedAt ?? '2026-02-20T12:00:00.000Z',
+  };
+  fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify(spec, null, 2), 'utf8');
+  return spec;
+}
+
+describe('GET /api/specs/archive (US-005 full-text search)', () => {
+  test('q param searches across spec title', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'auth-system', { title: 'Authentication System' });
+    seedRichSpec(pendingDir, 'payment-flow', { title: 'Payment Processing' });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=authentication');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('auth-system');
+    expect(res.body.specs[0].matchSnippets).toBeDefined();
+    expect(res.body.specs[0].matchSnippets.length).toBeGreaterThan(0);
+    expect(res.body.specs[0].matchSnippets[0].field).toBe('title');
+    expect(res.body.specs[0].matchSnippets[0].text).toContain('<mark>');
+  });
+
+  test('q param searches across story titles', async () => {
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    seedRichSpec(approvedDir, 'dashboard-spec', {
+      title: 'Dashboard Features',
+      userStories: [
+        { id: 'US-001', title: 'User Analytics Widget', description: 'Shows analytics', acceptanceCriteria: ['Loads fast'], dependsOn: [] },
+        { id: 'US-002', title: 'Notification Panel', description: 'Shows notifications', acceptanceCriteria: ['Real-time updates'], dependsOn: [] },
+      ],
+    });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=analytics');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('dashboard-spec');
+    const storySnippet = res.body.specs[0].matchSnippets.find((s: any) => s.field === 'storyTitle');
+    expect(storySnippet).toBeDefined();
+    expect(storySnippet.storyId).toBe('US-001');
+  });
+
+  test('q param searches across story descriptions', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'api-spec', {
+      title: 'API Endpoints',
+      userStories: [
+        { id: 'US-001', title: 'Create user', description: 'Implement OAuth2 token-based authentication flow', acceptanceCriteria: ['Returns JWT'], dependsOn: [] },
+      ],
+    });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=OAuth2');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('api-spec');
+    const descSnippet = res.body.specs[0].matchSnippets.find((s: any) => s.field === 'storyDescription');
+    expect(descSnippet).toBeDefined();
+    expect(descSnippet.text).toContain('<mark>OAuth2</mark>');
+  });
+
+  test('q param searches across acceptance criteria', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'perf-spec', {
+      title: 'Performance Improvements',
+      userStories: [
+        { id: 'US-001', title: 'Caching', description: 'Add cache', acceptanceCriteria: ['Response time under 50ms for cached queries', 'Cache invalidation on write'], dependsOn: [] },
+      ],
+    });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=invalidation');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('perf-spec');
+    const acSnippet = res.body.specs[0].matchSnippets.find((s: any) => s.field === 'acceptanceCriteria');
+    expect(acSnippet).toBeDefined();
+    expect(acSnippet.storyId).toBe('US-001');
+  });
+
+  test('results ranked by relevance — title matches rank higher', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    // This spec has "login" only in a story description
+    seedRichSpec(pendingDir, 'general-spec', {
+      title: 'General Features',
+      userStories: [
+        { id: 'US-001', title: 'Authentication', description: 'Implement login functionality', acceptanceCriteria: ['Works'], dependsOn: [] },
+      ],
+    });
+    // This spec has "login" in the title
+    seedRichSpec(pendingDir, 'login-system', {
+      title: 'Login System',
+      userStories: [
+        { id: 'US-001', title: 'Basic form', description: 'A form', acceptanceCriteria: ['Renders'], dependsOn: [] },
+      ],
+    });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=login');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(2);
+    // Title match should rank first
+    expect(res.body.specs[0].id).toBe('login-system');
+    expect(res.body.specs[0].relevanceScore).toBeGreaterThan(res.body.specs[1].relevanceScore);
+  });
+
+  test('date range filter: createdAfter', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'old-spec', { title: 'Old Spec', generatedAt: '2026-01-01T00:00:00.000Z' });
+    seedRichSpec(pendingDir, 'new-spec', { title: 'New Spec', generatedAt: '2026-02-15T00:00:00.000Z' });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&createdAfter=2026-02-01T00:00:00.000Z');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('new-spec');
+  });
+
+  test('date range filter: createdBefore', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'jan-spec', { title: 'January Spec', generatedAt: '2026-01-15T00:00:00.000Z' });
+    seedRichSpec(pendingDir, 'feb-spec', { title: 'February Spec', generatedAt: '2026-02-15T00:00:00.000Z' });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&createdBefore=2026-02-01T00:00:00.000Z');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('jan-spec');
+  });
+
+  test('date range combined with text search', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'auth-old', { title: 'Auth Module', generatedAt: '2026-01-10T00:00:00.000Z' });
+    seedRichSpec(pendingDir, 'auth-new', { title: 'Auth System v2', generatedAt: '2026-02-20T00:00:00.000Z' });
+    seedRichSpec(pendingDir, 'payment-new', { title: 'Payment System', generatedAt: '2026-02-20T00:00:00.000Z' });
+
+    const res = await request(app).get(
+      '/api/specs/archive?workspaceId=ws-test&q=auth&createdAfter=2026-02-01T00:00:00.000Z'
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('auth-new');
+  });
+
+  test('empty search returns all specs without snippets', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'spec-a', { title: 'Spec A' });
+    seedRichSpec(pendingDir, 'spec-b', { title: 'Spec B' });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(2);
+    // No matchSnippets or relevanceScore when no query
+    expect(res.body.specs[0].matchSnippets).toBeUndefined();
+    expect(res.body.specs[0].relevanceScore).toBeUndefined();
+  });
+
+  test('no results for unmatched query', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'some-spec', { title: 'Some Feature' });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=zzzznonexistent');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(0);
+    expect(res.body.total).toBe(0);
+  });
+
+  test('search respects status filter', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    seedRichSpec(pendingDir, 'auth-pending', { title: 'Auth Pending' });
+    seedRichSpec(approvedDir, 'auth-approved', { title: 'Auth Approved' });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&status=approved');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(1);
+    expect(res.body.specs[0].id).toBe('auth-approved');
+  });
+
+  test('pagination works with search results', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    seedRichSpec(pendingDir, 'auth-one', { title: 'Auth One', generatedAt: '2026-02-20T12:00:00.000Z' });
+    seedRichSpec(pendingDir, 'auth-two', { title: 'Auth Two', generatedAt: '2026-02-21T12:00:00.000Z' });
+    seedRichSpec(pendingDir, 'auth-three', { title: 'Auth Three', generatedAt: '2026-02-22T12:00:00.000Z' });
+
+    const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&limit=2&offset=0');
+
+    expect(res.status).toBe(200);
+    expect(res.body.specs).toHaveLength(2);
+    expect(res.body.total).toBe(3);
+    expect(res.body.hasMore).toBe(true);
+
+    // Second page
+    const res2 = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&limit=2&offset=2');
+    expect(res2.status).toBe(200);
+    expect(res2.body.specs).toHaveLength(1);
+    expect(res2.body.hasMore).toBe(false);
+  });
+});
