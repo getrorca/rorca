@@ -315,5 +315,26 @@ Key decisions:
 - Existing `DependencyGraph.tsx` (Mermaid-based) left untouched — used in Archive/ReviewQueue panels for static views
 - Popover positioned relative to container bounds to prevent overflow
 
+## Story V2-028: GitHub PR Merge Auto-Pass Stories — DONE
+Files touched:
+- backend/src/routes/webhook-handlers.ts (new — PR merge handler + story ID extraction)
+- backend/src/server.ts (modified — register webhook handlers on startup)
+- backend/src/routes/__tests__/pr-merge.test.ts (new — 12 tests)
+- src/components/StoryCard.tsx (modified — mergedVia field + PR link icon)
+
+What was built:
+- `pull_request` event handler registered via `onGithubEvent()` in webhooks.ts dispatcher
+- `extractStoryIds()` function matches `feat(US-XXX)`, `feat(US-XXX, US-YYY)`, `feat/US-XXX-slug` patterns from PR title and branch name
+- When a PR is merged (action=closed + merged=true), handler finds spec JSON files containing matched story IDs, sets `passes: true` and `mergedVia: <pr_url>` on each matched story
+- Emits `github_pr_merged` WAL event with pr_url, story_ids, merge_sha, branch, title
+- StoryCard UI shows a clickable "PR" badge with GitPullRequest icon linking to the GitHub PR when `mergedVia` is set
+
+Key decisions:
+- Story IDs extracted from both PR title and branch name with deduplication
+- Does NOT insert into `story_results` table (which requires a pipeline_runs FK) — PR merge is delivery tracking, not pipeline execution
+- Searches both approved/ and pending/ spec directories for matching stories
+- Single WAL event per PR merge (not per story) with all matched story IDs in payload
+- Handler registered at server startup via `registerWebhookHandlers()` called from server.ts
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
