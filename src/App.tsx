@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { HelpTipsProvider } from './contexts/HelpTipsContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
@@ -123,9 +124,11 @@ function AppContent() {
 function App() {
   return (
     <ThemeProvider>
-      <AuthProvider>
-        <AuthGate />
-      </AuthProvider>
+      <HelpTipsProvider>
+        <AuthProvider>
+          <AuthGate />
+        </AuthProvider>
+      </HelpTipsProvider>
     </ThemeProvider>
   );
 }

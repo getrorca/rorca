@@ -6,6 +6,7 @@ import {
 import { DollarSign, Calendar, ArrowDownUp, Loader2, Settings, Plus, Trash2, Save, X } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import { HelpTooltip } from '../components/HelpTooltip';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -199,6 +200,7 @@ export default function CostBreakdownPanel() {
         <div className="flex items-center gap-2">
           <DollarSign size={20} className="text-accent" />
           <h2 className="text-lg font-semibold">Cost Breakdown</h2>
+          <HelpTooltip helpKey="cost-breakdown" />
         </div>
 
         <div className="flex items-center gap-2">
@@ -337,9 +339,9 @@ function CostsTab({ data, loading, groupBy }: { data: CostResponse | null; loadi
       {/* Summary Cards */}
       {totals && (
         <div className="grid grid-cols-4 gap-4">
-          <SummaryCard label="Total Cost" value={formatCost(totals.total_cost_usd)} sub={`${totals.total_stories} stories`} />
-          <SummaryCard label="Input Cost" value={formatCost(totals.total_input_cost_usd)} sub={formatTokens(totals.total_input_tokens) + ' tokens'} />
-          <SummaryCard label="Output Cost" value={formatCost(totals.total_output_cost_usd)} sub={formatTokens(totals.total_output_tokens) + ' tokens'} />
+          <SummaryCard label="Total Cost" value={formatCost(totals.total_cost_usd)} sub={`${totals.total_stories} stories`} helpKey="cost-breakdown" />
+          <SummaryCard label="Input Cost" value={formatCost(totals.total_input_cost_usd)} sub={formatTokens(totals.total_input_tokens) + ' tokens'} helpKey="cost-input-tokens" />
+          <SummaryCard label="Output Cost" value={formatCost(totals.total_output_cost_usd)} sub={formatTokens(totals.total_output_tokens) + ' tokens'} helpKey="cost-output-tokens" />
           <SummaryCard
             label="Avg Cost / Story"
             value={totals.total_stories > 0 ? formatCost(totals.total_cost_usd / totals.total_stories) : '$0.00'}
@@ -747,10 +749,13 @@ function PricingTab({
 
 /* ─── Sub-components ──────────────────────────────────────────────── */
 
-function SummaryCard({ label, value, sub }: { label: string; value: string; sub: string }) {
+function SummaryCard({ label, value, sub, helpKey }: { label: string; value: string; sub: string; helpKey?: string }) {
   return (
     <div className="bg-panel-alt rounded-lg p-4 flex flex-col gap-1">
-      <span className="text-xs text-muted">{label}</span>
+      <span className="text-xs text-muted inline-flex items-center gap-1">
+        {label}
+        {helpKey && <HelpTooltip helpKey={helpKey} size={10} />}
+      </span>
       <span className="text-2xl font-bold">{value}</span>
       <span className="text-xs text-muted">{sub}</span>
     </div>

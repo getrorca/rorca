@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Penci
 import { apiFetch } from '../lib/apiFetch';
 import { AssigneeDropdown } from './AssigneeDropdown';
 import type { Assignee } from './AssigneeDropdown';
+import { HelpTooltip } from './HelpTooltip';
 
 export interface Story {
   id: string;
@@ -166,7 +167,7 @@ export function StoryCard({
             {story.id}
           </span>
           {story.complexity != null && (
-            <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded mt-0.5 ${
+            <span className={`shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded mt-0.5 ${
               story.complexity <= 2
                 ? 'bg-success/15 text-success'
                 : story.complexity === 3
@@ -174,6 +175,7 @@ export function StoryCard({
                 : 'bg-error/15 text-error'
             }`}>
               C{story.complexity}
+              <HelpTooltip helpKey="complexity-score" size={10} />
             </span>
           )}
           {story.timeoutMinutes != null && story.timeoutMinutes !== 45 && (
