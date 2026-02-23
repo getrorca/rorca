@@ -134,6 +134,25 @@ Key decisions:
 - spec.id = filename slug (e.g. "rorcha-feature-enhancements"), spec.specName = human title (display only)
 - CLAUDE.md covers all critical gotchas: spec path, chatComplete .text, 4 Claude env vars, stale runs, xterm package
 
+## Story US-007: Story Dependency DAG Visualization — DONE
+Files touched:
+- backend/src/routes/specs.ts — Added GET /:specId/graph endpoint with cycle detection, parallel groups, and optional run status overlay
+- backend/src/routes/__tests__/graph.test.ts (new) — 9 test cases covering happy path, parallel grouping, cycle detection, run status, edge cases
+
+What was built:
+- GET /api/specs/:specId/graph?workspaceId=X&runId=Y returns { nodes, edges, parallelGroups }
+- Circular dependency detection via DFS returns 422 with cycle path
+- Kahn's algorithm computes parallel execution groups (stories grouped by dependency resolution level)
+- Optional runId query param overlays story status (pending/running/passed/failed/skipped) from story_results table
+- Nodes include id, title, dependsOn, status; edges are { from, to } representing dependency direction
+
+Key decisions:
+- Used Kahn's algorithm for topological sort by levels — naturally produces parallel groups
+- Dangling dependsOn refs (to non-existent story IDs) silently ignored in edges and parallel groups
+- story_results status mapped: pass→passed, fail→failed, skip→skipped, retry→running
+- Endpoint added to existing specs.ts router (no new route file, mounted under /api/specs)
+- 422 status code for circular dependency (not 400) since the spec data is structurally valid but semantically invalid
+
 ## Gotchas Discovered
 - Pipeline runs failed at 0ms: two bugs in ArchivePanel path construction (wrong subdir + using specName instead of id slug)
 - xterm.js: must use scoped @xterm/xterm package, not legacy xterm
