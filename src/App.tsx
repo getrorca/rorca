@@ -13,6 +13,7 @@ import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
 import WorktreesPanel from './panels/WorktreesPanel';
 import ArchivePanel from './panels/ArchivePanel';
 import CompareRunsPanel from './panels/CompareRunsPanel';
+import GitHubSettingsPanel from './panels/GitHubSettingsPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -77,6 +78,7 @@ function AppContent() {
       {activePanel === 'worktrees' && <WorktreesPanel />}
       {activePanel === 'compare'   && <CompareRunsPanel onBack={() => setActivePanel('pipeline')} />}
       {activePanel === 'archive'   && <ArchivePanel onNavigate={setActivePanel} />}
+      {activePanel === 'github'   && <GitHubSettingsPanel />}
     </Shell>
   );
 }
