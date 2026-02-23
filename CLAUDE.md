@@ -1,4 +1,6 @@
-# CLAUDE.md — Rorcha
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 AI spec orchestration and pipeline management for autonomous Claude Code development.
 
@@ -16,9 +18,14 @@ npx tsc --noEmit           # Frontend type check
 
 # Backend (backend/)
 cd backend && npm run dev  # Express server (:3030) — NO hot-reload, requires restart
+cd backend && npm run mcp  # Run MCP server standalone (for debugging)
 cd backend && npm test     # Jest test suite
 cd backend && npx tsc --noEmit   # Backend type check
 cd backend && npx jest --testPathPattern=<name>  # Single test file
+
+# Frontend tests (Vitest, not Jest)
+npx vitest run             # Run all frontend tests once
+npx vitest                 # Watch mode
 
 # Type check both (run from root)
 bash -c "cd /Users/dimitriteravanessian/rorcha && npx tsc --noEmit; echo FRONTEND:\$?" && bash -c "cd /Users/dimitriteravanessian/rorcha/backend && npx tsc --noEmit; echo BACKEND:\$?"
@@ -44,7 +51,7 @@ Browser (React :5210)  ←→  Express API (:3030)  ←→  SQLite (WAL)
 **Stack**:
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + xterm.js
 - Backend: Express.js + TypeScript + SQLite (`better-sqlite3`, WAL mode, FK on)
-- LLM: `claude --print` (your Claude subscription — no API key)
+- LLM: multi-provider via `SPEC_PROVIDER` env var (`claude` → claude --print, `anthropic` → SDK, `openrouter` → OpenRouter)
 - MCP: 5 tools exposing Rorcha to Claude Code sessions
 
 **Ports**: Frontend 5210, Backend 3030, FinOps sim 5200
@@ -92,6 +99,8 @@ Spec files live in the **project workspace** (not Rorcha):
 ### The Ralph Loop (`run-loop.sh`)
 `run-loop.sh` lives in the **project workspace** (e.g. CashflowAI), NOT in Rorcha. Rorcha's backend finds it at `workspace.path/scripts/run-loop.sh` and spawns it with `bash`.
 
+**Flags**: `--json <file>` (use different spec), `--story <ID>` (run single story), `--dry-run` (preview only)
+
 **Modes** (auto-detected from JSON structure):
 - Implementation: `{ userStories: [...] }` — uses `rorcha.md` skill, `feat:` commits
 - QA: `{ phases: [{ stories: [...] }] }` — test-writing prompt, `test:` commits
@@ -120,7 +129,7 @@ rorcha/
 │       ├── mcp/              # MCP stdio server (5 tools)
 │       └── db/
 │           ├── index.ts      # DB connection + schema bootstrapper
-│           └── migrations/   # SQL migration files (001–005+)
+│           └── migrations/   # SQL migration files (001–006)
 ├── scripts/
 │   ├── run-loop.sh           # Ralph Loop execution engine
 │   ├── self-register.ts      # Self-hosting bootstrap
@@ -169,6 +178,8 @@ WAL mode + FK constraints are enabled on every DB connection in `backend/src/db/
 | `GET /api/pipeline/runs/:id` | Get run + story results |
 | `GET /api/pipeline/runs/:id/output` | SSE stream of raw terminal output (xterm.js) |
 | `GET /api/pipeline/stream` | SSE stream of WAL events (story progress) |
+| `POST /api/context/extract` | Multi-source context extraction (paste/file/URL/Q&A) |
+| `GET /api/wal` | Query WAL event log |
 | `GET /api/worktrees` | List git worktrees |
 | `POST /api/worktrees/merge` | Merge worktree branch to main |
 | `GET /api/workspaces` | List registered workspaces |

@@ -84,3 +84,63 @@ Key decisions:
 - preferred_model column added idempotently via pragma table_info check in db/index.ts (SQLite lacks ADD COLUMN IF NOT EXISTS)
 - Migration 005 is a no-op SQL marker; actual schema change in db/index.ts for idempotency
 - Model parameter is optional everywhere — omitting it falls through the resolution chain gracefully
+
+## Session: Pipeline Trigger UI + Worktree Automation + xterm.js Terminal — DONE
+Files touched:
+- backend/src/routes/pipeline.ts (in-memory output buffer, SSE streaming, auto-worktree spawn, conflict detection)
+- backend/src/routes/specs.ts (add-stories endpoint, repoName in archive response)
+- backend/src/routes/worktrees.ts (POST /merge endpoint with 409 conflict detection)
+- src/panels/ArchivePanel.tsx (Run in Pipeline button, conflict dialog, Add More Stories form, repoName/branchName badges)
+- src/panels/PipelineMonitorPanel.tsx (Terminal | Stories tabs, detailTab state, RunTerminal embed)
+- src/panels/WorktreesPanel.tsx (Merge to main button, mergeState machine)
+- src/components/RunTerminal.tsx (NEW — xterm.js terminal, SSE output stream, ResizeObserver fit)
+- src/App.tsx (onNavigate prop passed to ArchivePanel)
+- scripts/run-loop.sh (absolute path support for --json flag)
+- README.md (pipeline trigger UI, multi-workspace, worktree merge, Ralph Loop section)
+- CLAUDE.md (NEW — comprehensive architecture reference, critical gotchas, all API routes)
+- AGENTS.md (root — updated with all new features)
+- src/AGENTS.md (NEW — frontend patterns, apiFetch, panel navigation, SSE hook)
+- src/panels/AGENTS.md (NEW — panel inventory, PipelineMonitorPanel/ArchivePanel/WorktreesPanel gotchas)
+- src/components/AGENTS.md (NEW — RunTerminal, Shell, Sidebar patterns)
+- src/contexts/AGENTS.md (NEW — WorkspaceContext usage)
+- src/hooks/AGENTS.md (NEW — usePipelineSSE)
+- src/lib/AGENTS.md (NEW — apiFetch pattern)
+- backend/src/AGENTS.md (NEW — Express + SQLite patterns, WAL event pattern, chatComplete)
+- backend/src/routes/AGENTS.md (NEW — all route endpoints documented)
+- backend/src/lib/AGENTS.md (NEW — all lib files documented)
+- backend/src/db/AGENTS.md (NEW — table reference, column details, migration rules)
+- backend/src/db/migrations/AGENTS.md (NEW — migration file inventory, schema quick ref)
+- backend/src/mcp/AGENTS.md (NEW — 6 MCP tools documented)
+- scripts/AGENTS.md (NEW — run-loop.sh usage, context discovery, process isolation)
+- .claude/skills/rorcha.md (UPDATED — comprehensive skill prompt matching CashflowAI pattern)
+
+What was built:
+- "Run in Pipeline" button in Archive spec drawer → spawns run-loop.sh → SSE output in Pipeline Monitor
+- Conflict detection: if workspace has active run → inline prompt "Run in worktree?" → autoWorktree=true
+- Auto-worktree: creates `feat/<specSlug>-<timestamp>` branch + worktree, run-loop.sh executes there
+- "Merge to main" button in WorktreesPanel: POST /api/worktrees/merge, 409 on conflict
+- xterm.js terminal in Pipeline Monitor (Terminal tab default) — identical to iTerm2 output, full ANSI support
+- Late-joiner replay: in-memory output buffer replays all chunks on SSE connect (no missed output)
+- "Add More Stories" form in Archive drawer: number input 1–10, optional brief, appends to spec file
+- repoName + branchName badges on Archive spec cards
+- run-loop.sh absolute path fix for --json flag (was prefix-only, now detects leading /)
+- Comprehensive CLAUDE.md + AGENTS.md documentation throughout entire Rorcha codebase
+
+Key decisions:
+- xterm.js = @xterm/xterm + @xterm/addon-fit (NOT old `xterm` package — different API)
+- Output buffer is in-memory (not DB) — 30min auto-cleanup after process exit
+- SSE chunks base64-encoded (binary-safe for xterm write)
+- Spec path bug fixed: ralph/specs/approved/${spec.id}.json (was specs/approved/${spec.specName}.json)
+- spec.id = filename slug (e.g. "rorcha-feature-enhancements"), spec.specName = human title (display only)
+- CLAUDE.md covers all critical gotchas: spec path, chatComplete .text, 4 Claude env vars, stale runs, xterm package
+
+## Gotchas Discovered
+- Pipeline runs failed at 0ms: two bugs in ArchivePanel path construction (wrong subdir + using specName instead of id slug)
+- xterm.js: must use scoped @xterm/xterm package, not legacy xterm
+- gtimeout --foreground is REQUIRED in run-loop.sh — without it child process gets SIGTTOU → stopped state → 0-byte logs
+- ALL 4 Claude env vars must be unset for nested invocation (not just CLAUDECODE)
+- Port 3030 EADDRINUSE: always kill old process before restart (lsof -ti:3030 | xargs kill -9)
+- Stale pipeline_runs: status stays 'running' after backend restart — UPDATE to failed manually
+
+## Specs Loaded
+- All AGENTS.md files throughout Rorcha codebase (newly created this session)
