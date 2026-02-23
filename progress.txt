@@ -435,5 +435,28 @@ Key decisions:
 - effective_date uses constant default ('') + UPDATE backfill to avoid SQLite "non-constant default" error in ALTER TABLE
 - Cost calculation in SQL uses per-1M if available, falls back to per-1K * factor for old data
 
+## Story V2-045: Budget Alerts and Hard Spending Caps — DONE
+Files touched:
+- backend/src/db/migrations/024_budget_config.sql — new migration for budget_config table
+- backend/src/routes/budget.ts — new route file with POST/GET/DELETE endpoints + checkBudgetThresholds helper
+- backend/src/routes/pipeline.ts — added budget cap guard before pipeline trigger
+- backend/src/server.ts — registered budget route at /api/workspaces/:id/budget
+- backend/src/db/__tests__/db.test.ts — added budget_config to expected table list
+
+What was built:
+- budget_config table: workspace_id (unique), alert_threshold_usd, hard_cap_usd, period (daily/weekly/monthly), notify_emails (JSON array)
+- POST /api/workspaces/:id/budget — upsert budget config with validation (threshold < cap, valid period)
+- GET /api/workspaces/:id/budget — returns config + current spending + remaining budget + alert/cap status
+- DELETE /api/workspaces/:id/budget — removes budget config
+- checkBudgetThresholds() — reusable function that checks spending vs thresholds, emits budget_alert WAL event (deduped per period)
+- Pipeline trigger (POST /api/pipeline/trigger) blocks with 409 when hard_cap_usd exceeded for current period
+
+Key decisions:
+- Period start calculation: daily=midnight, weekly=Monday, monthly=1st of month (all UTC via JS Date)
+- Budget alert WAL dedup: checks wal_events.ts >= period_start to avoid re-emitting within same period
+- Hard cap enforced at pipeline trigger time (not mid-run) — simplest enforcement point
+- Spending calculated from token_usage.cost_usd (built in V2-043/V2-044)
+- notify_emails stored as JSON array in TEXT column (SQLite pattern consistent with existing code)
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
