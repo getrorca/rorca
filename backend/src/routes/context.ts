@@ -29,10 +29,41 @@ const upload = multer({
   },
 });
 
-// ---------------------------------------------------------------------------
-// POST /api/context/extract
-// ---------------------------------------------------------------------------
-
+/**
+ * @swagger
+ * /api/context/extract:
+ *   post:
+ *     tags: [Context]
+ *     summary: Extract context from paste/URL/Q&A for direction layers
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [mode, targetLayer]
+ *             properties:
+ *               mode: { type: string, enum: [paste, url, qa] }
+ *               targetLayer: { type: integer, enum: [1, 2, 3] }
+ *               content: { type: string, description: "Required for paste mode" }
+ *               url: { type: string, description: "Required for url mode" }
+ *               questions: { type: object, description: "Required for qa mode" }
+ *     responses:
+ *       200:
+ *         description: Extracted context
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 yaml: { type: string }
+ *                 confidence: { type: number }
+ *                 extracted: { type: array, items: { type: string } }
+ *                 missing: { type: array, items: { type: string } }
+ *                 rawInput: { type: string }
+ *                 tokenCount: { type: integer }
+ *       400: { description: "Missing mode or invalid targetLayer" }
+ */
 router.post('/extract', async (req: Request, res: Response) => {
   try {
     const body = req.body as ExtractRequest;
@@ -55,10 +86,39 @@ router.post('/extract', async (req: Request, res: Response) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// POST /api/context/upload
-// ---------------------------------------------------------------------------
-
+/**
+ * @swagger
+ * /api/context/upload:
+ *   post:
+ *     tags: [Context]
+ *     summary: Upload files for context extraction
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [files, targetLayer]
+ *             properties:
+ *               files:
+ *                 type: array
+ *                 items: { type: string, format: binary }
+ *               targetLayer: { type: integer, enum: [1, 2, 3] }
+ *     responses:
+ *       200:
+ *         description: Extracted context from files
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 yaml: { type: string }
+ *                 confidence: { type: number }
+ *                 extracted: { type: array, items: { type: string } }
+ *                 missing: { type: array, items: { type: string } }
+ *                 tokenCount: { type: integer }
+ *       400: { description: "No files or invalid targetLayer" }
+ */
 router.post('/upload', upload.array('files'), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[] | undefined;

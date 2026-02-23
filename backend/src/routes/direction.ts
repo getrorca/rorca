@@ -29,7 +29,53 @@ function getTeamLayers(workspaceId: string): { teamL1?: string; teamL2?: string 
   };
 }
 
-// GET /api/direction — fetch a single direction layer
+/**
+ * @swagger
+ * /api/direction:
+ *   get:
+ *     tags: [Direction Stack]
+ *     summary: Fetch a single direction layer
+ *     parameters:
+ *       - in: query
+ *         name: layer
+ *         required: true
+ *         schema: { type: integer, enum: [1, 2, 3] }
+ *       - in: query
+ *         name: workspaceId
+ *         schema: { type: string }
+ *         description: Required for L2 and L3
+ *     responses:
+ *       200:
+ *         description: Direction layer content
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 contentYaml: { type: string }
+ *                 preferredModel: { type: string, nullable: true, description: "Only returned for L3" }
+ *       400: { description: "Invalid layer" }
+ *   put:
+ *     tags: [Direction Stack]
+ *     summary: Upsert a direction layer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [layer, contentYaml]
+ *             properties:
+ *               layer: { type: integer, enum: [1, 2, 3] }
+ *               workspaceId: { type: string }
+ *               domain: { type: string }
+ *               contentYaml: { type: string }
+ *               preferredModel: { type: string, description: "Only valid for layer 3" }
+ *     responses:
+ *       200: { description: "Saved", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+ *       400: { description: "Missing fields or invalid layer" }
+ *       422: { description: "Invalid YAML or schema validation error" }
+ */
 router.get('/', (req: Request, res: Response) => {
   const { layer, workspaceId } = req.query;
 
@@ -126,14 +172,66 @@ router.put('/', (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// GET /api/direction/models — list supported models
+/**
+ * @swagger
+ * /api/direction/models:
+ *   get:
+ *     tags: [Direction Stack]
+ *     summary: List supported LLM models
+ *     responses:
+ *       200:
+ *         description: Model list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 models:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string, example: "claude-sonnet-4-5-20250929" }
+ *                       label: { type: string }
+ */
 router.get('/models', (_req: Request, res: Response) => {
   res.json({
     models: SUPPORTED_MODELS.map(id => ({ id, label: id })),
   });
 });
 
-// GET /api/direction/preview — synthesize the direction stack for a workspace+domain
+/**
+ * @swagger
+ * /api/direction/preview:
+ *   get:
+ *     tags: [Direction Stack]
+ *     summary: Preview synthesized direction stack
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         schema: { type: string }
+ *       - in: query
+ *         name: domain
+ *         schema: { type: string }
+ *       - in: query
+ *         name: brief
+ *         required: true
+ *         schema: { type: string }
+ *         description: The spec brief text (L4)
+ *     responses:
+ *       200:
+ *         description: Synthesized direction stack preview
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 synthesized: { type: string }
+ *                 schemaTableCount: { type: integer, nullable: true }
+ *                 gitCommitCount: { type: integer, nullable: true }
+ *                 warnings: { type: array, items: { type: string } }
+ *       400: { description: "Missing brief" }
+ */
 router.get('/preview', (req: Request, res: Response) => {
   const { workspaceId, domain, brief } = req.query;
 
@@ -221,7 +319,31 @@ router.get('/preview', (req: Request, res: Response) => {
   res.json({ synthesized, schemaTableCount, gitCommitCount, warnings });
 });
 
-// POST /api/direction/synthesize — synthesize with L4/L5 in body
+/**
+ * @swagger
+ * /api/direction/synthesize:
+ *   post:
+ *     tags: [Direction Stack]
+ *     summary: Synthesize direction stack with L4/L5 content
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               workspaceId: { type: string }
+ *               l4SpecBrief: { type: string, description: "Spec brief (L4)" }
+ *               l5Annotations: { type: string, description: "Story annotations (L5)" }
+ *     responses:
+ *       200:
+ *         description: Synthesized direction stack
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 synthesized: { type: string }
+ */
 router.post('/synthesize', (req: Request, res: Response) => {
   const { workspaceId, l4SpecBrief, l5Annotations } = req.body;
 

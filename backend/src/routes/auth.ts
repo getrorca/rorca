@@ -99,7 +99,43 @@ function storeRefreshToken(userId: string, rawToken: string): void {
   ).run(id, userId, tokenHash, expiresAt);
 }
 
-// POST /api/auth/register
+/**
+ * @swagger
+ * /api/auth/register:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Register a new user
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password, displayName]
+ *             properties:
+ *               email: { type: string, format: email, example: "user@example.com" }
+ *               password: { type: string, minLength: 8, example: "securepass123" }
+ *               displayName: { type: string, example: "Jane Doe" }
+ *     responses:
+ *       201:
+ *         description: User created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     email: { type: string }
+ *                     displayName: { type: string }
+ *                 accessToken: { type: string }
+ *                 refreshToken: { type: string }
+ *       400: { description: "Validation error", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+ *       409: { description: "Email already registered" }
+ */
 router.post('/register', (req: Request, res: Response) => {
   const { email, password, displayName } = req.body;
 
@@ -166,7 +202,41 @@ router.post('/register', (req: Request, res: Response) => {
   });
 });
 
-// POST /api/auth/login
+/**
+ * @swagger
+ * /api/auth/login:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Authenticate and get tokens
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               password: { type: string }
+ *     responses:
+ *       200:
+ *         description: Login successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     email: { type: string }
+ *                     displayName: { type: string }
+ *                 accessToken: { type: string }
+ *                 refreshToken: { type: string }
+ *       401: { description: "Invalid email or password" }
+ */
 router.post('/login', (req: Request, res: Response) => {
   const { email, password } = req.body;
 
@@ -212,7 +282,34 @@ router.post('/login', (req: Request, res: Response) => {
   });
 });
 
-// POST /api/auth/refresh
+/**
+ * @swagger
+ * /api/auth/refresh:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Refresh access token (token rotation)
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [refreshToken]
+ *             properties:
+ *               refreshToken: { type: string }
+ *     responses:
+ *       200:
+ *         description: New token pair issued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 accessToken: { type: string }
+ *                 refreshToken: { type: string }
+ *       401: { description: "Invalid or expired refresh token" }
+ */
 router.post('/refresh', (req: Request, res: Response) => {
   const { refreshToken } = req.body;
 
@@ -258,7 +355,26 @@ router.post('/refresh', (req: Request, res: Response) => {
   });
 });
 
-// POST /api/auth/logout
+/**
+ * @swagger
+ * /api/auth/logout:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Revoke a refresh token
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [refreshToken]
+ *             properties:
+ *               refreshToken: { type: string }
+ *     responses:
+ *       200: { description: "Logged out successfully" }
+ *       401: { description: "Invalid or already revoked token" }
+ */
 router.post('/logout', (req: Request, res: Response) => {
   const { refreshToken } = req.body;
 
@@ -281,7 +397,29 @@ router.post('/logout', (req: Request, res: Response) => {
   res.json({ message: 'Logged out successfully' });
 });
 
-// GET /api/auth/me — return current authenticated user
+/**
+ * @swagger
+ * /api/auth/me:
+ *   get:
+ *     tags: [Auth]
+ *     summary: Get current authenticated user
+ *     responses:
+ *       200:
+ *         description: Current user info
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     email: { type: string }
+ *                     displayName: { type: string }
+ *                     githubConnected: { type: boolean }
+ *       401: { description: "Not authenticated" }
+ */
 router.get('/me', authRequired, (req: Request, res: Response) => {
   const authReq = req as Request & { user: AuthUser };
   const user = db.prepare(
@@ -339,7 +477,17 @@ async function githubApiFetch<T>(url: string, token: string): Promise<T> {
   return resp.json() as Promise<T>;
 }
 
-// GET /api/auth/github — redirect to GitHub OAuth authorization URL
+/**
+ * @swagger
+ * /api/auth/github:
+ *   get:
+ *     tags: [Auth]
+ *     summary: Initiate GitHub OAuth flow
+ *     security: []
+ *     responses:
+ *       302: { description: "Redirect to GitHub authorization URL" }
+ *       500: { description: "GitHub OAuth not configured" }
+ */
 router.get('/github', (_req: Request, res: Response) => {
   if (!GITHUB_CLIENT_ID) {
     res.status(500).json({ error: 'GitHub OAuth not configured: GITHUB_CLIENT_ID missing' });
@@ -357,7 +505,23 @@ router.get('/github', (_req: Request, res: Response) => {
   res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
 });
 
-// GET /api/auth/github/callback — exchange code for token, create/link user
+/**
+ * @swagger
+ * /api/auth/github/callback:
+ *   get:
+ *     tags: [Auth]
+ *     summary: GitHub OAuth callback
+ *     security: []
+ *     parameters:
+ *       - in: query
+ *         name: code
+ *         required: true
+ *         schema: { type: string }
+ *         description: Authorization code from GitHub
+ *     responses:
+ *       302: { description: "Redirect to frontend with tokens in URL fragment" }
+ *       400: { description: "Missing authorization code" }
+ */
 router.get('/github/callback', async (req: Request, res: Response) => {
   const { code } = req.query;
 
