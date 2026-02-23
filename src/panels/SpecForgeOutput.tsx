@@ -101,6 +101,7 @@ function EmptyState() {
 function StoriesTab({ stories }: { stories: Story[] }) {
   const [showRaw, setShowRaw] = useState(false);
   const [copied, setCopied] = useState(false);
+  const allStoryIds = new Set(stories.map(s => s.id));
 
   const rawJson = JSON.stringify(stories, null, 2);
 
@@ -141,7 +142,7 @@ function StoriesTab({ stories }: { stories: Story[] }) {
       ) : (
         <div className="space-y-2">
           {stories.map((story) => (
-            <StoryCard key={story.id} story={story} />
+            <StoryCard key={story.id} story={story} allStoryIds={allStoryIds} />
           ))}
         </div>
       )}

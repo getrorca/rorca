@@ -25,6 +25,7 @@ import { InlineStoryEditor } from '../components/InlineStoryEditor';
 import DependencyGraph from '../components/DependencyGraph';
 import MermaidDiagram from '../components/MermaidDiagram';
 import type { PanelId } from '../components/Sidebar';
+import { ReadinessRing } from '../components/ReadinessRing';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -44,6 +45,7 @@ interface ArchiveSpec {
   storyTitles: string[];
   repoName?: string;
   branchName?: string;
+  readinessPercent?: number;
 }
 
 interface ArchiveResponse {
@@ -58,6 +60,7 @@ interface SpecDetail {
   stories?: Story[];
   diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
   mermaidDiagram?: string;
+  readinessPercent?: number;
   [key: string]: unknown;
 }
 
@@ -339,7 +342,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                       spec.id === selectedId ? 'bg-accent/10' : 'hover:bg-panel'
                     }`}
                   >
-                    {/* Row 1: status badge + date + story count */}
+                    {/* Row 1: status badge + date + story count + readiness */}
                     <div className="flex items-center justify-between mb-1.5">
                       <div className="flex items-center gap-2">
                         <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${cfg.className}`}>
@@ -351,6 +354,9 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
+                        {spec.readinessPercent != null && (
+                          <ReadinessRing percent={spec.readinessPercent} size={28} />
+                        )}
                         <span className="text-[10px] text-muted flex items-center gap-1">
                           <Clock size={10} />
                           {formatDate(spec.generatedAt)}
@@ -843,6 +849,7 @@ function StoriesTab({
   }
 
   const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
+  const allStoryIds = new Set(stories.map(s => s.id));
 
   return (
     <div className="p-4 space-y-2">
@@ -869,6 +876,7 @@ function StoriesTab({
           <StoryCard
             key={story.id}
             story={story}
+            allStoryIds={allStoryIds}
             onEdit={() => setEditingStoryId(story.id)}
             onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
           />
