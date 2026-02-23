@@ -542,4 +542,69 @@ export function authRequired(req: Request, res: Response, next: NextFunction): v
 /** @deprecated Use authRequired instead */
 export const requireAuth = authRequired;
 
+// ─── Role-based permission middleware ───
+
+export type TeamRole = 'admin' | 'editor' | 'viewer';
+
+const ROLE_HIERARCHY: Record<TeamRole, number> = {
+  viewer: 0,
+  editor: 1,
+  admin: 2,
+};
+
+/**
+ * Middleware factory that enforces a minimum team role for the request.
+ * Extracts teamId from req.params.teamId, req.params.id (team routes),
+ * req.query.teamId, or req.body.teamId.
+ *
+ * Must be used AFTER authRequired (user must be authenticated).
+ */
+export function requireRole(minRole: TeamRole) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const user = (req as Request & { user: AuthUser }).user;
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    const teamId =
+      req.params.teamId ||
+      req.params.id ||
+      (req.query.teamId as string) ||
+      req.body?.teamId;
+
+    if (!teamId) {
+      res.status(400).json({ error: 'Team ID is required' });
+      return;
+    }
+
+    // System user (internal scheduler) bypasses role checks
+    if (user.id === 'system') {
+      next();
+      return;
+    }
+
+    const membership = db
+      .prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?')
+      .get(teamId, user.id) as { role: string } | undefined;
+
+    if (!membership) {
+      res.status(403).json({ error: 'You are not a member of this team' });
+      return;
+    }
+
+    const userLevel = ROLE_HIERARCHY[membership.role as TeamRole];
+    const requiredLevel = ROLE_HIERARCHY[minRole];
+
+    if (userLevel === undefined || userLevel < requiredLevel) {
+      res.status(403).json({ error: `Insufficient permissions: requires ${minRole} role` });
+      return;
+    }
+
+    // Attach team role to request for downstream use
+    (req as Request & { user: AuthUser; teamRole: TeamRole }).teamRole = membership.role as TeamRole;
+    next();
+  };
+}
+
 export default router;
