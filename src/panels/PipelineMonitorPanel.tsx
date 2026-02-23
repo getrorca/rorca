@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
-import { Play, Terminal, ChevronDown, ChevronRight, Copy, Check, List } from 'lucide-react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Play, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -39,6 +39,13 @@ interface DerivedStory {
   title: string;
   elapsed: string;
   startedAt: string | null;
+  priority: number;  // 1=urgent, 2=high, 3=normal, 4=low
+}
+
+interface SpecStory {
+  id: string;
+  title: string;
+  priority?: number;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -56,6 +63,13 @@ const STORY_ICONS: Record<StoryStatus, string> = {
   running: '🔄',
   pending: '⏳',
   retry: '🔁',
+};
+
+const PRIORITY_CONFIG: Record<number, { label: string; className: string }> = {
+  1: { label: 'Urgent', className: 'bg-red-500/20 text-red-400 border-red-500/30' },
+  2: { label: 'High', className: 'bg-orange-500/20 text-orange-400 border-orange-500/30' },
+  3: { label: 'Normal', className: 'bg-zinc-500/20 text-zinc-400 border-zinc-500/30' },
+  4: { label: 'Low', className: 'bg-zinc-500/10 text-zinc-500 border-zinc-500/20' },
 };
 
 function specName(specPath: string): string {
@@ -104,6 +118,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           title: payload.title || e.story_id,
           elapsed: '',
           startedAt: e.ts,
+          priority: existing?.priority ?? 3,
         });
         break;
       case 'story_passed':
@@ -117,6 +132,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
             title: payload.title || e.story_id,
             elapsed: payload.elapsed || '',
             startedAt: e.ts,
+            priority: 3,
           });
         }
         break;
@@ -131,6 +147,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
             title: payload.title || e.story_id,
             elapsed: payload.elapsed || '',
             startedAt: e.ts,
+            priority: 3,
           });
         }
         break;
@@ -160,6 +177,9 @@ export default function PipelineMonitorPanel() {
   const [copied, setCopied] = useState(false);
   const [showStartHelp, setShowStartHelp] = useState(false);
   const [detailTab, setDetailTab] = useState<DetailTab>('terminal');
+  const [specStories, setSpecStories] = useState<SpecStory[]>([]);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const dragSrcId = useRef<string | null>(null);
 
   // SSE for live updates
   const sseEvents = usePipelineSSE(selectedRunId ? String(selectedRunId) : null);
@@ -188,6 +208,32 @@ export default function PipelineMonitorPanel() {
       .catch(console.error);
   }, [selectedRunId]);
 
+  // Fetch spec stories (with priority data) for the selected run
+  useEffect(() => {
+    if (!selectedRunDetail || !workspaceId) {
+      setSpecStories([]);
+      return;
+    }
+    const specPath = selectedRunDetail.run.spec_path;
+    // Extract specId from path like "ralph/specs/approved/my-slug.json"
+    const filename = specPath.split('/').pop() || '';
+    const specId = filename.replace(/\.json$/, '');
+    if (!specId) return;
+
+    apiFetch<{ userStories?: SpecStory[] }>(`/api/specs/${specId}?workspaceId=${workspaceId}`)
+      .then((data) => setSpecStories(data.userStories ?? []))
+      .catch(() => setSpecStories([]));
+  }, [selectedRunDetail, workspaceId]);
+
+  // Build priority lookup from spec stories
+  const priorityMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const s of specStories) {
+      map.set(s.id, s.priority ?? 3);
+    }
+    return map;
+  }, [specStories]);
+
   // Derive live stories from SSE events, merged with DB story results
   const derivedStories = useMemo(() => {
     const fromDB: DerivedStory[] = (selectedRunDetail?.stories || []).map((s) => ({
@@ -196,6 +242,7 @@ export default function PipelineMonitorPanel() {
       title: s.story_id,
       elapsed: elapsedTime(s.started_at, s.finished_at),
       startedAt: s.started_at,
+      priority: priorityMap.get(s.story_id) ?? 3,
     }));
 
     const fromSSE = deriveStoriesFromEvents(sseEvents);
@@ -205,8 +252,35 @@ export default function PipelineMonitorPanel() {
     for (const s of fromDB) merged.set(s.storyId, s);
     for (const s of fromSSE) merged.set(s.storyId, s);
 
-    return Array.from(merged.values());
-  }, [selectedRunDetail, sseEvents]);
+    // If we have spec data but no DB/SSE entries yet, seed from spec stories
+    if (specStories.length > 0 && merged.size === 0) {
+      for (const s of specStories) {
+        merged.set(s.id, {
+          storyId: s.id,
+          status: 'pending',
+          title: s.title,
+          elapsed: '',
+          startedAt: null,
+          priority: s.priority ?? 3,
+        });
+      }
+    }
+
+    // Merge priority from spec into all entries
+    for (const [id, story] of merged) {
+      story.priority = priorityMap.get(id) ?? story.priority;
+      // Also use spec title if we only have the storyId
+      const specStory = specStories.find(s => s.id === id);
+      if (specStory && story.title === story.storyId) {
+        story.title = specStory.title;
+      }
+    }
+
+    // Sort by priority (ascending: 1=urgent first), then by storyId for stability
+    return Array.from(merged.values()).sort((a, b) =>
+      a.priority !== b.priority ? a.priority - b.priority : a.storyId.localeCompare(b.storyId)
+    );
+  }, [selectedRunDetail, sseEvents, specStories, priorityMap]);
 
   const completedCount = derivedStories.filter((s) => s.status === 'pass' || s.status === 'fail').length;
   const totalCount = derivedStories.length;
@@ -252,6 +326,59 @@ export default function PipelineMonitorPanel() {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  // ─── Priority update via API ────────────────────────────────────────────
+
+  const getSpecId = useCallback(() => {
+    if (!selectedRunDetail) return null;
+    const specPath = selectedRunDetail.run.spec_path;
+    const filename = specPath.split('/').pop() || '';
+    return filename.replace(/\.json$/, '') || null;
+  }, [selectedRunDetail]);
+
+  const updateStoryPriority = useCallback(async (storyId: string, newPriority: number) => {
+    const specId = getSpecId();
+    if (!specId || !workspaceId) return;
+    try {
+      await apiFetch(`/api/specs/${specId}/stories/${storyId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, priority: newPriority }),
+      });
+      // Refresh spec stories to pick up the change
+      const data = await apiFetch<{ userStories?: SpecStory[] }>(`/api/specs/${specId}?workspaceId=${workspaceId}`);
+      setSpecStories(data.userStories ?? []);
+    } catch (err) {
+      console.error('[Priority] Update failed:', err);
+    }
+  }, [getSpecId, workspaceId]);
+
+  // ─── Drag-to-reorder handlers ──────────────────────────────────────────
+
+  const handleDragStart = useCallback((storyId: string) => {
+    dragSrcId.current = storyId;
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent, storyId: string) => {
+    e.preventDefault();
+    setDragOverId(storyId);
+  }, []);
+
+  const handleDragLeave = useCallback(() => {
+    setDragOverId(null);
+  }, []);
+
+  const handleDrop = useCallback((targetStoryId: string) => {
+    setDragOverId(null);
+    const srcId = dragSrcId.current;
+    dragSrcId.current = null;
+    if (!srcId || srcId === targetStoryId) return;
+
+    // Assign the dragged story the same priority as the drop target
+    const targetStory = derivedStories.find(s => s.storyId === targetStoryId);
+    if (!targetStory) return;
+    updateStoryPriority(srcId, targetStory.priority);
+  }, [derivedStories, updateStoryPriority]);
 
   // ─── Empty State ─────────────────────────────────────────────────────────
 
@@ -465,44 +592,63 @@ export default function PipelineMonitorPanel() {
                       Waiting for stories...
                     </div>
                   ) : (
-                    derivedStories.map((story) => (
-                      <div key={story.storyId}>
-                        <button
-                          onClick={() => handleStoryExpand(story.storyId)}
-                          className="w-full text-left px-4 py-2 border-b border-[var(--border)] hover:bg-[var(--surface)] transition-colors flex items-center gap-3"
+                    derivedStories.map((story) => {
+                      const pConfig = PRIORITY_CONFIG[story.priority] || PRIORITY_CONFIG[3];
+                      const canDrag = story.status === 'pending';
+                      return (
+                        <div
+                          key={story.storyId}
+                          draggable={canDrag}
+                          onDragStart={() => canDrag && handleDragStart(story.storyId)}
+                          onDragOver={(e) => canDrag && handleDragOver(e, story.storyId)}
+                          onDragLeave={handleDragLeave}
+                          onDrop={() => handleDrop(story.storyId)}
+                          onDragEnd={() => { dragSrcId.current = null; setDragOverId(null); }}
+                          className={dragOverId === story.storyId ? 'border-t-2 border-[var(--accent)]' : ''}
                         >
-                          <span className="w-4 text-center flex-shrink-0">
-                            {expandedStory === story.storyId ? (
-                              <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                            ) : (
-                              <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                          <button
+                            onClick={() => handleStoryExpand(story.storyId)}
+                            className="w-full text-left px-4 py-2 border-b border-[var(--border)] hover:bg-[var(--surface)] transition-colors flex items-center gap-2"
+                          >
+                            {canDrag && (
+                              <GripVertical className="w-3 h-3 text-[var(--text-muted)] flex-shrink-0 cursor-grab opacity-40 hover:opacity-100" />
                             )}
-                          </span>
-                          <span className="font-mono text-xs text-[var(--text-muted)] w-16 flex-shrink-0">
-                            {story.storyId}
-                          </span>
-                          <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
-                          <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
-                            {story.status}
-                          </span>
-                          <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
-                            {story.elapsed && `(${story.elapsed})`}
-                          </span>
-                          <span className="text-sm truncate min-w-0">{story.title}</span>
-                        </button>
+                            <span className="w-4 text-center flex-shrink-0">
+                              {expandedStory === story.storyId ? (
+                                <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                              ) : (
+                                <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                              )}
+                            </span>
+                            <span className="font-mono text-xs text-[var(--text-muted)] w-16 flex-shrink-0">
+                              {story.storyId}
+                            </span>
+                            <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded border flex-shrink-0 ${pConfig.className}`}>
+                              {pConfig.label}
+                            </span>
+                            <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
+                            <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
+                              {story.status}
+                            </span>
+                            <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
+                              {story.elapsed && `(${story.elapsed})`}
+                            </span>
+                            <span className="text-sm truncate min-w-0">{story.title}</span>
+                          </button>
 
-                        {/* Expanded log tail */}
-                        {expandedStory === story.storyId && (
-                          <div className="border-b border-[var(--border)] bg-[var(--bg)]">
-                            <div className="max-h-64 overflow-y-auto p-3">
-                              <pre className="text-xs font-mono text-[var(--text-muted)] whitespace-pre-wrap break-all leading-relaxed">
-                                {logLines.length > 0 ? logLines.join('\n') : '(Loading...)'}
-                              </pre>
+                          {/* Expanded log tail */}
+                          {expandedStory === story.storyId && (
+                            <div className="border-b border-[var(--border)] bg-[var(--bg)]">
+                              <div className="max-h-64 overflow-y-auto p-3">
+                                <pre className="text-xs font-mono text-[var(--text-muted)] whitespace-pre-wrap break-all leading-relaxed">
+                                  {logLines.length > 0 ? logLines.join('\n') : '(Loading...)'}
+                                </pre>
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </div>
-                    ))
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </>
