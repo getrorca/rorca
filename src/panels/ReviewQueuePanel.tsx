@@ -7,6 +7,10 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
+  MinusCircle,
+  PlusCircle,
+  Trash2,
+  Gauge,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -519,9 +523,61 @@ function PreviewStoriesTab({
 }) {
   const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
   const [localStories, setLocalStories] = useState(stories);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [priorityValue, setPriorityValue] = useState(3);
+  const [showPriorityPicker, setShowPriorityPicker] = useState(false);
 
   // Sync when prop changes
-  useEffect(() => { setLocalStories(stories); }, [stories]);
+  useEffect(() => {
+    setLocalStories(stories);
+    setSelectedIds(new Set()); // clear selection on story data refresh
+  }, [stories]);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === localStories.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(localStories.map(s => s.id)));
+    }
+  };
+
+  const executeBulkAction = async (action: string, extra?: Record<string, unknown>) => {
+    if (selectedIds.size === 0) return;
+    setBulkLoading(true);
+    try {
+      const result = await apiFetch<{ ok: boolean; stories: Story[] }>(
+        `/api/specs/${specId}/stories/bulk`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workspaceId,
+            action,
+            storyIds: [...selectedIds],
+            ...extra,
+          }),
+        },
+      );
+      if (result.stories) {
+        setLocalStories(result.stories);
+      }
+      setSelectedIds(new Set());
+      setShowPriorityPicker(false);
+    } catch (err) {
+      console.error('Bulk action failed:', err);
+    } finally {
+      setBulkLoading(false);
+    }
+  };
 
   if (localStories.length === 0) {
     return (
@@ -542,13 +598,32 @@ function PreviewStoriesTab({
     return ac.length >= 3 && deps.every(d => allStoryIds.has(d));
   }).length;
 
+  const hasSelection = selectedIds.size > 0;
+  const allSelected = selectedIds.size === localStories.length;
+
   return (
     <div className="p-4 space-y-2">
+      {/* Header with Select All + stats */}
       <div className="flex items-center justify-between">
-        <span className="text-xs text-muted">
-          {localStories.length} {localStories.length === 1 ? 'story' : 'stories'}
-          <span className="ml-2 text-muted/70">{readyCount}/{localStories.length} ready</span>
-        </span>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              ref={(el) => { if (el) el.indeterminate = hasSelection && !allSelected; }}
+              onChange={toggleSelectAll}
+              className="w-3.5 h-3.5 rounded border-border accent-accent cursor-pointer"
+            />
+            <span className="text-xs text-muted">
+              {hasSelection ? `${selectedIds.size} selected` : 'Select all'}
+            </span>
+          </label>
+          <span className="text-xs text-muted/50">|</span>
+          <span className="text-xs text-muted">
+            {localStories.length} {localStories.length === 1 ? 'story' : 'stories'}
+            <span className="ml-2 text-muted/70">{readyCount}/{localStories.length} ready</span>
+          </span>
+        </div>
         {hasComplexity && (
           <div className="flex items-center gap-3">
             <span className="text-xs text-muted">
@@ -566,6 +641,75 @@ function PreviewStoriesTab({
           </div>
         )}
       </div>
+
+      {/* Bulk action toolbar */}
+      {hasSelection && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded border border-accent/30 bg-accent/5">
+          <span className="text-xs font-medium text-text mr-1">
+            {selectedIds.size} selected
+          </span>
+          <button
+            onClick={() => executeBulkAction('exclude')}
+            disabled={bulkLoading}
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded border border-border text-warning hover:bg-warning/10 transition-colors disabled:opacity-50"
+            title="Exclude selected stories"
+          >
+            <MinusCircle size={12} />
+            Exclude
+          </button>
+          <button
+            onClick={() => executeBulkAction('include')}
+            disabled={bulkLoading}
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded border border-border text-success hover:bg-success/10 transition-colors disabled:opacity-50"
+            title="Include selected stories"
+          >
+            <PlusCircle size={12} />
+            Include
+          </button>
+          <button
+            onClick={() => executeBulkAction('delete')}
+            disabled={bulkLoading}
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded border border-border text-error hover:bg-error/10 transition-colors disabled:opacity-50"
+            title="Delete selected stories"
+          >
+            <Trash2 size={12} />
+            Delete
+          </button>
+          <div className="relative">
+            <button
+              onClick={() => setShowPriorityPicker(!showPriorityPicker)}
+              disabled={bulkLoading}
+              className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded border border-border text-accent hover:bg-accent/10 transition-colors disabled:opacity-50"
+              title="Set priority for selected stories"
+            >
+              <Gauge size={12} />
+              Priority
+            </button>
+            {showPriorityPicker && (
+              <div className="absolute top-full left-0 mt-1 p-2 rounded border border-border bg-bg shadow-lg z-20 flex items-center gap-2">
+                <select
+                  value={priorityValue}
+                  onChange={(e) => setPriorityValue(Number(e.target.value))}
+                  className="px-2 py-1 text-xs rounded border border-border bg-panel text-text"
+                >
+                  {[1, 2, 3, 4, 5].map(v => (
+                    <option key={v} value={v}>C{v}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => executeBulkAction('set_priority', { priority: priorityValue })}
+                  disabled={bulkLoading}
+                  className="px-2 py-1 text-xs font-medium rounded bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
+                >
+                  Apply
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Story cards */}
       {localStories.map((story) =>
         editingStoryId === story.id ? (
           <InlineStoryEditor
@@ -585,6 +729,8 @@ function PreviewStoriesTab({
             story={story}
             allStoryIds={allStoryIds}
             onEdit={() => setEditingStoryId(story.id)}
+            selected={selectedIds.has(story.id)}
+            onToggleSelect={() => toggleSelect(story.id)}
           />
         )
       )}

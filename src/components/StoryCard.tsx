@@ -33,11 +33,15 @@ export function StoryCard({
   onToggleExclude,
   onEdit,
   allStoryIds,
+  selected,
+  onToggleSelect,
 }: {
   story: Story;
   onToggleExclude?: () => void;
   onEdit?: () => void;
   allStoryIds?: Set<string>;
+  selected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -48,10 +52,18 @@ export function StoryCard({
 
   return (
     <div className={`border rounded bg-panel transition-opacity ${
-      isDeferred ? 'border-border/50 opacity-50' : isNotReady ? 'border-warning/40' : 'border-border'
+      selected ? 'border-accent ring-1 ring-accent/30' : isDeferred ? 'border-border/50 opacity-50' : isNotReady ? 'border-warning/40' : 'border-border'
     }`}>
       <div className="px-3 py-2.5">
         <div className="flex items-start gap-2">
+          {onToggleSelect && (
+            <input
+              type="checkbox"
+              checked={selected ?? false}
+              onChange={onToggleSelect}
+              className="shrink-0 mt-1 w-3.5 h-3.5 rounded border-border accent-accent cursor-pointer"
+            />
+          )}
           <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded mt-0.5 ${
             isDone
               ? 'bg-success/15 text-success'
