@@ -58,6 +58,7 @@ interface SpecSummary {
   workspacePath: string;
   readinessPercent: number;
   tags: string[];
+  forkedFrom?: string;
 }
 
 interface SpecVersionRow {
@@ -99,7 +100,7 @@ function safeReaddir(dir: string): string[] {
   }
 }
 
-function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string } {
+function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string } {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
 }
@@ -151,6 +152,7 @@ function buildSummary(
     workspacePath,
     readinessPercent: computeReadiness(stories),
     tags: workspaceId ? getSpecTags(specId, workspaceId) : [],
+    ...(content.forkedFrom ? { forkedFrom: content.forkedFrom } : {}),
   };
 }
 
@@ -917,6 +919,7 @@ interface ArchiveSpecSummary extends SpecSummary {
   storyTitles: string[];
   repoName: string;
   branchName?: string;
+  forkedFrom?: string;
   matchSnippets?: MatchSnippet[];
   relevanceScore?: number;
 }
@@ -940,7 +943,8 @@ function buildArchiveSummary(
   const stories = (content as any).userStories ?? (content as any).stories ?? [];
   const storyTitles = stories.map((s: any) => s.title ?? s.id ?? '').filter(Boolean);
   const repoName = path.basename(workspacePath);
-  return { ...base, storyTitles, repoName, branchName };
+  const forkedFrom = (content as any).forkedFrom as string | undefined;
+  return { ...base, storyTitles, repoName, branchName, ...(forkedFrom ? { forkedFrom } : {}) };
 }
 
 /** Extract searchable text fields from a parsed spec */
@@ -1802,6 +1806,114 @@ router.get('/:specId', (req: Request, res: Response) => {
     res.json({ ...content, readinessPercent: computeReadiness(stories) });
   } catch (error: any) {
     console.error('[Specs] Get error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-013: POST /:specId/fork — Deep copy spec with new slug ────────────────
+
+router.post('/:specId/fork', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const workspaceId = req.body.workspaceId as string;
+    const title = req.body.title as string | undefined;
+    const brief = req.body.brief as string | undefined;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Find the source spec in pending or approved
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let sourceFile: string;
+    if (fs.existsSync(pendingFile)) {
+      sourceFile = pendingFile;
+    } else if (fs.existsSync(approvedFile)) {
+      sourceFile = approvedFile;
+    } else {
+      res.status(404).json({ error: `Spec '${specId}' not found` });
+      return;
+    }
+
+    const sourceContent = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
+
+    // Determine fork slug: original-slug-fork-N
+    const baseSlug = `${specId}-fork`;
+    let forkNumber = 1;
+    while (
+      fs.existsSync(path.join(pendingDir, `${baseSlug}-${forkNumber}.json`)) ||
+      fs.existsSync(path.join(approvedDir, `${baseSlug}-${forkNumber}.json`))
+    ) {
+      forkNumber++;
+    }
+    const forkSlug = `${baseSlug}-${forkNumber}`;
+
+    // Deep copy: reset passes, add forkedFrom, update metadata
+    const stories: UserStory[] = (sourceContent.userStories ?? sourceContent.stories ?? []).map((s: UserStory) => ({
+      ...s,
+      passes: false,
+    }));
+
+    const forkedSpec = {
+      ...sourceContent,
+      title: title ?? `${sourceContent.title ?? specId} (Fork ${forkNumber})`,
+      userStories: stories,
+      forkedFrom: specId,
+      generatedAt: new Date().toISOString(),
+    };
+
+    // Optionally override the brief
+    if (brief) {
+      forkedSpec.brief = brief;
+    }
+
+    // Remove stories key if it existed (normalize to userStories)
+    delete forkedSpec.stories;
+
+    // Write to pending/
+    fs.mkdirSync(pendingDir, { recursive: true });
+    const forkFile = path.join(pendingDir, `${forkSlug}.json`);
+    fs.writeFileSync(forkFile, JSON.stringify(forkedSpec, null, 2));
+
+    // Copy tags from source spec
+    const sourceTags = getSpecTags(specId, workspaceId);
+    for (const tag of sourceTags) {
+      db.prepare(
+        'INSERT OR IGNORE INTO spec_tags (spec_id, workspace_id, tag_name) VALUES (?, ?, ?)'
+      ).run(forkSlug, workspaceId, tag);
+    }
+
+    // Snapshot version
+    snapshotVersion(forkSlug, JSON.stringify(forkedSpec), 'pending');
+
+    // Emit WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_forked', ?, ?, 'user', ?)`
+    ).run(forkSlug, workspaceId, JSON.stringify({ forkedFrom: specId, title: forkedSpec.title }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({
+      ok: true,
+      forkId: forkSlug,
+      forkedFrom: specId,
+      path: forkFile,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Fork error:', error);
     res.status(500).json({ error: error.message });
   }
 });
