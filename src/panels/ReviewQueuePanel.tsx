@@ -16,6 +16,7 @@ import { InlineStoryEditor } from '../components/InlineStoryEditor';
 import DependencyGraph from '../components/DependencyGraph';
 import MermaidDiagram from '../components/MermaidDiagram';
 import { useToast, ToastContainer } from '../components/Toast';
+import { ReadinessRing } from '../components/ReadinessRing';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -26,6 +27,7 @@ interface SpecSummary {
   status: 'pending' | 'approved';
   generatedAt: string;
   approvedAt?: string;
+  readinessPercent?: number;
 }
 
 interface SpecDetail {
@@ -35,6 +37,7 @@ interface SpecDetail {
   diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
   mermaidDiagram?: string;
   model?: string;
+  readinessPercent?: number;
   [key: string]: unknown;
 }
 
@@ -267,10 +270,15 @@ export default function ReviewQueuePanel() {
                     {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
                   </span>
                 </div>
-                <span className="text-[10px] text-muted flex items-center gap-1">
-                  <Clock size={10} />
-                  {relativeTime(spec.generatedAt)}
-                </span>
+                <div className="flex items-center gap-2">
+                  {spec.readinessPercent != null && (
+                    <ReadinessRing percent={spec.readinessPercent} size={28} />
+                  )}
+                  <span className="text-[10px] text-muted flex items-center gap-1">
+                    <Clock size={10} />
+                    {relativeTime(spec.generatedAt)}
+                  </span>
+                </div>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-sm font-mono text-text truncate pr-2">
@@ -527,12 +535,19 @@ function PreviewStoriesTab({
   const hasComplexity = complexityScores.length > 0;
   const totalComplexity = complexityScores.reduce((sum, c) => sum + c, 0);
   const avgComplexity = hasComplexity ? totalComplexity / complexityScores.length : 0;
+  const allStoryIds = new Set(localStories.map(s => s.id));
+  const readyCount = localStories.filter(s => {
+    const ac = s.acceptanceCriteria ?? [];
+    const deps = s.dependsOn ?? s.dependencies ?? [];
+    return ac.length >= 3 && deps.every(d => allStoryIds.has(d));
+  }).length;
 
   return (
     <div className="p-4 space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted">
           {localStories.length} {localStories.length === 1 ? 'story' : 'stories'}
+          <span className="ml-2 text-muted/70">{readyCount}/{localStories.length} ready</span>
         </span>
         {hasComplexity && (
           <div className="flex items-center gap-3">
@@ -568,6 +583,7 @@ function PreviewStoriesTab({
           <StoryCard
             key={story.id}
             story={story}
+            allStoryIds={allStoryIds}
             onEdit={() => setEditingStoryId(story.id)}
           />
         )

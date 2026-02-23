@@ -56,6 +56,7 @@ interface SpecSummary {
   generatedAt: string;
   approvedAt?: string;
   workspacePath: string;
+  readinessPercent: number;
 }
 
 interface SpecVersionRow {
@@ -102,6 +103,25 @@ function parseSpecFile(filePath: string): { title?: string; userStories?: unknow
   return JSON.parse(raw);
 }
 
+/**
+ * Compute readiness percentage for a spec.
+ * A story is "ready" when it has >= 3 acceptance criteria AND no unresolved dependencies.
+ * Unresolved = dependsOn references a story ID not present in the spec.
+ */
+function computeReadiness(stories: any[]): number {
+  if (stories.length === 0) return 0;
+  const storyIds = new Set(stories.map((s: any) => s.id));
+  let readyCount = 0;
+  for (const story of stories) {
+    const ac: unknown[] = story.acceptanceCriteria ?? [];
+    const deps: string[] = story.dependsOn ?? story.dependencies ?? [];
+    const hasEnoughAC = ac.length >= 3;
+    const allDepsResolved = deps.every((d: string) => storyIds.has(d));
+    if (hasEnoughAC && allDepsResolved) readyCount++;
+  }
+  return Math.round((readyCount / stories.length) * 100);
+}
+
 function buildSummary(
   filePath: string,
   fileName: string,
@@ -110,14 +130,16 @@ function buildSummary(
 ): SpecSummary {
   const content = parseSpecFile(filePath);
   const stat = fs.statSync(filePath);
+  const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
   return {
     id: fileName.replace('.json', ''),
     specName: content.title ?? fileName.replace('.json', ''),
-    storyCount: Array.isArray(content.userStories) ? content.userStories.length : 0,
+    storyCount: stories.length,
     status,
     generatedAt: content.generatedAt ?? stat.birthtime.toISOString(),
     ...(status === 'approved' ? { approvedAt: stat.mtime.toISOString() } : {}),
     workspacePath,
+    readinessPercent: computeReadiness(stories),
   };
 }
 
@@ -1171,6 +1193,7 @@ router.get('/archive', (req: Request, res: Response) => {
           workspacePath: workspace.path,
           repoName: path.basename(workspace.path),
           storyTitles: [],
+          readinessPercent: 0,
         });
       }
     }
@@ -1702,7 +1725,7 @@ router.get('/:specId', (req: Request, res: Response) => {
     const pendingFile = path.join(pendingDir, `${specId}.json`);
     const approvedFile = path.join(approvedDir, `${specId}.json`);
 
-    let content: unknown;
+    let content: any;
     if (fs.existsSync(pendingFile)) {
       content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
     } else if (fs.existsSync(approvedFile)) {
@@ -1712,7 +1735,8 @@ router.get('/:specId', (req: Request, res: Response) => {
       return;
     }
 
-    res.json(content);
+    const stories: any[] = content.userStories ?? content.stories ?? [];
+    res.json({ ...content, readinessPercent: computeReadiness(stories) });
   } catch (error: any) {
     console.error('[Specs] Get error:', error);
     res.status(500).json({ error: error.message });
