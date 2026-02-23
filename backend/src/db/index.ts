@@ -29,6 +29,31 @@ export function runMigrations() {
   if (!runCols.some(c => c.name === 'worktree_path')) {
     db.exec('ALTER TABLE pipeline_runs ADD COLUMN worktree_path TEXT');
   }
+
+  // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
+  const tableSql = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (!tableSql.includes('partial_failure')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE pipeline_runs_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec_path TEXT NOT NULL,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+        status TEXT NOT NULL CHECK(status IN ('running','paused','done','failed','partial_failure')),
+        pid INTEGER,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT,
+        branch_name TEXT,
+        worktree_path TEXT
+      );
+      INSERT INTO pipeline_runs_new SELECT id, spec_path, workspace_id, status, pid, started_at, finished_at, branch_name, worktree_path FROM pipeline_runs;
+      DROP TABLE pipeline_runs;
+      ALTER TABLE pipeline_runs_new RENAME TO pipeline_runs;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 runMigrations();
