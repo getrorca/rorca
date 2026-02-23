@@ -1,6 +1,6 @@
-import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive } from 'lucide-react';
+import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'queue' | 'pipeline' | 'worktrees' | 'archive';
+export type PanelId = 'forge' | 'stack' | 'queue' | 'pipeline' | 'worktrees' | 'archive' | 'compare';
 
 const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'forge',     label: 'Spec Forge',       icon: Wand2     },
@@ -8,6 +8,7 @@ const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'queue',     label: 'Review Queue',      icon: ListChecks},
   { id: 'pipeline',  label: 'Pipeline Monitor',  icon: Activity  },
   { id: 'worktrees', label: 'Worktree Manager',  icon: GitBranch },
+  { id: 'compare',   label: 'Compare Runs',       icon: ArrowLeftRight },
   { id: 'archive',   label: 'Archive',           icon: Archive   },
 ];
 
