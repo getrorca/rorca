@@ -7,6 +7,8 @@ import simpleGit from 'simple-git';
 import { db } from '../db/index';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
+import { estimateDryRunCost } from '../lib/cost-estimator';
+import { DEFAULT_MODEL, isValidModel, type SupportedModel } from '../lib/llm-client';
 
 /** Persistent log file path for a run — survives backend restarts */
 const runLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
@@ -65,7 +67,7 @@ interface StoryResultRow {
 
 router.post('/trigger', async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree } = req.body;
+    const { specPath, workspaceId, autoWorktree, dryRun } = req.body;
 
     if (!specPath || !workspaceId) {
       res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
@@ -74,9 +76,41 @@ router.post('/trigger', async (req: Request, res: Response) => {
 
     // 1. Look up workspace path
     const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
-      { id: string; label: string; path: string } | undefined;
+      { id: string; label: string; path: string; domain?: string } | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // ── Dry-run: return cost estimate without spawning any processes ─────
+    if (dryRun) {
+      const absSpecPath = path.join(workspace.path, 'scripts', specPath);
+      if (!fs.existsSync(absSpecPath)) {
+        res.status(422).json({ error: `Spec file not found at ${absSpecPath}` });
+        return;
+      }
+
+      const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+      if (!specJson.userStories || !Array.isArray(specJson.userStories)) {
+        res.status(422).json({ error: 'Spec has no userStories array' });
+        return;
+      }
+
+      // Resolve model: spec-level > workspace L3 preferred_model > default
+      let model: SupportedModel = DEFAULT_MODEL;
+      if (specJson.model && isValidModel(specJson.model)) {
+        model = specJson.model;
+      } else {
+        const l3Pref = db.prepare(
+          `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+        ).get(workspaceId) as { preferred_model: string | null } | undefined;
+        if (l3Pref?.preferred_model && isValidModel(l3Pref.preferred_model)) {
+          model = l3Pref.preferred_model as SupportedModel;
+        }
+      }
+
+      const estimate = estimateDryRunCost(specJson, workspaceId, model);
+      res.json({ dryRun: true, estimate });
       return;
     }
 
