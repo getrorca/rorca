@@ -21,6 +21,7 @@ import DependencyGraph from '../components/DependencyGraph';
 import MermaidDiagram from '../components/MermaidDiagram';
 import { useToast, ToastContainer } from '../components/Toast';
 import { ReadinessRing } from '../components/ReadinessRing';
+import { TagChipsReadonly } from '../components/TagChips';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -32,6 +33,7 @@ interface SpecSummary {
   generatedAt: string;
   approvedAt?: string;
   readinessPercent?: number;
+  tags?: string[];
 }
 
 interface SpecDetail {
@@ -295,6 +297,11 @@ export default function ReviewQueuePanel() {
                   }`}
                 />
               </div>
+              {spec.tags && spec.tags.length > 0 && (
+                <div className="mt-1">
+                  <TagChipsReadonly tags={spec.tags} />
+                </div>
+              )}
             </button>
           ))}
         </div>
