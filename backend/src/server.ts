@@ -27,6 +27,8 @@ import authRouter, { authRequired } from './routes/auth';
 import onboardingRouter from './routes/onboarding';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
+import swaggerUi from 'swagger-ui-express';
+import { swaggerSpec } from './lib/swagger';
 
 dotenv.config();
 
@@ -49,6 +51,14 @@ app.use(express.json({
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
+
+app.get('/api/docs/openapi.json', (_req, res) => {
+  res.json(swaggerSpec);
+});
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  explorer: true,
+  customSiteTitle: 'Rorcha API Docs',
+}));
 
 app.use('/api/auth', authRouter);
 app.use('/api/webhooks', webhooksRouter);

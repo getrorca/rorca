@@ -87,8 +87,57 @@ function parsePorcelain(output: string): GitWorktree[] {
   return worktrees;
 }
 
-// ─── GET /api/worktrees?workspaceId= ────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/worktrees:
+ *   get:
+ *     tags: [Worktrees]
+ *     summary: List git worktrees for a workspace
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of worktrees
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 worktrees:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/GitWorktree' }
+ *       404: { description: "Workspace not found" }
+ *   post:
+ *     tags: [Worktrees]
+ *     summary: Create a new git worktree
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, branchName]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               branchName: { type: string }
+ *               baseBranch: { type: string }
+ *               worktreePath: { type: string }
+ *     responses:
+ *       201:
+ *         description: Worktree created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 worktreePath: { type: string }
+ *                 branchName: { type: string }
+ *       409: { description: "Branch already exists" }
+ */
 router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -156,8 +205,29 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
-// ─── DELETE /api/worktrees/:encodedPath?workspaceId=&force= ─────────────────
-
+/**
+ * @swagger
+ * /api/worktrees/{encodedPath}:
+ *   delete:
+ *     tags: [Worktrees]
+ *     summary: Remove a git worktree
+ *     parameters:
+ *       - in: path
+ *         name: encodedPath
+ *         required: true
+ *         schema: { type: string }
+ *         description: URL-encoded worktree path
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: force
+ *         schema: { type: boolean, default: false }
+ *     responses:
+ *       200: { description: "Removed" }
+ *       409: { description: "Worktree has uncommitted changes" }
+ */
 router.delete('/:encodedPath', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -197,8 +267,26 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/worktrees/merge ───────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/worktrees/merge:
+ *   post:
+ *     tags: [Worktrees]
+ *     summary: Merge a worktree branch to main
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, branchName]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               branchName: { type: string }
+ *     responses:
+ *       200: { description: "Merged", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+ *       409: { description: "Merge conflict", content: { application/json: { schema: { type: object, properties: { conflict: { type: boolean }, details: { type: string } } } } } }
+ */
 router.post('/merge', async (req: Request, res: Response) => {
   try {
     const { workspaceId, branchName } = req.body;
@@ -230,8 +318,36 @@ router.post('/merge', async (req: Request, res: Response) => {
   }
 });
 
-// ─── GET /api/worktrees/status?workspaceId=&path= ──────────────────────────
-
+/**
+ * @swagger
+ * /api/worktrees/status:
+ *   get:
+ *     tags: [Worktrees]
+ *     summary: Get worktree branch status
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: path
+ *         required: true
+ *         schema: { type: string }
+ *         description: Worktree path
+ *     responses:
+ *       200:
+ *         description: Branch status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 branch: { type: string }
+ *                 ahead: { type: integer }
+ *                 behind: { type: integer }
+ *                 isClean: { type: boolean }
+ *                 modifiedFiles: { type: array, items: { type: string } }
+ */
 router.get('/status', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
