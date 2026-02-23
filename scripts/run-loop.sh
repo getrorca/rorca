@@ -121,6 +121,9 @@ for s in sorted(stories, key=lambda x: x.get('priority', 999)):
     # Skip permanently failed stories (marked skipped after max retries)
     if s.get('skipped'):
         continue
+    # Skip deferred stories (excluded by user in Rorcha UI)
+    if s.get('excluded'):
+        continue
     # Check dependencies
     deps = s.get('dependsOn', [])
     if all(dep in passed_ids for dep in deps):

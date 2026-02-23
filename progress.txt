@@ -153,6 +153,28 @@ Key decisions:
 - Endpoint added to existing specs.ts router (no new route file, mounted under /api/specs)
 - 422 status code for circular dependency (not 400) since the spec data is structurally valid but semantically invalid
 
+## Story US-008: Batch Spec Generation Queue — DONE
+Files touched:
+- backend/src/routes/specs.ts — Added POST /generate/batch, GET /generate/batch/:batchId, processBatch/processBatchBrief async queue
+- backend/src/routes/pipeline.ts — Added batch_started/batch_progress to SSE poll event types
+- backend/src/routes/__tests__/batch.test.ts (new) — 12 test cases
+- backend/src/routes/AGENTS.md — Documented new endpoints
+
+What was built:
+- POST /api/specs/generate/batch accepts { briefs: [{ brief, workspaceId, templateId?, title?, model?, storyCount?, domain? }] }, returns { batchId, briefCount }
+- GET /api/specs/generate/batch/:batchId returns batch status with per-brief progress (queued/generating/completed/failed), summary counts, slugs, and error messages
+- Briefs processed sequentially to avoid concurrent LLM call conflicts with Claude CLI
+- SSE stream emits batch_progress WAL events with batchId, briefIndex, totalBriefs, status per brief transition
+- Failed briefs do not block remaining briefs; errors captured per-brief with LLM error message
+- In-memory batch queue with 1-hour auto-cleanup (same pattern as pipeline output buffers)
+
+Key decisions:
+- In-memory batch state (not DB table) — batches are transient, WAL events provide durable audit trail
+- Reused all existing generate logic (direction stack synthesis, template injection, model resolution, spec writing) via shared processBatchBrief function
+- Each brief gets its own generate + batch_progress WAL events (two per brief: generating + completed/failed)
+- batch_started event emitted synchronously before returning 201; processing starts async
+- Batch routes mounted before parameterized /:specId routes to avoid route conflicts
+
 ## Gotchas Discovered
 - Pipeline runs failed at 0ms: two bugs in ArchivePanel path construction (wrong subdir + using specName instead of id slug)
 - xterm.js: must use scoped @xterm/xterm package, not legacy xterm
@@ -160,6 +182,28 @@ Key decisions:
 - ALL 4 Claude env vars must be unset for nested invocation (not just CLAUDECODE)
 - Port 3030 EADDRINUSE: always kill old process before restart (lsof -ti:3030 | xargs kill -9)
 - Stale pipeline_runs: status stays 'running' after backend restart — UPDATE to failed manually
+
+## Story V2-001: User Registration (email + password) — DONE
+Files touched:
+- backend/src/db/migrations/007_users.sql (new — users + refresh_tokens tables)
+- backend/src/routes/auth.ts (new — POST /api/auth/register endpoint)
+- backend/src/routes/__tests__/auth.test.ts (new — 14 tests)
+- backend/src/server.ts (modified — mount authRouter at /api/auth)
+- backend/src/db/__tests__/db.test.ts (modified — expect users + refresh_tokens in table list)
+- backend/package.json (modified — added bcryptjs, jsonwebtoken + types)
+
+What was built:
+- `users` table (id, email UNIQUE, display_name, password_hash, created_at, updated_at)
+- `refresh_tokens` table (id, user_id FK, token_hash, expires_at, created_at) with cascade delete
+- POST /api/auth/register: validates email format, password ≥8 chars, displayName required; hashes with bcrypt cost 12; returns 201 with JWT access token (15m expiry) + refresh token; emits user_registered WAL event
+- 409 on duplicate email ("Email already registered"), 400 on validation errors with specific messages
+- Email normalized to lowercase, displayName trimmed
+
+Key decisions:
+- Used bcryptjs (pure JS) over bcrypt (native) for easier cross-platform compatibility
+- Refresh token stored as SHA-256 hash (not plaintext) — raw token returned to client only once
+- JWT_SECRET defaults to dev-mode string; production should set JWT_SECRET env var
+- user_registered WAL event uses empty string for workspace_id (auth is workspace-agnostic)
 
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)

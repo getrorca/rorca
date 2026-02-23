@@ -184,6 +184,66 @@
         "A new `spec_usage` table stores per-generation usage rows with foreign key to `pipeline_runs` or `spec_versions`, and the schema migration runs idempotently on startup"
       ],
       "dependsOn": []
+    },
+    {
+      "id": "US-014",
+      "title": "Spec Export and Import with Portable Bundles",
+      "description": "As a developer, I want to export a spec as a self-contained portable bundle and import bundles into any workspace so I can share proven specs across teams, back up work before destructive operations, and seed new projects from existing specifications.",
+      "acceptanceCriteria": [
+        "GET /api/specs/:specId/export?workspaceId=X returns a JSON bundle containing the spec content, associated direction stack layers (L1-L3), version history from spec_versions, and generation metadata \u2014 with a Content-Disposition header for file download",
+        "POST /api/specs/import accepts a multipart upload of a previously exported bundle JSON file plus a target workspaceId, validates the bundle schema, writes the spec to the target workspace's pending directory, and returns the imported spec slug",
+        "Import detects slug collisions with existing specs in the target workspace and returns a 409 with the conflicting spec ID rather than silently overwriting",
+        "The exported bundle includes a schemaVersion field; import rejects bundles with an unrecognized schemaVersion and returns a 422 with a descriptive error message",
+        "A WAL event of type 'spec_exported' or 'spec_imported' is emitted for each operation, capturing the spec slug, source/target workspace ID, and bundle size in bytes"
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "US-015",
+      "title": "Story-Level Exclusion and Deferral Toggle",
+      "description": "As a developer, I want to defer individual stories from a pipeline run without removing them from the spec, so I can focus the run on ready work and revisit deferred stories in a future run.",
+      "acceptanceCriteria": [
+        "PATCH /api/specs/:specId/stories/:storyId accepts { workspaceId, excluded: boolean } and updates the excluded field in the spec JSON on disk",
+        "run-loop.sh skips stories with excluded: true (alongside existing passes and skipped checks)",
+        "Stories tab shows a MinusCircle toggle button per story (except passed stories)",
+        "Excluded stories render with 50% opacity, strikethrough title, and a DEFERRED badge",
+        "Clicking the toggle optimistically updates local state and calls the PATCH API",
+        "Run in Pipeline button shows an N deferred pill when some stories are deferred",
+        "story_excluded and story_included WAL events are emitted on toggle",
+        "Exclusion persists across page refreshes (stored in spec JSON on disk)"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "US-016",
+      "title": "GitHub PR Webhook for Automatic Spec Sync",
+      "description": "As a developer, I want Rorcha to listen for GitHub PR events and automatically update the relevant spec when a PR is opened or merged, so that specs stay in sync with actual implementation progress without manual updates.",
+      "acceptanceCriteria": [
+        "POST /api/webhooks/github receives GitHub pull_request events and verifies HMAC signature",
+        "When a PR is opened, Rorcha matches the branch name to a spec slug and creates a comment summarizing which stories the branch likely implements",
+        "When a PR is merged, story passes fields are updated to true for stories whose IDs appear in the PR commit messages (e.g. feat(US-005): ...)",
+        "A new workspace setting stores the GitHub webhook secret (stored in direction_layers or a new webhooks table)",
+        "GET /api/webhooks/setup returns the webhook endpoint URL and setup instructions",
+        "WAL event webhook_pr_merged is emitted with PR number, spec_id, and list of auto-passed story IDs"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "US-017",
+      "title": "Workspace Activity Dashboard with Token Spend",
+      "description": "As a developer, I want a dashboard overview of my workspace activity \u2014 recent runs, total stories completed, and LLM token spend \u2014 so I can monitor progress and understand costs at a glance.",
+      "acceptanceCriteria": [
+        "GET /api/workspaces/:id/stats returns { totalSpecs, totalStoriesCompleted, totalStoriesPending, totalRuns, lastRunAt, totalInputTokens, totalOutputTokens, estimatedCost }",
+        "Token counts are summed from wal_events.payload for generate events that include usage data",
+        "A new Dashboard panel (or sidebar section) displays these stats with sparkline-style progress bars",
+        "Estimated cost is calculated from provider pricing constants in llm-client.ts (input/output token rates per model)",
+        "Stats auto-refresh every 30 seconds when the panel is visible",
+        "Stats are scoped per workspace (workspaceId query param required)"
+      ],
+      "dependsOn": [],
+      "passes": false
     }
   ]
 }
