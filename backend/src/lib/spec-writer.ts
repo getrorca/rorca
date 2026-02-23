@@ -19,6 +19,7 @@ export interface GeneratedSpec {
   slug: string;
   stories: GeneratedStory[];
   diagrams: Record<string, DiagramOutput>;
+  mermaidDiagram?: string;
   model?: string;
 }
 
@@ -50,7 +51,8 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
       acceptanceCriteria: s.acceptanceCriteria,
       dependsOn: s.dependsOn,
       passes: false
-    }))
+    })),
+    ...(spec.mermaidDiagram ? { mermaidDiagram: spec.mermaidDiagram } : {}),
   };
   fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2), 'utf8');
 
