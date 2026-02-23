@@ -11,6 +11,10 @@ import {
   PlusCircle,
   Trash2,
   Gauge,
+  Send,
+  Eye,
+  MessageSquare,
+  AlertCircle,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -25,6 +29,9 @@ import { TagChipsReadonly } from '../components/TagChips';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
+type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
+type ReviewFilter = 'all' | 'review_requested' | 'changes_requested';
+
 interface SpecSummary {
   id: string;
   specName: string;
@@ -34,7 +41,21 @@ interface SpecSummary {
   approvedAt?: string;
   readinessPercent?: number;
   tags?: string[];
+  reviewStatus?: ReviewStatus;
 }
+
+const REVIEW_STATUS_CONFIG: Record<ReviewStatus, { label: string; className: string; icon: typeof Eye }> = {
+  draft: { label: 'Draft', className: 'bg-muted/15 text-muted border-muted/30', icon: AlertCircle },
+  review_requested: { label: 'Needs Review', className: 'bg-accent/15 text-accent border-accent/30', icon: Eye },
+  approved: { label: 'Review Approved', className: 'bg-success/15 text-success border-success/30', icon: CheckCircle2 },
+  changes_requested: { label: 'Changes Requested', className: 'bg-warning/15 text-warning border-warning/30', icon: MessageSquare },
+};
+
+const REVIEW_FILTERS: { id: ReviewFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'review_requested', label: 'Needs Review' },
+  { id: 'changes_requested', label: 'Changes Requested' },
+];
 
 interface SpecDetail {
   title?: string;
@@ -96,6 +117,9 @@ export default function ReviewQueuePanel() {
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>('all');
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [reviewComment, setReviewComment] = useState('');
 
   // ─── Fetch spec list ───────────────────────────────────────────────
   const fetchSpecs = useCallback(async () => {
@@ -187,6 +211,55 @@ export default function ReviewQueuePanel() {
     }
   };
 
+  const handleRequestReview = async (specId: string) => {
+    setActionLoading(true);
+    try {
+      await apiFetch(`/api/specs/${specId}/request-review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      showToast('Review requested', 'success');
+      await fetchSpecs();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Request review failed', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleReview = async (specId: string, action: 'approve' | 'request_changes') => {
+    setActionLoading(true);
+    try {
+      await apiFetch(`/api/specs/${specId}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId,
+          action,
+          comment: reviewComment || undefined,
+        }),
+      });
+      showToast(action === 'approve' ? 'Review approved' : 'Changes requested', 'success');
+      setReviewingId(null);
+      setReviewComment('');
+      if (selectedId === specId) {
+        setSelectedId(null);
+        setSpecDetail(null);
+      }
+      await fetchSpecs();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Review failed', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Apply review status filter
+  const filteredSpecs = reviewFilter === 'all'
+    ? specs
+    : specs.filter(s => (s.reviewStatus ?? 'draft') === reviewFilter);
+
   // ─── No workspace selected ────────────────────────────────────────
   if (!workspaceId) {
     return (
@@ -240,7 +313,7 @@ export default function ReviewQueuePanel() {
     );
   }
 
-  const selectedSpec = specs.find((s) => s.id === selectedId);
+  const selectedSpec = filteredSpecs.find((s) => s.id === selectedId);
 
   return (
     <div className="flex h-full">
@@ -251,12 +324,33 @@ export default function ReviewQueuePanel() {
             Pending Review
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            {specs.length} {specs.length === 1 ? 'spec' : 'specs'} awaiting approval
+            {filteredSpecs.length} of {specs.length} {specs.length === 1 ? 'spec' : 'specs'}
           </p>
+          <div className="flex gap-1 mt-2">
+            {REVIEW_FILTERS.map((f) => {
+              const count = f.id === 'all'
+                ? specs.length
+                : specs.filter(s => (s.reviewStatus ?? 'draft') === f.id).length;
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => setReviewFilter(f.id)}
+                  className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
+                    reviewFilter === f.id
+                      ? 'bg-accent/15 text-accent border border-accent/30'
+                      : 'text-muted border border-transparent hover:text-text hover:border-border'
+                  }`}
+                >
+                  {f.label}
+                  {count > 0 && <span className="ml-1 opacity-70">({count})</span>}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {specs.map((spec) => (
+          {filteredSpecs.map((spec) => (
             <button
               key={spec.id}
               onClick={() => setSelectedId(spec.id === selectedId ? null : spec.id)}
@@ -275,6 +369,17 @@ export default function ReviewQueuePanel() {
                   <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
                     {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
                   </span>
+                  {(() => {
+                    const rs = spec.reviewStatus ?? 'draft';
+                    const cfg = REVIEW_STATUS_CONFIG[rs];
+                    const Icon = cfg.icon;
+                    return (
+                      <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded border ${cfg.className}`}>
+                        <Icon size={10} />
+                        {cfg.label}
+                      </span>
+                    );
+                  })()}
                 </div>
                 <div className="flex items-center gap-2">
                   {spec.readinessPercent != null && (
@@ -327,6 +432,13 @@ export default function ReviewQueuePanel() {
             onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
             onConfirmReject={() => handleReject(selectedId)}
             onApprove={() => handleApprove(selectedId)}
+            onRequestReview={() => handleRequestReview(selectedId)}
+            reviewingId={reviewingId}
+            reviewComment={reviewComment}
+            onReviewCommentChange={setReviewComment}
+            onStartReview={() => setReviewingId(selectedId)}
+            onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
+            onConfirmReview={(action) => handleReview(selectedId, action)}
             workspaceId={workspaceId!}
           />
         )}
@@ -337,7 +449,7 @@ export default function ReviewQueuePanel() {
         <div className="xl:hidden fixed inset-0 z-40 bg-bg flex flex-col">
           <div className="flex items-center px-4 py-3 border-b border-border shrink-0">
             <button
-              onClick={() => { setSelectedId(null); setRejectingId(null); setRejectReason(''); }}
+              onClick={() => { setSelectedId(null); setRejectingId(null); setRejectReason(''); setReviewingId(null); setReviewComment(''); }}
               className="text-xs text-accent hover:text-accent-hover transition-colors mr-3"
             >
               &larr; Back
@@ -358,6 +470,13 @@ export default function ReviewQueuePanel() {
               onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
               onConfirmReject={() => handleReject(selectedId)}
               onApprove={() => handleApprove(selectedId)}
+              onRequestReview={() => handleRequestReview(selectedId)}
+              reviewingId={reviewingId}
+              reviewComment={reviewComment}
+              onReviewCommentChange={setReviewComment}
+              onStartReview={() => setReviewingId(selectedId)}
+              onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
+              onConfirmReview={(action) => handleReview(selectedId, action)}
               workspaceId={workspaceId!}
             />
           </div>
@@ -384,6 +503,13 @@ function SpecPreview({
   onCancelReject,
   onConfirmReject,
   onApprove,
+  onRequestReview,
+  reviewingId,
+  reviewComment,
+  onReviewCommentChange,
+  onStartReview,
+  onCancelReview,
+  onConfirmReview,
   workspaceId,
 }: {
   spec: SpecDetail;
@@ -398,6 +524,13 @@ function SpecPreview({
   onCancelReject: () => void;
   onConfirmReject: () => void;
   onApprove: () => void;
+  onRequestReview: () => void;
+  reviewingId: string | null;
+  reviewComment: string;
+  onReviewCommentChange: (v: string) => void;
+  onStartReview: () => void;
+  onCancelReview: () => void;
+  onConfirmReview: (action: 'approve' | 'request_changes') => void;
   workspaceId: string;
 }) {
   const stories = spec.userStories ?? spec.stories ?? [];
@@ -466,52 +599,163 @@ function SpecPreview({
 
       {/* Action bar */}
       <div className="px-4 py-3 border-t border-border shrink-0 bg-bg">
-        {rejectingId === summary.id ? (
-          <div className="space-y-2">
-            <textarea
-              value={rejectReason}
-              onChange={(e) => onRejectReasonChange(e.target.value)}
-              placeholder="Reason for rejection (optional)"
-              className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 resize-none focus:outline-none focus:border-accent"
-              rows={2}
-            />
+        {(() => {
+          const rs = summary.reviewStatus ?? 'draft';
+
+          // Reject confirmation panel (shared across statuses)
+          if (rejectingId === summary.id) {
+            return (
+              <div className="space-y-2">
+                <textarea
+                  value={rejectReason}
+                  onChange={(e) => onRejectReasonChange(e.target.value)}
+                  placeholder="Reason for rejection (optional)"
+                  className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 resize-none focus:outline-none focus:border-accent"
+                  rows={2}
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={onConfirmReject}
+                    disabled={actionLoading}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-error text-white hover:bg-error/90 transition-colors disabled:opacity-50"
+                  >
+                    <XCircle size={14} />
+                    Confirm Reject
+                  </button>
+                  <button
+                    onClick={onCancelReject}
+                    className="px-4 py-2 rounded text-sm font-medium text-muted border border-border hover:text-text transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            );
+          }
+
+          // Review comment panel (for reviewer performing a review)
+          if (reviewingId === summary.id) {
+            return (
+              <div className="space-y-2">
+                <textarea
+                  value={reviewComment}
+                  onChange={(e) => onReviewCommentChange(e.target.value)}
+                  placeholder="Review comment (optional)"
+                  className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 resize-none focus:outline-none focus:border-accent"
+                  rows={2}
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => onConfirmReview('approve')}
+                    disabled={actionLoading}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
+                  >
+                    <CheckCircle2 size={14} />
+                    Approve Review
+                  </button>
+                  <button
+                    onClick={() => onConfirmReview('request_changes')}
+                    disabled={actionLoading}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-warning text-white hover:bg-warning/90 transition-colors disabled:opacity-50"
+                  >
+                    <MessageSquare size={14} />
+                    Request Changes
+                  </button>
+                  <button
+                    onClick={onCancelReview}
+                    className="px-4 py-2 rounded text-sm font-medium text-muted border border-border hover:text-text transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            );
+          }
+
+          // Draft / Changes Requested: show "Request Review" + original approve/reject
+          if (rs === 'draft' || rs === 'changes_requested') {
+            return (
+              <div className="flex gap-2">
+                <button
+                  onClick={onRequestReview}
+                  disabled={actionLoading}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
+                >
+                  <Send size={14} />
+                  Request Review
+                </button>
+                <button
+                  onClick={onApprove}
+                  disabled={actionLoading}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
+                >
+                  <CheckCircle2 size={14} />
+                  Approve
+                </button>
+                <button
+                  onClick={onStartReject}
+                  disabled={actionLoading}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded text-sm font-medium text-error border border-error/40 hover:bg-error/10 transition-colors disabled:opacity-50"
+                >
+                  <XCircle size={14} />
+                </button>
+              </div>
+            );
+          }
+
+          // Review Requested: show review actions for reviewer
+          if (rs === 'review_requested') {
+            return (
+              <div className="flex gap-2">
+                <button
+                  onClick={onStartReview}
+                  disabled={actionLoading}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
+                >
+                  <Eye size={14} />
+                  Review
+                </button>
+                <button
+                  onClick={onApprove}
+                  disabled={actionLoading}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
+                >
+                  <CheckCircle2 size={14} />
+                  Approve
+                </button>
+                <button
+                  onClick={onStartReject}
+                  disabled={actionLoading}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded text-sm font-medium text-error border border-error/40 hover:bg-error/10 transition-colors disabled:opacity-50"
+                >
+                  <XCircle size={14} />
+                </button>
+              </div>
+            );
+          }
+
+          // Review Approved: show approve (move to approved/) + reject
+          return (
             <div className="flex gap-2">
               <button
-                onClick={onConfirmReject}
+                onClick={onApprove}
                 disabled={actionLoading}
-                className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-error text-white hover:bg-error/90 transition-colors disabled:opacity-50"
+                className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
               >
-                <XCircle size={14} />
-                Confirm Reject
+                <CheckCircle2 size={14} />
+                Approve
               </button>
               <button
-                onClick={onCancelReject}
-                className="px-4 py-2 rounded text-sm font-medium text-muted border border-border hover:text-text transition-colors"
+                onClick={onStartReject}
+                disabled={actionLoading}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium text-error border border-error/40 hover:bg-error/10 transition-colors disabled:opacity-50"
               >
-                Cancel
+                <XCircle size={14} />
+                Reject
               </button>
             </div>
-          </div>
-        ) : (
-          <div className="flex gap-2">
-            <button
-              onClick={onApprove}
-              disabled={actionLoading}
-              className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
-            >
-              <CheckCircle2 size={14} />
-              Approve
-            </button>
-            <button
-              onClick={onStartReject}
-              disabled={actionLoading}
-              className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium text-error border border-error/40 hover:bg-error/10 transition-colors disabled:opacity-50"
-            >
-              <XCircle size={14} />
-              Reject
-            </button>
-          </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );
