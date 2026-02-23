@@ -2711,4 +2711,257 @@ router.post('/:specId/stories/:storyId/pr-body', (req: Request, res: Response) =
   }
 });
 
+// ─── V2-033: POST /:specId/import/github-issues — Import GitHub Issues as stories ───
+
+interface GitHubIssue {
+  number: number;
+  title: string;
+  body: string | null;
+  html_url: string;
+  labels: Array<{ name: string }>;
+  state: string;
+}
+
+interface GitHubConnectionRow {
+  encrypted_token: string;
+}
+
+interface GithubWebhookRow {
+  repo_owner: string;
+  repo_name: string;
+}
+
+/**
+ * Fetch a page of GitHub issues by number.
+ * Uses the individual issue endpoint for specific numbers,
+ * or the list endpoint with pagination for bulk fetches.
+ */
+async function fetchGithubIssues(
+  owner: string,
+  repo: string,
+  token: string,
+  issueNumbers: number[],
+): Promise<{ issues: GitHubIssue[]; errors: Array<{ number: number; error: string }> }> {
+  const issues: GitHubIssue[] = [];
+  const errors: Array<{ number: number; error: string }> = [];
+
+  // Fetch individual issues by number — handles any set of issue numbers
+  // regardless of pagination concerns
+  const BATCH_SIZE = 10;
+  for (let i = 0; i < issueNumbers.length; i += BATCH_SIZE) {
+    const batch = issueNumbers.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(async (num) => {
+        const res = await fetch(
+          `https://api.github.com/repos/${owner}/${repo}/issues/${num}`,
+          {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+            },
+          },
+        );
+        if (!res.ok) {
+          errors.push({ number: num, error: `GitHub API ${res.status}: ${res.statusText}` });
+          return null;
+        }
+        return (await res.json()) as GitHubIssue;
+      }),
+    );
+    for (const issue of results) {
+      if (issue) issues.push(issue);
+    }
+  }
+
+  return { issues, errors };
+}
+
+/**
+ * Fetch ALL open issues from a GitHub repo with pagination.
+ * Used when no specific issue numbers are provided.
+ */
+async function fetchAllGithubIssues(
+  owner: string,
+  repo: string,
+  token: string,
+): Promise<{ issues: GitHubIssue[]; errors: Array<{ number: number; error: string }> }> {
+  const issues: GitHubIssue[] = [];
+  let page = 1;
+  const perPage = 100; // GitHub max
+
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      },
+    );
+
+    if (!res.ok) {
+      return { issues, errors: [{ number: 0, error: `GitHub API ${res.status}: ${res.statusText}` }] };
+    }
+
+    const pageIssues = (await res.json()) as GitHubIssue[];
+    // Filter out pull requests (GitHub Issues API includes PRs)
+    const realIssues = pageIssues.filter(i => !('pull_request' in i));
+    issues.push(...realIssues);
+
+    if (pageIssues.length < perPage) break;
+    page++;
+  }
+
+  return { issues, errors: [] };
+}
+
+function githubIssueToStory(
+  issue: GitHubIssue,
+  storyId: string,
+): UserStory & { githubIssueUrl: string; tags: string[] } {
+  const tags = issue.labels.map(l => l.name);
+  return {
+    id: storyId,
+    title: issue.title,
+    description: issue.body ?? '',
+    acceptanceCriteria: [],
+    dependsOn: [],
+    passes: false,
+    githubIssueUrl: issue.html_url,
+    tags,
+  };
+}
+
+router.post('/:specId/import/github-issues', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId, issueNumbers, preview } = req.body as {
+      workspaceId: string;
+      issueNumbers?: number[];
+      preview?: boolean;
+    };
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Resolve GitHub connection for this workspace
+    const ghConn = db.prepare(
+      'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = ?'
+    ).get(workspaceId) as GithubWebhookRow | undefined;
+
+    if (!ghConn) {
+      res.status(400).json({ error: 'No GitHub connection for this workspace. Connect via workspace settings first.' });
+      return;
+    }
+
+    // Resolve GitHub token from OAuth connections
+    const tokenRow = db.prepare(
+      'SELECT encrypted_token FROM github_connections LIMIT 1'
+    ).get() as GitHubConnectionRow | undefined;
+
+    if (!tokenRow) {
+      res.status(400).json({ error: 'No GitHub OAuth token available. Connect your GitHub account first.' });
+      return;
+    }
+
+    const { decryptToken } = await import('./auth');
+    const githubToken = decryptToken(tokenRow.encrypted_token);
+
+    // Find the spec on disk
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFilePath: string;
+    if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
+    else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
+    else { res.status(404).json({ error: 'Spec not found' }); return; }
+
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    const existingStories: Array<{ id: string }> =
+      specContent.userStories ?? specContent.stories ?? [];
+
+    // Determine next story ID
+    const storyPrefix = existingStories[0]?.id?.match(/^([A-Z]+)/)?.[1] ?? 'US';
+    const maxN = existingStories.reduce((max: number, s: { id: string }) => {
+      const n = parseInt(s.id?.replace(/\D/g, '') || '0', 10);
+      return n > max ? n : max;
+    }, 0);
+
+    // Fetch issues from GitHub
+    const { issues, errors } = issueNumbers && issueNumbers.length > 0
+      ? await fetchGithubIssues(ghConn.repo_owner, ghConn.repo_name, githubToken, issueNumbers)
+      : await fetchAllGithubIssues(ghConn.repo_owner, ghConn.repo_name, githubToken);
+
+    if (issues.length === 0 && errors.length > 0) {
+      res.status(502).json({ error: 'Failed to fetch GitHub issues', details: errors });
+      return;
+    }
+
+    // Map issues to stories
+    const newStories = issues.map((issue, idx) => {
+      const storyNum = maxN + idx + 1;
+      const storyId = `${storyPrefix}-${String(storyNum).padStart(3, '0')}`;
+      return githubIssueToStory(issue, storyId);
+    });
+
+    // Preview mode — return proposed stories without saving
+    if (preview) {
+      res.json({
+        ok: true,
+        preview: true,
+        stories: newStories,
+        errors,
+      });
+      return;
+    }
+
+    // Import mode — append stories and write to disk
+    specContent.userStories = [...existingStories, ...newStories];
+
+    // Regenerate mermaidDiagram with all stories
+    const { generateStoryDepsDiagram } = await import('../lib/diagram-generator');
+    const depsDiagram = generateStoryDepsDiagram(specContent.userStories);
+    specContent.mermaidDiagram = depsDiagram.mermaid;
+
+    fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+
+    // Emit WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('github_issues_imported', ?, ?, ?)`
+    ).run(specId, workspaceId, JSON.stringify({
+      issueCount: newStories.length,
+      issueNumbers: issues.map(i => i.number),
+      repoOwner: ghConn.repo_owner,
+      repoName: ghConn.repo_name,
+    }));
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({
+      ok: true,
+      preview: false,
+      importedCount: newStories.length,
+      stories: newStories,
+      errors,
+    });
+  } catch (error: any) {
+    console.error('[Specs] GitHub issues import error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
