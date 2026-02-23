@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle, Webhook, FileText, RotateCcw } from 'lucide-react';
+import { Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle, Webhook, FileText, RotateCcw, Download } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import { getAccessToken } from '../lib/apiFetch';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -313,6 +314,51 @@ export default function GitHubSettingsPanel() {
           </div>
         </div>
       )}
+
+      {/* ─── GitHub Actions YAML ─────────────────────────────────────── */}
+      <div className="mt-8 border-t border-border pt-6">
+        <div className="flex items-center gap-2 mb-3">
+          <Download size={18} />
+          <h2 className="text-sm font-semibold">GitHub Actions Workflow</h2>
+        </div>
+        <p className="text-xs text-muted mb-3">
+          Download a GitHub Actions workflow that triggers Rorcha pipeline runs on push to main.
+          Place the file at <code className="bg-surface px-1 rounded">.github/workflows/rorcha-pipeline.yml</code> in your repository.
+        </p>
+        <p className="text-xs text-muted mb-3">
+          Required repository secrets:{' '}
+          <code className="bg-surface px-1 rounded">RORCHA_API_URL</code>,{' '}
+          <code className="bg-surface px-1 rounded">RORCHA_API_TOKEN</code>,{' '}
+          <code className="bg-surface px-1 rounded">WORKSPACE_ID</code>
+        </p>
+        <button
+          onClick={async () => {
+            if (!workspaceId) return;
+            try {
+              const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:3030';
+              const token = getAccessToken();
+              const res = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/github/actions-yaml`, {
+                headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+              });
+              if (!res.ok) throw new Error(`${res.status}`);
+              const text = await res.text();
+              const blob = new Blob([text], { type: 'application/x-yaml' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = 'rorcha-pipeline.yml';
+              a.click();
+              URL.revokeObjectURL(url);
+            } catch (err: any) {
+              console.error('[GitHubSettings] YAML download error:', err);
+            }
+          }}
+          className="px-4 py-2 text-sm rounded bg-accent text-white hover:opacity-90 transition-opacity flex items-center gap-1.5"
+        >
+          <Download size={14} />
+          Download Actions YAML
+        </button>
+      </div>
 
       {/* ─── PR Template ──────────────────────────────────────────────── */}
       <div className="mt-8 border-t border-border pt-6">
