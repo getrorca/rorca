@@ -79,6 +79,7 @@ interface UserStory {
   dependsOn: string[];
   complexity?: number;
   priority?: number;  // 1=urgent, 2=high, 3=normal (default), 4=low
+  timeoutMinutes?: number;  // 5-120, default 45
   passes?: boolean;
   excluded?: boolean;
 }
@@ -1562,7 +1563,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
-    const { workspaceId, title, description, acceptanceCriteria, complexity, priority } = req.body;
+    const { workspaceId, title, description, acceptanceCriteria, complexity, priority, timeoutMinutes } = req.body;
 
     if (!workspaceId) {
       res.status(400).json({ error: 'Missing required field: workspaceId' });
@@ -1576,6 +1577,11 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
     if (priority !== undefined && (!Number.isInteger(priority) || priority < 1 || priority > 4)) {
       res.status(400).json({ error: 'priority must be an integer between 1 (urgent) and 4 (low)' });
+      return;
+    }
+
+    if (timeoutMinutes !== undefined && (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 5 || timeoutMinutes > 120)) {
+      res.status(400).json({ error: 'timeoutMinutes must be an integer between 5 and 120' });
       return;
     }
 
@@ -1619,6 +1625,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
     if (acceptanceCriteria !== undefined) stories[storyIndex].acceptanceCriteria = acceptanceCriteria;
     if (complexity !== undefined) stories[storyIndex].complexity = complexity;
     if (priority !== undefined) stories[storyIndex].priority = priority;
+    if (timeoutMinutes !== undefined) stories[storyIndex].timeoutMinutes = timeoutMinutes;
 
     content.userStories = stories;
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
