@@ -1143,4 +1143,236 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
   }
 });
 
+// ─── US-007: GET /:specId/graph — DAG representation of story dependencies ───
+
+interface StoryResultRow {
+  story_id: string;
+  status: string;
+}
+
+interface GraphNode {
+  id: string;
+  title: string;
+  dependsOn: string[];
+  status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
+}
+
+interface GraphEdge {
+  from: string;
+  to: string;
+}
+
+interface GraphResponse {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  parallelGroups: string[][];
+}
+
+interface GraphErrorResponse {
+  error: string;
+  cycle?: string[];
+}
+
+/**
+ * Detect cycles in the dependency graph using DFS.
+ * Returns the cycle path if found, null otherwise.
+ */
+function detectCycle(stories: UserStory[]): string[] | null {
+  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const color = new Map<string, number>();
+  const parent = new Map<string, string | null>();
+
+  for (const s of stories) color.set(s.id, WHITE);
+
+  function dfs(u: string): string[] | null {
+    color.set(u, GRAY);
+    const story = stories.find(s => s.id === u);
+    if (!story) return null;
+
+    for (const dep of story.dependsOn) {
+      if (!color.has(dep)) continue; // unknown dep, skip
+      if (color.get(dep) === GRAY) {
+        // Back edge found — reconstruct cycle
+        const cycle: string[] = [dep, u];
+        let cur = u;
+        while (cur !== dep) {
+          cur = parent.get(cur)!;
+          if (cur === dep) break;
+          cycle.push(cur);
+        }
+        cycle.reverse();
+        return cycle;
+      }
+      if (color.get(dep) === WHITE) {
+        parent.set(dep, u);
+        const result = dfs(dep);
+        if (result) return result;
+      }
+    }
+
+    color.set(u, BLACK);
+    return null;
+  }
+
+  for (const s of stories) {
+    if (color.get(s.id) === WHITE) {
+      parent.set(s.id, null);
+      const result = dfs(s.id);
+      if (result) return result;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Compute parallel execution groups using Kahn's algorithm (topological sort by levels).
+ * Each group contains stories whose dependencies are all in prior groups.
+ */
+function computeParallelGroups(stories: UserStory[]): string[][] {
+  const storyIds = new Set(stories.map(s => s.id));
+  const inDegree = new Map<string, number>();
+  const dependents = new Map<string, string[]>(); // dep -> stories that depend on it
+
+  for (const s of stories) {
+    inDegree.set(s.id, 0);
+    dependents.set(s.id, []);
+  }
+
+  for (const s of stories) {
+    let count = 0;
+    for (const dep of s.dependsOn) {
+      if (storyIds.has(dep)) {
+        count++;
+        dependents.get(dep)!.push(s.id);
+      }
+    }
+    inDegree.set(s.id, count);
+  }
+
+  const groups: string[][] = [];
+  let queue = stories.filter(s => inDegree.get(s.id) === 0).map(s => s.id);
+
+  while (queue.length > 0) {
+    groups.push([...queue]);
+    const nextQueue: string[] = [];
+    for (const id of queue) {
+      for (const dep of dependents.get(id) ?? []) {
+        const newDeg = inDegree.get(dep)! - 1;
+        inDegree.set(dep, newDeg);
+        if (newDeg === 0) nextQueue.push(dep);
+      }
+    }
+    queue = nextQueue;
+  }
+
+  return groups;
+}
+
+router.get('/:specId/graph', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const workspaceId = req.query.workspaceId as string;
+    const runId = req.query.runId as string | undefined;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Load spec from pending or approved
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specContent: { userStories?: UserStory[]; stories?: UserStory[] };
+    if (fs.existsSync(pendingFile)) {
+      specContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories: UserStory[] = (specContent.userStories ?? specContent.stories ?? []).map(s => ({
+      ...s,
+      dependsOn: s.dependsOn ?? [],
+    }));
+
+    if (stories.length === 0) {
+      res.json({ nodes: [], edges: [], parallelGroups: [] });
+      return;
+    }
+
+    // Detect cycles
+    const cycle = detectCycle(stories);
+    if (cycle) {
+      res.status(422).json({ error: 'Circular dependency detected', cycle } as GraphErrorResponse);
+      return;
+    }
+
+    // Build status map from story_results if runId provided
+    const statusMap = new Map<string, string>();
+    if (runId) {
+      const results = db.prepare(
+        `SELECT story_id, status FROM story_results WHERE run_id = ? ORDER BY id DESC`
+      ).all(Number(runId)) as StoryResultRow[];
+
+      // Latest result per story wins (ORDER BY id DESC + first-seen)
+      for (const r of results) {
+        if (!statusMap.has(r.story_id)) {
+          statusMap.set(r.story_id, r.status);
+        }
+      }
+    }
+
+    // Map story_results status values to graph status values
+    function mapStatus(storyId: string): GraphNode['status'] {
+      const raw = statusMap.get(storyId);
+      if (!raw) return 'pending';
+      switch (raw) {
+        case 'pass': return 'passed';
+        case 'fail': return 'failed';
+        case 'skip': return 'skipped';
+        case 'retry': return 'running';
+        default: return 'pending';
+      }
+    }
+
+    const storyIds = new Set(stories.map(s => s.id));
+
+    // Build nodes and edges
+    const nodes: GraphNode[] = stories.map(s => ({
+      id: s.id,
+      title: s.title,
+      dependsOn: s.dependsOn.filter(d => storyIds.has(d)),
+      status: mapStatus(s.id),
+    }));
+
+    const edges: GraphEdge[] = [];
+    for (const s of stories) {
+      for (const dep of s.dependsOn) {
+        if (storyIds.has(dep)) {
+          edges.push({ from: dep, to: s.id });
+        }
+      }
+    }
+
+    // Compute parallel groups
+    const parallelGroups = computeParallelGroups(stories);
+
+    res.json({ nodes, edges, parallelGroups } as GraphResponse);
+  } catch (error: any) {
+    console.error('[Specs] Graph error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
