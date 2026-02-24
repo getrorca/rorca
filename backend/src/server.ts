@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import dotenv from 'dotenv';
 import workspacesRouter from './routes/workspaces';
 import directionRouter from './routes/direction';
@@ -48,7 +49,11 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3030;
 
-app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5210' }));
+// When serving static frontend (rorcha start), allow same-origin; otherwise allow Vite dev server
+const corsOrigin = process.env.RORCHA_SERVE_STATIC === '1'
+  ? true  // reflect request origin (same-origin when served by Express)
+  : (process.env.CORS_ORIGIN || 'http://localhost:5210');
+app.use(cors({ origin: corsOrigin }));
 
 // Capture raw body for webhook signature verification.
 // The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
@@ -113,6 +118,17 @@ app.use('/api/onboarding', onboardingRouter);
 app.use('/api/admin', backupsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/settings', settingsRouter);
+
+// V2-108: Serve frontend static files when running via `rorcha start`
+if (process.env.RORCHA_SERVE_STATIC === '1' && process.env.RORCHA_STATIC_DIR) {
+  const staticDir = process.env.RORCHA_STATIC_DIR;
+  app.use(express.static(staticDir));
+  // SPA fallback: serve index.html for non-API routes
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    res.sendFile(path.join(staticDir, 'index.html'));
+  });
+}
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);

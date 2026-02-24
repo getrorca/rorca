@@ -1,5 +1,5 @@
 import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, BASE_URL } from '../lib/apiFetch';
 
 export interface Notification {
   id: string;
@@ -99,8 +99,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
 
   // SSE: subscribe to WAL events to detect new notifications in real-time
   useEffect(() => {
-    const base = import.meta.env.VITE_API_URL || 'http://localhost:3030';
-    const es = new EventSource(`${base}/api/pipeline/stream`);
+    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
     sseRef.current = es;
 
     es.addEventListener('wal_event', (e) => {
