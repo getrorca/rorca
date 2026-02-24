@@ -470,7 +470,7 @@ router.get('/:id', (req, res) => {
   res.json({ workspace: parseWorkspace(row) });
 });
 
-// PATCH /api/workspaces/:id — Update workspace settings (e.g. pr_template)
+// PATCH /api/workspaces/:id — Update workspace settings
 router.patch('/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
   if (!row) {
@@ -478,7 +478,24 @@ router.patch('/:id', (req, res) => {
     return;
   }
 
-  const { pr_template } = req.body;
+  const { label, path: wsPath, domains, pr_template } = req.body;
+
+  if (label !== undefined) {
+    db.prepare('UPDATE workspaces SET label = ? WHERE id = ?').run(String(label), req.params.id);
+  }
+
+  if (wsPath !== undefined) {
+    if (!fs.existsSync(wsPath)) {
+      res.status(400).json({ error: `Path does not exist on filesystem: ${wsPath}` });
+      return;
+    }
+    db.prepare('UPDATE workspaces SET path = ? WHERE id = ?').run(String(wsPath), req.params.id);
+  }
+
+  if (domains !== undefined) {
+    db.prepare('UPDATE workspaces SET domains = ? WHERE id = ?').run(JSON.stringify(domains), req.params.id);
+  }
+
   if (pr_template !== undefined) {
     const value = pr_template === null || pr_template === '' ? null : String(pr_template);
     db.prepare('UPDATE workspaces SET pr_template = ? WHERE id = ?').run(value, req.params.id);
@@ -486,6 +503,36 @@ router.patch('/:id', (req, res) => {
 
   const updated = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow;
   res.json({ workspace: parseWorkspace(updated) });
+});
+
+// GET /api/workspaces/:id/pipeline-config — Get pipeline configuration
+router.get('/:id/pipeline-config', (req, res) => {
+  const row = db.prepare('SELECT pipeline_config FROM workspaces WHERE id = ?').get(req.params.id) as { pipeline_config: string } | undefined;
+  if (!row) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+  const config = JSON.parse(row.pipeline_config || '{}');
+  res.json({
+    config: {
+      autoWorktree: config.autoWorktree ?? true,
+      storyTimeoutMin: config.storyTimeoutMin ?? 45,
+      maxRetries: config.maxRetries ?? 0,
+    },
+  });
+});
+
+// PUT /api/workspaces/:id/pipeline-config — Update pipeline configuration
+router.put('/:id/pipeline-config', (req, res) => {
+  const row = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(req.params.id) as { id: string } | undefined;
+  if (!row) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+  const { autoWorktree, storyTimeoutMin, maxRetries } = req.body;
+  const config = JSON.stringify({ autoWorktree, storyTimeoutMin, maxRetries });
+  db.prepare('UPDATE workspaces SET pipeline_config = ? WHERE id = ?').run(config, req.params.id);
+  res.json({ ok: true });
 });
 
 // GET /api/workspaces/:id/stats — Summary stats for a workspace

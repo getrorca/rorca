@@ -199,6 +199,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE workspaces ADD COLUMN pr_template TEXT');
   }
 
+  // V2-086: Add pipeline_config column to workspaces (idempotent)
+  const wsColsV86 = db.pragma('table_info(workspaces)') as { name: string }[];
+  if (!wsColsV86.some(c => c.name === 'pipeline_config')) {
+    db.exec("ALTER TABLE workspaces ADD COLUMN pipeline_config TEXT NOT NULL DEFAULT '{}'");
+  }
+
   // V2-084: Add ROI calculator config columns to workspaces (idempotent)
   const wsColsROI = db.pragma('table_info(workspaces)') as { name: string }[];
   if (!wsColsROI.some(c => c.name === 'roi_hours_per_story')) {
