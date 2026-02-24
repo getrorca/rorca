@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Menu, HelpCircle } from 'lucide-react';
+import { Menu, HelpCircle, Settings } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useHelpTips } from '../contexts/HelpTipsContext';
@@ -66,7 +66,7 @@ function WorkspaceSelector() {
   );
 }
 
-function UserMenu() {
+function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
   const { user, logout } = useAuth();
   const [open, setOpen] = useState(false);
 
@@ -92,6 +92,13 @@ function UserMenu() {
               <p className="text-sm text-[var(--text)] truncate">{user.displayName}</p>
               <p className="text-xs text-muted truncate">{user.email}</p>
             </div>
+            <button
+              onClick={() => { setOpen(false); onNavigate?.('settings'); }}
+              className="w-full text-left px-3 py-2 text-sm text-muted hover:bg-bg hover:text-[var(--text)] transition-colors flex items-center gap-2"
+            >
+              <Settings size={14} />
+              Settings
+            </button>
             <button
               onClick={() => { setOpen(false); logout(); }}
               className="w-full text-left px-3 py-2 text-sm text-muted hover:bg-bg hover:text-[var(--text)] transition-colors"
@@ -155,7 +162,7 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
           <ShowTipsToggle />
           <NotificationBell onNavigate={onNavigate} />
           <ThemeToggle />
-          <UserMenu />
+          <UserMenu onNavigate={onNavigate} />
         </div>
       </header>
 
