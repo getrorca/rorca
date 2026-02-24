@@ -19,6 +19,7 @@ import {
   Sparkles,
   Upload,
   ExternalLink,
+  History,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -31,12 +32,13 @@ import MermaidDiagram from '../components/MermaidDiagram';
 import type { PanelId } from '../components/Sidebar';
 import { ReadinessRing } from '../components/ReadinessRing';
 import { TagChipsReadonly, TagChips } from '../components/TagChips';
+import { SpecVersionHistory } from '../components/SpecVersionHistory';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
 type SpecStatus = 'pending' | 'approved' | 'rejected';
 type StatusFilter = 'all' | SpecStatus;
-type PreviewTab = 'stories' | 'graph' | 'diagram' | 'json';
+type PreviewTab = 'stories' | 'graph' | 'diagram' | 'json' | 'history';
 
 type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
 
@@ -724,8 +726,9 @@ function SpecPreviewDrawer({
   const diagram = detail ? extractDiagramText(detail) : null;
   const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
 
-  const tabs: { id: PreviewTab; label: string; badge?: string }[] = [
+  const tabs: { id: PreviewTab; label: string; badge?: string; icon?: typeof History }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
+    { id: 'history', label: 'History', icon: History },
     { id: 'graph', label: 'Graph' },
     { id: 'diagram', label: 'Dependencies' },
     { id: 'json', label: 'Raw JSON' },
@@ -855,6 +858,7 @@ function SpecPreviewDrawer({
                       : 'text-muted hover:text-text border-transparent'
                   }`}
                 >
+                  {tab.icon && <tab.icon size={12} />}
                   {tab.label}
                   {tab.badge && tab.badge !== '0' && (
                     <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-accent/15 text-accent">
@@ -877,6 +881,9 @@ function SpecPreviewDrawer({
                     setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s));
                   }}
                 />
+              )}
+              {activeTab === 'history' && workspaceId && (
+                <SpecVersionHistory specId={specId} workspaceId={workspaceId} />
               )}
               {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
               {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-archive" />}
