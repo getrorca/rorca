@@ -190,12 +190,17 @@ router.post('/trigger', async (req: Request, res: Response) => {
       return;
     }
 
-    // 3. Verify run-loop.sh exists in this workspace
-    const runLoopScript = path.join(workspace.path, 'scripts', 'run-loop.sh');
-    if (!fs.existsSync(runLoopScript)) {
-      res.status(422).json({ error: `run-loop.sh not found at ${runLoopScript}` });
+    // 3. Verify run-loop engine is available.
+    //    Priority: bash run-loop.sh in workspace (backward compat + test stubs) → TS run-loop.ts in backend
+    const runLoopSh = path.join(workspace.path, 'scripts', 'run-loop.sh');
+    const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
+    const hasBashRunLoop = fs.existsSync(runLoopSh);
+    const hasTsRunLoop = fs.existsSync(runLoopTs);
+    if (!hasBashRunLoop && !hasTsRunLoop) {
+      res.status(422).json({ error: `run-loop.sh not found at ${runLoopSh}` });
       return;
     }
+    const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
 
     // 4. Conflict check — is there already an active run for this workspace?
     const activeRun = db.prepare(
@@ -321,17 +326,38 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }
     }
 
-    // 9. Spawn run-loop.sh — detached so it survives backend restarts.
+    // 9. Spawn run-loop — detached so it survives backend restarts.
     //    stdout+stderr go directly to the log file via file descriptor (no pipes).
     //    Pipes break on parent death (SIGPIPE), but file descriptors don't.
-    const scriptInCwd = path.join(cwd, 'scripts', 'run-loop.sh');
     const logFd = fs.openSync(logPath, 'a');
-    const child = spawn('bash', [scriptInCwd, '--json', absSpecPath], {
-      cwd,
-      stdio: ['ignore', logFd, logFd],
-      detached: true,
-      env,
-    });
+    let child: ReturnType<typeof spawn>;
+
+    if (useTypescriptRunLoop) {
+      // TypeScript run-loop (cross-platform, no bash/gtimeout/python dependency)
+      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
+      const backendPort = process.env.PORT || '3030';
+      child = spawn(tsxBin, [
+        runLoopTs,
+        '--json', absSpecPath,
+        '--cwd', cwd,
+        '--run-id', String(runId),
+        '--port', backendPort,
+      ], {
+        cwd,
+        stdio: ['ignore', logFd, logFd],
+        detached: true,
+        env,
+      });
+    } else {
+      // Legacy bash run-loop (fallback for workspaces that still have run-loop.sh)
+      const scriptInCwd = path.join(cwd, 'scripts', 'run-loop.sh');
+      child = spawn('bash', [scriptInCwd, '--json', absSpecPath], {
+        cwd,
+        stdio: ['ignore', logFd, logFd],
+        detached: true,
+        env,
+      });
+    }
     fs.closeSync(logFd);  // parent closes its copy; child keeps its own fd
     child.unref();        // don't keep Node alive waiting for this child
 
@@ -833,13 +859,17 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       return;
     }
 
-    // 5. Verify run-loop.sh exists
+    // 5. Verify run-loop engine is available
     const cwd = originalRun.worktree_path || workspace.path;
-    const runLoopScript = path.join(cwd, 'scripts', 'run-loop.sh');
-    if (!fs.existsSync(runLoopScript)) {
-      res.status(422).json({ error: `run-loop.sh not found at ${runLoopScript}` });
+    const retryRunLoopSh = path.join(cwd, 'scripts', 'run-loop.sh');
+    const retryRunLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
+    const retryHasBash = fs.existsSync(retryRunLoopSh);
+    const retryHasTs = fs.existsSync(retryRunLoopTs);
+    if (!retryHasBash && !retryHasTs) {
+      res.status(422).json({ error: `run-loop.sh not found at ${retryRunLoopSh}` });
       return;
     }
+    const retryUseTs = !retryHasBash && retryHasTs;
 
     // 6. Create a NEW pipeline_run linked to the original via retried_from_run_id
     const newRunResult = db.prepare(
@@ -948,16 +978,34 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       env[k] = v;
     }
 
-    // 11. Spawn run-loop.sh with the retry spec — detached, output to log file
+    // 11. Spawn run-loop with the retry spec — detached, output to log file
     const retryLogPath = workspaceLogPath(workspace.path, newRunId);
     db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(retryLogPath, newRunId);
     const retryLogFd = fs.openSync(retryLogPath, 'a');
-    const child = spawn('bash', [runLoopScript, '--json', retrySpecPath], {
-      cwd,
-      stdio: ['ignore', retryLogFd, retryLogFd],
-      detached: true,
-      env,
-    });
+    let child: ReturnType<typeof spawn>;
+    if (retryUseTs) {
+      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
+      const backendPort = process.env.PORT || '3030';
+      child = spawn(tsxBin, [
+        retryRunLoopTs,
+        '--json', retrySpecPath,
+        '--cwd', cwd,
+        '--run-id', String(newRunId),
+        '--port', backendPort,
+      ], {
+        cwd,
+        stdio: ['ignore', retryLogFd, retryLogFd],
+        detached: true,
+        env,
+      });
+    } else {
+      child = spawn('bash', [retryRunLoopSh, '--json', retrySpecPath], {
+        cwd,
+        stdio: ['ignore', retryLogFd, retryLogFd],
+        detached: true,
+        env,
+      });
+    }
     fs.closeSync(retryLogFd);
     child.unref();
 
@@ -1497,8 +1545,36 @@ function recordTokenUsage(runId: number, storyId: string, inputTokens: number, o
   ).run(runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, Math.round(costUsd * 1_000_000) / 1_000_000);
 }
 
+// ─── POST /api/pipeline/story-result — Record story outcome from run-loop.ts ──
+// Called by the TypeScript run-loop to insert story_results rows.
+
+router.post('/story-result', (req: Request, res: Response) => {
+  try {
+    const { runId, storyId, status } = req.body as { runId?: number; storyId?: string; status?: string };
+
+    if (!runId || !storyId || !status) {
+      res.status(400).json({ error: 'runId, storyId, and status are required' });
+      return;
+    }
+
+    if (!['pass', 'fail', 'skip', 'excluded'].includes(status)) {
+      res.status(400).json({ error: `Invalid status: ${status}` });
+      return;
+    }
+
+    db.prepare(
+      `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, ?, ?, datetime('now'))`
+    ).run(runId, storyId, status);
+
+    res.status(201).json({ ok: true });
+  } catch (error: any) {
+    console.error('[Pipeline] Story result error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── POST /api/pipeline/runs/:runId/stories/:storyId/tokens — Record token usage ─
-// Allows run-loop.sh or external callers to report token usage for a story.
+// Allows run-loop.ts or external callers to report token usage for a story.
 
 router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response) => {
   try {
