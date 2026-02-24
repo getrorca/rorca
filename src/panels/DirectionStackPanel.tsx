@@ -6,6 +6,17 @@ import BootstrapContextModal from '../components/BootstrapContextModal';
 import AISetupWizard from '../components/AISetupWizard';
 import { HelpTooltip } from '../components/HelpTooltip';
 
+interface ScanResult {
+  l1Draft: string;
+  l2Draft: string;
+  l3Draft: string;
+  confidence: 'low' | 'medium' | 'high';
+  filesScanned: string[];
+  dirCount: number;
+  l3Valid: boolean;
+  l3Errors: Array<{ path: string; message: string }>;
+}
+
 type LayerTab = 1 | 2 | 3;
 
 const LAYER_LABELS: Record<LayerTab, string> = {
@@ -21,6 +32,11 @@ export default function DirectionStackPanel() {
   const [activeTab, setActiveTab] = useState<LayerTab>(1);
   const [showBootstrap, setShowBootstrap] = useState(false);
   const [showAISetup, setShowAISetup] = useState(false);
+
+  // Scan Repo state
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   // L1/L2/L3 persisted layers
   const l1 = useDirectionLayer(workspaceId, 1);
@@ -50,6 +66,33 @@ export default function DirectionStackPanel() {
     l2.setContent(layers.l2);
     l3.setContent(layers.l3);
   }, [l1, l2, l3]);
+
+  const handleScanRepo = useCallback(async () => {
+    if (!workspaceId) return;
+    setIsScanning(true);
+    setScanError(null);
+    setScanResult(null);
+    try {
+      const result = await apiFetch<ScanResult>(`/api/workspaces/${workspaceId}/scan-direction`, {
+        method: 'POST',
+      });
+      setScanResult(result);
+    } catch (err: any) {
+      setScanError(err.message || 'Scan failed');
+    } finally {
+      setIsScanning(false);
+    }
+  }, [workspaceId]);
+
+  const handleAcceptScan = useCallback(() => {
+    if (!scanResult) return;
+    l1.setContent(scanResult.l1Draft);
+    l2.setContent(scanResult.l2Draft);
+    l3.setContent(scanResult.l3Draft);
+    setScanResult(null);
+    setBannerDismissed(true);
+    if (workspaceId) localStorage.setItem(BOOTSTRAP_DISMISSED_KEY(workspaceId), 'true');
+  }, [scanResult, l1, l2, l3, workspaceId]);
 
   // L4/L5 ephemeral (no save)
   const [l4, setL4] = useState('');
@@ -128,6 +171,14 @@ export default function DirectionStackPanel() {
           </div>
           <div className="flex items-center gap-1">
             <button
+              onClick={handleScanRepo}
+              disabled={isScanning}
+              className="px-2.5 py-1.5 text-xs font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap disabled:opacity-50"
+            >
+              {isScanning ? 'Scanning...' : 'Scan Repo'}
+            </button>
+            <span className="text-border">|</span>
+            <button
               onClick={() => setShowAISetup(true)}
               className="px-2.5 py-1.5 text-xs font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap"
             >
@@ -163,6 +214,51 @@ export default function DirectionStackPanel() {
               >
                 &#10005;
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Scan error */}
+        {scanError && (
+          <div className="flex items-center justify-between px-3 py-2 bg-red-500/10 border-b border-red-500/30">
+            <span className="text-xs text-red-400">{scanError}</span>
+            <button onClick={() => setScanError(null)} className="text-xs text-muted hover:text-text">&#10005;</button>
+          </div>
+        )}
+
+        {/* Scan result preview banner */}
+        {scanResult && (
+          <div className="border-b border-accent/30 bg-accent/5">
+            <div className="flex items-center justify-between px-3 py-2">
+              <div className="text-xs text-text">
+                <span className="font-medium">Repo scanned</span>
+                <span className="text-muted ml-2">
+                  {scanResult.filesScanned.join(', ')} | {scanResult.dirCount} dirs | confidence: {scanResult.confidence}
+                </span>
+                {!scanResult.l3Valid && scanResult.l3Errors.length > 0 && (
+                  <span className="text-warning ml-2">L3 has validation issues</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={handleAcceptScan}
+                  className="px-2.5 py-1 text-xs font-medium bg-accent hover:bg-[var(--accent-hover)] text-white rounded transition-colors"
+                >
+                  Apply Drafts
+                </button>
+                <button
+                  onClick={() => setScanResult(null)}
+                  className="text-xs text-muted hover:text-text transition-colors"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            {/* Inline preview of the draft for the active tab */}
+            <div className="px-3 pb-2">
+              <pre className="text-xs font-mono text-muted max-h-24 overflow-auto bg-bg rounded p-2">
+                {activeTab === 1 ? scanResult.l1Draft : activeTab === 2 ? scanResult.l2Draft : scanResult.l3Draft}
+              </pre>
             </div>
           </div>
         )}

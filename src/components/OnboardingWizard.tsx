@@ -136,9 +136,12 @@ export default function OnboardingWizard() {
   // Step 2: Direction stack state
   const [selectedTemplate, setSelectedTemplate] = useState<string>('react');
   const [l1Content, setL1Content] = useState(STACK_TEMPLATES.react.l1);
+  const [l2Content, setL2Content] = useState('');
   const [l3Content, setL3Content] = useState(STACK_TEMPLATES.react.l3);
   const [dirSaving, setDirSaving] = useState(false);
   const [dirSaved, setDirSaved] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanConfidence, setScanConfidence] = useState<string | null>(null);
 
   // Step 3: Spec generation state
   const [specBrief, setSpecBrief] = useState(SAMPLE_BRIEF);
@@ -226,6 +229,29 @@ export default function OnboardingWizard() {
     }
   }
 
+  // Step 2: Scan repo to auto-fill direction
+  async function handleScanRepo() {
+    if (!createdWorkspaceId) return;
+    setIsScanning(true);
+    setScanConfidence(null);
+    try {
+      const result = await apiFetch<{
+        l1Draft: string; l2Draft: string; l3Draft: string;
+        confidence: string; filesScanned: string[];
+      }>(`/api/workspaces/${createdWorkspaceId}/scan-direction`, { method: 'POST' });
+      setL1Content(result.l1Draft);
+      setL2Content(result.l2Draft);
+      setL3Content(result.l3Draft);
+      setScanConfidence(result.confidence);
+      setSelectedTemplate('');
+      setDirSaved(false);
+    } catch (err: any) {
+      alert(`Scan failed: ${err.message}`);
+    } finally {
+      setIsScanning(false);
+    }
+  }
+
   // Step 2: Save direction layers
   async function handleSaveDirection() {
     if (!createdWorkspaceId) return;
@@ -237,6 +263,14 @@ export default function OnboardingWizard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ layer: 1, contentYaml: l1Content }),
       });
+      // Save L2 (domain) if populated (e.g. from repo scan)
+      if (l2Content.trim()) {
+        await apiFetch('/api/direction', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ layer: 2, workspaceId: createdWorkspaceId, contentYaml: l2Content }),
+        });
+      }
       // Save L3 (project)
       await apiFetch('/api/direction', {
         method: 'PUT',
@@ -419,6 +453,32 @@ export default function OnboardingWizard() {
                 The direction stack guides AI spec generation. Pick a template that matches your project, then customize.
               </p>
 
+              {/* Scan Repo button */}
+              <div className="mb-4 p-3 bg-accent/5 border border-accent/20 rounded-lg">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Auto-detect from repo</p>
+                    <p className="text-xs text-muted mt-0.5">Scans package.json, CLAUDE.md, README.md, and directory structure</p>
+                  </div>
+                  <button
+                    onClick={handleScanRepo}
+                    disabled={isScanning}
+                    className="px-4 py-2 text-sm rounded bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-50 shrink-0 ml-3"
+                  >
+                    {isScanning ? 'Scanning...' : 'Scan Repo'}
+                  </button>
+                </div>
+                {scanConfidence && (
+                  <p className="text-xs text-green-400 mt-2">Scan complete (confidence: {scanConfidence})</p>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3 mb-4">
+                <div className="flex-1 h-px bg-border" />
+                <span className="text-xs text-muted">or pick a template</span>
+                <div className="flex-1 h-px bg-border" />
+              </div>
+
               {/* Template selector */}
               <div className="mb-4">
                 <label className="block text-sm font-medium mb-2">Stack Template</label>
@@ -429,7 +489,9 @@ export default function OnboardingWizard() {
                       onClick={() => {
                         setSelectedTemplate(key);
                         setL1Content(tmpl.l1);
+                        setL2Content('');
                         setL3Content(tmpl.l3);
+                        setScanConfidence(null);
                         setDirSaved(false);
                       }}
                       className={`px-3 py-2 text-sm rounded border text-left transition-colors ${
@@ -454,6 +516,19 @@ export default function OnboardingWizard() {
                   className="w-full px-3 py-2 rounded border border-border bg-bg text-xs font-mono focus:outline-none focus:border-accent resize-y"
                 />
               </div>
+
+              {/* L2: Domain Profile (shown when populated from scan) */}
+              {l2Content.trim() && (
+                <div className="mb-4">
+                  <label className="block text-sm font-medium mb-1">L2 — Domain Profile</label>
+                  <textarea
+                    value={l2Content}
+                    onChange={(e) => { setL2Content(e.target.value); setDirSaved(false); }}
+                    rows={4}
+                    className="w-full px-3 py-2 rounded border border-border bg-bg text-xs font-mono focus:outline-none focus:border-accent resize-y"
+                  />
+                </div>
+              )}
 
               {/* L3: Project Context */}
               <div className="mb-4">
