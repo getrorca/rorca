@@ -30,6 +30,7 @@ import CompletionRatePanel from './panels/CompletionRatePanel';
 import HealthDashboardPanel from './panels/HealthDashboardPanel';
 import AuditLogPanel from './panels/AuditLogPanel';
 import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
+import SettingsPanel from './panels/SettingsPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -115,6 +116,7 @@ function AppContent() {
       {activePanel === 'audit-log' && <AuditLogPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
+      {activePanel === 'settings' && <SettingsPanel />}
       {showCommandPalette && (
         <CommandPalette
           onNavigate={setActivePanel}
