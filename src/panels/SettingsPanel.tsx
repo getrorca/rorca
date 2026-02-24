@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, Bell, Key, Monitor, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail } from 'lucide-react';
+import { User, Bell, Key, Monitor, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, clearTokens } from '../lib/apiFetch';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type SettingsTab = 'profile' | 'notifications' | 'api-keys' | 'display';
+type SettingsTab = 'profile' | 'notifications' | 'api-keys' | 'display' | 'account';
 
 interface ProfileData {
   id: string;
@@ -44,6 +44,7 @@ const TABS: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'api-keys', label: 'API Keys', icon: Key },
   { id: 'display', label: 'Display', icon: Monitor },
+  { id: 'account', label: 'Account', icon: AlertTriangle },
 ];
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
@@ -117,6 +118,7 @@ export default function SettingsPanel() {
           {activeTab === 'notifications' && <NotificationsSection />}
           {activeTab === 'api-keys' && <ApiKeysSection />}
           {activeTab === 'display' && <DisplaySection />}
+          {activeTab === 'account' && <AccountDeletionSection />}
         </div>
       </div>
     </div>
@@ -707,6 +709,119 @@ function DisplaySection() {
         {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
         {saved ? 'Saved' : 'Save Display Settings'}
       </button>
+    </div>
+  );
+}
+
+// ─── Account Deletion Section ─────────────────────────────────────────────────
+
+function AccountDeletionSection() {
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [password, setPassword] = useState('');
+  const [confirmText, setConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canDelete = password.length > 0 && confirmText === 'DELETE';
+
+  const handleDelete = async () => {
+    if (!canDelete) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await apiFetch('/api/auth/account', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      // Account deleted — clear local state and redirect
+      clearTokens();
+      window.location.href = '/';
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete account');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="max-w-lg space-y-6">
+      <div>
+        <h2 className="text-sm font-semibold text-red-500 mb-2">Danger Zone</h2>
+        <p className="text-xs text-muted">
+          Permanently delete your account and all associated data. This action is irreversible.
+        </p>
+      </div>
+
+      <div className="border border-red-500/30 rounded p-4 space-y-4 bg-red-500/5">
+        <div className="flex items-start gap-3">
+          <AlertTriangle size={20} className="text-red-500 shrink-0 mt-0.5" />
+          <div className="text-sm text-[var(--text)]">
+            <p className="font-medium">Delete your account</p>
+            <p className="text-xs text-muted mt-1">
+              This will permanently delete your user account, all workspaces you own, specs, direction layers,
+              pipeline runs, WAL events, API keys, team memberships, and cancel your subscription if active.
+              This cannot be undone.
+            </p>
+          </div>
+        </div>
+
+        {!showConfirm ? (
+          <button
+            onClick={() => setShowConfirm(true)}
+            className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
+          >
+            <Trash2 size={14} />
+            Delete my account
+          </button>
+        ) : (
+          <div className="space-y-3 border-t border-red-500/20 pt-4">
+            <div>
+              <label className="block text-xs text-muted mb-1">Enter your password to confirm</label>
+              <input
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="Your current password"
+                className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-red-500 outline-none"
+                autoFocus
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs text-muted mb-1">
+                Type <span className="font-mono font-bold text-red-400">DELETE</span> to confirm
+              </label>
+              <input
+                type="text"
+                value={confirmText}
+                onChange={e => setConfirmText(e.target.value)}
+                placeholder="DELETE"
+                className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-red-500 outline-none font-mono"
+              />
+            </div>
+
+            {error && <p className="text-xs text-red-500">{error}</p>}
+
+            <div className="flex gap-2">
+              <button
+                onClick={handleDelete}
+                disabled={!canDelete || deleting}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 transition-colors"
+              >
+                {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                {deleting ? 'Deleting...' : 'Permanently delete my account'}
+              </button>
+              <button
+                onClick={() => { setShowConfirm(false); setPassword(''); setConfirmText(''); setError(null); }}
+                className="px-4 py-2 text-sm text-muted hover:text-[var(--text)] transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
