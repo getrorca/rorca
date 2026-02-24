@@ -112,6 +112,16 @@ router.post('/', (req, res) => {
     "INSERT INTO wal_events (event_type, workspace_id) VALUES ('workspace_create', ?)"
   ).run(id);
 
+  // V2-070: Auto-create default agent profile using workspace's L3 direction content
+  const l3Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = '' LIMIT 1`
+  ).get(id) as { content_yaml: string } | undefined;
+
+  db.prepare(
+    `INSERT OR IGNORE INTO agent_profiles (workspace_id, name, system_prompt_override, allowed_tools, is_active)
+     VALUES (?, 'Default', ?, '[]', 1)`
+  ).run(id, l3Row?.content_yaml || null);
+
   const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as WorkspaceRow;
   res.status(201).json({ workspace: parseWorkspace(row) });
 });
