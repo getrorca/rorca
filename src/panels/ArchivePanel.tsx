@@ -61,9 +61,10 @@ interface ArchiveSpec {
 }
 
 interface ArchiveResponse {
-  specs: ArchiveSpec[];
+  items: ArchiveSpec[];
   total: number;
   hasMore: boolean;
+  cursor?: string;
 }
 
 interface SpecDetail {
@@ -188,9 +189,9 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
 
       const res = await apiFetch<ArchiveResponse>(`/api/specs/archive?${params}`);
       if (append) {
-        setSpecs(prev => [...prev, ...res.specs]);
+        setSpecs(prev => [...prev, ...res.items]);
       } else {
-        setSpecs(res.specs);
+        setSpecs(res.items);
       }
       setTotal(res.total);
       setHasMore(res.hasMore);

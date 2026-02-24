@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
 import { db } from '../db/index';
+import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
 const router = Router();
 
@@ -44,7 +45,8 @@ router.get('/', (req: Request, res: Response) => {
       next_run_at: row.enabled ? nextRunAt(row.cron_expression) : null,
     }));
 
-    res.json({ schedules });
+    const pagination = parsePaginationParams(req);
+    res.json(paginateArray(schedules, pagination));
   } catch (error: any) {
     console.error('[Schedules] List error:', error);
     res.status(500).json({ error: error.message });

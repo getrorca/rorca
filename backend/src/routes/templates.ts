@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../db/index';
 import { AuthUser } from './auth';
+import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
 const router = Router();
 
@@ -238,7 +239,8 @@ router.get('/', (req: Request, res: Response) => {
       return 0; // preserve DB ordering (created_at DESC) within same featured status
     });
 
-    res.json({ templates });
+    const pagination = parsePaginationParams(req);
+    res.json(paginateArray(templates, pagination, { cursorKey: (t) => t.id as string }));
   } catch (error: any) {
     console.error('[Templates] List error:', error);
     res.status(500).json({ error: error.message });

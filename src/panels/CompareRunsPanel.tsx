@@ -108,10 +108,10 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
   // Fetch available runs
   useEffect(() => {
     if (!workspaceId) return;
-    apiFetch<{ runs: PipelineRun[] }>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
+    apiFetch<{ items: PipelineRun[]; total: number; hasMore: boolean; cursor?: string }>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
       .then((data) => {
         // Only show completed runs (can't meaningfully compare in-progress runs)
-        const completed = data.runs.filter(r => ['done', 'failed', 'partial_failure'].includes(r.status));
+        const completed = data.items.filter(r => ['done', 'failed', 'partial_failure'].includes(r.status));
         setRuns(completed);
       })
       .catch(console.error);

@@ -451,10 +451,10 @@ describe('GET /api/specs (list)', () => {
     const res = await request(app).get('/api/specs?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(2);
+    expect(res.body.items).toHaveLength(2);
 
-    const pending = res.body.specs.find((s: any) => s.id === 'my-pending-spec');
-    const approved = res.body.specs.find((s: any) => s.id === 'my-approved-spec');
+    const pending = res.body.items.find((s: any) => s.id === 'my-pending-spec');
+    const approved = res.body.items.find((s: any) => s.id === 'my-approved-spec');
 
     expect(pending).toBeDefined();
     expect(pending.status).toBe('pending');
@@ -475,8 +475,8 @@ describe('GET /api/specs (list)', () => {
     const res = await request(app).get('/api/specs?workspaceId=ws-test&status=pending').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('pend-only');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('pend-only');
   });
 
   test('filters by status=approved', async () => {
@@ -489,14 +489,14 @@ describe('GET /api/specs (list)', () => {
     const res = await request(app).get('/api/specs?workspaceId=ws-test&status=approved').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('appr-only2');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('appr-only2');
   });
 
   test('returns empty array when no specs exist', async () => {
     const res = await request(app).get('/api/specs?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.specs).toEqual([]);
+    expect(res.body.items).toEqual([]);
   });
 
   test('missing workspaceId → 400', async () => {
@@ -672,8 +672,8 @@ describe('GET /api/specs/:specId/versions', () => {
   test('returns empty array when no versions exist', async () => {
     const res = await request(app).get('/api/specs/nonexistent-slug/versions').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.specSlug).toBe('nonexistent-slug');
-    expect(res.body.versions).toEqual([]);
+    
+    expect(res.body.items).toEqual([]);
   });
 
   test('returns versions after rejection creates a snapshot', async () => {
@@ -694,13 +694,13 @@ describe('GET /api/specs/:specId/versions', () => {
 
     const res = await request(app).get('/api/specs/versioned-spec/versions').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.versions).toHaveLength(1);
-    expect(res.body.versions[0].version).toBe(1);
-    expect(res.body.versions[0].status).toBe('rejected');
-    expect(res.body.versions[0].rejectionReason).toBe('Needs more stories');
-    expect(res.body.versions[0].title).toBe('Versioned Spec');
-    expect(res.body.versions[0].storyCount).toBe(2);
-    expect(res.body.versions[0].createdAt).toBeDefined();
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].version).toBe(1);
+    expect(res.body.items[0].status).toBe('rejected');
+    expect(res.body.items[0].rejectionReason).toBe('Needs more stories');
+    expect(res.body.items[0].title).toBe('Versioned Spec');
+    expect(res.body.items[0].storyCount).toBe(2);
+    expect(res.body.items[0].createdAt).toBeDefined();
   });
 
   test('returns multiple versions in ascending order', async () => {
@@ -714,13 +714,13 @@ describe('GET /api/specs/:specId/versions', () => {
 
     const res = await request(app).get('/api/specs/multi-ver/versions').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.versions).toHaveLength(2);
-    expect(res.body.versions[0].version).toBe(1);
-    expect(res.body.versions[0].title).toBe('V1');
-    expect(res.body.versions[0].storyCount).toBe(0);
-    expect(res.body.versions[1].version).toBe(2);
-    expect(res.body.versions[1].title).toBe('V2');
-    expect(res.body.versions[1].storyCount).toBe(1);
+    expect(res.body.items).toHaveLength(2);
+    expect(res.body.items[0].version).toBe(1);
+    expect(res.body.items[0].title).toBe('V1');
+    expect(res.body.items[0].storyCount).toBe(0);
+    expect(res.body.items[1].version).toBe(2);
+    expect(res.body.items[1].title).toBe('V2');
+    expect(res.body.items[1].storyCount).toBe(1);
   });
 });
 
@@ -845,12 +845,12 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=authentication').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('auth-system');
-    expect(res.body.specs[0].matchSnippets).toBeDefined();
-    expect(res.body.specs[0].matchSnippets.length).toBeGreaterThan(0);
-    expect(res.body.specs[0].matchSnippets[0].field).toBe('title');
-    expect(res.body.specs[0].matchSnippets[0].text).toContain('<mark>');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('auth-system');
+    expect(res.body.items[0].matchSnippets).toBeDefined();
+    expect(res.body.items[0].matchSnippets.length).toBeGreaterThan(0);
+    expect(res.body.items[0].matchSnippets[0].field).toBe('title');
+    expect(res.body.items[0].matchSnippets[0].text).toContain('<mark>');
   });
 
   test('q param searches across story titles', async () => {
@@ -866,9 +866,9 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=analytics').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('dashboard-spec');
-    const storySnippet = res.body.specs[0].matchSnippets.find((s: any) => s.field === 'storyTitle');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('dashboard-spec');
+    const storySnippet = res.body.items[0].matchSnippets.find((s: any) => s.field === 'storyTitle');
     expect(storySnippet).toBeDefined();
     expect(storySnippet.storyId).toBe('US-001');
   });
@@ -885,9 +885,9 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=OAuth2').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('api-spec');
-    const descSnippet = res.body.specs[0].matchSnippets.find((s: any) => s.field === 'storyDescription');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('api-spec');
+    const descSnippet = res.body.items[0].matchSnippets.find((s: any) => s.field === 'storyDescription');
     expect(descSnippet).toBeDefined();
     expect(descSnippet.text).toContain('<mark>OAuth2</mark>');
   });
@@ -904,9 +904,9 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=invalidation').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('perf-spec');
-    const acSnippet = res.body.specs[0].matchSnippets.find((s: any) => s.field === 'acceptanceCriteria');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('perf-spec');
+    const acSnippet = res.body.items[0].matchSnippets.find((s: any) => s.field === 'acceptanceCriteria');
     expect(acSnippet).toBeDefined();
     expect(acSnippet.storyId).toBe('US-001');
   });
@@ -931,10 +931,10 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=login').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(2);
+    expect(res.body.items).toHaveLength(2);
     // Title match should rank first
-    expect(res.body.specs[0].id).toBe('login-system');
-    expect(res.body.specs[0].relevanceScore).toBeGreaterThan(res.body.specs[1].relevanceScore);
+    expect(res.body.items[0].id).toBe('login-system');
+    expect(res.body.items[0].relevanceScore).toBeGreaterThan(res.body.items[1].relevanceScore);
   });
 
   test('date range filter: createdAfter', async () => {
@@ -945,8 +945,8 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&createdAfter=2026-02-01T00:00:00.000Z').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('new-spec');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('new-spec');
   });
 
   test('date range filter: createdBefore', async () => {
@@ -957,8 +957,8 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&createdBefore=2026-02-01T00:00:00.000Z').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('jan-spec');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('jan-spec');
   });
 
   test('date range combined with text search', async () => {
@@ -972,8 +972,8 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('auth-new');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('auth-new');
   });
 
   test('empty search returns all specs without snippets', async () => {
@@ -984,10 +984,10 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(2);
+    expect(res.body.items).toHaveLength(2);
     // No matchSnippets or relevanceScore when no query
-    expect(res.body.specs[0].matchSnippets).toBeUndefined();
-    expect(res.body.specs[0].relevanceScore).toBeUndefined();
+    expect(res.body.items[0].matchSnippets).toBeUndefined();
+    expect(res.body.items[0].relevanceScore).toBeUndefined();
   });
 
   test('no results for unmatched query', async () => {
@@ -997,7 +997,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=zzzznonexistent').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(0);
+    expect(res.body.items).toHaveLength(0);
     expect(res.body.total).toBe(0);
   });
 
@@ -1010,8 +1010,8 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&status=approved').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(1);
-    expect(res.body.specs[0].id).toBe('auth-approved');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].id).toBe('auth-approved');
   });
 
   test('pagination works with search results', async () => {
@@ -1023,14 +1023,14 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&limit=2&offset=0').set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs).toHaveLength(2);
+    expect(res.body.items).toHaveLength(2);
     expect(res.body.total).toBe(3);
     expect(res.body.hasMore).toBe(true);
 
     // Second page
     const res2 = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=auth&limit=2&offset=2').set('Authorization', `Bearer ${authToken}`);
     expect(res2.status).toBe(200);
-    expect(res2.body.specs).toHaveLength(1);
+    expect(res2.body.items).toHaveLength(1);
     expect(res2.body.hasMore).toBe(false);
   });
 });

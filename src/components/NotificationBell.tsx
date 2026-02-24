@@ -15,9 +15,11 @@ interface Notification {
 }
 
 interface NotificationsResponse {
-  notifications: Notification[];
+  items: Notification[];
   unreadCount: number;
   total: number;
+  hasMore: boolean;
+  cursor?: string;
 }
 
 interface UnreadCountResponse {
@@ -82,7 +84,7 @@ export default function NotificationBell({ onNavigate }: NotificationBellProps) 
     setLoading(true);
     try {
       const res = await apiFetch<NotificationsResponse>('/api/notifications?limit=20');
-      setNotifications(res.notifications);
+      setNotifications(res.items);
       setUnreadCount(res.unreadCount);
     } catch {
       // ignore

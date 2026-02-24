@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db } from '../db/index';
+import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
 const router = Router();
 
@@ -30,8 +31,7 @@ interface WalEventRow {
  *   sort        - 'newest' (default) or 'oldest'
  */
 router.get('/', (req, res) => {
-  const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 50, 1), 200);
-  const offset = Math.max(parseInt(String(req.query.offset), 10) || 0, 0);
+  const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 200 });
   const eventType = req.query.event_type ? String(req.query.event_type) : null;
   const workspaceId = req.query.workspace_id ? String(req.query.workspace_id) : null;
   const actor = req.query.actor ? String(req.query.actor) : null;
@@ -73,13 +73,15 @@ router.get('/', (req, res) => {
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const events = db.prepare(
-    `SELECT * FROM wal_events ${whereClause} ORDER BY id ${sort} LIMIT ? OFFSET ?`
-  ).all(...params, limit, offset) as WalEventRow[];
-
-  const countRow = db.prepare(
-    `SELECT COUNT(*) as total FROM wal_events ${whereClause}`
-  ).get(...params) as { total: number };
+  const result = paginateQuery<WalEventRow>(db, {
+    query: `SELECT * FROM wal_events ${whereClause}`,
+    countQuery: `SELECT COUNT(*) as total FROM wal_events ${whereClause}`,
+    params,
+    pagination,
+    orderBy: `id ${sort}`,
+    cursorColumn: 'id',
+    cursorDirection: sort === 'DESC' ? 'desc' : 'asc',
+  });
 
   // Return distinct event types for filter dropdown
   const eventTypes = db.prepare(
@@ -87,10 +89,7 @@ router.get('/', (req, res) => {
   ).all() as { event_type: string }[];
 
   res.json({
-    events,
-    total: countRow.total,
-    limit,
-    offset,
+    ...result,
     eventTypes: eventTypes.map(r => r.event_type),
   });
 });
