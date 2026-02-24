@@ -557,3 +557,19 @@ Key decisions:
 - `rorcha_list_runs` slices client-side since /api/pipeline/runs doesn't have limit param
 - `rorcha_usage_stats` delegates to /api/analytics/usage (already has groupBy, dateRange, timeSeries)
 - Tool output is human-readable text, not raw JSON — matches existing tool patterns
+
+## Story V2-098: Integration Tests for All API Routes — DONE
+Files touched:
+- backend/src/routes/__tests__/pipeline.test.ts (NEW — 43 tests)
+- backend/src/routes/__tests__/analytics.test.ts (NEW — 43 tests)
+
+What was built:
+- Pipeline integration tests (43 tests): POST /trigger (validation, 404, 422, conflict detection, spawn+WAL, dry-run, excluded stories, auth), GET /runs (list with workspace isolation), GET /runs/:id (detail with stories), POST pause/resume (state+pid validation), POST /runs (create record+WAL), GET /runs/:id/log (download), POST /stories/:id/tokens (recording), GET /runs/compare (story-level diff+summary)
+- Analytics integration tests (43 tests): GET /usage (empty, group by model/story, invalid group_by, hasActiveRuns), GET /costs (by model/period, validation), GET/PUT/DELETE /pricing (CRUD, negative validation, DB persistence), GET /models (comparison metrics), GET /velocity (weekly data, available specs), GET /completion-rates (structure, summary), GET /roi (400/404, zero/calculated, config effects), PUT /roi/config (validation, persistence, ROI recalculation)
+- Total new tests: 86, covering all untested API routes
+
+Key decisions:
+- Pipeline log test uses runId=999999 to avoid collision with legacy /tmp/rorcha-run-{id}.log files
+- Pipeline trigger tests use bash stub script (exit 0) rather than mocking spawn — tests actual spawn path
+- Analytics tests seed token_usage + story_results directly in DB — faster and more deterministic than going through pipeline
+- Pre-existing test failures (notifications, teams, direction, auth, specs) verified unrelated to V2-098
