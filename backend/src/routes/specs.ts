@@ -7,12 +7,30 @@ import simpleGit from 'simple-git';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
-import { chatComplete, getActiveProvider, isValidModel, DEFAULT_MODEL, SUPPORTED_MODELS } from '../lib/llm-client';
-import type { SupportedModel } from '../lib/llm-client';
+import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
+
+/** Resolve vault credentials (API key + baseUrl) for a given model and user. */
+function resolveVaultCreds(userId: string, model: string): { apiKey?: string; baseUrl?: string } {
+  // Try provider inferred from model registry first
+  const vaultProvider = resolveVaultProvider(model);
+  if (vaultProvider) {
+    const result = getVaultKey(userId, vaultProvider);
+    if (result) return { apiKey: result.key, baseUrl: result.baseUrl ?? undefined };
+  }
+  // Fallback: try 'openai-compat' for unrecognized models (pass-through)
+  if (!vaultProvider) {
+    const compat = getVaultKey(userId, 'openai-compat');
+    if (compat) return { apiKey: compat.key, baseUrl: compat.baseUrl ?? undefined };
+  }
+  // Final fallback: try anthropic (backward compat — many users have this stored)
+  const anthropic = getVaultKey(userId, 'anthropic');
+  if (anthropic) return { apiKey: anthropic.key };
+  return {};
+}
 import { createNotification } from './notifications';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
@@ -356,13 +374,8 @@ router.post('/generate', async (req: Request, res: Response) => {
       return;
     }
 
-    // 1b. Validate model if provided
-    if (requestedModel && !isValidModel(requestedModel)) {
-      res.status(400).json({
-        error: `Invalid model: '${requestedModel}'. Supported models: ${SUPPORTED_MODELS.join(', ')}`,
-      });
-      return;
-    }
+    // 1b. Validate model if provided (allow pass-through for openai-compat provider IDs)
+    // No validation gate — any model string is accepted. Unknown models route to openai-compat.
 
     // 2. Fetch workspace from DB
     const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as Record<string, unknown> | undefined;
@@ -372,15 +385,15 @@ router.post('/generate', async (req: Request, res: Response) => {
     }
 
     // 2b. Resolve model: request param > workspace L3 preferred_model > default
-    let resolvedModel: SupportedModel = DEFAULT_MODEL;
-    if (requestedModel && isValidModel(requestedModel)) {
+    let resolvedModel: string = DEFAULT_MODEL;
+    if (requestedModel) {
       resolvedModel = requestedModel;
-    } else if (!requestedModel) {
+    } else {
       // Check workspace L3 for preferred_model
       const l3Pref = db.prepare(
         `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
       ).get(workspaceId) as { preferred_model: string | null } | undefined;
-      if (l3Pref?.preferred_model && isValidModel(l3Pref.preferred_model)) {
+      if (l3Pref?.preferred_model) {
         resolvedModel = l3Pref.preferred_model;
       }
     }
@@ -503,10 +516,10 @@ router.post('/generate', async (req: Request, res: Response) => {
 
     // 8. Call LLM with selected model (use vault key if available)
     const user = (req as Request & { user: AuthUser }).user;
-    const vaultApiKey = getVaultKey(user.id, 'anthropic');
+    const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
     const llmResult = await chatComplete(
       [{ role: 'user', content: fullPrompt }],
-      { model: resolvedModel, apiKey: vaultApiKey ?? undefined },
+      { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
     );
     const rawResponse = llmResult.text;
     const tokenUsage = llmResult.usage;
@@ -633,15 +646,15 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     return;
   }
 
-  // Resolve model
-  let resolvedModel: SupportedModel = DEFAULT_MODEL;
-  if (item.model && isValidModel(item.model)) {
+  // Resolve model (accept any model string for openai-compat pass-through)
+  let resolvedModel: string = DEFAULT_MODEL;
+  if (item.model) {
     resolvedModel = item.model;
-  } else if (!item.model) {
+  } else {
     const l3Pref = db.prepare(
       `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
     ).get(item.workspaceId) as { preferred_model: string | null } | undefined;
-    if (l3Pref?.preferred_model && isValidModel(l3Pref.preferred_model)) {
+    if (l3Pref?.preferred_model) {
       resolvedModel = l3Pref.preferred_model;
     }
   }
@@ -724,10 +737,10 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   ].join('\n');
 
   // Call LLM (use vault key if available for this user)
-  const batchVaultKey = item.userId ? getVaultKey(item.userId, 'anthropic') : null;
+  const batchVaultCreds = item.userId ? resolveVaultCreds(item.userId, resolvedModel) : {};
   const llmResult = await chatComplete(
     [{ role: 'user', content: fullPrompt }],
-    { model: resolvedModel, apiKey: batchVaultKey ?? undefined },
+    { model: resolvedModel, apiKey: batchVaultCreds.apiKey, baseUrl: batchVaultCreds.baseUrl },
   );
   const rawResponse = llmResult.text;
 
@@ -870,10 +883,7 @@ router.post('/generate/batch', (req: Request, res: Response) => {
         res.status(400).json({ error: `Brief at index ${i} missing required fields: title, brief, workspaceId` });
         return;
       }
-      if (b.model && !isValidModel(b.model)) {
-        res.status(400).json({ error: `Brief at index ${i} has invalid model: '${b.model}'` });
-        return;
-      }
+      // Model validation removed — any model string is accepted for openai-compat pass-through
     }
 
     const batchId = crypto.randomUUID();
@@ -1728,10 +1738,10 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
     const { chatComplete: chatCompleteFn } = await import('../lib/llm-client');
     const addStoriesUser = (req as Request & { user: AuthUser }).user;
-    const addStoriesVaultKey = getVaultKey(addStoriesUser.id, 'anthropic');
+    const addStoriesVaultCreds = resolveVaultCreds(addStoriesUser.id, DEFAULT_MODEL);
     const rawResponse = await chatCompleteFn(
       [{ role: 'user', content: fullPrompt }],
-      { apiKey: addStoriesVaultKey ?? undefined },
+      { apiKey: addStoriesVaultCreds.apiKey, baseUrl: addStoriesVaultCreds.baseUrl },
     );
 
     let parsed: { stories: unknown[] };
@@ -2251,12 +2261,12 @@ User instructions: ${instructions || 'Improve clarity and completeness.'}
 
 Rewrite the story following the user instructions. Keep the same scope unless told otherwise. Return ONLY the JSON object.`;
 
-    const resolvedModel = model && isValidModel(model) ? model as SupportedModel : undefined;
+    const resolvedModel = model || undefined;
     const rewriteUser = (req as Request & { user: AuthUser }).user;
-    const rewriteVaultKey = getVaultKey(rewriteUser.id, 'anthropic');
+    const rewriteVaultCreds = resolveVaultCreds(rewriteUser.id, resolvedModel ?? DEFAULT_MODEL);
     const llmResult = await chatComplete(
       [{ role: 'user', content: prompt }],
-      { model: resolvedModel, apiKey: rewriteVaultKey ?? undefined },
+      { model: resolvedModel, apiKey: rewriteVaultCreds.apiKey, baseUrl: rewriteVaultCreds.baseUrl },
     );
 
     // Parse LLM response — strip markdown fences if present
@@ -3247,10 +3257,10 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
     ].join('\n');
 
     const user = (req as Request & { user: AuthUser }).user;
-    const vaultApiKey = getVaultKey(user.id, 'anthropic');
+    const depVaultCreds = resolveVaultCreds(user.id, DEFAULT_MODEL);
     const llmResult = await chatComplete(
       [{ role: 'user', content: prompt }],
-      { apiKey: vaultApiKey ?? undefined },
+      { apiKey: depVaultCreds.apiKey, baseUrl: depVaultCreds.baseUrl },
     );
 
     // Parse response
@@ -4832,10 +4842,10 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
     ].filter(Boolean).join('\n');
 
     const enhanceUser = (req as Request & { user: AuthUser }).user;
-    const enhanceVaultKey = getVaultKey(enhanceUser.id, 'anthropic');
+    const enhanceVaultCreds = resolveVaultCreds(enhanceUser.id, DEFAULT_MODEL);
     const rawResponse = await chatComplete(
       [{ role: 'user', content: fullPrompt }],
-      { apiKey: enhanceVaultKey ?? undefined },
+      { apiKey: enhanceVaultCreds.apiKey, baseUrl: enhanceVaultCreds.baseUrl },
     );
 
     let parsed: { suggestions: Array<{ criterion: string; rationale: string }> };

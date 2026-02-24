@@ -13,6 +13,8 @@ jest.mock('../../lib/llm-client', () => ({
   isValidModel: jest.fn().mockImplementation((m: string) =>
     ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
   ),
+  resolveVaultProvider: jest.fn().mockReturnValue(null),
+  getModelInfo: jest.fn().mockReturnValue(undefined),
   DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
@@ -56,6 +58,8 @@ beforeEach(async () => {
     isValidModel: jest.fn().mockImplementation((m: string) =>
       ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
     ),
+    resolveVaultProvider: jest.fn().mockReturnValue(null),
+    getModelInfo: jest.fn().mockReturnValue(undefined),
     DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   }));
@@ -330,20 +334,21 @@ test('POST /api/specs/generate with explicit model uses that model', async () =>
   );
 });
 
-test('POST /api/specs/generate with invalid model returns 400', async () => {
+test('POST /api/specs/generate accepts any model string (pass-through for openai-compat)', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
+
   const res = await request(app)
     .post('/api/specs/generate')
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       workspaceId: 'ws-test',
-      title: 'Bad Model',
-      brief: 'Test bad model',
-      model: 'gpt-4o',
+      title: 'Custom Model',
+      brief: 'Test custom model pass-through',
+      model: 'my-custom-model-v1',
     });
 
-  expect(res.status).toBe(400);
-  expect(res.body.error).toContain('Invalid model');
-  expect(res.body.error).toContain('gpt-4o');
+  // Should not return 400 — any model string is accepted for openai-compat pass-through
+  expect(res.status).not.toBe(400);
 });
 
 test('POST /api/specs/generate without model uses workspace L3 preferred_model', async () => {
@@ -1093,19 +1098,20 @@ describe('POST /api/specs/generate/batch', () => {
     expect(res.body.error).toContain('workspaceId');
   });
 
-  test('brief with invalid model → 400 with index', async () => {
+  test('brief with custom model is accepted (pass-through)', async () => {
+    mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+
     const res = await request(app)
       .post('/api/specs/generate/batch')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
-          { title: 'Test Spec', brief: 'Test', workspaceId: 'ws-test', model: 'gpt-4o' },
+          { title: 'Test Spec', brief: 'Test', workspaceId: 'ws-test', model: 'custom-model-v1' },
         ],
       });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toContain('index 0');
-    expect(res.body.error).toContain('gpt-4o');
+    // Any model string is accepted for openai-compat pass-through
+    expect(res.status).not.toBe(400);
   });
 
   test('emits batch_started WAL event', async () => {

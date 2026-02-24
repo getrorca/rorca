@@ -8,7 +8,7 @@ import { db } from '../db/index';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
-import { DEFAULT_MODEL, isValidModel, type SupportedModel } from '../lib/llm-client';
+import { DEFAULT_MODEL } from '../lib/llm-client';
 import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
@@ -172,15 +172,15 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }
 
       // Resolve model: spec-level > workspace L3 preferred_model > default
-      let model: SupportedModel = DEFAULT_MODEL;
-      if (specJson.model && isValidModel(specJson.model)) {
+      let model: string = DEFAULT_MODEL;
+      if (specJson.model) {
         model = specJson.model;
       } else {
         const l3Pref = db.prepare(
           `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
         ).get(workspaceId) as { preferred_model: string | null } | undefined;
-        if (l3Pref?.preferred_model && isValidModel(l3Pref.preferred_model)) {
-          model = l3Pref.preferred_model as SupportedModel;
+        if (l3Pref?.preferred_model) {
+          model = l3Pref.preferred_model;
         }
       }
 
@@ -264,11 +264,22 @@ router.post('/trigger', async (req: Request, res: Response) => {
       env[k] = v;
     }
 
-    // 7c. Inject vault API key if user has one stored for Anthropic
+    // 7c. Inject vault API keys for all configured providers
     const pipelineUser = (req as Request & { user: AuthUser }).user;
     const anthropicVaultKey = getVaultKey(pipelineUser.id, 'anthropic');
     if (anthropicVaultKey) {
-      env['ANTHROPIC_API_KEY'] = anthropicVaultKey;
+      env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
+    }
+    const openaiVaultKey = getVaultKey(pipelineUser.id, 'openai-compat');
+    if (openaiVaultKey) {
+      env['OPENAI_API_KEY'] = openaiVaultKey.key;
+      if (openaiVaultKey.baseUrl) {
+        env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
+      }
+    }
+    const openrouterVaultKey = getVaultKey(pipelineUser.id, 'openrouter');
+    if (openrouterVaultKey) {
+      env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
     }
 
     // 7d. Inject active agent profile (system prompt + allowed tools + model override)

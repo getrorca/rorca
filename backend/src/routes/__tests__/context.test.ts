@@ -41,6 +41,8 @@ beforeEach(async () => {
     getActiveModel: () => 'mock-model',
     isValidModel: () => false,
     DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+    resolveVaultProvider: jest.fn().mockReturnValue(null),
+    getModelInfo: jest.fn().mockReturnValue(undefined),
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   }));
   (global as any).fetch = mockFetch;

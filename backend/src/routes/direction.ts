@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { chatComplete } from '../lib/llm-client';
-import { isValidModel, SUPPORTED_MODELS, DEFAULT_MODEL, ALL_MODELS, getModelsForProviders } from '../lib/llm-client';
+import { DEFAULT_MODEL, ALL_MODELS, getModelsForProviders } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 
@@ -133,12 +133,7 @@ router.put('/', (req: Request, res: Response) => {
       res.status(400).json({ error: 'preferredModel is only valid for layer 3' });
       return;
     }
-    if (!isValidModel(preferredModel)) {
-      res.status(400).json({
-        error: `Invalid preferredModel: '${preferredModel}'. Supported models: ${SUPPORTED_MODELS.join(', ')}`,
-      });
-      return;
-    }
+    // Accept any model string — registered models get cost tracking, unregistered models pass through to openai-compat
   }
 
   // Validate YAML syntax and per-layer schema (skip for Simple/prose mode)
