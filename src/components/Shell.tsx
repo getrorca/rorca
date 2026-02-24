@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Menu, HelpCircle, Settings } from 'lucide-react';
+import { Menu, HelpCircle, Settings, Zap } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
+import PricingModal from './PricingModal';
 import { useHelpTips } from '../contexts/HelpTipsContext';
 import AddWorkspaceModal from './AddWorkspaceModal';
 import ThemeToggle from './ThemeToggle';
@@ -131,6 +132,34 @@ function ShowTipsToggle() {
   );
 }
 
+const PLAN_COLORS: Record<string, string> = {
+  free: 'text-muted bg-bg border-border',
+  solo: 'text-blue-600 bg-blue-500/10 border-blue-500/30',
+  pro: 'text-accent bg-accent/10 border-accent/30',
+  team: 'text-purple-600 bg-purple-500/10 border-purple-500/30',
+};
+
+function PlanBadge() {
+  const { user } = useAuth();
+  const [showPricing, setShowPricing] = useState(false);
+  const plan = user?.plan || 'free';
+  const colors = PLAN_COLORS[plan] || PLAN_COLORS.free;
+
+  return (
+    <>
+      <button
+        onClick={() => plan === 'free' ? setShowPricing(true) : undefined}
+        className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold uppercase tracking-wider border transition-colors ${colors} ${plan === 'free' ? 'cursor-pointer hover:border-accent' : 'cursor-default'}`}
+        title={plan === 'free' ? 'Click to upgrade' : `${plan} plan`}
+      >
+        {plan !== 'free' && <Zap size={10} />}
+        {plan}
+      </button>
+      {showPricing && <PricingModal onClose={() => setShowPricing(false)} />}
+    </>
+  );
+}
+
 interface ShellProps {
   sidebar?: React.ReactNode;
   children?: React.ReactNode;
@@ -159,6 +188,7 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
         </div>
         <div className="flex items-center gap-1 sm:gap-2">
           <WorkspaceSelector />
+          <PlanBadge />
           <ShowTipsToggle />
           <NotificationBell onNavigate={onNavigate} />
           <ThemeToggle />

@@ -146,6 +146,17 @@ router.post('/trigger', async (req: Request, res: Response) => {
       return;
     }
 
+    // ── Plan enforcement: Free tier cannot execute pipelines ─────
+    const authReq = req as Request & { user?: { id: string } };
+    if (authReq.user?.id) {
+      const userRow = db.prepare('SELECT plan FROM users WHERE id = ?').get(authReq.user.id) as { plan: string } | undefined;
+      const plan = userRow?.plan || 'free';
+      if (plan === 'free' && !dryRun) {
+        res.status(403).json({ error: 'plan_required', message: 'Pipeline execution requires a paid plan. Upgrade to Solo, Pro, or Team.' });
+        return;
+      }
+    }
+
     // ── Dry-run: return cost estimate without spawning any processes ─────
     if (dryRun) {
       const absSpecPath = path.join(workspace.path, 'scripts', specPath);

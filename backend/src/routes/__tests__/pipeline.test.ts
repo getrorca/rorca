@@ -44,6 +44,9 @@ beforeEach(async () => {
 
   authToken = await getAuthToken(app);
 
+  // Set test user to a paid plan so pipeline trigger isn't blocked by V2-111 plan enforcement
+  db.prepare("UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'").run();
+
   // Create workspace directory with run-loop.sh and spec files
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
