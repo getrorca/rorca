@@ -22,7 +22,9 @@ import {
   History,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useAuth } from '../contexts/AuthContext';
 import { apiFetch } from '../lib/apiFetch';
+import PricingModal from '../components/PricingModal';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
 import { InlineStoryEditor } from '../components/InlineStoryEditor';
@@ -538,6 +540,9 @@ function SpecPreviewDrawer({
   onTagsChange: (tags: string[]) => void;
 }) {
   const { workspaceId } = useWorkspace();
+  const { user } = useAuth();
+  const [showPricing, setShowPricing] = useState(false);
+  const isFreePlan = !user?.plan || user.plan === 'free';
   const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
   const [runState, setRunState] = useState<RunState>('idle');
   const [runError, setRunError] = useState('');
@@ -925,12 +930,20 @@ function SpecPreviewDrawer({
                   </div>
                 ) : (
                   <button
-                    onClick={() => handleRun(false)}
+                    onClick={() => isFreePlan ? setShowPricing(true) : handleRun(false)}
                     disabled={runState === 'triggering'}
-                    className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-60"
+                    className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium transition-opacity disabled:opacity-60 ${
+                      isFreePlan
+                        ? 'bg-amber-500/15 text-amber-600 border border-amber-500/30 hover:bg-amber-500/25'
+                        : 'bg-accent text-white hover:opacity-90'
+                    }`}
                   >
                     {runState === 'triggering' ? (
                       <><Loader2 size={14} className="animate-spin" /> Starting run...</>
+                    ) : isFreePlan ? (
+                      <>
+                        <Play size={14} /> Upgrade to Run
+                      </>
                     ) : (
                       <>
                         <Play size={14} /> Run in Pipeline
@@ -1213,6 +1226,7 @@ function SpecPreviewDrawer({
           </div>
         )}
       </div>
+      {showPricing && <PricingModal onClose={() => setShowPricing(false)} />}
     </>
   );
 }

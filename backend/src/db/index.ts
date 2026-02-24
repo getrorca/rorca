@@ -85,6 +85,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT');
   }
 
+  // V2-111: Add plan column to users (idempotent)
+  const userColsV2111 = db.pragma('table_info(users)') as { name: string }[];
+  if (!userColsV2111.some(c => c.name === 'plan')) {
+    db.exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'");
+  }
+
   // V2-017: Add 'timeout' to story_results status CHECK + elapsed_seconds column (idempotent)
   const storyResultsSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_results'`

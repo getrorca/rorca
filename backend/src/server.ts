@@ -34,6 +34,7 @@ import agentHooksRouter from './routes/agent-hooks';
 import agentProfilesRouter from './routes/agent-profiles';
 import notificationsRouter from './routes/notifications';
 import settingsRouter from './routes/settings';
+import billingRouter, { webhookRouter as billingWebhookRouter } from './routes/billing';
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { subscribe } from './lib/sse-hub';
@@ -59,7 +60,8 @@ app.use(cors({ origin: corsOrigin }));
 // The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
 app.use(express.json({
   verify: (req, _res, buf) => {
-    if ((req as express.Request).originalUrl?.startsWith('/api/webhooks/')) {
+    const url = (req as express.Request).originalUrl || '';
+    if (url.startsWith('/api/webhooks/') || url.startsWith('/api/billing/webhook')) {
       (req as any).rawBody = buf;
     }
   },
@@ -82,6 +84,7 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 // Rate limit public routes by IP (unauthenticated tier)
 app.use('/api/auth', rateLimiter, authRouter);
 app.use('/api/webhooks', webhooksRouter);
+app.use('/api/billing', billingWebhookRouter); // Stripe webhook (no auth, needs raw body)
 app.use('/api/invites', rateLimiter, invitesRouter);
 registerWebhookHandlers();
 
@@ -118,6 +121,7 @@ app.use('/api/onboarding', onboardingRouter);
 app.use('/api/admin', backupsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api/billing', billingRouter);
 
 // V2-108: Serve frontend static files when running via `rorcha start`
 if (process.env.RORCHA_SERVE_STATIC === '1' && process.env.RORCHA_STATIC_DIR) {
