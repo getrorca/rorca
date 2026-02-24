@@ -233,7 +233,7 @@ describe('GET /api/templates', () => {
   test('returns empty array when no templates exist', async () => {
     const res = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.templates).toEqual([]);
+    expect(res.body.items).toEqual([]);
   });
 
   test('scope=all returns personal and team templates', async () => {
@@ -250,7 +250,7 @@ describe('GET /api/templates', () => {
 
     const res = await request(app).get('/api/templates?scope=all').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.templates).toHaveLength(2);
+    expect(res.body.items).toHaveLength(2);
   });
 
   test('scope=personal returns only personal templates', async () => {
@@ -265,8 +265,8 @@ describe('GET /api/templates', () => {
 
     const res = await request(app).get('/api/templates?scope=personal').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.templates).toHaveLength(1);
-    expect(res.body.templates[0].name).toBe('Personal');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].name).toBe('Personal');
   });
 
   test('scope=team returns only team templates', async () => {
@@ -281,8 +281,8 @@ describe('GET /api/templates', () => {
 
     const res = await request(app).get('/api/templates?scope=team').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.templates).toHaveLength(1);
-    expect(res.body.templates[0].name).toBe('Team');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].name).toBe('Team');
   });
 
   test('featured templates (rating >= 4.0) appear first', async () => {
@@ -299,8 +299,8 @@ describe('GET /api/templates', () => {
       .send({ rating: 5 });
 
     const listRes = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
-    expect(listRes.body.templates[0].name).toBe('High Rated');
-    expect(listRes.body.templates[0].avgRating).toBeGreaterThanOrEqual(4.0);
+    expect(listRes.body.items[0].name).toBe('High Rated');
+    expect(listRes.body.items[0].avgRating).toBeGreaterThanOrEqual(4.0);
   });
 
   test('list includes author info, usage count, and rating', async () => {
@@ -310,7 +310,7 @@ describe('GET /api/templates', () => {
 
     const res = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
-    const tpl = res.body.templates[0];
+    const tpl = res.body.items[0];
     expect(tpl.authorName).toBe('Auth Test User');
     expect(tpl.usageCount).toBe(0);
     expect(tpl.avgRating).toBe(0);
@@ -469,8 +469,8 @@ describe('workspace-agnostic templates', () => {
     expect(createRes.status).toBe(201);
 
     const listRes = await request(app).get('/api/templates').set('Authorization', `Bearer ${authToken}`);
-    expect(listRes.body.templates).toHaveLength(1);
-    expect(listRes.body.templates[0].name).toBe('Global Template');
+    expect(listRes.body.items).toHaveLength(1);
+    expect(listRes.body.items[0].name).toBe('Global Template');
   });
 });
 

@@ -37,10 +37,10 @@ export default function TeamDirectionPanel() {
 
   // Load teams list
   useEffect(() => {
-    apiFetch<Team[]>('/api/teams')
+    apiFetch<{ items: Team[]; total: number; hasMore: boolean; cursor?: string }>('/api/teams')
       .then((data) => {
         // API may return array or {teams: [...]}
-        const list = Array.isArray(data) ? data : ((data as unknown as { teams: Team[] }).teams ?? []);
+        const list = data.items;
         setTeams(list);
         if (list.length > 0 && !selectedTeamId) {
           setSelectedTeamId(list[0].id);

@@ -272,8 +272,8 @@ describe('GET /api/specs with tags filter', () => {
 
     expect(res.status).toBe(200);
     // Only test-spec has both 'frontend' and 'auth'
-    expect(res.body.specs.length).toBe(1);
-    expect(res.body.specs[0].id).toBe(specSlug);
+    expect(res.body.items.length).toBe(1);
+    expect(res.body.items[0].id).toBe(specSlug);
   });
 
   test('returns specs matching single tag', async () => {
@@ -283,7 +283,7 @@ describe('GET /api/specs with tags filter', () => {
 
     expect(res.status).toBe(200);
     // Both specs have 'frontend'
-    expect(res.body.specs.length).toBe(2);
+    expect(res.body.items.length).toBe(2);
   });
 
   test('includes tags array in spec summary', async () => {
@@ -292,7 +292,7 @@ describe('GET /api/specs with tags filter', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    const spec = res.body.specs.find((s: any) => s.id === specSlug);
+    const spec = res.body.items.find((s: any) => s.id === specSlug);
     expect(spec.tags).toEqual(['auth', 'frontend']);
   });
 
@@ -302,6 +302,6 @@ describe('GET /api/specs with tags filter', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.specs.length).toBe(2);
+    expect(res.body.items.length).toBe(2);
   });
 });

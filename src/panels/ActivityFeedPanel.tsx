@@ -45,9 +45,8 @@ interface ActivityItem {
 interface ActivityResponse {
   items: ActivityItem[];
   total: number;
-  limit: number;
-  offset: number;
   hasMore: boolean;
+  cursor?: string;
 }
 
 type ActivityTypeFilter = 'all' | 'spec_created' | 'spec_approved' | 'spec_rejected' | 'spec_edited' | 'run_triggered' | 'run_completed' | 'comment_added' | 'member_joined';

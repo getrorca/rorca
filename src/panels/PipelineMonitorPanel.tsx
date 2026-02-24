@@ -240,11 +240,11 @@ export default function PipelineMonitorPanel() {
   // Fetch run list on mount / workspace change
   useEffect(() => {
     if (!workspaceId) return;
-    apiFetch<{ runs: PipelineRun[] }>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
+    apiFetch<{ items: PipelineRun[]; total: number; hasMore: boolean; cursor?: string }>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
       .then((data) => {
-        setRuns(data.runs);
-        if (data.runs.length > 0 && !selectedRunId) {
-          setSelectedRunId(data.runs[0].id);
+        setRuns(data.items);
+        if (data.items.length > 0 && !selectedRunId) {
+          setSelectedRunId(data.items[0].id);
         }
       })
       .catch(console.error);
@@ -441,10 +441,10 @@ export default function PipelineMonitorPanel() {
       // Re-fetch run detail and run list to pick up status change immediately
       const [detail, runList] = await Promise.all([
         apiFetch<{ run: PipelineRun; stories: StoryResult[] }>(`/api/pipeline/runs/${selectedRunId}`),
-        apiFetch<{ runs: PipelineRun[] }>(`/api/pipeline/runs?workspaceId=${workspaceId}`),
+        apiFetch<{ items: PipelineRun[]; total: number; hasMore: boolean; cursor?: string }>(`/api/pipeline/runs?workspaceId=${workspaceId}`),
       ]);
       setSelectedRunDetail(detail);
-      setRuns(runList.runs);
+      setRuns(runList.items);
     } catch (err) {
       console.error(`[Pipeline] ${action} failed:`, err);
     } finally {
@@ -466,8 +466,8 @@ export default function PipelineMonitorPanel() {
       });
       if (result.ok && result.runId) {
         // Refresh run list and switch to the new retry run
-        const runList = await apiFetch<{ runs: PipelineRun[] }>(`/api/pipeline/runs?workspaceId=${workspaceId}`);
-        setRuns(runList.runs);
+        const runList = await apiFetch<{ items: PipelineRun[]; total: number; hasMore: boolean; cursor?: string }>(`/api/pipeline/runs?workspaceId=${workspaceId}`);
+        setRuns(runList.items);
         setSelectedRunId(result.runId);
       }
     } catch (err) {

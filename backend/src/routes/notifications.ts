@@ -2,6 +2,7 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import { db } from '../db/index';
 import type { AuthUser } from './auth';
+import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
 const router = Router();
 
@@ -38,28 +39,29 @@ interface PreferenceRow {
 // GET /api/notifications — list current user's notifications
 router.get('/', (req, res) => {
   const user = (req as any).user as AuthUser;
-  const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 30, 1), 100);
-  const offset = Math.max(parseInt(String(req.query.offset), 10) || 0, 0);
+  const pagination = parsePaginationParams(req, { limit: 30, maxLimit: 100 });
   const unreadOnly = req.query.unread === 'true';
 
   const whereClause = unreadOnly
     ? 'WHERE user_id = ? AND read_at IS NULL'
     : 'WHERE user_id = ?';
 
-  const rows = db.prepare(
-    `SELECT * FROM notifications ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`
-  ).all(user.id, limit, offset) as NotificationRow[];
-
-  const countRow = db.prepare(
-    `SELECT COUNT(*) as total FROM notifications ${whereClause}`
-  ).get(user.id) as { total: number };
+  const result = paginateQuery<NotificationRow>(db, {
+    query: `SELECT * FROM notifications ${whereClause}`,
+    countQuery: `SELECT COUNT(*) as total FROM notifications ${whereClause}`,
+    params: [user.id],
+    pagination,
+    orderBy: 'created_at DESC',
+    cursorColumn: 'id',
+    cursorDirection: 'desc',
+  });
 
   const unreadRow = db.prepare(
     'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND read_at IS NULL'
   ).get(user.id) as { count: number };
 
   res.json({
-    notifications: rows.map(r => ({
+    items: result.items.map(r => ({
       id: r.id,
       type: r.type,
       title: r.title,
@@ -68,11 +70,10 @@ router.get('/', (req, res) => {
       readAt: r.read_at,
       createdAt: r.created_at,
     })),
+    total: result.total,
+    hasMore: result.hasMore,
+    cursor: result.cursor,
     unreadCount: unreadRow.count,
-    total: countRow.total,
-    limit,
-    offset,
-    hasMore: offset + limit < countRow.total,
   });
 });
 

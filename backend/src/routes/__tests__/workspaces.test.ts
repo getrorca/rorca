@@ -78,9 +78,9 @@ test('GET /api/workspaces returns array containing created workspace', async () 
   const res = await request(app).get('/api/workspaces').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.workspaces).toHaveLength(1);
-  expect(res.body.workspaces[0].id).toBe('ws-test-1');
-  expect(Array.isArray(res.body.workspaces[0].domains)).toBe(true);
+  expect(res.body.items).toHaveLength(1);
+  expect(res.body.items[0].id).toBe('ws-test-1');
+  expect(Array.isArray(res.body.items[0].domains)).toBe(true);
 });
 
 test('GET /api/workspaces/:id returns workspace', async () => {

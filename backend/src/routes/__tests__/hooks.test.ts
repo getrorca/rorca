@@ -125,7 +125,7 @@ describe('GET /api/pipeline/hooks', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hooks).toEqual([]);
+    expect(res.body.items).toEqual([]);
   });
 
   test('lists hooks for a workspace', async () => {
@@ -143,7 +143,7 @@ describe('GET /api/pipeline/hooks', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hooks).toHaveLength(2);
+    expect(res.body.items).toHaveLength(2);
   });
 
   test('requires workspaceId query param', async () => {
@@ -236,7 +236,7 @@ describe('DELETE /api/pipeline/hooks/:id', () => {
       .get('/api/pipeline/hooks?workspaceId=ws-hooks')
       .set('Authorization', `Bearer ${authToken}`);
 
-    expect(listRes.body.hooks).toHaveLength(0);
+    expect(listRes.body.items).toHaveLength(0);
   });
 
   test('returns 404 for nonexistent hook', async () => {

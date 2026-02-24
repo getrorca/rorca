@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import type { PipelineHookRow } from '../lib/hook-runner';
+import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
 const router = Router();
 
@@ -20,7 +21,8 @@ router.get('/', (req: Request, res: Response) => {
       'SELECT * FROM pipeline_hooks WHERE workspace_id = ? ORDER BY hook_type, id ASC'
     ).all(workspaceId) as PipelineHookRow[];
 
-    res.json({ hooks });
+    const pagination = parsePaginationParams(req);
+    res.json(paginateArray(hooks, pagination));
   } catch (error: any) {
     console.error('[Hooks] List error:', error);
     res.status(500).json({ error: error.message });

@@ -128,8 +128,8 @@ describe('GET /api/pipeline/schedules', () => {
       .set('Authorization', `Bearer ${authToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.schedules).toHaveLength(2);
-    expect(res.body.schedules[0].next_run_at).toBeTruthy();
+    expect(res.body.items).toHaveLength(2);
+    expect(res.body.items[0].next_run_at).toBeTruthy();
   });
 
   it('returns 400 when workspaceId is missing', async () => {
@@ -214,7 +214,7 @@ describe('DELETE /api/pipeline/schedules/:id', () => {
     const listRes = await request(app)
       .get('/api/pipeline/schedules?workspaceId=ws-sched')
       .set('Authorization', `Bearer ${authToken}`);
-    expect(listRes.body.schedules).toHaveLength(0);
+    expect(listRes.body.items).toHaveLength(0);
   });
 
   it('returns 404 for non-existent schedule', async () => {

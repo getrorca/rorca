@@ -1,0 +1,925 @@
+{
+  "title": "rorcha-integrations",
+  "userStories": [
+    {
+      "id": "INT-001",
+      "title": "Integration Settings Hub Page",
+      "description": "A unified integrations page within Settings showing all provider connection statuses and management controls.",
+      "acceptanceCriteria": [
+        "New 'Integrations' tab in Settings (alongside Direction Stack, Model, GitHub, Account)",
+        "Each integration card: provider logo, name, status badge (Connected/Disconnected/Error), Connect/Disconnect button",
+        "Cards: Linear, GitHub (deeper), Vercel, Slack",
+        "Error state shows last error message with retry option",
+        "'Test connection' button per integration sends ping and shows latency",
+        "Integration cards sorted: connected first, then disconnected"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "INT-002",
+      "title": "Credentials Vault with AES-256-GCM Encryption",
+      "description": "All integration API tokens and secrets are stored encrypted at rest using AES-256-GCM.",
+      "acceptanceCriteria": [
+        "New DB table integration_credentials (id, workspace_id, provider, ciphertext, iv, tag, created_at, updated_at)",
+        "AES-256-GCM encryption using Node crypto module",
+        "Encryption key derived from CREDENTIALS_SECRET env var (required on startup)",
+        "Decryption only in-memory, never logged or exposed in API responses",
+        "API never returns raw tokens \u2014 only masked last 4 chars",
+        "Credentials rotate: new encrypt+store replaces old without downtime",
+        "Migration 030_integration_credentials.sql created"
+      ],
+      "dependsOn": [
+        "INT-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-003",
+      "title": "Webhook Infrastructure \u2014 Receiver and Signature Router",
+      "description": "A shared webhook endpoint routes incoming webhooks to the correct integration handler with signature verification.",
+      "acceptanceCriteria": [
+        "POST /api/webhooks/:provider receives all inbound webhooks",
+        "Provider-specific signature verification before processing (fail fast on bad sig)",
+        "Async processing: webhook accepted (200) immediately, processed in background",
+        "Dead letter queue: failed webhook payloads stored in webhook_failures table for retry",
+        "Retry up to 3 times with exponential backoff (1m, 5m, 15m)",
+        "Webhook delivery log stored in integration_audit_log table",
+        "Migration 031_webhook_infrastructure.sql created"
+      ],
+      "dependsOn": [
+        "INT-002"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-004",
+      "title": "Integration Health Dashboard",
+      "description": "A real-time dashboard showing the health of all connected integrations.",
+      "acceptanceCriteria": [
+        "Health panel in Integration Settings: last sync time, error count (24h), status indicator",
+        "Status: Healthy (green), Degraded (amber, >1 error in 24h), Down (red, last sync >1h ago)",
+        "'Refresh' button triggers live health check for all integrations",
+        "Error log expandable: last 10 errors with timestamp and message",
+        "Auto-refresh every 60 seconds",
+        "Health data stored in integration_health table with TTL cleanup"
+      ],
+      "dependsOn": [
+        "INT-001",
+        "INT-003"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-005",
+      "title": "Integration Audit Log",
+      "description": "Append-only log of all integration actions for debugging and compliance.",
+      "acceptanceCriteria": [
+        "integration_audit_log table: id, provider, action, workspace_id, payload_summary, status, created_at",
+        "Actions logged: token_stored, token_rotated, webhook_received, sync_triggered, sync_completed, sync_failed",
+        "API endpoint GET /api/integrations/audit-log with pagination",
+        "Audit log viewable in Settings > Integrations > Audit Log tab",
+        "Log entries never deleted (append-only), retained 90 days",
+        "Sensitive data redacted from payload_summary (tokens replaced with [REDACTED])"
+      ],
+      "dependsOn": [
+        "INT-003"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-006",
+      "title": "Integration Enable/Disable Toggle Per Workspace",
+      "description": "Each integration can be independently enabled or disabled per workspace.",
+      "acceptanceCriteria": [
+        "Toggle switch per integration per workspace in Integration Settings",
+        "Disabled integration: webhooks still received but not processed",
+        "Sync events not fired when integration disabled",
+        "Toggle state stored in integration_settings table (workspace_id, provider, enabled, config JSON)",
+        "UI shows disabled integrations greyed out with 'Paused' badge",
+        "Audit log entry created on enable/disable"
+      ],
+      "dependsOn": [
+        "INT-001",
+        "INT-005"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-007",
+      "title": "Rate Limit Handler with Exponential Backoff",
+      "description": "All outbound integration API calls respect provider rate limits with automatic backoff.",
+      "acceptanceCriteria": [
+        "HTTP 429 responses trigger retry with Retry-After header respected",
+        "If no Retry-After: exponential backoff 1s, 2s, 4s, 8s (max 4 retries)",
+        "Rate limit events logged to integration_audit_log",
+        "Per-provider rate limit config: Linear (400 req/min), GitHub (5000 req/hr), Vercel (200 req/min), Slack (1 req/sec per method)",
+        "In-memory rate limit counter per provider per workspace",
+        "Circuit breaker: disable provider after 10 consecutive failures, auto-retry after 5 minutes"
+      ],
+      "dependsOn": [
+        "INT-003"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-008",
+      "title": "Linear OAuth 2.0 Connection with PKCE",
+      "description": "Users connect their Linear account via OAuth 2.0 with PKCE for security.",
+      "acceptanceCriteria": [
+        "'Connect Linear' button in Integration Settings initiates OAuth flow",
+        "State parameter and code_verifier generated per session (PKCE)",
+        "Redirect to Linear OAuth with scopes: read, write, issues:create",
+        "Callback at /api/auth/linear/callback exchanges code for token",
+        "Access token and refresh token stored in credentials vault",
+        "Connection success: Linear user email and workspace name shown in settings",
+        "Token refresh handled automatically before expiry"
+      ],
+      "dependsOn": [
+        "INT-002",
+        "INT-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-009",
+      "title": "Linear Workspace and Team Selection",
+      "description": "Post-auth, users select which Linear workspace and team to sync with.",
+      "acceptanceCriteria": [
+        "After OAuth: modal shows Linear workspace/team picker",
+        "Fetches /teams from Linear API and displays team list",
+        "Selected team stored in integration_settings per Rorcha workspace",
+        "Default: first team alphabetically",
+        "'Change team' button in Integration Settings",
+        "Team selection validates user has write access"
+      ],
+      "dependsOn": [
+        "INT-008"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-010",
+      "title": "Linear Issue Import \u2014 Browse and Convert to Spec",
+      "description": "Users can browse Linear issues and convert one or more into a Rorcha spec brief.",
+      "acceptanceCriteria": [
+        "'Import from Linear' button in Forge screen",
+        "Modal: search/filter Linear issues by team, status, assignee",
+        "Issue list: title, description excerpt, priority badge, status",
+        "Select single issue: populates Forge brief with title + description + acceptance criteria",
+        "Select multiple issues: combined into one spec brief",
+        "'Open in Linear' link next to each issue",
+        "Import event logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-009"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-011",
+      "title": "Linear Webhook Receiver with HMAC-SHA256 Verification",
+      "description": "Linear webhooks are received and verified before processing.",
+      "acceptanceCriteria": [
+        "Linear webhook configured with Linear-Signature header verification",
+        "HMAC-SHA256 computed with shared secret from credentials vault",
+        "Invalid signature returns 401 immediately",
+        "Supported event types: Issue, Comment, IssueLabel",
+        "Webhook events processed asynchronously via queue",
+        "Linear webhook URL shown in Settings: https://app/api/webhooks/linear"
+      ],
+      "dependsOn": [
+        "INT-003",
+        "INT-009"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-012",
+      "title": "Linear \u2192 Rorcha Auto-Sync: New Issue Creates Draft Spec",
+      "description": "Optionally, a new Linear issue automatically creates a draft spec in Rorcha.",
+      "acceptanceCriteria": [
+        "Configurable per workspace: auto-sync on/off, filter by label/status",
+        "Linear Issue Created webhook triggers spec generation with issue title+description as brief",
+        "Generated spec saved to pending/ directory",
+        "Notification toast in Rorcha: 'New spec drafted from Linear issue #123'",
+        "Spec card in Hub pending review shows Linear issue link badge",
+        "Auto-sync events logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-011"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-013",
+      "title": "Story Pass \u2192 Linear Sub-Issue Marked Done",
+      "description": "When a Rorcha story passes, the corresponding Linear sub-issue is updated.",
+      "acceptanceCriteria": [
+        "Mapping stored: rorcha story_id \u2192 linear issue_id in story_linear_map table",
+        "WAL story_passed event triggers PATCH to Linear API to update issue status to Done",
+        "Linear issue state resolved by looking up team's 'Done' state",
+        "Mapping created when spec was imported from Linear (INT-010)",
+        "No-op if story has no Linear mapping",
+        "API call logged to audit log with Linear issue ID"
+      ],
+      "dependsOn": [
+        "INT-009",
+        "INT-010"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-014",
+      "title": "Rorcha Run Completion \u2192 Linear Parent Issue Update",
+      "description": "When a run completes, the parent Linear issue status is updated with a summary comment.",
+      "acceptanceCriteria": [
+        "WAL run_finished event triggers Linear parent issue status update",
+        "Status: Done if all stories pass, In Review if partial, cancelled if failed",
+        "Comment posted to Linear issue: pass count, fail count, run duration, GitHub PR link",
+        "Comment formatted as Markdown",
+        "Comment only posted if run was imported from Linear",
+        "Comment mentions: 'Rorcha automated update'"
+      ],
+      "dependsOn": [
+        "INT-013"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-015",
+      "title": "Linear Cycle Sync \u2014 Tag Stories to Active Cycle",
+      "description": "Stories in a run are linked to the active Linear cycle.",
+      "acceptanceCriteria": [
+        "Fetch active cycle for team from Linear API at run start",
+        "New sub-issues created by INT-013 are added to the active cycle",
+        "Cycle start/end dates shown in Run View metadata",
+        "'No active cycle' gracefully skipped",
+        "Cycle sync configurable per workspace (on/off)",
+        "Cycle assignment logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-013"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-016",
+      "title": "Linear Comment on Story Failure",
+      "description": "Failed stories generate a Linear comment with error context.",
+      "acceptanceCriteria": [
+        "WAL story_failed event triggers comment on mapped Linear issue",
+        "Comment includes: story ID, failure reason (last 500 chars of output), retry count",
+        "Comment formatted with code block for error output",
+        "Comment only on final failure (after all retries exhausted)",
+        "Reaction emoji added to comment: \u274c",
+        "Comment creation logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-013"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-017",
+      "title": "Linear Disconnect and Token Revocation",
+      "description": "Users can fully disconnect the Linear integration.",
+      "acceptanceCriteria": [
+        "'Disconnect Linear' button in Integration Settings",
+        "Confirmation dialog: 'This will stop all Linear syncing and delete stored credentials'",
+        "POST to Linear /oauth/revoke to invalidate token",
+        "Delete credentials from vault",
+        "Delete integration_settings row for Linear",
+        "Delete all story_linear_map entries for workspace",
+        "Disconnect logged to audit log",
+        "UI updates to 'Disconnected' status immediately"
+      ],
+      "dependsOn": [
+        "INT-008"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-018",
+      "title": "GitHub Issues Import \u2014 Browse Repo Issues and Convert to Spec",
+      "description": "Browse a linked GitHub repository's issues and convert to Rorcha specs.",
+      "acceptanceCriteria": [
+        "'Import from GitHub Issue' button in Forge",
+        "Modal shows repo issue list: title, labels, body excerpt, state",
+        "Search by keyword, filter by label/milestone/assignee",
+        "Select issue: populates Forge brief with title + body",
+        "Multi-select creates combined spec",
+        "'View on GitHub' link per issue",
+        "Import event logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-019",
+      "title": "GitHub Actions Workflow Dispatch Trigger",
+      "description": "A GitHub Action can trigger a Rorcha pipeline run via workflow_dispatch event.",
+      "acceptanceCriteria": [
+        "POST /api/integrations/github/trigger accepts workflow_dispatch payload",
+        "Payload includes: spec_id, workspace_id, autoWorktree flag",
+        "Authenticates via GitHub webhook secret (HMAC-SHA256)",
+        "Triggers pipeline run and returns run_id in response",
+        "Example workflow YAML provided in documentation and in-app",
+        "Trigger event logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-003"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-020",
+      "title": "Per-Story GitHub Commit Status Checks",
+      "description": "Each story completion posts a GitHub commit status check on the worktree branch.",
+      "acceptanceCriteria": [
+        "WAL story_passed/failed events trigger POST to GitHub Statuses API",
+        "Status context: 'rorcha/story-{story_id}'",
+        "State: 'success' for pass, 'failure' for fail, 'pending' for running",
+        "Description: 'V2-048: Sprint Velocity Chart \u2014 passed in 8m 22s'",
+        "Target URL links to Rorcha Run View",
+        "Only fires when run is in a git worktree (has branch)",
+        "Commit SHA from most recent commit in worktree"
+      ],
+      "dependsOn": [
+        "INT-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-021",
+      "title": "Auto PR Creation on Run Completion",
+      "description": "When a run completes successfully, a GitHub PR is automatically created for the worktree branch.",
+      "acceptanceCriteria": [
+        "WAL run_finished (status=done) triggers GitHub PR creation",
+        "PR title: 'feat: [spec title]'",
+        "PR body: table of stories (ID, title, status, elapsed), total pass rate, run duration",
+        "PR base: main branch, head: worktree branch",
+        "Labels: ['rorcha', 'automated']",
+        "PR URL stored in pipeline_runs.pr_url column",
+        "PR URL shown in Run View metadata and Hub recent runs row",
+        "PR creation skipped if no worktree or if PR already exists"
+      ],
+      "dependsOn": [
+        "INT-020"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-022",
+      "title": "PR Description Template Population",
+      "description": "Auto-generated PRs use a configurable template with spec metadata.",
+      "acceptanceCriteria": [
+        "PR template stored in workspace settings (Markdown with template variables)",
+        "Variables: {{spec_title}}, {{story_count}}, {{pass_count}}, {{fail_count}}, {{duration}}, {{run_id}}, {{preview_url}}",
+        "Default template if none configured: standard Rorcha PR format",
+        "Template editor in Settings > GitHub tab",
+        "Preview button shows rendered template with sample data",
+        "Template version stored so changes don't affect in-flight runs"
+      ],
+      "dependsOn": [
+        "INT-021"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-023",
+      "title": "GitHub Check Run Integration",
+      "description": "The entire Rorcha run is represented as a single GitHub Check Run on the worktree branch.",
+      "acceptanceCriteria": [
+        "Check Run created at run start: status=in_progress, title='Rorcha: [spec title]'",
+        "Check Run summary updated every 60 seconds with story progress",
+        "Check Run completed at run end: conclusion=success or failure",
+        "Check Run output: summary table of all stories with status",
+        "Check Run annotations: failed stories marked as 'failure' annotations",
+        "Check Run URL shown in Run View metadata",
+        "Check Run links to Rorcha Run View as 'Details'"
+      ],
+      "dependsOn": [
+        "INT-020"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-024",
+      "title": "Repository Auto-Scan for Codebase Context",
+      "description": "Rorcha scans a linked repository to extract tech stack and architecture context for the direction stack.",
+      "acceptanceCriteria": [
+        "'Scan Repository' button in Settings > GitHub tab",
+        "Scan reads: package.json, Cargo.toml, go.mod, requirements.txt, .nvmrc, Dockerfile",
+        "Extracts: primary language, framework, test runner, package manager",
+        "Extracts: directory structure (top 2 levels), key files",
+        "Extracted context suggested as L3 direction layer content",
+        "User reviews and saves suggested context",
+        "Scan result cached 24 hours (re-scan button forces refresh)",
+        "Scan event logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-025",
+      "title": "GitHub Actions Workflow Generator",
+      "description": "Generate a .github/workflows/rorcha.yml workflow file for the target repository.",
+      "acceptanceCriteria": [
+        "'Generate Workflow' button in Settings > GitHub tab",
+        "Generated workflow: trigger on PR open, calls Rorcha trigger API via workflow_dispatch",
+        "Workflow includes: RORCHA_URL secret, spec selection input, autoWorktree option",
+        "Preview YAML shown before commit",
+        "One-click commit to default branch via GitHub API",
+        "Workflow file path: .github/workflows/rorcha.yml",
+        "Existing workflow detected and shown with diff before overwrite"
+      ],
+      "dependsOn": [
+        "INT-019"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-026",
+      "title": "GitHub PR Review Request Automation",
+      "description": "Auto-created PRs can automatically request reviews from configured team members.",
+      "acceptanceCriteria": [
+        "Reviewer list configurable in Settings > GitHub tab (GitHub usernames)",
+        "CODEOWNERS file in target repo respected if no explicit reviewers configured",
+        "POST to GitHub PR review_requests endpoint",
+        "Reviewers notified via GitHub's native notification system",
+        "'No reviewers configured' skipped gracefully",
+        "Reviewer assignment logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-021"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-027",
+      "title": "GitHub Webhook Receiver \u2014 Push Events",
+      "description": "Push events to the main branch trigger a spec scan for any new or changed spec files.",
+      "acceptanceCriteria": [
+        "GitHub webhook configured for push events on default branch",
+        "Webhook secret verified via HMAC-SHA256",
+        "Push to main: scan for new .json files in scripts/ralph/specs/pending/",
+        "New spec files discovered: notify via Rorcha toast and Hub pending review",
+        "Webhook processes only default branch pushes (configurable)",
+        "Push events logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-003"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-028",
+      "title": "GitHub Disconnect and App Uninstall",
+      "description": "Full GitHub integration disconnection removes all stored data.",
+      "acceptanceCriteria": [
+        "'Disconnect GitHub' button in Settings > GitHub tab",
+        "Confirmation with list of what will be deleted",
+        "Revoke GitHub OAuth token via API",
+        "Delete credentials from vault",
+        "Remove all GitHub-specific integration_settings",
+        "Future webhooks from GitHub rejected with 401",
+        "Disconnect logged to audit log",
+        "Integration card shows Disconnected state immediately"
+      ],
+      "dependsOn": [
+        "INT-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-029",
+      "title": "Vercel API Token Storage and Validation",
+      "description": "Store a Vercel API token per workspace for deployment automation.",
+      "acceptanceCriteria": [
+        "Vercel integration card in Settings > Integrations",
+        "Input field for Vercel API token (masked, type=password)",
+        "'Validate' button calls GET /v2/user on Vercel API to confirm token is valid",
+        "Token stored in credentials vault on validation success",
+        "Validated token shows Vercel account email and team name",
+        "Token can be rotated: new token input replaces old",
+        "Token masked: shows only last 4 chars after saving"
+      ],
+      "dependsOn": [
+        "INT-002",
+        "INT-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-030",
+      "title": "Vercel Project Linking Per Workspace",
+      "description": "Link a Rorcha workspace to a specific Vercel project.",
+      "acceptanceCriteria": [
+        "After token validation: fetch Vercel projects list via API",
+        "Project selector dropdown with search",
+        "Selected project stored in integration_settings (vercel_project_id, vercel_team_id)",
+        "'View project on Vercel' link shown after selection",
+        "Project unlink removes only project association (not token)",
+        "Multiple workspaces can link to different Vercel projects",
+        "Project link validated on save (project must be accessible with stored token)"
+      ],
+      "dependsOn": [
+        "INT-029"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-031",
+      "title": "Auto-Deploy on Run Completion",
+      "description": "When a Rorcha run completes successfully, automatically trigger a Vercel deployment.",
+      "acceptanceCriteria": [
+        "WAL run_finished (status=done) triggers POST to Vercel deploy hook or Deployments API",
+        "Deployment created from the worktree branch HEAD commit",
+        "Deployment metadata: target=preview for worktrees, target=production for main",
+        "Vercel deployment ID stored in pipeline_runs.vercel_deployment_id",
+        "Deploy trigger configurable per workspace: auto (default), manual, off",
+        "Auto-deploy event logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-030"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-032",
+      "title": "Per-Worktree Vercel Preview Deployment",
+      "description": "Each worktree branch gets its own Vercel preview deployment during a run.",
+      "acceptanceCriteria": [
+        "When autoWorktree=true, each run creates a Vercel preview deployment on the worktree branch",
+        "Preview deployment triggered at run start (not on completion)",
+        "Vercel auto-detects branch and builds from worktree branch commits",
+        "Preview URL available as soon as first commit is pushed to worktree",
+        "Preview URL stored and updated in pipeline_runs as commits happen",
+        "Each story commit updates preview (Vercel detects new HEAD)"
+      ],
+      "dependsOn": [
+        "INT-031"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-033",
+      "title": "Deployment Status Polling and Run View Display",
+      "description": "Vercel deployment status is polled and displayed in the Run View metadata panel.",
+      "acceptanceCriteria": [
+        "Poll Vercel GET /v13/deployments/:id every 30 seconds after deploy trigger",
+        "States: QUEUED, BUILDING, READY, ERROR",
+        "Deployment status shown in Run View metadata: 'Vercel: Building...' with spinner",
+        "On READY: status changes to 'Vercel: Live \u2713' with preview URL link",
+        "On ERROR: status shows 'Vercel: Build failed' with link to Vercel dashboard",
+        "Polling stops after READY or ERROR state",
+        "Last status persisted in DB so reload shows correct state"
+      ],
+      "dependsOn": [
+        "INT-032"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-034",
+      "title": "Preview URL Display in Run View and Hub",
+      "description": "The Vercel preview URL is prominently displayed wherever the run is visible.",
+      "acceptanceCriteria": [
+        "Preview URL shown in Run View metadata panel with globe icon",
+        "'Open preview \u2192' link opens URL in new tab",
+        "URL also shown in Hub recent runs row (truncated)",
+        "URL shown in auto-generated GitHub PR description (via {{preview_url}} template variable)",
+        "Copy URL button next to link",
+        "'Preview not ready yet' placeholder while deployment is building"
+      ],
+      "dependsOn": [
+        "INT-033"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-035",
+      "title": "Production Promotion Trigger",
+      "description": "A button in Run View promotes the preview deployment to production.",
+      "acceptanceCriteria": [
+        "'Promote to Production' button in Run View Worktree tab",
+        "Confirmation dialog: 'This will replace the current production deployment'",
+        "POST to Vercel /v12/deployments/:id/promote endpoint",
+        "Production URL shown after promotion with green badge",
+        "Button disabled if deployment is not in READY state",
+        "Promotion event logged to audit log",
+        "Button only shown if Vercel integration is connected"
+      ],
+      "dependsOn": [
+        "INT-034"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-036",
+      "title": "Rollback Trigger on Failed Run",
+      "description": "When a run is marked failed, an option to rollback the Vercel deployment appears.",
+      "acceptanceCriteria": [
+        "WAL run_finished (status=failed) shows 'Rollback Vercel' button in Run View",
+        "Button calls GET /v6/deployments for project to find previous READY deployment",
+        "Confirmation dialog shows previous deployment date and commit",
+        "POST to Vercel /v12/deployments/:id/promote with previous deployment ID",
+        "Success toast: 'Rolled back to [date] deployment'",
+        "Rollback event logged to audit log",
+        "Button hidden if no previous deployment exists"
+      ],
+      "dependsOn": [
+        "INT-033"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-037",
+      "title": "Vercel Environment Variable Sync",
+      "description": "Sync environment variables from Rorcha workspace config to the Vercel project.",
+      "acceptanceCriteria": [
+        "'Sync Env Vars' button in Settings > Integrations > Vercel section",
+        "Fetches current Vercel env vars and shows diff vs Rorcha workspace env vars",
+        "Diff view: added (green), removed (red), unchanged (grey)",
+        "'Apply sync' pushes changes to Vercel via /v10/projects/:id/env",
+        "Vercel env var types: plain (non-sensitive), encrypted (sensitive)",
+        "Sensitive vars marked as 'sensitive' in Rorcha mapped to Vercel encrypted type",
+        "Sync event logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-030"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-038",
+      "title": "Vercel Webhook Receiver for Deployment Events",
+      "description": "Vercel sends deployment events back to Rorcha to update deployment status without polling.",
+      "acceptanceCriteria": [
+        "Vercel webhook configured at /api/webhooks/vercel",
+        "Vercel webhook signature verified via x-vercel-signature header",
+        "Events processed: deployment.created, deployment.ready, deployment.error, deployment.canceled",
+        "deployment.ready: updates pipeline_runs.vercel_status to READY, preview URL stored",
+        "deployment.error: updates status to ERROR, error message stored",
+        "Events replace polling after first webhook is received (polling stops)",
+        "Webhook events logged to audit log"
+      ],
+      "dependsOn": [
+        "INT-003",
+        "INT-033"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-039",
+      "title": "Slack OAuth App Installation",
+      "description": "Users install the Rorcha Slack app into their workspace via OAuth.",
+      "acceptanceCriteria": [
+        "'Connect Slack' button in Integration Settings initiates Slack OAuth flow",
+        "OAuth scopes: chat:write, chat:write.public, channels:read, commands",
+        "Bot token and team ID stored in credentials vault",
+        "App home URL shown in Slack: 'Rorcha is connected to your workspace'",
+        "Connected Slack workspace name and bot name shown in Settings",
+        "'Reinstall' button available to refresh scopes",
+        "OAuth flow handles already-installed case gracefully"
+      ],
+      "dependsOn": [
+        "INT-002",
+        "INT-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-040",
+      "title": "Slack Channel Selection Per Workspace",
+      "description": "Each Rorcha workspace can send notifications to a specific Slack channel.",
+      "acceptanceCriteria": [
+        "After OAuth: channel picker fetches public channels via conversations.list",
+        "Search field filters channels by name",
+        "Selected channel stored in integration_settings per Rorcha workspace",
+        "Multiple workspaces can post to different channels",
+        "'Post a test message' button sends 'Rorcha is connected!' to selected channel",
+        "Channel must be joined by bot before posting (join via API if needed)",
+        "Channel ID stored (not name) to handle renames"
+      ],
+      "dependsOn": [
+        "INT-039"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-041",
+      "title": "Run Started Slack Notification",
+      "description": "A Slack message is sent when a pipeline run starts.",
+      "acceptanceCriteria": [
+        "WAL run_started event triggers Slack message via chat.postMessage",
+        "Message Block Kit: Rorcha logo, spec name, story count, estimated duration, 'View Run \u2192' button",
+        "Message posted to configured workspace channel",
+        "Thread TS stored in pipeline_runs.slack_thread_ts for follow-up messages",
+        "Configurable per workspace: run_started notifications on/off",
+        "Message sent within 10 seconds of run start WAL event"
+      ],
+      "dependsOn": [
+        "INT-040"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-042",
+      "title": "Story Pass/Fail Slack Notifications",
+      "description": "Configurable story-level notifications posted as thread replies.",
+      "acceptanceCriteria": [
+        "Replies to the run thread (uses stored thread TS from INT-041)",
+        "Notification frequency options: every story, every 10 stories, failures only, none",
+        "'Failures only' mode: only failed stories (after final retry) post a reply",
+        "Story reply: status icon, story ID, title, elapsed time, retry count if failed",
+        "Failure reply includes: last 200 chars of output as code block",
+        "Configurable per workspace in notification settings UI",
+        "Notification settings stored in integration_settings"
+      ],
+      "dependsOn": [
+        "INT-041"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-043",
+      "title": "Run Completion Slack Summary Message",
+      "description": "A rich summary message is posted when a run completes.",
+      "acceptanceCriteria": [
+        "WAL run_finished triggers summary update to the run thread",
+        "Block Kit message: status emoji (\u2705/\u274c/\u26a0\ufe0f), pass count, fail count, duration",
+        "Table section: top 3 failed stories with error excerpt",
+        "'View full results \u2192' button linking to Run View",
+        "GitHub PR link included if PR was auto-created (INT-021)",
+        "Vercel preview URL included if deployment is ready (INT-034)",
+        "Summary posted as new message in thread AND updates original message status badge"
+      ],
+      "dependsOn": [
+        "INT-041",
+        "INT-021",
+        "INT-034"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-044",
+      "title": "Spec Approval Request \u2014 Interactive Slack Message",
+      "description": "When a spec is generated, an interactive Slack message with Approve/Reject buttons is posted.",
+      "acceptanceCriteria": [
+        "Spec generation completion triggers Slack message (configurable: auto or manual)",
+        "Block Kit: spec title, story count, model, 'Approve \u2713' and 'Reject \u2717' action buttons",
+        "'Review stories \u2192' link to Spec Review screen",
+        "Button actions POST to /api/integrations/slack/actions (Slack interactivity endpoint)",
+        "Action verified via Slack signing secret",
+        "Approve action moves spec to approved/ and updates Slack message to 'Approved \u2713'",
+        "Reject action deletes spec and updates message to 'Rejected \u2717'"
+      ],
+      "dependsOn": [
+        "INT-040"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-045",
+      "title": "Approve and Reject Spec from Slack",
+      "description": "The interactive Slack buttons fully complete the approval/rejection workflow without opening Rorcha.",
+      "acceptanceCriteria": [
+        "POST /api/integrations/slack/actions handles button payloads",
+        "Slack signing secret verified on every action request",
+        "Approve: calls same logic as POST /api/specs/:id/approve, responds to Slack within 3s",
+        "Reject: opens a Slack modal to enter rejection reason, then rejects",
+        "Action user's Slack display name shown in updated message: 'Approved by @dimitri'",
+        "If spec no longer exists: responds 'Spec no longer available'",
+        "Action events logged to audit log with Slack user ID"
+      ],
+      "dependsOn": [
+        "INT-044"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-046",
+      "title": "Daily Digest Slack Message",
+      "description": "A configurable morning summary of pending reviews and recent activity.",
+      "acceptanceCriteria": [
+        "Configurable digest time (default: 9:00 AM workspace timezone)",
+        "Digest content: pending specs count, active runs, yesterday's completed runs summary",
+        "'No activity' digest suppressed (no message if nothing to report)",
+        "Digest scheduled via setInterval or cron-like job in backend",
+        "Timezone stored per workspace in integration_settings",
+        "Digest configurable: on/off, time, channel override",
+        "Manual trigger: 'Send digest now' button in Integration Settings"
+      ],
+      "dependsOn": [
+        "INT-040"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-047",
+      "title": "Consecutive Failure Alert",
+      "description": "An urgent Slack alert when multiple stories fail in a row.",
+      "acceptanceCriteria": [
+        "Alert triggers when N consecutive stories fail (default N=3, configurable)",
+        "Alert message: '@channel \u26a0\ufe0f Rorcha: 3 consecutive story failures in [run name]'",
+        "Alert includes: failed story names, error excerpt, 'Pause Run' and 'View Run' buttons",
+        "'Pause Run' button pauses the run from Slack (via interactive action)",
+        "Alert resets counter on story pass",
+        "Alert suppressed if run already paused by user",
+        "Alert only fires once per run (not repeatedly)",
+        "Alert configurable: on/off, threshold N, mention level (@channel vs @here vs none)"
+      ],
+      "dependsOn": [
+        "INT-042",
+        "INT-044"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-048",
+      "title": "Custom Notification Rules UI",
+      "description": "A UI for configuring per-event, per-channel notification rules per workspace.",
+      "acceptanceCriteria": [
+        "'Notification Rules' section in Integration Settings > Slack",
+        "Table of rules: event type, channel, condition, enabled toggle",
+        "Events: run_started, story_failed, run_finished, spec_generated, spec_approved",
+        "Conditions: always, on failure, above threshold",
+        "Add/edit/delete rules via modal form",
+        "Rules stored in integration_settings as JSON array",
+        "Default rules created on Slack connection",
+        "Rules tested with 'Send test notification' button per rule"
+      ],
+      "dependsOn": [
+        "INT-040"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-049",
+      "title": "Integration Cross-Provider Automation Chain",
+      "description": "Configure automation chains where one integration triggers another (e.g., GitHub PR \u2192 Vercel deploy \u2192 Slack notify).",
+      "acceptanceCriteria": [
+        "'Automation' section in Integration Settings",
+        "Pre-built chain templates: 'Full CI/CD' (GitHub + Vercel + Slack), 'Review Flow' (Slack approval + Linear update)",
+        "Chain editor: trigger event \u2192 condition \u2192 action (visual flow)",
+        "Chains stored as JSON in integration_settings",
+        "Chain execution logged step-by-step to audit log",
+        "Failed chain step logs error and continues or stops (configurable)",
+        "At most 5 steps per chain to prevent complexity"
+      ],
+      "dependsOn": [
+        "INT-005",
+        "INT-043",
+        "INT-021"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-050",
+      "title": "Secrets Rotation Flow",
+      "description": "API tokens for all integrations can be rotated without losing integration configuration.",
+      "acceptanceCriteria": [
+        "'Rotate credentials' button per integration in Integration Settings",
+        "Opens input for new token/secret",
+        "Validates new credentials before replacing old",
+        "Atomic swap: old credentials remain valid until new are confirmed",
+        "Zero-downtime: in-flight webhook processing completes with old credentials before swap",
+        "Rotation event logged to audit log with timestamp",
+        "Last rotated date shown in Integration Settings card",
+        "Reminder shown if credentials not rotated in 90+ days"
+      ],
+      "dependsOn": [
+        "INT-002",
+        "INT-005"
+      ],
+      "passes": false
+    },
+    {
+      "id": "INT-051",
+      "title": "Slack Disconnect",
+      "description": "Full Slack integration disconnection.",
+      "acceptanceCriteria": [
+        "'Disconnect Slack' button in Integration Settings",
+        "Confirmation dialog listing what stops (notifications, approvals)",
+        "POST to Slack /auth.revoke to invalidate bot token",
+        "Delete credentials from vault",
+        "Delete integration_settings Slack config",
+        "Cancel any scheduled digests",
+        "Disconnect logged to audit log",
+        "UI updates to Disconnected immediately"
+      ],
+      "dependsOn": [
+        "INT-039"
+      ],
+      "passes": false
+    }
+  ],
+  "model": "claude-opus-4-6",
+  "generatedAt": "2026-02-23T12:00:00.000Z"
+}

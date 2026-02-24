@@ -14,6 +14,7 @@ import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import { createNotification } from './notifications';
+import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
 const router = Router();
 
@@ -1152,7 +1153,8 @@ router.get('/', (req: Request, res: Response) => {
       new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
     );
 
-    res.json({ specs: filtered });
+    const pagination = parsePaginationParams(req);
+    res.json(paginateArray(filtered, pagination, { cursorKey: (s) => s.id }));
   } catch (error: any) {
     console.error('[Specs] List error:', error);
     res.status(500).json({ error: error.message });
@@ -1402,8 +1404,7 @@ router.get('/archive', (req: Request, res: Response) => {
     const workspaceId = req.query.workspaceId as string;
     const q = (req.query.q as string) || '';
     const statusFilter = (req.query.status as string) || 'all';
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 200 });
     const createdAfter = req.query.createdAfter as string | undefined;
     const createdBefore = req.query.createdBefore as string | undefined;
     const tagsParam = req.query.tags as string | undefined;
@@ -1577,14 +1578,7 @@ router.get('/archive', (req: Request, res: Response) => {
     }
 
     // Paginate
-    const total = filtered.length;
-    const paged = filtered.slice(offset, offset + limit);
-
-    res.json({
-      specs: paged,
-      total,
-      hasMore: offset + limit < total,
-    });
+    res.json(paginateArray(filtered, pagination, { cursorKey: (s) => s.id }));
   } catch (error: any) {
     console.error('[Specs] Archive error:', error);
     res.status(500).json({ error: error.message });
@@ -1649,7 +1643,8 @@ router.get('/search/stories', (req: Request, res: Response) => {
       }
     }
 
-    res.json({ query, resultCount: results.length, results });
+    const pagination = parsePaginationParams(req);
+    res.json(paginateArray(results, pagination));
   } catch (error: any) {
     console.error('[Specs] Story search error:', error);
     res.status(500).json({ error: error.message });
@@ -1797,7 +1792,8 @@ router.get('/:specId/versions', (req: Request, res: Response) => {
       };
     });
 
-    res.json({ specSlug: specId, versions });
+    const pagination = parsePaginationParams(req);
+    res.json(paginateArray(versions, pagination));
   } catch (error: any) {
     console.error('[Specs] Versions error:', error);
     res.status(500).json({ error: error.message });

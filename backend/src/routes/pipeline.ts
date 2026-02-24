@@ -14,6 +14,7 @@ import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import type { AgentProfileRow } from './agent-profiles';
+import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
 /** Legacy tmp-based log path (used as fallback for old runs) */
 const tmpLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
@@ -521,11 +522,18 @@ router.get('/runs', (req: Request, res: Response) => {
       return;
     }
 
-    const runs = db.prepare(
-      'SELECT * FROM pipeline_runs WHERE workspace_id = ? ORDER BY id DESC'
-    ).all(workspaceId) as PipelineRunRow[];
+    const pagination = parsePaginationParams(req);
+    const result = paginateQuery<PipelineRunRow>(db, {
+      query: 'SELECT * FROM pipeline_runs WHERE workspace_id = ?',
+      countQuery: 'SELECT COUNT(*) as total FROM pipeline_runs WHERE workspace_id = ?',
+      params: [workspaceId],
+      pagination,
+      orderBy: 'id DESC',
+      cursorColumn: 'id',
+      cursorDirection: 'desc',
+    });
 
-    res.json({ runs });
+    res.json(result);
   } catch (error: any) {
     console.error('[Pipeline] List runs error:', error);
     res.status(500).json({ error: error.message });

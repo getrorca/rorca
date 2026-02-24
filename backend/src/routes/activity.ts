@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db } from '../db/index';
+import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
 const router = Router();
 
@@ -148,8 +149,7 @@ const ACTIVITY_EVENT_TYPES = [
 
 // GET /api/activity
 router.get('/', (req, res) => {
-  const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 30, 1), 100);
-  const offset = Math.max(parseInt(String(req.query.offset), 10) || 0, 0);
+  const pagination = parsePaginationParams(req, { limit: 30, maxLimit: 100 });
   const typeFilter = req.query.type ? String(req.query.type) : null;
   const workspaceFilter = req.query.workspaceId ? String(req.query.workspaceId) : null;
 
@@ -189,16 +189,18 @@ router.get('/', (req, res) => {
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const events = db.prepare(
-    `SELECT * FROM wal_events ${whereClause} ORDER BY id DESC LIMIT ? OFFSET ?`
-  ).all(...params, limit, offset) as WalEventRow[];
-
-  const countRow = db.prepare(
-    `SELECT COUNT(*) as total FROM wal_events ${whereClause}`
-  ).get(...params) as { total: number };
+  const result = paginateQuery<WalEventRow>(db, {
+    query: `SELECT * FROM wal_events ${whereClause}`,
+    countQuery: `SELECT COUNT(*) as total FROM wal_events ${whereClause}`,
+    params,
+    pagination,
+    orderBy: 'id DESC',
+    cursorColumn: 'id',
+    cursorDirection: 'desc',
+  });
 
   // Batch-fetch display names for all unique actors
-  const actorIds = [...new Set(events.map(e => e.actor))];
+  const actorIds = [...new Set(result.items.map(e => e.actor))];
   const userMap = new Map<string, UserRow>();
   for (const actorId of actorIds) {
     const user = db.prepare(
@@ -209,7 +211,7 @@ router.get('/', (req, res) => {
     }
   }
 
-  const items = events.map(event => {
+  const items = result.items.map(event => {
     const user = userMap.get(event.actor);
     const displayName = user?.display_name || event.actor;
     return {
@@ -232,10 +234,9 @@ router.get('/', (req, res) => {
 
   res.json({
     items,
-    total: countRow.total,
-    limit,
-    offset,
-    hasMore: offset + limit < countRow.total,
+    total: result.total,
+    hasMore: result.hasMore,
+    cursor: result.cursor,
   });
 });
 

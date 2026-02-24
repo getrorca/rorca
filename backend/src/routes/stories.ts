@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db/index';
+import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
 const router = Router();
 
@@ -98,8 +99,6 @@ router.get('/search', (req: Request, res: Response) => {
     const statusFilter = (req.query.status as string) || 'all';
     const tagsParam = req.query.tags as string | undefined;
     const filterTags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const offset = parseInt(req.query.offset as string) || 0;
 
     if (!q) {
       res.status(400).json({ error: 'Missing required query param: q' });
@@ -204,14 +203,8 @@ router.get('/search', (req: Request, res: Response) => {
     });
 
     // Paginate
-    const total = allResults.length;
-    const items = allResults.slice(offset, offset + limit);
-
-    res.json({
-      items,
-      total,
-      hasMore: offset + limit < total,
-    });
+    const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 200 });
+    res.json(paginateArray(allResults, pagination));
   } catch (error: any) {
     console.error('[Stories] Search error:', error);
     res.status(500).json({ error: error.message });

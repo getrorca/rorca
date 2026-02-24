@@ -125,9 +125,9 @@ export default function CommandPalette({ onNavigate, onClose }: CommandPalettePr
   useEffect(() => {
     if (!workspaceId) return;
     const params = `workspaceId=${workspaceId}`;
-    apiFetch<SpecSummary[]>(`/api/specs?${params}`).then(setSpecs).catch(() => {});
-    apiFetch<{ specs: ArchiveSpec[] }>(`/api/specs/archive?${params}&limit=50`).then((r) => setArchiveSpecs(r.specs)).catch(() => {});
-    apiFetch<PipelineRun[]>(`/api/pipeline/runs?${params}`).then(setRuns).catch(() => {});
+    apiFetch<{ items: SpecSummary[] }>(`/api/specs?${params}`).then((r) => setSpecs(r.items)).catch(() => {});
+    apiFetch<{ items: ArchiveSpec[] }>(`/api/specs/archive?${params}&limit=50`).then((r) => setArchiveSpecs(r.items)).catch(() => {});
+    apiFetch<{ items: PipelineRun[] }>(`/api/pipeline/runs?${params}`).then((r) => setRuns(r.items)).catch(() => {});
   }, [workspaceId]);
 
   // Focus input on mount
