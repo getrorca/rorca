@@ -6,6 +6,15 @@ import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
 type DiagramType = 'flowchart' | 'sequenceDiagram' | 'ascii';
 type OutputFormat = 'json' | 'markdown' | 'both';
 
+interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  costPer1kInput: number;
+  costPer1kOutput: number;
+  recommended: boolean;
+}
+
 const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
 export default function SpecForgePanelPage() {
@@ -18,22 +27,17 @@ export default function SpecForgePanelPage() {
   const [domain, setDomain] = useState('');
 
   // Model selection
-  const [availableModels, setAvailableModels] = useState<{ id: string; label: string }[]>([]);
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
-  const [workspaceDefaultModel, setWorkspaceDefaultModel] = useState<string | null>(null);
+  const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
 
-  // Fetch available models + workspace default
-  useEffect(() => {
-    apiFetch<{ models: { id: string; label: string }[] }>('/api/direction/models')
-      .then(data => setAvailableModels(data.models))
-      .catch(() => {});
-  }, []);
-
+  // Fetch available models (includes recommended badge based on workspace default)
   useEffect(() => {
     if (!workspaceId) return;
-    apiFetch<{ preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`)
+    apiFetch<{ models: ModelOption[]; defaultModel: string }>(`/api/direction/models?workspaceId=${workspaceId}`)
       .then(data => {
-        setWorkspaceDefaultModel(data.preferredModel ?? null);
+        setAvailableModels(data.models);
+        setDefaultModelId(data.defaultModel);
       })
       .catch(() => {});
   }, [workspaceId]);
@@ -57,6 +61,7 @@ export default function SpecForgePanelPage() {
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedSpec, setGeneratedSpec] = useState<GeneratedSpec | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
 
   const validateSpecName = useCallback((value: string) => {
     if (!value) {
@@ -91,6 +96,8 @@ export default function SpecForgePanelPage() {
   const handleGenerate = async () => {
     if (!canGenerate || isGenerating) return;
     setIsGenerating(true);
+    setGenerateError(null);
+    const modelUsed = selectedModel || defaultModelId || 'claude-sonnet-4-5-20250929';
     try {
       const result = await apiFetch<GeneratedSpec>('/api/specs/generate', {
         method: 'POST',
@@ -111,8 +118,15 @@ export default function SpecForgePanelPage() {
         }),
       });
       setGeneratedSpec(result);
-    } catch (err) {
-      console.error('Generate failed:', err);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const alternatives = availableModels
+        .filter(m => m.id !== modelUsed)
+        .map(m => m.label);
+      const suggestion = alternatives.length > 0
+        ? ` Try an alternative model: ${alternatives.join(', ')}.`
+        : '';
+      setGenerateError(`Generation failed with ${availableModels.find(m => m.id === modelUsed)?.label || modelUsed}: ${message}.${suggestion}`);
     } finally {
       setIsGenerating(false);
     }
@@ -216,22 +230,44 @@ export default function SpecForgePanelPage() {
               </h3>
               <div className="space-y-4">
                 <Field label="LLM Model">
-                  <select
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors"
-                  >
-                    <option value="">
-                      {workspaceDefaultModel
-                        ? `Workspace default (${workspaceDefaultModel})`
-                        : 'Default (claude-sonnet-4-5-20250929)'}
-                    </option>
+                  <div className="space-y-1.5">
                     {availableModels.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.id}
-                      </option>
+                      <label
+                        key={m.id}
+                        className={`flex items-center gap-3 px-3 py-2 rounded border cursor-pointer transition-colors ${
+                          (selectedModel || defaultModelId) === m.id
+                            ? 'border-accent bg-accent/5'
+                            : 'border-border bg-panel hover:border-accent/40'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="modelSelect"
+                          value={m.id}
+                          checked={(selectedModel || defaultModelId) === m.id}
+                          onChange={() => setSelectedModel(m.id)}
+                          className="w-4 h-4 accent-accent"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-text">{m.label}</span>
+                            {m.recommended && (
+                              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-accent/15 text-accent">
+                                Recommended
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="text-xs text-muted">{m.provider}</span>
+                            <span className="text-xs text-muted/60">|</span>
+                            <span className="text-xs text-muted">
+                              ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
+                            </span>
+                          </div>
+                        </div>
+                      </label>
                     ))}
-                  </select>
+                  </div>
                 </Field>
 
                 <div className="flex gap-4">
@@ -346,27 +382,34 @@ export default function SpecForgePanelPage() {
             </section>
 
             {/* Generate Button */}
-            <button
-              onClick={handleGenerate}
-              disabled={!canGenerate || isGenerating}
-              className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${
-                canGenerate && !isGenerating
-                  ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
-                  : 'bg-accent/30 text-white/40 cursor-not-allowed'
-              }`}
-            >
-              {isGenerating ? (
-                <span className="flex items-center justify-center gap-2">
-                  <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  Generating...
-                </span>
-              ) : (
-                'Generate Spec'
+            <div className="space-y-2">
+              <button
+                onClick={handleGenerate}
+                disabled={!canGenerate || isGenerating}
+                className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${
+                  canGenerate && !isGenerating
+                    ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
+                    : 'bg-accent/30 text-white/40 cursor-not-allowed'
+                }`}
+              >
+                {isGenerating ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Generating...
+                  </span>
+                ) : (
+                  'Generate Spec'
+                )}
+              </button>
+              {generateError && (
+                <div className="px-3 py-2 rounded border border-error/30 bg-error/5 text-xs text-error">
+                  {generateError}
+                </div>
               )}
-            </button>
+            </div>
           </div>
         </div>
       </div>

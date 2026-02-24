@@ -33,6 +33,39 @@ export function isValidModel(model: string): model is SupportedModel {
   return (SUPPORTED_MODELS as readonly string[]).includes(model);
 }
 
+export interface ModelInfo {
+  id: SupportedModel;
+  label: string;
+  provider: string;
+  costPer1kInput: number;
+  costPer1kOutput: number;
+}
+
+/** Static metadata for each supported model (costs in USD per 1K tokens). */
+export const MODEL_INFO: Record<SupportedModel, ModelInfo> = {
+  'claude-sonnet-4-5-20250929': {
+    id: 'claude-sonnet-4-5-20250929',
+    label: 'Claude Sonnet 4.5',
+    provider: 'Anthropic',
+    costPer1kInput: 0.003,
+    costPer1kOutput: 0.015,
+  },
+  'claude-opus-4-6': {
+    id: 'claude-opus-4-6',
+    label: 'Claude Opus 4.6',
+    provider: 'Anthropic',
+    costPer1kInput: 0.015,
+    costPer1kOutput: 0.075,
+  },
+  'claude-haiku-4-5-20251001': {
+    id: 'claude-haiku-4-5-20251001',
+    label: 'Claude Haiku 4.5',
+    provider: 'Anthropic',
+    costPer1kInput: 0.0008,
+    costPer1kOutput: 0.004,
+  },
+};
+
 // Resolve claude binary — NVM PATH not available in Node child processes.
 // Override via CLAUDE_BIN env var for portability across machines.
 const CLAUDE_BIN = process.env.CLAUDE_BIN ||
