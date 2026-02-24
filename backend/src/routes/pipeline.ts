@@ -15,8 +15,24 @@ import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import type { AgentProfileRow } from './agent-profiles';
 
-/** Persistent log file path for a run — survives backend restarts */
-const runLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
+/** Legacy tmp-based log path (used as fallback for old runs) */
+const tmpLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
+
+/** Persistent log file path inside workspace/scripts/ralph/logs/ — survives backend restarts */
+function workspaceLogPath(workspacePath: string, runId: number): string {
+  const logDir = path.join(workspacePath, 'scripts', 'ralph', 'logs');
+  fs.mkdirSync(logDir, { recursive: true });
+  return path.join(logDir, `run-${runId}.log`);
+}
+
+/** Resolve log path for a run: check DB log_path, then legacy /tmp path */
+function resolveLogPath(runId: number): string | null {
+  const row = db.prepare('SELECT log_path FROM pipeline_runs WHERE id = ?').get(runId) as { log_path: string | null } | undefined;
+  if (row?.log_path && fs.existsSync(row.log_path)) return row.log_path;
+  const legacy = tmpLogPath(runId);
+  if (fs.existsSync(legacy)) return legacy;
+  return null;
+}
 
 /** True if the given PID is still alive */
 function isPidAlive(pid: number): boolean {
@@ -56,6 +72,7 @@ interface PipelineRunRow {
   started_at: string;
   finished_at: string | null;
   retried_from_run_id: number | null;
+  log_path: string | null;
 }
 
 interface StoryResultRow {
@@ -256,7 +273,8 @@ router.post('/trigger', async (req: Request, res: Response) => {
     }
 
     // 8. Run pre-run hooks — abort if any exit non-zero
-    const logPath = runLogPath(runId);
+    const logPath = workspaceLogPath(workspace.path, runId);
+    db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(logPath, runId);
     const preRunResults = runHooks(workspaceId, 'pre_run', cwd, env);
     if (preRunResults.length > 0) {
       // Write hook output to the log file so it appears in the terminal
@@ -289,7 +307,6 @@ router.post('/trigger', async (req: Request, res: Response) => {
         outputBuffers.set(runId, failBuf);
         setTimeout(() => {
           outputBuffers.delete(runId);
-          try { fs.unlinkSync(logPath); } catch { /* already gone */ }
         }, 30 * 60 * 1000);
 
         res.status(422).json({
@@ -395,13 +412,12 @@ router.post('/trigger', async (req: Request, res: Response) => {
       ) as WalEvent;
       broadcastAll(walEvent);
 
-      // Mark buffer done; notify subscribers; clean up buffer + log after 30 min
+      // Mark buffer done; notify subscribers; clean up buffer after 30 min (log file retained on disk)
       buf.done = true;
       buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
       buf.subscribers.clear();
       setTimeout(() => {
         outputBuffers.delete(runId);
-        try { fs.unlinkSync(logPath); } catch { /* already gone */ }
       }, 30 * 60 * 1000);
     });
 
@@ -905,7 +921,8 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     }
 
     // 11. Spawn run-loop.sh with the retry spec — detached, output to log file
-    const retryLogPath = runLogPath(newRunId);
+    const retryLogPath = workspaceLogPath(workspace.path, newRunId);
+    db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(retryLogPath, newRunId);
     const retryLogFd = fs.openSync(retryLogPath, 'a');
     const child = spawn('bash', [runLoopScript, '--json', retrySpecPath], {
       cwd,
@@ -998,7 +1015,6 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       buf.subscribers.clear();
       setTimeout(() => {
         outputBuffers.delete(newRunId);
-        try { fs.unlinkSync(retryLogPath); } catch { /* already gone */ }
       }, 30 * 60 * 1000);
 
       // Clean up temporary retry spec
@@ -1252,9 +1268,9 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
   }
 
   // ── Cold path: buffer not in memory (backend restarted) ──────────────────
-  // Fall back to the persisted log file.
-  const logPath = runLogPath(runId);
-  if (!fs.existsSync(logPath)) {
+  // Fall back to the persisted log file (check DB log_path, then legacy /tmp).
+  const logPath = resolveLogPath(runId);
+  if (!logPath) {
     // No log file — run finished before this server started or never ran
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
@@ -1500,5 +1516,97 @@ router.get('/stream', (req: Request, res: Response) => {
     clearInterval(pollInterval);
   });
 });
+
+// ─── GET /api/pipeline/runs/:runId/log — Download raw log file ───────────────
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/log:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Download raw pipeline log file
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Raw log file
+ *         content:
+ *           text/plain:
+ *             schema: { type: string }
+ *       404: { description: "Log file not found" }
+ */
+router.get('/runs/:runId/log', (req: Request, res: Response) => {
+  const runId = parseInt(String(req.params.runId), 10);
+  if (isNaN(runId)) {
+    res.status(400).json({ error: 'Invalid runId' });
+    return;
+  }
+
+  const logPath = resolveLogPath(runId);
+  if (!logPath) {
+    res.status(404).json({ error: 'Log file not found for this run' });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="run-${runId}.log"`);
+  const stream = fs.createReadStream(logPath);
+  stream.pipe(res);
+  stream.on('error', () => {
+    res.status(500).json({ error: 'Failed to read log file' });
+  });
+});
+
+// ─── Log cleanup: delete logs older than 30 days ─────────────────────────────
+
+const LOG_RETENTION_DAYS = 30;
+
+export function cleanupOldLogs(): number {
+  const cutoff = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let deleted = 0;
+
+  // Clean logs referenced in pipeline_runs.log_path
+  const rows = db.prepare(
+    `SELECT id, log_path FROM pipeline_runs WHERE log_path IS NOT NULL AND finished_at IS NOT NULL`
+  ).all() as { id: number; log_path: string }[];
+
+  for (const row of rows) {
+    try {
+      if (fs.existsSync(row.log_path)) {
+        const stat = fs.statSync(row.log_path);
+        if (stat.mtimeMs < cutoff) {
+          fs.unlinkSync(row.log_path);
+          deleted++;
+        }
+      }
+    } catch { /* ignore individual file errors */ }
+  }
+
+  // Also clean legacy /tmp logs for old runs without log_path
+  const legacyRows = db.prepare(
+    `SELECT id FROM pipeline_runs WHERE log_path IS NULL AND finished_at IS NOT NULL`
+  ).all() as { id: number }[];
+
+  for (const row of legacyRows) {
+    try {
+      const legacy = tmpLogPath(row.id);
+      if (fs.existsSync(legacy)) {
+        const stat = fs.statSync(legacy);
+        if (stat.mtimeMs < cutoff) {
+          fs.unlinkSync(legacy);
+          deleted++;
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  if (deleted > 0) {
+    console.log(`[Pipeline] Cleaned up ${deleted} log file(s) older than ${LOG_RETENTION_DAYS} days`);
+  }
+  return deleted;
+}
 
 export default router;
