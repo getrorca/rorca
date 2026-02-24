@@ -38,7 +38,7 @@ interface StoryResult {
   output_tokens: number | null;
 }
 
-type StoryStatus = 'pending' | 'running' | 'pass' | 'fail' | 'retry';
+type StoryStatus = 'pending' | 'running' | 'pass' | 'fail' | 'retry' | 'skipped';
 
 interface DerivedStory {
   storyId: string;
@@ -77,6 +77,7 @@ const STORY_ICONS: Record<StoryStatus, string> = {
   running: '🔄',
   pending: '⏳',
   retry: '🔁',
+  skipped: '⏭️',
 };
 
 const PRIORITY_CONFIG: Record<number, { label: string; className: string }> = {
@@ -210,6 +211,18 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           existing.status = 'retry';
         }
         break;
+      case 'story_skipped':
+        storyMap.set(e.story_id, {
+          storyId: e.story_id,
+          status: 'skipped',
+          title: payload.title || e.story_id,
+          elapsed: '',
+          startedAt: null,
+          priority: existing?.priority ?? 3,
+          inputTokens: null,
+          outputTokens: null,
+        });
+        break;
     }
   }
 
@@ -292,7 +305,7 @@ export default function PipelineMonitorPanel() {
   const derivedStories = useMemo(() => {
     const fromDB: DerivedStory[] = (selectedRunDetail?.stories || []).map((s) => ({
       storyId: s.story_id,
-      status: s.status === 'pass' ? 'pass' : s.status === 'fail' ? 'fail' : s.status === 'retry' ? 'retry' : 'pending' as StoryStatus,
+      status: s.status === 'pass' ? 'pass' : s.status === 'fail' ? 'fail' : s.status === 'retry' ? 'retry' : s.status === 'skip' ? 'skipped' : 'pending' as StoryStatus,
       title: s.story_id,
       elapsed: elapsedTime(s.started_at, s.finished_at),
       startedAt: s.started_at,
@@ -340,7 +353,7 @@ export default function PipelineMonitorPanel() {
     );
   }, [selectedRunDetail, sseEvents, specStories, priorityMap]);
 
-  const completedCount = derivedStories.filter((s) => s.status === 'pass' || s.status === 'fail').length;
+  const completedCount = derivedStories.filter((s) => s.status === 'pass' || s.status === 'fail' || s.status === 'skipped').length;
   const totalCount = derivedStories.length;
   const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
@@ -913,9 +926,15 @@ export default function PipelineMonitorPanel() {
                               <HelpTooltip helpKey="story-priority" size={9} />
                             </span>
                             <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
-                            <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
-                              {story.status}
-                            </span>
+                            {story.status === 'skipped' ? (
+                              <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-teal-500/15 text-teal-400 border border-teal-500/30 flex-shrink-0">
+                                Already Passing
+                              </span>
+                            ) : (
+                              <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
+                                {story.status}
+                              </span>
+                            )}
                             <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
                               {story.elapsed && `(${story.elapsed})`}
                             </span>
