@@ -1,0 +1,368 @@
+import { useState, useEffect, useCallback } from 'react';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Legend,
+} from 'recharts';
+import { Calculator, Calendar, Loader2, Settings2, Check } from 'lucide-react';
+import { useWorkspace } from '../contexts/WorkspaceContext';
+import { apiFetch } from '../lib/apiFetch';
+
+/* ─── Types ───────────────────────────────────────────────────────── */
+
+interface ROITimeSeries {
+  date: string;
+  stories_passed: number;
+  hours_saved: number;
+  llm_cost: number;
+  net_savings: number;
+}
+
+interface ROIResponse {
+  total_stories_passed: number;
+  estimated_hours_saved: number;
+  total_llm_cost: number;
+  savings_value: number;
+  net_savings: number;
+  roi_multiplier: number | null;
+  config: {
+    hours_per_story: number;
+    hourly_rate: number;
+  };
+  timeSeries: ROITimeSeries[];
+  dateRange: { from: string; to: string };
+}
+
+type DateRange = '7d' | '30d' | '90d' | 'all';
+
+/* ─── Helpers ─────────────────────────────────────────────────────── */
+
+function formatCurrency(usd: number): string {
+  if (Math.abs(usd) >= 1000) return `$${(usd / 1000).toFixed(1)}K`;
+  if (Math.abs(usd) < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+function formatHours(h: number): string {
+  if (h >= 1000) return `${(h / 1000).toFixed(1)}K`;
+  return h.toFixed(1);
+}
+
+function dateRangeToISO(range: DateRange): { from: string; to: string } {
+  const now = new Date();
+  const to = now.toISOString();
+  if (range === 'all') return { from: '2020-01-01T00:00:00Z', to };
+  const days = range === '7d' ? 7 : range === '30d' ? 30 : 90;
+  const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+  return { from, to };
+}
+
+/* ─── Component ───────────────────────────────────────────────────── */
+
+export default function RoiCalculatorPanel() {
+  const { workspaceId } = useWorkspace();
+  const [data, setData] = useState<ROIResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [dateRange, setDateRange] = useState<DateRange>('30d');
+  const [showSettings, setShowSettings] = useState(false);
+  const [hoursPerStory, setHoursPerStory] = useState(4);
+  const [hourlyRate, setHourlyRate] = useState(75);
+  const [saving, setSaving] = useState(false);
+
+  const fetchROI = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const { from, to } = dateRangeToISO(dateRange);
+      const params = new URLSearchParams({
+        workspace_id: workspaceId,
+        from,
+        to,
+      });
+      const result = await apiFetch<ROIResponse>(`/api/analytics/roi?${params}`);
+      setData(result);
+      setHoursPerStory(result.config.hours_per_story);
+      setHourlyRate(result.config.hourly_rate);
+    } catch (err) {
+      console.error('[ROI] fetch error:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId, dateRange]);
+
+  useEffect(() => {
+    setLoading(true);
+    fetchROI();
+  }, [fetchROI]);
+
+  const saveConfig = async () => {
+    if (!workspaceId) return;
+    setSaving(true);
+    try {
+      await apiFetch('/api/analytics/roi/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          hours_per_story: hoursPerStory,
+          hourly_rate: hourlyRate,
+        }),
+      });
+      await fetchROI();
+      setShowSettings(false);
+    } catch (err) {
+      console.error('[ROI] save config error:', err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
+        <div className="flex items-center gap-2">
+          <Calculator size={20} className="text-accent" />
+          <h2 className="text-lg font-semibold">ROI Calculator</h2>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* Date range */}
+          <div className="flex items-center gap-1 bg-panel-alt rounded-md p-0.5">
+            <Calendar size={14} className="text-muted ml-1.5" />
+            {(['7d', '30d', '90d', 'all'] as DateRange[]).map(r => (
+              <button
+                key={r}
+                onClick={() => setDateRange(r)}
+                className={`px-2.5 py-1 text-xs rounded transition-colors ${
+                  dateRange === r
+                    ? 'bg-accent text-white'
+                    : 'text-muted hover:text-[var(--text)]'
+                }`}
+              >
+                {r === 'all' ? 'All' : r}
+              </button>
+            ))}
+          </div>
+
+          {/* Settings toggle */}
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className={`p-1.5 rounded transition-colors ${
+              showSettings ? 'bg-accent text-white' : 'text-muted hover:text-[var(--text)]'
+            }`}
+            title="ROI Settings"
+          >
+            <Settings2 size={16} />
+          </button>
+        </div>
+      </div>
+
+      {/* Settings panel */}
+      {showSettings && (
+        <div className="px-5 py-3 border-b border-border bg-panel-alt flex items-center gap-4 text-sm">
+          <label className="flex items-center gap-2">
+            <span className="text-muted">Hours per story:</span>
+            <input
+              type="number"
+              min={0.5}
+              max={100}
+              step={0.5}
+              value={hoursPerStory}
+              onChange={e => setHoursPerStory(parseFloat(e.target.value) || 0)}
+              className="w-20 bg-bg border border-border rounded px-2 py-1 text-sm"
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="text-muted">Hourly rate ($):</span>
+            <input
+              type="number"
+              min={1}
+              max={1000}
+              step={5}
+              value={hourlyRate}
+              onChange={e => setHourlyRate(parseFloat(e.target.value) || 0)}
+              className="w-24 bg-bg border border-border rounded px-2 py-1 text-sm"
+            />
+          </label>
+          <button
+            onClick={saveConfig}
+            disabled={saving}
+            className="flex items-center gap-1 px-3 py-1 bg-accent text-white rounded text-xs hover:bg-accent/80 transition-colors disabled:opacity-50"
+          >
+            {saving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+            Save
+          </button>
+        </div>
+      )}
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-5 space-y-6">
+        {loading ? (
+          <div className="flex items-center justify-center h-64">
+            <Loader2 className="animate-spin text-muted" size={28} />
+          </div>
+        ) : !data ? (
+          <div className="flex flex-col items-center justify-center h-64 text-muted text-sm gap-2">
+            <Calculator size={32} className="opacity-40" />
+            <p>Unable to load ROI data.</p>
+          </div>
+        ) : (
+          <>
+            {/* Summary Cards */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              <MetricCard
+                label="Stories Passed"
+                value={String(data.total_stories_passed)}
+                sub="unique, deduplicated"
+              />
+              <MetricCard
+                label="Hours Saved"
+                value={`${formatHours(data.estimated_hours_saved)}h`}
+                sub={`@ ${data.config.hours_per_story}h/story`}
+              />
+              <MetricCard
+                label="Savings Value"
+                value={formatCurrency(data.savings_value)}
+                sub={`@ $${data.config.hourly_rate}/hr`}
+              />
+              <MetricCard
+                label="LLM Cost"
+                value={formatCurrency(data.total_llm_cost)}
+                sub="total inference cost"
+              />
+              <MetricCard
+                label="Net ROI"
+                value={data.net_savings >= 0 ? formatCurrency(data.net_savings) : `-${formatCurrency(Math.abs(data.net_savings))}`}
+                sub={data.roi_multiplier != null ? `${data.roi_multiplier}x return` : 'infinite return'}
+                highlight={data.net_savings > 0}
+              />
+            </div>
+
+            {/* ROI Multiplier Banner */}
+            {data.total_stories_passed > 0 && (
+              <div className={`rounded-lg p-4 flex items-center justify-between ${
+                data.net_savings > 0 ? 'bg-emerald-500/10 border border-emerald-500/30' : 'bg-amber-500/10 border border-amber-500/30'
+              }`}>
+                <div>
+                  <span className="text-sm text-muted">For every $1 spent on LLM inference, Rorcha saves</span>
+                  <span className={`text-2xl font-bold ml-2 ${data.net_savings > 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {data.roi_multiplier != null ? `$${data.roi_multiplier.toFixed(1)}` : '\u221E'}
+                  </span>
+                  <span className="text-sm text-muted ml-1">in developer time</span>
+                </div>
+                <div className="text-right text-xs text-muted">
+                  Based on {data.config.hours_per_story}h/story at ${data.config.hourly_rate}/hr
+                </div>
+              </div>
+            )}
+
+            {/* Cumulative Net Savings Chart */}
+            {data.timeSeries.length > 1 && (
+              <div className="bg-panel-alt rounded-lg p-4">
+                <h3 className="text-sm font-medium text-muted mb-3">Cumulative Net Savings Over Time</h3>
+                <ResponsiveContainer width="100%" height={280}>
+                  <LineChart data={data.timeSeries} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis
+                      dataKey="date"
+                      tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
+                      tickFormatter={(v: number) => formatCurrency(v)}
+                      tickLine={false}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        background: 'var(--panel)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                      }}
+                      formatter={(value?: number, name?: string) => {
+                        const v = value ?? 0;
+                        if (name === 'net_savings') return [formatCurrency(v), 'Net Savings'];
+                        if (name === 'llm_cost') return [formatCurrency(v), 'LLM Cost'];
+                        if (name === 'hours_saved') return [`${v}h`, 'Hours Saved'];
+                        return [String(v), name ?? ''];
+                      }}
+                    />
+                    <Legend
+                      formatter={(value: string) => {
+                        if (value === 'net_savings') return 'Cumulative Net Savings';
+                        if (value === 'llm_cost') return 'Daily LLM Cost';
+                        if (value === 'hours_saved') return 'Daily Hours Saved';
+                        return value;
+                      }}
+                    />
+                    <Line type="monotone" dataKey="net_savings" stroke="#10b981" strokeWidth={2.5} dot={false} />
+                    <Line type="monotone" dataKey="llm_cost" stroke="#ef4444" strokeWidth={1.5} dot={false} strokeDasharray="4 4" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* Daily Breakdown Table */}
+            {data.timeSeries.length > 0 && (
+              <div className="bg-panel-alt rounded-lg p-4">
+                <h3 className="text-sm font-medium text-muted mb-3">Daily Breakdown</h3>
+                <div className="max-h-64 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-panel-alt">
+                      <tr className="text-left text-muted border-b border-border">
+                        <th className="pb-2 font-medium">Date</th>
+                        <th className="pb-2 font-medium text-right">Stories</th>
+                        <th className="pb-2 font-medium text-right">Hours Saved</th>
+                        <th className="pb-2 font-medium text-right">LLM Cost</th>
+                        <th className="pb-2 font-medium text-right">Net Savings</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.timeSeries.map(row => (
+                        <tr key={row.date} className="border-b border-border/50 last:border-0">
+                          <td className="py-1.5 text-muted">{row.date}</td>
+                          <td className="py-1.5 text-right">{row.stories_passed}</td>
+                          <td className="py-1.5 text-right text-muted">{row.hours_saved}h</td>
+                          <td className="py-1.5 text-right text-red-400">{formatCurrency(row.llm_cost)}</td>
+                          <td className={`py-1.5 text-right font-medium ${row.net_savings >= 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                            {formatCurrency(row.net_savings)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {data.total_stories_passed === 0 && (
+              <div className="flex flex-col items-center justify-center h-32 text-muted text-sm gap-2">
+                <Calculator size={28} className="opacity-40" />
+                <p>No passed stories in this period. Run a pipeline to see ROI data.</p>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Sub-components ──────────────────────────────────────────────── */
+
+function MetricCard({ label, value, sub, highlight }: {
+  label: string;
+  value: string;
+  sub: string;
+  highlight?: boolean;
+}) {
+  return (
+    <div className={`rounded-lg p-4 flex flex-col gap-1 ${
+      highlight ? 'bg-emerald-500/10 border border-emerald-500/30' : 'bg-panel-alt'
+    }`}>
+      <span className="text-xs text-muted">{label}</span>
+      <span className={`text-2xl font-bold ${highlight ? 'text-emerald-400' : ''}`}>{value}</span>
+      <span className="text-xs text-muted">{sub}</span>
+    </div>
+  );
+}

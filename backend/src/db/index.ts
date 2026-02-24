@@ -199,6 +199,15 @@ export function runMigrations() {
     db.exec('ALTER TABLE workspaces ADD COLUMN pr_template TEXT');
   }
 
+  // V2-084: Add ROI calculator config columns to workspaces (idempotent)
+  const wsColsROI = db.pragma('table_info(workspaces)') as { name: string }[];
+  if (!wsColsROI.some(c => c.name === 'roi_hours_per_story')) {
+    db.exec('ALTER TABLE workspaces ADD COLUMN roi_hours_per_story REAL NOT NULL DEFAULT 4.0');
+  }
+  if (!wsColsROI.some(c => c.name === 'roi_hourly_rate')) {
+    db.exec('ALTER TABLE workspaces ADD COLUMN roi_hourly_rate REAL NOT NULL DEFAULT 75.0');
+  }
+
   // V2-035: Add last_active_at column to team_members (idempotent)
   const tmCols = db.pragma('table_info(team_members)') as { name: string }[];
   if (!tmCols.some(c => c.name === 'last_active_at')) {

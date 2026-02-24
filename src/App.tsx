@@ -29,6 +29,7 @@ import VelocityChartPanel from './panels/VelocityChartPanel';
 import CompletionRatePanel from './panels/CompletionRatePanel';
 import HealthDashboardPanel from './panels/HealthDashboardPanel';
 import AuditLogPanel from './panels/AuditLogPanel';
+import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -109,6 +110,7 @@ function AppContent() {
       {activePanel === 'models'    && <ModelComparisonPanel />}
       {activePanel === 'velocity'  && <VelocityChartPanel />}
       {activePanel === 'completion' && <CompletionRatePanel />}
+      {activePanel === 'roi'       && <RoiCalculatorPanel />}
       {activePanel === 'health'    && <HealthDashboardPanel />}
       {activePanel === 'audit-log' && <AuditLogPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
