@@ -1,6 +1,6 @@
-import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp, BarChart3, HeartPulse, ScrollText, X } from 'lucide-react';
+import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp, BarChart3, HeartPulse, ScrollText, Calculator, X } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health';
+export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi';
 
 export const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'forge',           label: 'Spec Forge',         icon: Wand2          },
@@ -17,6 +17,7 @@ export const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'models',          label: 'Model Comparison',     icon: Zap            },
   { id: 'velocity',        label: 'Velocity Chart',       icon: TrendingUp     },
   { id: 'completion',      label: 'Completion Rates',     icon: BarChart3      },
+  { id: 'roi',              label: 'ROI Calculator',        icon: Calculator     },
   { id: 'health',           label: 'Health',               icon: HeartPulse     },
   { id: 'audit-log',       label: 'Audit Log',            icon: ScrollText     },
   { id: 'activity',        label: 'Activity Feed',       icon: Rss            },
