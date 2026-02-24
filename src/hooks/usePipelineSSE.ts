@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { BASE_URL } from '../lib/apiFetch';
 
 export interface WalEvent {
   id: number;
@@ -20,8 +21,7 @@ export function usePipelineSSE(runId: string | null) {
       return;
     }
 
-    const base = import.meta.env.VITE_API_URL || 'http://localhost:3030';
-    const url = `${base}/api/pipeline/stream?runId=${runId}`;
+    const url = `${BASE_URL}/api/pipeline/stream?runId=${runId}`;
     const es = new EventSource(url);
 
     es.addEventListener('wal_event', (e) => {

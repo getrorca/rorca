@@ -1,14 +1,44 @@
 {
   "name": "rorcha",
-  "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "AI spec orchestration pipeline — turn plain-English briefs into validated, executed code",
   "type": "module",
+  "bin": {
+    "rorcha": "./cli.js"
+  },
   "scripts": {
     "dev": "concurrently \"vite\" \"cd backend && npx tsx src/server.ts\"",
     "build": "vite build && cd backend && tsc",
     "typecheck": "tsc --noEmit && cd backend && tsc --noEmit",
-    "self-register": "npx tsx scripts/self-register.ts"
+    "self-register": "npx tsx scripts/self-register.ts",
+    "start": "node cli.js start",
+    "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
+    "prepublishOnly": "npm run build"
   },
+  "keywords": [
+    "ai",
+    "spec",
+    "orchestration",
+    "pipeline",
+    "claude",
+    "llm",
+    "development"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "cli.js",
+    "dist/",
+    "backend/dist/",
+    "backend/src/db/migrations/",
+    "backend/package.json",
+    "backend/package-lock.json",
+    "scripts/run-loop.sh",
+    "scripts/self-register.ts",
+    "package.json"
+  ],
   "dependencies": {
     "@dagrejs/dagre": "^2.0.4",
     "@rollup/rollup-darwin-arm64": "^4.59.0",

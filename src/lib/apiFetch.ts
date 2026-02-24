@@ -1,4 +1,7 @@
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3030';
+// When served by Express (rorcha start), use same-origin (empty base URL).
+// In dev mode (Vite on :5210), use the backend URL on :3030.
+export const BASE_URL = import.meta.env.VITE_API_URL
+  || (import.meta.env.DEV ? 'http://localhost:3030' : '');
 
 // ─── Typed API Error ──────────────────────────────────────────────────────────
 

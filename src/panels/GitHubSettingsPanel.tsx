@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle, Webhook, FileText, RotateCcw, Download } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
-import { apiFetch } from '../lib/apiFetch';
-import { getAccessToken } from '../lib/apiFetch';
+import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -335,9 +334,8 @@ export default function GitHubSettingsPanel() {
           onClick={async () => {
             if (!workspaceId) return;
             try {
-              const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:3030';
               const token = getAccessToken();
-              const res = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/github/actions-yaml`, {
+              const res = await fetch(`${BASE_URL}/api/workspaces/${workspaceId}/github/actions-yaml`, {
                 headers: token ? { 'Authorization': `Bearer ${token}` } : {},
               });
               if (!res.ok) throw new Error(`${res.status}`);

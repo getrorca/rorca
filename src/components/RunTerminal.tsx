@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { useTheme } from '../contexts/ThemeContext';
+import { BASE_URL } from '../lib/apiFetch';
 import '@xterm/xterm/css/xterm.css';
 
 interface RunTerminalProps {
@@ -95,9 +96,8 @@ export default function RunTerminal({ runId }: RunTerminalProps) {
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    // Connect to live output stream — must use absolute URL (backend is on :3030, not :5210)
-    const base = import.meta.env.VITE_API_URL || 'http://localhost:3030';
-    const es = new EventSource(`${base}/api/pipeline/runs/${runId}/output`);
+    // Connect to live output stream
+    const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/output`);
     esRef.current = es;
 
     es.addEventListener('chunk', (e: MessageEvent) => {
