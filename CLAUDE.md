@@ -199,6 +199,9 @@ WAL mode + FK constraints are enabled on every DB connection in `backend/src/db/
 4. **run-loop.sh lives in the PROJECT workspace** — Rorcha finds it at `workspace.path/scripts/run-loop.sh`, not in Rorcha's own repo.
 5. **Backend requires restart** — `tsx` has no hot-reload. Always `lsof -ti:3030 | xargs kill -9 && npm run dev` after any backend changes.
 
+### Auth Middleware — Intentionally Bypassed
+`app.use(authRequired)` in `backend/src/server.ts` line ~78 is **commented out**. This is intentional — Rorcha is a local single-user tool and the login wall blocks workspaces API causing onboarding to show incorrectly. Do NOT re-enable globally. Auth routes (`/api/auth/*`) still work for the registered user (`admin@rorcha.local` / `rorcha123`). If authRequired reappears as a global middleware, comment it out again.
+
 ### Spec Path Construction
 ```typescript
 // WRONG — wrong subdirectory, uses specName (title) not slug
@@ -290,4 +293,78 @@ When `SPEC_PROVIDER=claude` (default), no API key is needed — uses `claude --p
 - Story timeout: 45 min (gtimeout --foreground)
 
 ## CI
-Not configured for Rorcha yet. Run locally: `npm run typecheck && cd backend && npm test`.
+E2E tests: `npm run test:e2e` (Playwright — configured in `rorcha-e2e-testing` spec, not yet built).
+Unit/integration: `npm run typecheck && cd backend && npm test`.
+
+## Model Usage Guide
+- **Opus 4-6** (`claude-opus-4-6`): Use for implementation specs — architecture decisions, complex reasoning
+- **Sonnet 4-6** (`claude-sonnet-4-6`): Use for QA/test-writing specs — faster, cheaper on Claude sub, sufficient for test generation
+- Set `"model"` field in spec JSON before triggering, or set workspace L3 `preferred_model`
+
+## Spec Pipeline — Run Order
+After `rorcha-v2-platform` finishes (113 stories — V2-089–092 excluded):
+1. `rorcha-ui-redesign` (64 stories) — new navigation shell, Hub, Run View, Forge, Graph, Command Palette
+2. `rorcha-integrations` (51 stories) — Linear, GitHub deeper, Vercel, Slack
+3. `rorcha-e2e-testing` (58 stories) — Playwright E2E, finds and fixes bugs
+
+All three specs are in `scripts/ralph/specs/pending/`. Approve via Hub when ready.
+
+**Why V2-089–092 excluded**: Stories V2-089 (Forge redesign), V2-090 (Spec detail), V2-091 (Pipeline DAG), V2-092 (Dashboard) are superseded by `rorcha-ui-redesign` which does all of this plus the navigation shell. Running both would create throwaway work.
+
+## UI Redesign Architecture (rorcha-ui-redesign)
+The redesign replaces the 10-icon sidebar with a 4-screen architecture:
+
+```
+4 nav icons: + (New), Hub (grid), Forge (hammer), Settings (gear)
+
+Hub (default)    → Active run card + Pending reviews + Recent runs
+Run View         → Full-screen: terminal (60%) + story list (40%) + Graph tab
+Forge            → Brief input + direction stack sidebar + inline approve
+Settings         → Direction Stack / Model / GitHub / Account / Billing tabs
+```
+
+Key components:
+- **Command palette**: `cmdk` library, ⌘K trigger, context-aware
+- **Graph view**: D3.js or React Flow DAG from `dependsOn` fields — NO graph DB needed. Nodes = stories, edges = dependsOn. Colors: grey/blue-pulse/green/red by status from `story_results` + SSE
+- **HITL blocked state**: Amber banner when run-loop is stuck, textarea to inject context, resume without kill
+- **Semantic logging**: Parse xterm output for `[Read]`, `[Write]`, `[Planning]`, `[Executing]`, `[Commit]` prefixes — toggle raw/semantic
+
+## Integration Roadmap (rorcha-integrations)
+Priority order: Linear → GitHub deeper → Vercel → Slack
+
+| Integration | Key value |
+|---|---|
+| Linear | Issue → spec import, story pass → sub-issue done, run complete → parent issue update |
+| GitHub | Issue → spec, auto PR on completion, commit status checks per story, Actions trigger |
+| Vercel | Auto-deploy on run complete, preview URL in Run View, production promote button |
+| Slack | Run notifications, spec approval via interactive buttons, consecutive failure alert |
+
+All tokens stored AES-256-GCM encrypted in `integration_credentials` table.
+
+## Platform Distribution Roadmap
+```
+Phase 1 (now)       npm package (V2-108) — rorcha start
+                    VS Code extension — embed React frontend as WebviewPanel (~200 lines glue)
+Phase 2 (cloud)     Railway deployment, Anthropic SDK path (V2-114), auth + billing
+Phase 3 (desktop)   PWA (manifest.json + service worker, no App Store needed)
+                    Tauri — after PMF, when users ask for it
+Phase 4 (mobile)    React Native — AFTER cloud is live (mobile needs a server to connect to)
+```
+
+**VS Code extension**: Reuses existing React frontend as a VS Code WebviewPanel. Adds status bar item (● N/M), command palette entries (⌘⇧P "Rorcha: New Spec"), sidebar icon. Publish to VS Code Marketplace. ~200 lines of extension glue code.
+
+**Tauri vs Electron**: Use Tauri (~20MB). Rust layer is thin system glue (window, tray, menus). All LLM integrations, Express backend, TypeScript — unchanged. Express runs as Tauri sidecar process.
+
+## Business Model & Licensing
+- **Commercial** (not open source initially) — source-available via BSL or Commons Clause
+- **Register "Rorcha" trademark** at USPTO before launch (~$350) — protects name even if code is inspectable
+- **Pricing**: Free (spec generation only, no pipeline execution) → $15/month (full execution, 3 workspaces) → $30/month (unlimited workspaces, team)
+- **Cloud vs self-hosted**: self-hosted free forever, cloud version paid
+- **BYOB**: Rorcha never pays for inference — users bring their own Claude sub or API key
+
+## Competitive Positioning
+- **vs ChatPRD**: "ChatPRD writes the plan. Rorcha ships it." ChatPRD outputs a document, Rorcha executes code.
+- **vs Devin**: Task-oriented ($500/mo), no spec concept, no direction stack, no pipeline monitoring
+- **vs MetaGPT**: Academic research project, no UI, no production pipeline
+- **"Spec-driven development"** is unclaimed terminology — no Google results, blue ocean category to own
+- Core moat: direction stack (persistent context cascade) + per-story isolated execution + live DAG visualization
