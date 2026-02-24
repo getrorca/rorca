@@ -156,7 +156,7 @@ test('PUT L3 with preferredModel stores it and GET returns it', async () => {
   expect(getRes.body.preferredModel).toBe('claude-opus-4-6');
 });
 
-test('PUT L3 with invalid preferredModel returns 400', async () => {
+test('PUT L3 with any preferredModel string is accepted (pass-through)', async () => {
   const res = await request(app)
     .put('/api/direction')
     .set('Authorization', `Bearer ${authToken}`)
@@ -164,10 +164,10 @@ test('PUT L3 with invalid preferredModel returns 400', async () => {
       layer: 3,
       workspaceId: 'ws-dir-test',
       contentYaml: validL3Yaml,
-      preferredModel: 'gpt-4o',
+      preferredModel: 'custom-openai-compat-model',
     });
-  expect(res.status).toBe(400);
-  expect(res.body.error).toContain('Invalid preferredModel');
+  // Any model string is accepted for openai-compat pass-through
+  expect(res.status).not.toBe(400);
 });
 
 test('PUT L1 with preferredModel returns 400 (only valid for L3)', async () => {

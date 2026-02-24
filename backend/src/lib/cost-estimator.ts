@@ -1,6 +1,5 @@
 import { db } from '../db/index';
 import { synthesize } from './direction-stack';
-import type { SupportedModel } from './llm-client';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -77,7 +76,7 @@ function getHistoricalOutputEstimate(workspaceId: string): number {
 export function estimateDryRunCost(
   specJson: { userStories: UserStory[]; model?: string },
   workspaceId: string,
-  model: SupportedModel,
+  model: string,
 ): DryRunEstimate {
   // 1. Fetch model pricing
   const pricing = db.prepare(
