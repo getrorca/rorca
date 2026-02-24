@@ -1750,6 +1750,87 @@ router.get('/:specId/diff', (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /:specId/versions/:version/restore — Restore a historical version ──
+
+router.post('/:specId/versions/:version/restore', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const version = req.params.version as string;
+    const { workspaceId } = req.body;
+    const versionNum = parseInt(version);
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    if (isNaN(versionNum)) {
+      res.status(400).json({ error: 'Invalid version number' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Fetch the version to restore
+    const row = db.prepare(
+      'SELECT content_json, status FROM spec_versions WHERE spec_slug = ? AND version = ?'
+    ).get(specId, versionNum) as { content_json: string; status: string } | undefined;
+
+    if (!row) {
+      res.status(404).json({ error: `Version ${versionNum} not found for spec ${specId}` });
+      return;
+    }
+
+    const restoredContent = JSON.parse(row.content_json);
+
+    // Find the current spec file and snapshot it before overwriting
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingPath = path.join(pendingDir, `${specId}.json`);
+    const approvedPath = path.join(approvedDir, `${specId}.json`);
+    const currentPath = fs.existsSync(approvedPath) ? approvedPath : fs.existsSync(pendingPath) ? pendingPath : null;
+    const currentStatus = currentPath === approvedPath ? 'approved' : 'pending';
+
+    if (currentPath) {
+      // Snapshot current state before overwriting
+      const currentContent = fs.readFileSync(currentPath, 'utf8');
+      snapshotVersion(specId, currentContent, currentStatus);
+    }
+
+    // Write restored content to the current location (or pending if no file exists)
+    const targetPath = currentPath ?? pendingPath;
+    const targetDir = path.dirname(targetPath);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    // Add restoration metadata
+    restoredContent.restoredFrom = versionNum;
+    restoredContent.restoredAt = new Date().toISOString();
+
+    fs.writeFileSync(targetPath, JSON.stringify(restoredContent, null, 2), 'utf8');
+
+    // Snapshot the restored version
+    const newVersion = snapshotVersion(specId, JSON.stringify(restoredContent), currentStatus);
+
+    // Emit WAL event
+    db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
+    ).run('version_restored', specId, workspaceId, JSON.stringify({
+      restoredFromVersion: versionNum,
+      newVersion,
+    }));
+
+    res.json({ ok: true, newVersion, restoredFromVersion: versionNum });
+  } catch (error: any) {
+    console.error('[Specs] Restore version error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── PATCH /:specId/stories/:storyId — Toggle excluded flag ──────────────────
 
 router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
