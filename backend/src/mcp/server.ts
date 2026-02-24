@@ -172,6 +172,176 @@ server.registerTool(
   }
 );
 
+// ─── V2-067: Extended Spec Lifecycle MCP Tools ────────────────────────────────
+
+server.registerTool(
+  'rorcha_edit_story',
+  {
+    description: 'Update a single story in an existing spec. Can modify title, description, and acceptance criteria by spec ID and story ID. The spec can be in pending or approved status. Use rorcha_list_specs to find the spec ID, then rorcha_search_stories or read the spec to find the story ID (e.g. US-001).',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+      specId: z.string().describe('Spec ID (filename slug, e.g. "my-feature-spec")'),
+      storyId: z.string().describe('Story ID within the spec (e.g. "US-001")'),
+      title: z.string().optional().describe('New title for the story'),
+      description: z.string().optional().describe('New description for the story'),
+      acceptanceCriteria: z.array(z.string()).optional().describe('New acceptance criteria (replaces existing list)'),
+    },
+  },
+  async ({ workspaceId, specId, storyId, title, description, acceptanceCriteria }) => {
+    const body: Record<string, unknown> = { workspaceId };
+    if (title !== undefined) body.title = title;
+    if (description !== undefined) body.description = description;
+    if (acceptanceCriteria !== undefined) body.acceptanceCriteria = acceptanceCriteria;
+
+    const res = await fetch(`${RORCHA_API}/api/specs/${specId}/stories/${storyId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to edit story ${storyId} in spec ${specId} (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as { ok: boolean; story: Record<string, unknown>; version: number };
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Story ${storyId} updated in spec ${specId} (version ${data.version})\n\n${JSON.stringify(data.story, null, 2)}`
+      }]
+    };
+  }
+);
+
+server.registerTool(
+  'rorcha_search_stories',
+  {
+    description: 'Search across all specs in a workspace for stories matching a query string. Searches story IDs, titles, descriptions, and acceptance criteria. Returns matching stories with their spec context. Useful for finding related stories, checking for duplicates, or locating a specific story when you only know partial text.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+      query: z.string().describe('Search query — matches against story ID, title, description, and acceptance criteria'),
+    },
+  },
+  async ({ workspaceId, query }) => {
+    const res = await fetch(`${RORCHA_API}/api/specs/search/stories?workspaceId=${encodeURIComponent(workspaceId)}&q=${encodeURIComponent(query)}`);
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Story search failed (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      query: string;
+      resultCount: number;
+      results: Array<{
+        specId: string;
+        specTitle: string;
+        status: string;
+        story: { id: string; title: string; description: string; acceptanceCriteria: string[] };
+        matchFields: string[];
+      }>;
+    };
+
+    if (data.resultCount === 0) {
+      return { content: [{ type: 'text' as const, text: `No stories found matching "${query}"` }] };
+    }
+
+    const lines = data.results.map(r =>
+      `[${r.status.toUpperCase()}] ${r.specId} → ${r.story.id}: ${r.story.title}\n  Matched in: ${r.matchFields.join(', ')}\n  AC: ${r.story.acceptanceCriteria?.slice(0, 2).join('; ') ?? 'none'}${(r.story.acceptanceCriteria?.length ?? 0) > 2 ? ` (+${(r.story.acceptanceCriteria?.length ?? 0) - 2} more)` : ''}`
+    );
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Found ${data.resultCount} stories matching "${query}":\n\n${lines.join('\n\n')}`
+      }]
+    };
+  }
+);
+
+server.registerTool(
+  'rorcha_add_stories',
+  {
+    description: 'Generate and append new stories to an existing spec using the LLM. The new stories are AI-generated based on the existing spec context and an optional brief describing what the new stories should cover. Story IDs are auto-sequenced after existing stories.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+      specId: z.string().describe('Spec ID (filename slug) to add stories to'),
+      count: z.number().min(1).max(20).optional().default(3).describe('Number of new stories to generate (default 3, max 20)'),
+      brief: z.string().optional().describe('Optional guidance for what the new stories should cover. If omitted, the LLM infers from the existing spec.'),
+    },
+  },
+  async ({ workspaceId, specId, count, brief }) => {
+    const body: Record<string, unknown> = {
+      workspaceId,
+      count: count ?? 3,
+    };
+    if (brief !== undefined) body.brief = brief;
+
+    const res = await fetch(`${RORCHA_API}/api/specs/${specId}/add-stories`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to add stories to spec ${specId} (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      added: number;
+      totalStories: number;
+      newStories: Array<{ id: string; title: string }>;
+    };
+
+    const storyList = data.newStories.map(s => `  ${s.id}: ${s.title}`).join('\n');
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Added ${data.added} stories to spec ${specId} (${data.totalStories} total):\n\n${storyList}`
+      }]
+    };
+  }
+);
+
+server.registerTool(
+  'rorcha_delete_story',
+  {
+    description: 'Remove a single story from a spec by spec ID and story ID. The remaining stories are automatically reindexed to maintain sequential IDs (US-001, US-002, ...). Dependencies referencing the deleted story are cleaned up. A version snapshot is created before deletion for rollback.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+      specId: z.string().describe('Spec ID (filename slug)'),
+      storyId: z.string().describe('Story ID to delete (e.g. "US-003")'),
+    },
+  },
+  async ({ workspaceId, specId, storyId }) => {
+    const res = await fetch(`${RORCHA_API}/api/specs/${specId}/stories/${storyId}?workspaceId=${encodeURIComponent(workspaceId)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to delete story ${storyId} from spec ${specId} (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      ok: boolean;
+      deletedStory: { id: string; title: string };
+      version: number;
+      remainingCount: number;
+    };
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Deleted story ${storyId} ("${data.deletedStory.title}") from spec ${specId}\nVersion snapshot: ${data.version}\nRemaining stories: ${data.remainingCount}`
+      }]
+    };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

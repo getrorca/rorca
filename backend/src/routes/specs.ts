@@ -1487,6 +1487,71 @@ router.get('/archive', (req: Request, res: Response) => {
   }
 });
 
+// ─── V2-067: GET /search/stories — Cross-spec story search ────────────────────
+
+router.get('/search/stories', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspaceId as string | undefined;
+    const query = req.query.q as string | undefined;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+    if (!query || query.trim().length === 0) {
+      res.status(400).json({ error: 'Missing required query param: q (search query)' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const queryLower = query.toLowerCase();
+    const results: Array<{
+      specId: string;
+      specTitle: string;
+      status: string;
+      story: UserStory;
+      matchFields: string[];
+    }> = [];
+
+    for (const [dir, status] of [[pendingDir, 'pending'], [approvedDir, 'approved']] as const) {
+      for (const file of safeReaddir(dir)) {
+        const specId = file.replace('.json', '');
+        const filePath = path.join(dir, file);
+        try {
+          const content = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          const specTitle = content.title ?? specId;
+          const stories: UserStory[] = content.userStories ?? [];
+
+          for (const story of stories) {
+            const matchFields: string[] = [];
+            if (story.id?.toLowerCase().includes(queryLower)) matchFields.push('id');
+            if (story.title?.toLowerCase().includes(queryLower)) matchFields.push('title');
+            if (story.description?.toLowerCase().includes(queryLower)) matchFields.push('description');
+            if (story.acceptanceCriteria?.some(ac => ac.toLowerCase().includes(queryLower))) matchFields.push('acceptanceCriteria');
+
+            if (matchFields.length > 0) {
+              results.push({ specId, specTitle, status, story, matchFields });
+            }
+          }
+        } catch {
+          // Skip unparseable spec files
+        }
+      }
+    }
+
+    res.json({ query, resultCount: results.length, results });
+  } catch (error: any) {
+    console.error('[Specs] Story search error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── POST /:specId/add-stories — Generate more stories for an existing spec ───
 
 router.post('/:specId/add-stories', async (req: Request, res: Response) => {
@@ -1846,6 +1911,98 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
     res.json({ ok: true, story: stories[storyIndex], version });
   } catch (error: any) {
     console.error('[Specs] Story update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-067: DELETE /:specId/stories/:storyId — Remove a single story ─────────
+
+router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const storyId = req.params.storyId as string;
+    const workspaceId = (req.query.workspaceId ?? req.body?.workspaceId) as string | undefined;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+
+    let specPath: string;
+    if (fs.existsSync(approvedFile)) {
+      specPath = approvedFile;
+    } else if (fs.existsSync(pendingFile)) {
+      specPath = pendingFile;
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const raw = fs.readFileSync(specPath, 'utf8');
+    const content = JSON.parse(raw);
+    const stories: UserStory[] = content.userStories ?? [];
+    const storyIndex = stories.findIndex((s: UserStory) => s.id === storyId);
+
+    if (storyIndex === -1) {
+      res.status(404).json({ error: `Story ${storyId} not found in spec ${specId}` });
+      return;
+    }
+
+    const deletedStory = stories[storyIndex];
+
+    // Snapshot pre-delete state
+    const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
+    const version = snapshotVersion(specId, raw, status);
+
+    // Remove and reindex
+    stories.splice(storyIndex, 1);
+    const storyPrefix = deletedStory.id.match(/^([A-Z]+)/)?.[1] ?? 'US';
+    const reindexed = stories.map((s, i) => ({
+      ...s,
+      id: `${storyPrefix}-${String(i + 1).padStart(3, '0')}`,
+      dependsOn: (s.dependsOn ?? [])
+        .filter(dep => dep !== storyId)
+        .map(dep => {
+          const origIndex = stories.findIndex(os => os.id === dep);
+          return origIndex >= 0 ? `${storyPrefix}-${String(origIndex + 1).padStart(3, '0')}` : dep;
+        }),
+    }));
+
+    content.userStories = reindexed;
+    fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
+
+    // WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
+    ).run('story_deleted', workspaceId, specId, storyId, JSON.stringify({
+      deletedTitle: deletedStory.title,
+      version,
+    }));
+
+    broadcastAll({
+      id: walResult.lastInsertRowid as number,
+      ts: new Date().toISOString(),
+      event_type: 'story_deleted',
+      workspace_id: workspaceId,
+      spec_id: specId,
+      story_id: storyId,
+      actor: 'api',
+      payload: JSON.stringify({ deletedTitle: deletedStory.title, version }),
+    });
+
+    res.json({ ok: true, deletedStory, version, remainingCount: reindexed.length });
+  } catch (error: any) {
+    console.error('[Specs] Story delete error:', error);
     res.status(500).json({ error: error.message });
   }
 });
