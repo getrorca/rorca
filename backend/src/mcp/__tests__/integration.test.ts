@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 
 describe('MCP server integration', () => {
-  it('lists all 5 expected tools', (done) => {
+  it('lists all 9 expected tools', (done) => {
     const proc = spawn('npx', ['tsx', path.resolve(__dirname, '../server.ts')], {
       env: { ...process.env, NODE_ENV: 'production', RORCHA_API_URL: 'http://localhost:3030' },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -34,6 +34,10 @@ describe('MCP server integration', () => {
       expect(toolNames).toContain('rorcha_list_specs');
       expect(toolNames).toContain('rorcha_approve_spec');
       expect(toolNames).toContain('rorcha_pipeline_status');
+      expect(toolNames).toContain('rorcha_edit_story');
+      expect(toolNames).toContain('rorcha_search_stories');
+      expect(toolNames).toContain('rorcha_add_stories');
+      expect(toolNames).toContain('rorcha_delete_story');
       done();
     }, 6000);
   }, 15000);
