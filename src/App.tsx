@@ -28,6 +28,7 @@ import ModelComparisonPanel from './panels/ModelComparisonPanel';
 import VelocityChartPanel from './panels/VelocityChartPanel';
 import CompletionRatePanel from './panels/CompletionRatePanel';
 import HealthDashboardPanel from './panels/HealthDashboardPanel';
+import AuditLogPanel from './panels/AuditLogPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -108,6 +109,7 @@ function AppContent() {
       {activePanel === 'velocity'  && <VelocityChartPanel />}
       {activePanel === 'completion' && <CompletionRatePanel />}
       {activePanel === 'health'    && <HealthDashboardPanel />}
+      {activePanel === 'audit-log' && <AuditLogPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
       {showCommandPalette && (
