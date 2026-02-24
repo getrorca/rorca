@@ -184,10 +184,26 @@ test('PUT L1 with preferredModel returns 400 (only valid for L3)', async () => {
 });
 
 test('GET /api/direction/models returns supported models', async () => {
-  const res = await request(app).get('/api/direction/models').set('Authorization', `Bearer ${authToken}`);
-  expect(res.status).toBe(200);
-  expect(res.body.models).toHaveLength(3);
-  expect(res.body.models.map((m: { id: string }) => m.id)).toContain('claude-opus-4-6');
+  // Clear env vars that affect provider detection to ensure deterministic test
+  const savedOpenRouter = process.env.OPENROUTER_API_KEY;
+  const savedAnthropic = process.env.ANTHROPIC_API_KEY;
+  const savedOpenAI = process.env.OPENAI_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+
+  try {
+    const res = await request(app).get('/api/direction/models').set('Authorization', `Bearer ${authToken}`);
+    expect(res.status).toBe(200);
+    // With only claude-cli (always present), only Anthropic models are returned
+    expect(res.body.models).toHaveLength(3);
+    expect(res.body.models.map((m: { id: string }) => m.id)).toContain('claude-opus-4-6');
+    expect(res.body.configuredProviders).toContain('claude-cli');
+  } finally {
+    if (savedOpenRouter) process.env.OPENROUTER_API_KEY = savedOpenRouter;
+    if (savedAnthropic) process.env.ANTHROPIC_API_KEY = savedAnthropic;
+    if (savedOpenAI) process.env.OPENAI_API_KEY = savedOpenAI;
+  }
 });
 
 // --- WAL events ---

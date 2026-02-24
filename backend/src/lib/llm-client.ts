@@ -1,5 +1,10 @@
 import { spawn } from 'child_process';
 import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
+
+// ─── Provider Types ──────────────────────────────────────────────────────────
+
+export type ProviderType = 'claude-cli' | 'anthropic' | 'openai-compat' | 'openrouter';
 
 export interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 
@@ -14,11 +19,117 @@ export interface ChatResult {
 }
 
 export interface ChatOptions {
-  model?: SupportedModel;
+  model?: string;
   apiKey?: string;
+  provider?: ProviderType;
+  baseUrl?: string;
 }
 
-// Supported model IDs — keep in sync with AC for US-003.
+// ─── Model Registry ──────────────────────────────────────────────────────────
+
+/** Models available per provider. `providerType` links to routing logic. */
+export interface ModelInfo {
+  id: string;
+  label: string;
+  provider: string;
+  providerType: ProviderType;
+  costPer1kInput: number;
+  costPer1kOutput: number;
+}
+
+/** All known models across providers. */
+export const ALL_MODELS: ModelInfo[] = [
+  // ── Anthropic (claude-cli or anthropic SDK) ──
+  {
+    id: 'claude-sonnet-4-5-20250929',
+    label: 'Claude Sonnet 4.5',
+    provider: 'Anthropic',
+    providerType: 'anthropic',
+    costPer1kInput: 0.003,
+    costPer1kOutput: 0.015,
+  },
+  {
+    id: 'claude-opus-4-6',
+    label: 'Claude Opus 4.6',
+    provider: 'Anthropic',
+    providerType: 'anthropic',
+    costPer1kInput: 0.015,
+    costPer1kOutput: 0.075,
+  },
+  {
+    id: 'claude-haiku-4-5-20251001',
+    label: 'Claude Haiku 4.5',
+    provider: 'Anthropic',
+    providerType: 'anthropic',
+    costPer1kInput: 0.0008,
+    costPer1kOutput: 0.004,
+  },
+  // ── OpenAI-compat (covers OpenAI, Groq, Together, DeepSeek, Mistral, Ollama) ──
+  {
+    id: 'gpt-4o',
+    label: 'GPT-4o',
+    provider: 'OpenAI',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.0025,
+    costPer1kOutput: 0.01,
+  },
+  {
+    id: 'gpt-4o-mini',
+    label: 'GPT-4o Mini',
+    provider: 'OpenAI',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.00015,
+    costPer1kOutput: 0.0006,
+  },
+  {
+    id: 'deepseek-chat',
+    label: 'DeepSeek V3',
+    provider: 'DeepSeek',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.00027,
+    costPer1kOutput: 0.0011,
+  },
+  {
+    id: 'deepseek-reasoner',
+    label: 'DeepSeek R1',
+    provider: 'DeepSeek',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.00055,
+    costPer1kOutput: 0.0022,
+  },
+  // ── OpenRouter (covers Gemini, Grok, and any other outlier) ──
+  {
+    id: 'google/gemini-2.5-pro-preview',
+    label: 'Gemini 2.5 Pro',
+    provider: 'Google',
+    providerType: 'openrouter',
+    costPer1kInput: 0.00125,
+    costPer1kOutput: 0.01,
+  },
+  {
+    id: 'google/gemini-2.5-flash-preview',
+    label: 'Gemini 2.5 Flash',
+    provider: 'Google',
+    providerType: 'openrouter',
+    costPer1kInput: 0.00015,
+    costPer1kOutput: 0.0006,
+  },
+  {
+    id: 'x-ai/grok-3',
+    label: 'Grok 3',
+    provider: 'xAI',
+    providerType: 'openrouter',
+    costPer1kInput: 0.003,
+    costPer1kOutput: 0.015,
+  },
+];
+
+// ── Backward-compat aliases ──
+
+/**
+ * Legacy SUPPORTED_MODELS — Anthropic-only model IDs for backward compat.
+ * New code should use ALL_MODELS and filter by providerType.
+ */
 export const SUPPORTED_MODELS = [
   'claude-sonnet-4-5-20250929',
   'claude-opus-4-6',
@@ -29,49 +140,70 @@ export type SupportedModel = typeof SUPPORTED_MODELS[number];
 
 export const DEFAULT_MODEL: SupportedModel = 'claude-sonnet-4-5-20250929';
 
-export function isValidModel(model: string): model is SupportedModel {
-  return (SUPPORTED_MODELS as readonly string[]).includes(model);
-}
-
-export interface ModelInfo {
-  id: SupportedModel;
-  label: string;
-  provider: string;
-  costPer1kInput: number;
-  costPer1kOutput: number;
-}
-
-/** Static metadata for each supported model (costs in USD per 1K tokens). */
+/**
+ * Backward-compat MODEL_INFO keyed by SupportedModel.
+ * New code should use ALL_MODELS instead.
+ */
 export const MODEL_INFO: Record<SupportedModel, ModelInfo> = {
-  'claude-sonnet-4-5-20250929': {
-    id: 'claude-sonnet-4-5-20250929',
-    label: 'Claude Sonnet 4.5',
-    provider: 'Anthropic',
-    costPer1kInput: 0.003,
-    costPer1kOutput: 0.015,
-  },
-  'claude-opus-4-6': {
-    id: 'claude-opus-4-6',
-    label: 'Claude Opus 4.6',
-    provider: 'Anthropic',
-    costPer1kInput: 0.015,
-    costPer1kOutput: 0.075,
-  },
-  'claude-haiku-4-5-20251001': {
-    id: 'claude-haiku-4-5-20251001',
-    label: 'Claude Haiku 4.5',
-    provider: 'Anthropic',
-    costPer1kInput: 0.0008,
-    costPer1kOutput: 0.004,
-  },
+  'claude-sonnet-4-5-20250929': ALL_MODELS.find(m => m.id === 'claude-sonnet-4-5-20250929')!,
+  'claude-opus-4-6': ALL_MODELS.find(m => m.id === 'claude-opus-4-6')!,
+  'claude-haiku-4-5-20251001': ALL_MODELS.find(m => m.id === 'claude-haiku-4-5-20251001')!,
 };
 
-// Resolve claude binary — NVM PATH not available in Node child processes.
-// Override via CLAUDE_BIN env var for portability across machines.
+/** Check if model ID exists in the full registry. */
+export function isValidModel(model: string): model is SupportedModel {
+  return ALL_MODELS.some(m => m.id === model) ||
+    (SUPPORTED_MODELS as readonly string[]).includes(model);
+}
+
+/** Get ModelInfo for any registered model. */
+export function getModelInfo(modelId: string): ModelInfo | undefined {
+  return ALL_MODELS.find(m => m.id === modelId);
+}
+
+/** Get available models filtered to a set of configured providers. */
+export function getModelsForProviders(providers: ProviderType[]): ModelInfo[] {
+  return ALL_MODELS.filter(m =>
+    providers.includes(m.providerType) ||
+    // claude-cli can use all Anthropic models
+    (providers.includes('claude-cli') && m.providerType === 'anthropic')
+  );
+}
+
+// ─── Provider Resolution ─────────────────────────────────────────────────────
+
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+
+/**
+ * Resolve which provider to use. Priority:
+ * 1. Explicit `opts.provider` param
+ * 2. Infer from model registry (look up providerType)
+ * 3. If apiKey provided but no provider, assume 'anthropic' (backward compat)
+ * 4. Default: 'claude-cli'
+ */
+function resolveProvider(opts: ChatOptions): ProviderType {
+  if (opts.provider) return opts.provider;
+
+  if (opts.model) {
+    const info = getModelInfo(opts.model);
+    if (info) {
+      // Anthropic models can be served by claude-cli when no API key
+      if (info.providerType === 'anthropic' && !opts.apiKey) return 'claude-cli';
+      return info.providerType;
+    }
+  }
+
+  // Backward compat: apiKey without provider = anthropic
+  if (opts.apiKey) return 'anthropic';
+
+  return 'claude-cli';
+}
+
+// ─── Claude CLI ──────────────────────────────────────────────────────────────
+
 const CLAUDE_BIN = process.env.CLAUDE_BIN ||
   '/Users/dimitriteravanessian/.nvm/versions/node/v20.19.6/bin/claude';
 
-// All Claude Code env vars that block nested invocation.
 const CLAUDE_ENV_VARS_TO_REMOVE = [
   'CLAUDECODE',
   'CLAUDE_CODE_ENTRYPOINT',
@@ -79,55 +211,13 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
   'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
 ];
 
-/**
- * Call the Claude CLI or Anthropic SDK depending on whether an API key is provided.
- * When apiKey is set, uses the Anthropic SDK directly (BYOB path).
- * Otherwise falls back to `claude --print` CLI (subscription path).
- */
-export function chatComplete(messages: ChatMessage[], modelOrOpts?: SupportedModel | ChatOptions): Promise<ChatResult> {
-  // Normalize overloaded parameter
-  const opts: ChatOptions = typeof modelOrOpts === 'string'
-    ? { model: modelOrOpts }
-    : modelOrOpts ?? {};
-
-  // If an API key is provided, use the Anthropic SDK directly
-  if (opts.apiKey) {
-    return chatCompleteSDK(messages, opts.model ?? DEFAULT_MODEL, opts.apiKey);
-  }
-
-  return chatCompleteCLI(messages, opts.model);
-}
-
-async function chatCompleteSDK(messages: ChatMessage[], model: SupportedModel, apiKey: string): Promise<ChatResult> {
-  const client = new Anthropic({ apiKey });
-  const response = await client.messages.create({
-    model,
-    max_tokens: 16384,
-    messages: messages.map(m => ({ role: m.role, content: m.content })),
-  });
-
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map(b => b.text)
-    .join('');
-
-  return {
-    text,
-    usage: {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-    },
-  };
-}
-
-function chatCompleteCLI(messages: ChatMessage[], model?: SupportedModel): Promise<ChatResult> {
+function chatCompleteCLI(messages: ChatMessage[], model?: string): Promise<ChatResult> {
   const prompt = messages.length === 1
     ? messages[0].content
     : messages.map(m =>
         m.role === 'user' ? m.content : `[Previous response: ${m.content}]`
       ).join('\n\n---\n\n');
 
-  // Build clean env — delete all Claude Code vars so the subprocess isn't blocked.
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
@@ -172,7 +262,6 @@ function chatCompleteCLI(messages: ChatMessage[], model?: SupportedModel): Promi
         return;
       }
 
-      // Parse JSON output to extract text and usage
       try {
         const parsed = JSON.parse(stdout.trim());
         const text = parsed.result ?? parsed.text ?? stdout.trim();
@@ -182,12 +271,121 @@ function chatCompleteCLI(messages: ChatMessage[], model?: SupportedModel): Promi
         };
         resolve({ text: typeof text === 'string' ? text : JSON.stringify(text), usage });
       } catch {
-        // Fallback: treat entire stdout as plain text (no usage data available)
         resolve({ text: stdout.trim(), usage: { inputTokens: 0, outputTokens: 0 } });
       }
     });
   });
 }
+
+// ─── Anthropic SDK ───────────────────────────────────────────────────────────
+
+async function chatCompleteAnthropic(messages: ChatMessage[], model: string, apiKey: string): Promise<ChatResult> {
+  const client = new Anthropic({ apiKey });
+  const response = await client.messages.create({
+    model,
+    max_tokens: 16384,
+    messages: messages.map(m => ({ role: m.role, content: m.content })),
+  });
+
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+    .map(b => b.text)
+    .join('');
+
+  return {
+    text,
+    usage: {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+    },
+  };
+}
+
+// ─── OpenAI-compatible (OpenAI, Groq, Together, DeepSeek, Mistral, Ollama) ──
+
+async function chatCompleteOpenAICompat(
+  messages: ChatMessage[],
+  model: string,
+  apiKey: string,
+  baseUrl?: string,
+): Promise<ChatResult> {
+  const client = new OpenAI({
+    apiKey,
+    baseURL: baseUrl || 'https://api.openai.com/v1',
+  });
+
+  const response = await client.chat.completions.create({
+    model,
+    messages: messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+    max_tokens: 16384,
+  });
+
+  const text = response.choices[0]?.message?.content ?? '';
+  const usage = response.usage;
+
+  return {
+    text,
+    usage: {
+      inputTokens: usage?.prompt_tokens ?? 0,
+      outputTokens: usage?.completion_tokens ?? 0,
+    },
+  };
+}
+
+// ─── OpenRouter ──────────────────────────────────────────────────────────────
+
+async function chatCompleteOpenRouter(messages: ChatMessage[], model: string, apiKey: string): Promise<ChatResult> {
+  return chatCompleteOpenAICompat(messages, model, apiKey, OPENROUTER_BASE_URL);
+}
+
+// ─── Unified Entry Point ─────────────────────────────────────────────────────
+
+/**
+ * Unified LLM completion that routes to the correct provider.
+ *
+ * Provider resolution order:
+ * 1. Explicit `opts.provider` param
+ * 2. Infer from model registry (look up providerType)
+ * 3. If apiKey provided but no provider, assume 'anthropic' (backward compat)
+ * 4. Default: 'claude-cli' (subscription path)
+ */
+export function chatComplete(messages: ChatMessage[], modelOrOpts?: string | ChatOptions): Promise<ChatResult> {
+  // Normalize overloaded parameter (backward compat: string = model name)
+  const opts: ChatOptions = typeof modelOrOpts === 'string'
+    ? { model: modelOrOpts }
+    : modelOrOpts ?? {};
+
+  const provider = resolveProvider(opts);
+  const model = opts.model ?? DEFAULT_MODEL;
+
+  switch (provider) {
+    case 'claude-cli':
+      return chatCompleteCLI(messages, model);
+
+    case 'anthropic':
+      if (!opts.apiKey) {
+        throw new Error('Anthropic provider requires an API key (set via BYOB vault or ANTHROPIC_API_KEY)');
+      }
+      return chatCompleteAnthropic(messages, model, opts.apiKey);
+
+    case 'openai-compat':
+      if (!opts.apiKey) {
+        throw new Error('OpenAI-compatible provider requires an API key');
+      }
+      return chatCompleteOpenAICompat(messages, model, opts.apiKey, opts.baseUrl);
+
+    case 'openrouter':
+      if (!opts.apiKey) {
+        throw new Error('OpenRouter provider requires an API key');
+      }
+      return chatCompleteOpenRouter(messages, model, opts.apiKey);
+
+    default:
+      throw new Error(`Unknown provider: ${provider}`);
+  }
+}
+
+// ─── Status Helpers ──────────────────────────────────────────────────────────
 
 export function getActiveProvider(): string { return 'claude-cli'; }
 export function getActiveModel(): string { return 'claude (subscription)'; }
