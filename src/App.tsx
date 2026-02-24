@@ -187,7 +187,7 @@ function AppContent() {
 
   return (
     <Shell
-      sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />}
+      sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} onCommandPalette={() => setShowCommandPalette((v) => !v)} />}
       showMenuButton
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
       onNavigate={setActivePanel}
