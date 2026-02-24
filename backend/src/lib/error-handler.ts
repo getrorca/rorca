@@ -1,0 +1,49 @@
+/**
+ * V2-094: Centralized Express error handler middleware.
+ *
+ * Catches all errors (thrown AppError subclasses + unhandled exceptions)
+ * and formats them into the standard { error, code?, details? } shape.
+ *
+ * Stack traces are included only when NODE_ENV=development.
+ */
+
+import type { Request, Response, NextFunction } from 'express';
+import { AppError } from './errors';
+
+export function errorHandler(
+  err: Error,
+  _req: Request,
+  res: Response,
+  _next: NextFunction,
+): void {
+  // Known AppError subclass — use its status code and structured body
+  if (err instanceof AppError) {
+    const body = err.toJSON();
+    if (process.env.NODE_ENV === 'development') {
+      (body as Record<string, unknown>).stack = err.stack;
+    }
+    res.status(err.statusCode).json(body);
+    return;
+  }
+
+  // SQLite unique constraint — map to 409 Conflict
+  if (err.message?.includes('UNIQUE constraint failed')) {
+    res.status(409).json({
+      error: 'Resource already exists',
+      code: 'CONFLICT',
+    });
+    return;
+  }
+
+  // Unhandled / unexpected errors — 500
+  console.error('[ErrorHandler] Unhandled error:', err);
+  const body: Record<string, unknown> = {
+    error: 'Internal server error',
+    code: 'INTERNAL_ERROR',
+  };
+  if (process.env.NODE_ENV === 'development') {
+    body.stack = err.stack;
+    body.details = { originalMessage: err.message };
+  }
+  res.status(500).json(body);
+}
