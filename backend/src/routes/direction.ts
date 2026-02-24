@@ -114,7 +114,7 @@ router.get('/', (req: Request, res: Response) => {
 
 // PUT /api/direction — upsert a direction layer
 router.put('/', (req: Request, res: Response) => {
-  const { layer, workspaceId, domain, contentYaml, preferredModel } = req.body;
+  const { layer, workspaceId, domain, contentYaml, preferredModel, skipValidation } = req.body;
 
   if (!layer || !contentYaml) {
     res.status(400).json({ error: 'Missing required fields: layer, contentYaml' });
@@ -140,21 +140,23 @@ router.put('/', (req: Request, res: Response) => {
     }
   }
 
-  // Validate YAML syntax and per-layer schema
-  const validation = validateDirectionYaml(layer, contentYaml);
-  if (validation.yamlError) {
-    res.status(422).json({
-      error: 'Invalid YAML syntax',
-      yamlError: validation.yamlError,
-    });
-    return;
-  }
-  if (!validation.valid) {
-    res.status(422).json({
-      error: 'Direction content failed schema validation',
-      validationErrors: validation.errors,
-    });
-    return;
+  // Validate YAML syntax and per-layer schema (skip for Simple/prose mode)
+  if (!skipValidation) {
+    const validation = validateDirectionYaml(layer, contentYaml);
+    if (validation.yamlError) {
+      res.status(422).json({
+        error: 'Invalid YAML syntax',
+        yamlError: validation.yamlError,
+      });
+      return;
+    }
+    if (!validation.valid) {
+      res.status(422).json({
+        error: 'Direction content failed schema validation',
+        validationErrors: validation.errors,
+      });
+      return;
+    }
   }
 
   // Upsert via INSERT OR REPLACE (unique index on layer + coalesced workspace_id + domain)
