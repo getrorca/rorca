@@ -16,6 +16,7 @@ import LoginPage from './components/LoginPage';
 import RegisterPage from './components/RegisterPage';
 import ForgotPasswordPage from './components/ForgotPasswordPage';
 import ResetPasswordPage from './components/ResetPasswordPage';
+import EmailVerificationBanner from './components/EmailVerificationBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { onApiFetchError } from './lib/apiFetch';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
@@ -217,6 +218,7 @@ function AppContent() {
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
       onNavigate={setActivePanel}
     >
+      <EmailVerificationBanner />
       {/* key={activePanel} resets ErrorBoundary when switching panels */}
       <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel]}>
         <ActivePanel id={activePanel} onNavigate={setActivePanel} />

@@ -6,6 +6,7 @@ export interface AuthUser {
   email: string;
   displayName: string;
   githubConnected?: boolean;
+  emailVerified?: boolean;
 }
 
 interface AuthContextValue {
