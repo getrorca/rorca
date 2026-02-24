@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check, MessageSquare } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check, MessageSquare, Sparkles, X, CheckCheck, Loader2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { AssigneeDropdown } from './AssigneeDropdown';
 import type { Assignee } from './AssigneeDropdown';
@@ -17,6 +17,11 @@ export interface Story {
   passes?: boolean;
   excluded?: boolean;
   mergedVia?: string;
+}
+
+interface CriteriaSuggestion {
+  criterion: string;
+  rationale: string;
 }
 
 interface StoryCommit {
@@ -57,6 +62,7 @@ export function StoryCard({
   onOpenComments,
   assignee,
   onAssignStory,
+  onCriteriaAccepted,
 }: {
   story: Story;
   onToggleExclude?: () => void;
@@ -70,6 +76,7 @@ export function StoryCard({
   onOpenComments?: () => void;
   assignee?: Assignee | null;
   onAssignStory?: (userId: string | null) => Promise<void>;
+  onCriteriaAccepted?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [commitsExpanded, setCommitsExpanded] = useState(false);
@@ -79,6 +86,11 @@ export function StoryCard({
   const [branchLoading, setBranchLoading] = useState(false);
   const [prBodyCopied, setPrBodyCopied] = useState(false);
   const [prBodyLoading, setPrBodyLoading] = useState(false);
+  const [suggestions, setSuggestions] = useState<CriteriaSuggestion[]>([]);
+  const [acceptedIndices, setAcceptedIndices] = useState<Set<number>>(new Set());
+  const [enhanceLoading, setEnhanceLoading] = useState(false);
+  const [enhanceError, setEnhanceError] = useState<string | null>(null);
+  const [acceptingAll, setAcceptingAll] = useState(false);
 
   const isDone = story.passes === true;
   const isDeferred = story.excluded === true && !isDone;
@@ -129,6 +141,69 @@ export function StoryCard({
     } finally {
       setPrBodyLoading(false);
     }
+  };
+
+  const canEnhance = !!(specId && workspaceId && !isDone);
+  const hasFewCriteria = story.acceptanceCriteria.length < 3;
+
+  const handleEnhanceCriteria = async () => {
+    if (!specId || !workspaceId || enhanceLoading) return;
+    setEnhanceLoading(true);
+    setEnhanceError(null);
+    setSuggestions([]);
+    setAcceptedIndices(new Set());
+    try {
+      const data = await apiFetch<{ suggestions: CriteriaSuggestion[] }>(
+        `/api/specs/${specId}/stories/${story.id}/enhance-criteria`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) }
+      );
+      setSuggestions(data.suggestions);
+      if (!expanded) setExpanded(true);
+    } catch (err: any) {
+      setEnhanceError(err?.message || 'Failed to generate suggestions');
+    } finally {
+      setEnhanceLoading(false);
+    }
+  };
+
+  const handleAcceptSingle = async (idx: number) => {
+    if (!specId || !workspaceId) return;
+    const criterion = suggestions[idx]?.criterion;
+    if (!criterion) return;
+    try {
+      await apiFetch(
+        `/api/specs/${specId}/stories/${story.id}/accept-criteria`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId, criteria: [criterion] }) }
+      );
+      setAcceptedIndices(prev => new Set([...prev, idx]));
+      onCriteriaAccepted?.();
+    } catch {
+      // silent
+    }
+  };
+
+  const handleAcceptAll = async () => {
+    if (!specId || !workspaceId || acceptingAll) return;
+    const remaining = suggestions.filter((_, i) => !acceptedIndices.has(i)).map(s => s.criterion);
+    if (remaining.length === 0) return;
+    setAcceptingAll(true);
+    try {
+      await apiFetch(
+        `/api/specs/${specId}/stories/${story.id}/accept-criteria`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId, criteria: remaining }) }
+      );
+      setAcceptedIndices(new Set(suggestions.map((_, i) => i)));
+      onCriteriaAccepted?.();
+    } catch {
+      // silent
+    } finally {
+      setAcceptingAll(false);
+    }
+  };
+
+  const handleDismissAll = () => {
+    setSuggestions([]);
+    setAcceptedIndices(new Set());
   };
 
   useEffect(() => {
@@ -279,12 +354,37 @@ export function StoryCard({
         </div>
 
         {story.acceptanceCriteria.length > 0 && (
+          <div className="flex items-center gap-2 mt-2">
+            <button
+              onClick={() => setExpanded(!expanded)}
+              className="flex items-center gap-1 text-xs text-muted hover:text-text transition-colors"
+            >
+              {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              Acceptance criteria ({story.acceptanceCriteria.length})
+            </button>
+            {canEnhance && hasFewCriteria && suggestions.length === 0 && (
+              <button
+                onClick={handleEnhanceCriteria}
+                disabled={enhanceLoading}
+                className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-warning/15 text-warning hover:bg-warning/25 transition-colors disabled:opacity-50"
+                title="This story has fewer than 3 criteria — enhance with AI"
+              >
+                {enhanceLoading ? <Loader2 size={9} className="animate-spin" /> : <Sparkles size={9} />}
+                Suggest more
+              </button>
+            )}
+          </div>
+        )}
+
+        {canEnhance && story.acceptanceCriteria.length === 0 && suggestions.length === 0 && (
           <button
-            onClick={() => setExpanded(!expanded)}
-            className="flex items-center gap-1 mt-2 text-xs text-muted hover:text-text transition-colors"
+            onClick={handleEnhanceCriteria}
+            disabled={enhanceLoading}
+            className="flex items-center gap-1 mt-2 text-[10px] px-1.5 py-0.5 rounded bg-warning/15 text-warning hover:bg-warning/25 transition-colors disabled:opacity-50"
+            title="No acceptance criteria — generate with AI"
           >
-            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-            Acceptance criteria ({story.acceptanceCriteria.length})
+            {enhanceLoading ? <Loader2 size={9} className="animate-spin" /> : <Sparkles size={9} />}
+            Suggest criteria
           </button>
         )}
 
@@ -343,6 +443,99 @@ export function StoryCard({
               </li>
             ))}
           </ul>
+
+          {/* Enhance button (inline, for stories with >=3 criteria) */}
+          {canEnhance && !hasFewCriteria && suggestions.length === 0 && (
+            <button
+              onClick={handleEnhanceCriteria}
+              disabled={enhanceLoading}
+              className="flex items-center gap-1 mt-2 text-xs text-muted hover:text-accent transition-colors disabled:opacity-50"
+            >
+              {enhanceLoading ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+              {enhanceLoading ? 'Generating suggestions...' : 'Suggest more criteria'}
+            </button>
+          )}
+
+          {/* Loading indicator */}
+          {enhanceLoading && (
+            <div className="flex items-center gap-1.5 mt-2 text-xs text-muted">
+              <Loader2 size={11} className="animate-spin" />
+              Analyzing story and generating criteria...
+            </div>
+          )}
+
+          {/* Error message */}
+          {enhanceError && (
+            <div className="mt-2 text-xs text-error">
+              {enhanceError}
+            </div>
+          )}
+
+          {/* Suggestions panel */}
+          {suggestions.length > 0 && (
+            <div className="mt-3 border border-accent/30 rounded bg-accent/5 p-2">
+              <div className="flex items-center justify-between mb-2">
+                <span className="flex items-center gap-1 text-xs font-medium text-accent">
+                  <Sparkles size={11} />
+                  AI Suggestions ({suggestions.length - acceptedIndices.size} remaining)
+                </span>
+                <div className="flex items-center gap-1.5">
+                  {acceptedIndices.size < suggestions.length && (
+                    <button
+                      onClick={handleAcceptAll}
+                      disabled={acceptingAll}
+                      className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded bg-success/15 text-success hover:bg-success/25 transition-colors disabled:opacity-50"
+                    >
+                      {acceptingAll ? <Loader2 size={9} className="animate-spin" /> : <CheckCheck size={9} />}
+                      Accept all
+                    </button>
+                  )}
+                  <button
+                    onClick={handleDismissAll}
+                    className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded bg-muted/15 text-muted hover:bg-muted/25 transition-colors"
+                  >
+                    <X size={9} />
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+              <ul className="space-y-2">
+                {suggestions.map((s, i) => {
+                  const isAccepted = acceptedIndices.has(i);
+                  return (
+                    <li key={i} className={`text-xs rounded p-1.5 ${isAccepted ? 'bg-success/10' : 'bg-surface'}`}>
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className={`${isAccepted ? 'text-success' : 'text-text'}`}>
+                            {s.criterion}
+                          </div>
+                          <div className="text-[10px] text-muted mt-0.5 italic">
+                            {s.rationale}
+                          </div>
+                        </div>
+                        {!isAccepted && (
+                          <button
+                            onClick={() => handleAcceptSingle(i)}
+                            className="shrink-0 mt-0.5 flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded bg-success/15 text-success hover:bg-success/25 transition-colors"
+                          >
+                            <Check size={9} />
+                            Accept
+                          </button>
+                        )}
+                        {isAccepted && (
+                          <span className="shrink-0 mt-0.5 flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded bg-success/15 text-success">
+                            <CheckCircle2 size={9} />
+                            Added
+                          </span>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
           {story.dependencies && story.dependencies.length > 0 && (
             <div className="mt-2 text-xs text-muted">
               <span className="font-medium">Depends on:</span>{' '}
