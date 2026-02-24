@@ -1,30 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState } from 'react';
 import { Bell, Settings } from 'lucide-react';
-import { apiFetch } from '../lib/apiFetch';
+import { useNotifications, type Notification } from '../contexts/NotificationContext';
 import type { PanelId } from './Sidebar';
 import NotificationPreferences from './NotificationPreferences';
-
-interface Notification {
-  id: string;
-  type: string;
-  title: string;
-  body: string;
-  link: string | null;
-  readAt: string | null;
-  createdAt: string;
-}
-
-interface NotificationsResponse {
-  items: Notification[];
-  unreadCount: number;
-  total: number;
-  hasMore: boolean;
-  cursor?: string;
-}
-
-interface UnreadCountResponse {
-  count: number;
-}
 
 /** Map notification link paths to panel IDs */
 function linkToPanelId(link: string | null): PanelId | null {
@@ -55,73 +33,23 @@ interface NotificationBellProps {
 
 export default function NotificationBell({ onNavigate }: NotificationBellProps) {
   const [open, setOpen] = useState(false);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [loading, setLoading] = useState(false);
   const [showPrefs, setShowPrefs] = useState(false);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Poll unread count every 10s
-  const fetchUnreadCount = useCallback(async () => {
-    try {
-      const res = await apiFetch<UnreadCountResponse>('/api/notifications/unread-count');
-      setUnreadCount(res.count);
-    } catch {
-      // silently ignore — auth might not be active
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchUnreadCount();
-    intervalRef.current = setInterval(fetchUnreadCount, 10_000);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchUnreadCount]);
-
-  // Fetch full list when dropdown opens
-  const fetchNotifications = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await apiFetch<NotificationsResponse>('/api/notifications?limit=20');
-      setNotifications(res.items);
-      setUnreadCount(res.unreadCount);
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const {
+    unreadCount,
+    notifications,
+    loading,
+    fetchNotifications,
+    markRead,
+    markAllRead,
+  } = useNotifications();
 
   const handleOpen = () => {
     if (!open) fetchNotifications();
     setOpen(!open);
   };
 
-  const handleMarkRead = async (id: string) => {
-    try {
-      await apiFetch(`/api/notifications/${id}/read`, { method: 'POST' });
-      setNotifications(prev =>
-        prev.map(n => n.id === id ? { ...n, readAt: new Date().toISOString() } : n)
-      );
-      setUnreadCount(prev => Math.max(0, prev - 1));
-    } catch {
-      // ignore
-    }
-  };
-
-  const handleMarkAllRead = async () => {
-    try {
-      await apiFetch('/api/notifications/read-all', { method: 'POST' });
-      setNotifications(prev => prev.map(n => ({ ...n, readAt: n.readAt || new Date().toISOString() })));
-      setUnreadCount(0);
-    } catch {
-      // ignore
-    }
-  };
-
   const handleClickNotification = (n: Notification) => {
-    if (!n.readAt) handleMarkRead(n.id);
+    if (!n.readAt) markRead(n.id);
     const panelId = linkToPanelId(n.link);
     if (panelId && onNavigate) onNavigate(panelId);
     setOpen(false);
@@ -153,7 +81,7 @@ export default function NotificationBell({ onNavigate }: NotificationBellProps) 
               <div className="flex items-center gap-2">
                 {unreadCount > 0 && (
                   <button
-                    onClick={handleMarkAllRead}
+                    onClick={markAllRead}
                     className="text-xs text-accent hover:underline"
                   >
                     Mark all read
