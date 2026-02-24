@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
+import { chatComplete } from '../lib/llm-client';
 import { isValidModel, SUPPORTED_MODELS, MODEL_INFO, DEFAULT_MODEL } from '../lib/llm-client';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 
@@ -476,6 +477,98 @@ router.post('/synthesize', (req: Request, res: Response) => {
   });
 
   res.json({ synthesized });
+});
+
+/**
+ * POST /api/direction/wizard — AI Setup Wizard
+ * Takes plain-English answers to 5-7 questions, returns L1/L2/L3 YAML via LLM.
+ */
+router.post('/wizard', async (req: Request, res: Response) => {
+  try {
+    const { answers } = req.body as { answers: Record<string, string> };
+
+    if (!answers || typeof answers !== 'object' || Object.keys(answers).length === 0) {
+      res.status(400).json({ error: 'answers object is required and must not be empty' });
+      return;
+    }
+
+    // Build a structured summary of answers for the LLM
+    const answerText = Object.entries(answers)
+      .filter(([, v]) => v && v.trim())
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('\n');
+
+    const prompt = `=== INSTRUCTIONS: READ THIS FIRST ===
+You MUST return ONLY a JSON object. No markdown fences, no explanation, no preamble.
+The JSON object must have exactly three keys: "l1", "l2", "l3".
+Each value is a string containing valid YAML for that direction layer.
+
+=== CONTEXT ===
+You are an AI assistant helping set up a "Direction Stack" for a software project.
+The Direction Stack has 3 persistent layers:
+
+L1 (Global Brain): Global engineering principles, coding style, output format preferences, things to always/never do. This is plain text or YAML — any format is valid.
+
+L2 (Domain Profile): Domain-specific knowledge — industry concepts, regulatory constraints, business terminology, domain-specific patterns. This is plain text or YAML — any format is valid.
+
+L3 (Project Brief): Project-specific context. This MUST be a YAML mapping with these required fields:
+  - name: string (project name)
+  - type: string (e.g. "web-app", "api", "cli", "mobile-app")
+  - stack: array of strings (technologies used)
+  - purpose: string (what the project does)
+  - key_modules: array of strings (main components/modules)
+
+Additional optional L3 fields: constraints, v1_done, deployment_target, team_size, integrations
+
+=== USER ANSWERS ===
+${answerText}
+
+=== OUTPUT FORMAT ===
+Return a JSON object with exactly this structure (no markdown, no fences):
+{
+  "l1": "the L1 YAML content as a string",
+  "l2": "the L2 YAML content as a string",
+  "l3": "the L3 YAML content as a string"
+}
+
+Generate thoughtful, specific content for each layer based on the user's answers. Make reasonable inferences where information is incomplete. L3 MUST include name, type, stack, purpose, and key_modules fields.`;
+
+    const result = await chatComplete([{ role: 'user', content: prompt }]);
+    let text = result.text.trim();
+
+    // Strip markdown fences if LLM wrapped them
+    if (text.startsWith('```')) {
+      text = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+    }
+
+    let parsed: { l1: string; l2: string; l3: string };
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      res.status(502).json({ error: 'LLM returned invalid JSON', raw: text.slice(0, 500) });
+      return;
+    }
+
+    if (!parsed.l1 || !parsed.l2 || !parsed.l3) {
+      res.status(502).json({ error: 'LLM response missing required l1/l2/l3 keys', raw: text.slice(0, 500) });
+      return;
+    }
+
+    // Validate L3 against the direction schema
+    const l3Validation = validateDirectionYaml(3, parsed.l3);
+
+    res.json({
+      l1: parsed.l1,
+      l2: parsed.l2,
+      l3: parsed.l3,
+      l3Valid: l3Validation.valid,
+      l3Errors: l3Validation.errors,
+      usage: result.usage,
+    });
+  } catch (err: any) {
+    console.error('[direction/wizard] error:', err.message);
+    res.status(500).json({ error: err.message || 'Wizard generation failed' });
+  }
 });
 
 export default router;
