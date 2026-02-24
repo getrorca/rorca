@@ -172,6 +172,274 @@ server.registerTool(
   }
 );
 
+// ─── V2-068: Pipeline Control & Analytics MCP Tools ───────────────────────────
+
+server.registerTool(
+  'rorcha_trigger_run',
+  {
+    description: 'Start a pipeline run for an approved spec. Spawns run-loop.sh in the project workspace to execute all user stories sequentially. Optionally runs in dry-run mode (returns cost estimate without executing) or creates an isolated git worktree for the run.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+      specId: z.string().describe('Spec ID (filename slug) — must be in approved status'),
+      dryRun: z.boolean().optional().default(false).describe('If true, returns a cost estimate without spawning the run'),
+      autoWorktree: z.boolean().optional().default(false).describe('If true, creates an isolated git worktree branch for this run'),
+    },
+  },
+  async ({ workspaceId, specId, dryRun, autoWorktree }) => {
+    const res = await fetch(`${RORCHA_API}/api/pipeline/trigger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workspaceId,
+        specPath: `ralph/specs/approved/${specId}.json`,
+        dryRun: dryRun ?? false,
+        autoWorktree: autoWorktree ?? false,
+      }),
+    });
+
+    const data = await res.json() as Record<string, unknown>;
+
+    if (!res.ok) {
+      throw new Error(`Pipeline trigger failed (${res.status}): ${data.error ?? JSON.stringify(data)}`);
+    }
+
+    if (data.conflict) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Conflict: workspace already has an active run (run #${data.activeRunId}). Wait for it to finish or use autoWorktree to run in parallel.`
+        }]
+      };
+    }
+
+    if (data.dryRun) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Dry run estimate for ${specId}:\n${JSON.stringify(data.estimate, null, 2)}`
+        }]
+      };
+    }
+
+    const parts = [`Pipeline run #${data.runId} started for spec ${specId}`];
+    if (data.branchName) parts.push(`Worktree branch: ${data.branchName}`);
+    if (data.worktreePath) parts.push(`Worktree path: ${data.worktreePath}`);
+    return { content: [{ type: 'text' as const, text: parts.join('\n') }] };
+  }
+);
+
+server.registerTool(
+  'rorcha_run_status',
+  {
+    description: 'Get detailed status of a specific pipeline run including per-story progress. Returns run status, elapsed time, and individual story pass/fail/skip/retry status with token counts. Use rorcha_list_runs to find run IDs.',
+    inputSchema: {
+      runId: z.number().describe('Pipeline run ID'),
+    },
+  },
+  async ({ runId }) => {
+    const res = await fetch(`${RORCHA_API}/api/pipeline/runs/${runId}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to get run status (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      run: {
+        id: number; status: string; spec_path: string;
+        workspace_id: string; pid: number | null;
+        branch_name: string | null; worktree_path: string | null;
+        started_at: string; finished_at: string | null;
+      };
+      stories: Array<{
+        story_id: string; status: string; retries: number;
+        started_at: string | null; finished_at: string | null;
+        elapsed_seconds: number | null;
+        input_tokens: number | null; output_tokens: number | null;
+      }>;
+    };
+
+    const { run, stories } = data;
+    const elapsed = run.finished_at
+      ? `${Math.round((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 60000)}m`
+      : `${Math.round((Date.now() - new Date(run.started_at).getTime()) / 60000)}m (running)`;
+
+    const pass = stories.filter(s => s.status === 'pass').length;
+    const fail = stories.filter(s => s.status === 'fail').length;
+    const skip = stories.filter(s => s.status === 'skip').length;
+    const retry = stories.filter(s => s.status === 'retry').length;
+
+    const header = [
+      `Run #${run.id}: ${run.status.toUpperCase()} (${elapsed})`,
+      `Spec: ${run.spec_path}`,
+      `Progress: ${pass} pass / ${fail} fail / ${skip} skip / ${retry} retry / ${stories.length} total`,
+    ];
+    if (run.branch_name) header.push(`Branch: ${run.branch_name}`);
+
+    const storyLines = stories.map(s => {
+      const tokens = (s.input_tokens || s.output_tokens)
+        ? ` [${s.input_tokens ?? 0}/${s.output_tokens ?? 0} tokens]`
+        : '';
+      const time = s.elapsed_seconds ? ` (${Math.round(s.elapsed_seconds)}s)` : '';
+      const retries = s.retries > 0 ? ` retry#${s.retries}` : '';
+      return `  ${s.story_id}: ${s.status.toUpperCase()}${retries}${time}${tokens}`;
+    });
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: header.join('\n') + '\n\nStories:\n' + storyLines.join('\n')
+      }]
+    };
+  }
+);
+
+server.registerTool(
+  'rorcha_usage_stats',
+  {
+    description: 'Get token usage and cost summary for a workspace over a date range. Returns aggregated usage grouped by model, with total input/output tokens, cost in USD, and daily time series. Useful for tracking spend and optimizing model selection.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+      from: z.string().optional().describe('Start date (ISO-8601, e.g. "2026-01-01"). Defaults to 30 days ago.'),
+      to: z.string().optional().describe('End date (ISO-8601, e.g. "2026-02-01"). Defaults to now.'),
+      groupBy: z.enum(['model', 'spec', 'story', 'user']).optional().default('model').describe('How to group results (default: model)'),
+    },
+  },
+  async ({ workspaceId, from, to, groupBy }) => {
+    const params = new URLSearchParams();
+    params.set('workspace_id', workspaceId);
+    params.set('group_by', groupBy ?? 'model');
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+
+    const res = await fetch(`${RORCHA_API}/api/analytics/usage?${params.toString()}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to get usage stats (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      grouped: Array<{
+        group_key: string;
+        total_input_tokens: number;
+        total_output_tokens: number;
+        total_cost_usd: number;
+        count: number;
+      }>;
+      timeSeries: Array<{
+        date: string;
+        total_input_tokens: number;
+        total_output_tokens: number;
+        total_cost_usd: number;
+      }>;
+      totals: {
+        total_input_tokens: number;
+        total_output_tokens: number;
+        total_cost_usd: number;
+        total_records: number;
+      };
+    };
+
+    const lines = [`Token Usage (grouped by ${groupBy ?? 'model'}):\n`];
+
+    if (data.grouped.length === 0) {
+      lines.push('No usage data found for this period.');
+    } else {
+      for (const g of data.grouped) {
+        lines.push(`  ${g.group_key}: ${g.total_input_tokens.toLocaleString()} in / ${g.total_output_tokens.toLocaleString()} out — $${g.total_cost_usd.toFixed(4)} (${g.count} records)`);
+      }
+    }
+
+    lines.push(`\nTotals: ${data.totals.total_input_tokens.toLocaleString()} in / ${data.totals.total_output_tokens.toLocaleString()} out — $${data.totals.total_cost_usd.toFixed(4)}`);
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
+server.registerTool(
+  'rorcha_retry_story',
+  {
+    description: 'Retry one or more failed stories within a completed pipeline run. The run must be in a terminal state (failed, done, or partial_failure). Creates new story_result rows with incremented retry counts and respawns run-loop.sh for only the specified stories.',
+    inputSchema: {
+      runId: z.number().describe('Pipeline run ID'),
+      storyIds: z.array(z.string()).optional().describe('Story IDs to retry (e.g. ["US-003", "US-005"]). If omitted, retries ALL failed stories.'),
+    },
+  },
+  async ({ runId, storyIds }) => {
+    const body: Record<string, unknown> = {};
+    if (storyIds !== undefined) body.storyIds = storyIds;
+
+    const res = await fetch(`${RORCHA_API}/api/pipeline/runs/${runId}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Retry failed (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      ok: boolean;
+      runId: number;
+      retriedStories: Array<{ storyId: string; attempt: number }>;
+    };
+
+    const storyList = data.retriedStories
+      .map(s => `  ${s.storyId} (attempt #${s.attempt})`)
+      .join('\n');
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Retry started for run #${data.runId}:\n${storyList}`
+      }]
+    };
+  }
+);
+
+server.registerTool(
+  'rorcha_list_runs',
+  {
+    description: 'List recent pipeline runs for a workspace with status, spec, and completion summary. Returns runs ordered by most recent first. Use this to find run IDs for rorcha_run_status or rorcha_retry_story.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+      limit: z.number().min(1).max(50).optional().default(10).describe('Maximum number of runs to return (default 10, max 50)'),
+    },
+  },
+  async ({ workspaceId, limit }) => {
+    const resolvedLimit = limit ?? 10;
+    const res = await fetch(`${RORCHA_API}/api/pipeline/runs?workspaceId=${encodeURIComponent(workspaceId)}&limit=${resolvedLimit}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to list runs (${res.status}): ${err}`);
+    }
+
+    const { runs } = await res.json() as {
+      runs: Array<{
+        id: number; status: string; spec_path: string;
+        branch_name: string | null; trigger_type: string | null;
+        started_at: string; finished_at: string | null;
+      }>;
+    };
+
+    if (runs.length === 0) {
+      return { content: [{ type: 'text' as const, text: `No pipeline runs found for workspace ${workspaceId}` }] };
+    }
+
+    const lines = runs.slice(0, resolvedLimit).map(r => {
+      const elapsed = r.finished_at
+        ? `${Math.round((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 60000)}m`
+        : `${Math.round((Date.now() - new Date(r.started_at).getTime()) / 60000)}m`;
+      const spec = r.spec_path.replace('ralph/specs/approved/', '').replace('.json', '');
+      const branch = r.branch_name ? ` [${r.branch_name}]` : '';
+      return `#${r.id}: ${r.status.toUpperCase()} — ${spec} (${elapsed})${branch}`;
+    });
+
+    return { content: [{ type: 'text' as const, text: `Recent runs:\n${lines.join('\n')}` }] };
+  }
+);
+
 // ─── V2-067: Extended Spec Lifecycle MCP Tools ────────────────────────────────
 
 server.registerTool(
