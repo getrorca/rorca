@@ -10,7 +10,7 @@ import { generateDiagramBundle } from '../lib/diagram-generator';
 import { chatComplete, getActiveProvider, isValidModel, DEFAULT_MODEL, SUPPORTED_MODELS } from '../lib/llm-client';
 import type { SupportedModel } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
-import { broadcastAll, type WalEvent } from '../lib/sse-hub';
+import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import { createNotification } from './notifications';
@@ -694,6 +694,13 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
 
   const storyPrefix = 'US';
   const fullPrompt = [
+    '=== INSTRUCTIONS: READ THIS FIRST ===',
+    'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+    'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+    'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+    'If you output anything other than raw JSON, the system will fail.',
+    '=== END INSTRUCTIONS ===',
+    '',
     synthesized,
     ...(templateContext ? [templateContext, '---'] : []),
     '---',
@@ -704,13 +711,14 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
     '',
     'JSON schema:',
-    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"]}]}`,
+    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}]}`,
     '',
     `Rules:`,
     `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
     '- Each story needs 3-5 specific testable acceptanceCriteria',
     '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
     '- Stories should be concrete and implementable, not vague',
+    '- Each story must have a "complexity" field: integer 1-5 (1=trivial, 2=simple, 3=moderate, 4=complex, 5=epic)',
     '- Your entire response must be valid JSON parseable by JSON.parse()',
   ].join('\n');
 
@@ -827,6 +835,20 @@ async function processBatch(batch: BatchState): Promise<void> {
 
   batch.finishedAt = new Date().toISOString();
 
+  // Emit batch_finished WAL event
+  const completed = batch.items.filter(i => i.status === 'completed').length;
+  const failed = batch.items.filter(i => i.status === 'failed').length;
+  const finishWalResult = db.prepare(
+    `INSERT INTO wal_events (event_type, payload) VALUES ('batch_finished', ?)`
+  ).run(JSON.stringify({
+    batchId: batch.id,
+    summary: { completed, failed, total: batch.items.length },
+  }));
+  const finishWalEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+    finishWalResult.lastInsertRowid
+  ) as WalEvent;
+  broadcastAll(finishWalEvent);
+
   // Auto-clean batch from memory after 1 hour
   setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000);
 }
@@ -843,8 +865,8 @@ router.post('/generate/batch', (req: Request, res: Response) => {
     // Validate each brief has required fields
     for (let i = 0; i < briefs.length; i++) {
       const b = briefs[i];
-      if (!b.brief || !b.workspaceId) {
-        res.status(400).json({ error: `Brief at index ${i} missing required fields: brief, workspaceId` });
+      if (!b.title || !b.brief || !b.workspaceId) {
+        res.status(400).json({ error: `Brief at index ${i} missing required fields: title, brief, workspaceId` });
         return;
       }
       if (b.model && !isValidModel(b.model)) {
@@ -932,6 +954,86 @@ router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
     console.error('[Specs] Batch status error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// ─── US-008: GET /generate/batch/:batchId/stream — SSE batch progress ─────────
+
+router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
+  const batchId = req.params.batchId as string;
+  const batch = batchQueue.get(batchId);
+
+  if (!batch) {
+    res.status(404).json({ error: 'Batch not found or expired' });
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+
+  // Send initial snapshot so late-joiners see current state
+  const snapshot = batch.items.map((item, index) => ({
+    index,
+    status: item.status,
+    slug: item.slug,
+    error: item.error,
+    title: item.title,
+  }));
+  res.write(`event: snapshot\ndata: ${JSON.stringify({
+    batchId: batch.id,
+    totalBriefs: batch.items.length,
+    items: snapshot,
+  })}\n\n`);
+
+  // If batch is already finished, send done event and close
+  if (batch.finishedAt) {
+    const completed = batch.items.filter(i => i.status === 'completed').length;
+    const failed = batch.items.filter(i => i.status === 'failed').length;
+    res.write(`event: done\ndata: ${JSON.stringify({
+      batchId: batch.id,
+      summary: { completed, failed, total: batch.items.length },
+    })}\n\n`);
+    res.end();
+    return;
+  }
+
+  // Subscribe to WAL events for batch_progress
+  const unsubscribe = subscribe((event) => {
+    if (event.event_type !== 'batch_progress' && event.event_type !== 'batch_finished') return;
+    const payload = event.payload ? JSON.parse(event.payload) : {};
+    if (payload.batchId !== batchId) return;
+    res.write(`event: progress\ndata: ${JSON.stringify(payload)}\n\n`);
+  });
+
+  // Heartbeat every 15s
+  const heartbeat = setInterval(() => {
+    res.write(': heartbeat\n\n');
+  }, 15_000);
+
+  // Check for batch completion periodically
+  const completionCheck = setInterval(() => {
+    const currentBatch = batchQueue.get(batchId);
+    if (currentBatch?.finishedAt) {
+      const completed = currentBatch.items.filter(i => i.status === 'completed').length;
+      const failed = currentBatch.items.filter(i => i.status === 'failed').length;
+      res.write(`event: done\ndata: ${JSON.stringify({
+        batchId: currentBatch.id,
+        summary: { completed, failed, total: currentBatch.items.length },
+      })}\n\n`);
+      cleanup();
+    }
+  }, 2_000);
+
+  function cleanup() {
+    clearInterval(heartbeat);
+    clearInterval(completionCheck);
+    unsubscribe();
+    res.end();
+  }
+
+  req.on('close', cleanup);
 });
 
 /**

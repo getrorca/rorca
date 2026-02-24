@@ -1083,8 +1083,8 @@ describe('POST /api/specs/generate/batch', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
-          { brief: 'Valid brief', workspaceId: 'ws-test' },
-          { brief: 'Missing workspace' },
+          { title: 'Valid', brief: 'Valid brief', workspaceId: 'ws-test' },
+          { title: 'Missing WS', brief: 'Missing workspace' },
         ],
       });
 
@@ -1099,7 +1099,7 @@ describe('POST /api/specs/generate/batch', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         briefs: [
-          { brief: 'Test', workspaceId: 'ws-test', model: 'gpt-4o' },
+          { title: 'Test Spec', brief: 'Test', workspaceId: 'ws-test', model: 'gpt-4o' },
         ],
       });
 
@@ -1298,5 +1298,145 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     const secondPayload = JSON.parse(events[1].payload);
     expect(secondPayload.status).toBe('completed');
     expect(secondPayload.slug).toBeDefined();
+  });
+});
+
+// ─── V2-083: Story Exclusion ─────────────────────────────────────────────────
+
+describe('V2-083: Story exclusion', () => {
+  function seedSpecWithStories(dir: string, slug: string) {
+    fs.mkdirSync(dir, { recursive: true });
+    const spec = {
+      title: slug.replace(/-/g, ' '),
+      userStories: [
+        { id: 'US-001', title: 'Story one', description: 'Desc 1', acceptanceCriteria: ['AC1'], dependsOn: [], passes: false },
+        { id: 'US-002', title: 'Story two', description: 'Desc 2', acceptanceCriteria: ['AC2'], dependsOn: ['US-001'], passes: false },
+        { id: 'US-003', title: 'Story three', description: 'Desc 3', acceptanceCriteria: ['AC3'], dependsOn: [], passes: false },
+      ],
+      generatedAt: '2026-02-20T12:00:00.000Z',
+    };
+    const specPath = path.join(dir, `${slug}.json`);
+    fs.writeFileSync(specPath, JSON.stringify(spec, null, 2), 'utf8');
+    return { spec, specPath };
+  }
+
+  test('PATCH /:specId/stories/:storyId toggles excluded flag', async () => {
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    seedSpecWithStories(approvedDir, 'excl-test');
+
+    // Exclude US-002
+    const res = await request(app)
+      .patch('/api/specs/excl-test/stories/US-002')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', excluded: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.story.excluded).toBe(true);
+
+    // Verify persisted to JSON
+    const content = JSON.parse(fs.readFileSync(path.join(approvedDir, 'excl-test.json'), 'utf8'));
+    expect(content.userStories[1].excluded).toBe(true);
+    expect(content.userStories[0].excluded).toBeFalsy();
+
+    // Re-include US-002
+    const res2 = await request(app)
+      .patch('/api/specs/excl-test/stories/US-002')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', excluded: false });
+
+    expect(res2.status).toBe(200);
+    expect(res2.body.story.excluded).toBe(false);
+  });
+
+  test('PATCH emits WAL event for exclusion toggle', async () => {
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    seedSpecWithStories(approvedDir, 'excl-wal');
+
+    await request(app)
+      .patch('/api/specs/excl-wal/stories/US-001')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', excluded: true });
+
+    const events = db.prepare(
+      "SELECT * FROM wal_events WHERE event_type = 'story_excluded' AND spec_id = 'excl-wal'"
+    ).all() as { story_id: string; payload: string }[];
+
+    expect(events).toHaveLength(1);
+    expect(events[0].story_id).toBe('US-001');
+  });
+
+  test('PATCH returns 404 for non-existent story', async () => {
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    seedSpecWithStories(approvedDir, 'excl-404');
+
+    const res = await request(app)
+      .patch('/api/specs/excl-404/stories/US-999')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', excluded: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Story not found');
+  });
+
+  test('bulk exclude marks multiple stories as excluded', async () => {
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    seedSpecWithStories(approvedDir, 'bulk-excl');
+
+    const res = await request(app)
+      .post('/api/specs/bulk-excl/stories/bulk')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', action: 'exclude', storyIds: ['US-001', 'US-003'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.affectedCount).toBe(2);
+
+    const content = JSON.parse(fs.readFileSync(path.join(approvedDir, 'bulk-excl.json'), 'utf8'));
+    expect(content.userStories[0].excluded).toBe(true);
+    expect(content.userStories[1].excluded).toBeFalsy();
+    expect(content.userStories[2].excluded).toBe(true);
+  });
+
+  test('bulk include re-includes excluded stories', async () => {
+    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    seedSpecWithStories(approvedDir, 'bulk-incl');
+
+    // First exclude
+    await request(app)
+      .post('/api/specs/bulk-incl/stories/bulk')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', action: 'exclude', storyIds: ['US-001', 'US-002'] });
+
+    // Then re-include
+    const res = await request(app)
+      .post('/api/specs/bulk-incl/stories/bulk')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', action: 'include', storyIds: ['US-001'] });
+
+    expect(res.status).toBe(200);
+
+    const content = JSON.parse(fs.readFileSync(path.join(approvedDir, 'bulk-incl.json'), 'utf8'));
+    expect(content.userStories[0].excluded).toBe(false);
+    expect(content.userStories[1].excluded).toBe(true);
+  });
+
+  test('story_results accepts excluded status', () => {
+    // Create a pipeline run to reference
+    const runResult = db.prepare(
+      "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('test.json', 'ws-test', 'running')"
+    ).run();
+    const runId = runResult.lastInsertRowid as number;
+
+    // Insert excluded story result
+    db.prepare(
+      "INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, 'US-001', 'excluded', datetime('now'))"
+    ).run(runId);
+
+    const row = db.prepare(
+      "SELECT * FROM story_results WHERE run_id = ? AND story_id = 'US-001'"
+    ).get(runId) as { status: string };
+
+    expect(row.status).toBe('excluded');
   });
 });

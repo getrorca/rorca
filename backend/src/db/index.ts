@@ -115,6 +115,34 @@ export function runMigrations() {
     db.exec('ALTER TABLE story_results ADD COLUMN output_tokens INTEGER');
   }
 
+  // V2-083: Add 'excluded' to story_results status CHECK (idempotent)
+  const storyResultsSqlExcl = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_results'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (!storyResultsSqlExcl.includes('excluded')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE story_results_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES pipeline_runs(id),
+        story_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pass','fail','skip','retry','timeout','excluded')),
+        retries INTEGER NOT NULL DEFAULT 0,
+        log_path TEXT,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT,
+        elapsed_seconds INTEGER,
+        input_tokens INTEGER,
+        output_tokens INTEGER
+      );
+      INSERT INTO story_results_new (id, run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens)
+        SELECT id, run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens FROM story_results;
+      DROP TABLE story_results;
+      ALTER TABLE story_results_new RENAME TO story_results;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
+
   // V2-020: Add trigger_type column to pipeline_runs (idempotent)
   const runColsV2020 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
   if (!runColsV2020.some(c => c.name === 'trigger_type')) {

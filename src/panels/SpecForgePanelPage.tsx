@@ -2,7 +2,9 @@ import { useState, useCallback, useEffect } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
+import BatchForge from './BatchForge';
 
+type ForgeMode = 'single' | 'batch';
 type DiagramType = 'flowchart' | 'sequenceDiagram' | 'ascii';
 type OutputFormat = 'json' | 'markdown' | 'both';
 
@@ -20,6 +22,7 @@ const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 export default function SpecForgePanelPage() {
   const { workspaceId, workspaces } = useWorkspace();
   const workspace = workspaces.find((w) => w.id === workspaceId);
+  const [forgeMode, setForgeMode] = useState<ForgeMode>('single');
 
   // Section 1: Spec Identity
   const [specName, setSpecName] = useState('');
@@ -141,7 +144,28 @@ export default function SpecForgePanelPage() {
   }
 
   return (
-    <div className="flex h-full gap-px bg-border">
+    <div className="flex flex-col h-full">
+      {/* Mode toggle: Single / Batch */}
+      <div className="flex border-b border-border shrink-0 bg-bg">
+        {(['single', 'batch'] as const).map((mode) => (
+          <button
+            key={mode}
+            onClick={() => setForgeMode(mode)}
+            className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 ${
+              forgeMode === mode
+                ? 'text-text border-accent'
+                : 'text-muted hover:text-text border-transparent'
+            }`}
+          >
+            {mode === 'single' ? 'Single' : 'Batch'}
+          </button>
+        ))}
+      </div>
+
+      {forgeMode === 'batch' ? (
+        <BatchForge />
+      ) : (
+    <div className="flex flex-1 min-h-0 gap-px bg-border">
       {/* Left pane: Form (~50% width) */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         <div className="flex-1 overflow-y-auto">
@@ -418,6 +442,8 @@ export default function SpecForgePanelPage() {
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         <SpecForgeOutput spec={generatedSpec} />
       </div>
+    </div>
+      )}
     </div>
   );
 }

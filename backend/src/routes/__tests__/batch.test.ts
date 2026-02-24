@@ -128,8 +128,8 @@ test('POST /api/specs/generate/batch validates brief fields', async () => {
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { brief: 'Good brief', workspaceId: 'ws-test' },
-        { brief: '', workspaceId: 'ws-test' }, // empty brief
+        { title: 'Good Title', brief: 'Good brief', workspaceId: 'ws-test' },
+        { title: 'Bad Title', brief: '', workspaceId: 'ws-test' }, // empty brief
       ],
     });
 
@@ -143,7 +143,7 @@ test('POST /api/specs/generate/batch validates model per brief', async () => {
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { brief: 'Build auth', workspaceId: 'ws-test', model: 'gpt-4o' },
+        { title: 'Auth System', brief: 'Build auth', workspaceId: 'ws-test', model: 'gpt-4o' },
       ],
     });
 
