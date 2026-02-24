@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server — exposes Rorcha as a set of tools that Cl
 
 ## What It Does
 
-`server.ts` registers 6 MCP tools using `@modelcontextprotocol/sdk`. When Claude (or another MCP client) connects, it can call these tools to interact with Rorcha without going through the HTTP API manually.
+`server.ts` registers 14 MCP tools using `@modelcontextprotocol/sdk`. When Claude (or another MCP client) connects, it can call these tools to interact with Rorcha without going through the HTTP API manually.
 
 The MCP server hits Rorcha's HTTP API internally: `RORCHA_API_URL` env var (default `http://localhost:3030`).
 
@@ -18,6 +18,15 @@ The MCP server hits Rorcha's HTTP API internally: `RORCHA_API_URL` env var (defa
 | `rorcha_list_specs` | `workspaceId`, `status?` (pending/approved) | Array of spec summaries |
 | `rorcha_list_workspaces` | (none) | All registered workspaces |
 | `rorcha_pipeline_status` | `workspaceId?`, `runId?` | Current/recent pipeline runs with story results |
+| `rorcha_trigger_run` | `workspaceId`, `specId`, `dryRun?`, `autoWorktree?` | Start pipeline run for approved spec |
+| `rorcha_run_status` | `runId` | Detailed run status with per-story progress |
+| `rorcha_usage_stats` | `workspaceId`, `from?`, `to?`, `groupBy?` | Token usage and cost summary |
+| `rorcha_retry_story` | `runId`, `storyIds?` | Retry failed stories in a completed run |
+| `rorcha_list_runs` | `workspaceId`, `limit?` | Recent pipeline runs with status summary |
+| `rorcha_edit_story` | `workspaceId`, `specId`, `storyId`, fields | Update a single story in a spec |
+| `rorcha_search_stories` | `workspaceId`, `query` | Cross-spec story search |
+| `rorcha_add_stories` | `workspaceId`, `specId`, `count?`, `brief?` | Generate and append stories to spec |
+| `rorcha_delete_story` | `workspaceId`, `specId`, `storyId` | Remove story, reindex IDs |
 
 ## Usage Pattern
 
