@@ -380,8 +380,13 @@ router.post('/trigger', async (req: Request, res: Response) => {
 
     // 9b. Record excluded stories immediately — run-loop.sh will skip them,
     //     but we insert story_results rows so the UI shows them as excluded.
+    // 9c. Backfill already-passing stories (passes:true) as 'skipped' so the
+    //     progress bar reflects true completion state from the start.
     try {
       const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+      const specSlug = path.basename(specPath, '.json');
+
+      // 9b — excluded stories
       const excludedStories = (specJson.userStories ?? []).filter(
         (s: { excluded?: boolean }) => s.excluded === true
       );
@@ -392,7 +397,23 @@ router.post('/trigger', async (req: Request, res: Response) => {
         insertExcluded.run(runId, s.id);
         const walResult = db.prepare(
           `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_excluded_from_run', ?, ?, ?, ?)`
-        ).run(workspaceId, path.basename(specPath, '.json'), s.id, JSON.stringify({ run_id: runId }));
+        ).run(workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+        broadcastAll(walEvent);
+      }
+
+      // 9c — backfill already-passing stories as 'skipped'
+      const alreadyPassing = (specJson.userStories ?? []).filter(
+        (s: { passes?: boolean; excluded?: boolean }) => s.passes === true && s.excluded !== true
+      );
+      const insertSkipped = db.prepare(
+        `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, ?, 'skip', datetime('now'))`
+      );
+      for (const s of alreadyPassing) {
+        insertSkipped.run(runId, s.id);
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_skipped', ?, ?, ?, ?)`
+        ).run(workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId, reason: 'already_passing' }));
         const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
         broadcastAll(walEvent);
       }
