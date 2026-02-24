@@ -4646,4 +4646,193 @@ router.get('/:specId/assignments', (req: Request, res: Response) => {
   }
 });
 
+// ─── V2-077: POST /:specId/stories/:storyId/enhance-criteria — AI-suggest acceptance criteria ───
+
+router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, res: Response) => {
+  try {
+    const { specId, storyId } = req.params;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFilePath: string;
+    if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
+    else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
+    else { res.status(404).json({ error: 'Spec not found' }); return; }
+
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    const allStories: Array<{ id: string; title: string; description?: string; acceptanceCriteria: string[]; dependsOn?: string[] }> =
+      specContent.userStories ?? specContent.stories ?? [];
+
+    const targetStory = allStories.find(s => s.id === storyId);
+    if (!targetStory) {
+      res.status(404).json({ error: `Story ${storyId} not found in spec ${specId}` });
+      return;
+    }
+
+    // Build related stories context (dependencies + dependents)
+    const deps = targetStory.dependsOn ?? [];
+    const sid = storyId as string;
+    const dependents = allStories.filter(s => (s.dependsOn ?? []).includes(sid));
+    const relatedStories = allStories.filter(s => deps.includes(s.id) || dependents.some(d => d.id === s.id));
+    const relatedContext = relatedStories.length > 0
+      ? relatedStories.map(s => `- ${s.id}: ${s.title} [AC: ${s.acceptanceCriteria.join('; ')}]`).join('\n')
+      : 'None';
+
+    // Synthesize direction stack context
+    const l1Row = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+    ).get() as { content_yaml: string } | undefined;
+    const l3Row = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+    ).get(workspaceId) as { content_yaml: string } | undefined;
+
+    const synthesized = synthesize({ l1: l1Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: specContent.title ?? specId });
+
+    const fullPrompt = [
+      '=== INSTRUCTIONS: READ THIS FIRST ===',
+      'You are a spec quality reviewer. Your ONLY job is to output a single valid JSON object.',
+      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+      'Output ONLY the raw JSON object. If you output anything else, you have failed.',
+      '=== END INSTRUCTIONS ===',
+      '',
+      synthesized,
+      '---',
+      `TASK: Suggest additional acceptance criteria for story ${storyId} to improve quality and testability.`,
+      '',
+      `Story: ${targetStory.id} — ${targetStory.title}`,
+      targetStory.description ? `Description: ${targetStory.description}` : '',
+      '',
+      `Existing acceptance criteria (${targetStory.acceptanceCriteria.length}):`,
+      targetStory.acceptanceCriteria.map((ac, i) => `  ${i + 1}. ${ac}`).join('\n'),
+      '',
+      `Related stories for consistency:`,
+      relatedContext,
+      '',
+      'Generate 3-5 NEW acceptance criteria that:',
+      '- Are specific, measurable, and testable',
+      '- Cover edge cases, error handling, or performance not already addressed',
+      '- Are consistent with related stories in tone and granularity',
+      '- Do NOT duplicate existing criteria',
+      '',
+      'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown. No preamble. Start with { and end with }.',
+      'JSON schema: {"suggestions":[{"criterion":"string","rationale":"string"}]}',
+      'Each suggestion has the criterion text and a brief rationale explaining why it was added.',
+    ].filter(Boolean).join('\n');
+
+    const enhanceUser = (req as Request & { user: AuthUser }).user;
+    const enhanceVaultKey = getVaultKey(enhanceUser.id, 'anthropic');
+    const rawResponse = await chatComplete(
+      [{ role: 'user', content: fullPrompt }],
+      { apiKey: enhanceVaultKey ?? undefined },
+    );
+
+    let parsed: { suggestions: Array<{ criterion: string; rationale: string }> };
+    try {
+      const responseText = rawResponse.text;
+      const fenceMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonStr = fenceMatch ? fenceMatch[1].trim() : responseText.trim();
+      const jsonStart = jsonStr.indexOf('{');
+      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+    } catch {
+      res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse.text });
+      return;
+    }
+
+    if (!Array.isArray(parsed.suggestions)) {
+      res.status(500).json({ error: 'Invalid structure from LLM — expected suggestions array' });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      storyId,
+      existingCount: targetStory.acceptanceCriteria.length,
+      suggestions: parsed.suggestions,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Enhance criteria error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-077: POST /:specId/stories/:storyId/accept-criteria — Accept suggested criteria ───
+
+router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, res: Response) => {
+  try {
+    const { specId, storyId } = req.params;
+    const { workspaceId, criteria } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+    if (!Array.isArray(criteria) || criteria.length === 0) {
+      res.status(400).json({ error: 'Missing or empty criteria array' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFilePath: string;
+    if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
+    else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
+    else { res.status(404).json({ error: 'Spec not found' }); return; }
+
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    const allStories: Array<{ id: string; acceptanceCriteria: string[] }> =
+      specContent.userStories ?? specContent.stories ?? [];
+
+    const targetStory = allStories.find(s => s.id === storyId);
+    if (!targetStory) {
+      res.status(404).json({ error: `Story ${storyId} not found in spec ${specId}` });
+      return;
+    }
+
+    // Append accepted criteria (deduplicate)
+    const existing = new Set(targetStory.acceptanceCriteria);
+    const added: string[] = [];
+    for (const c of criteria) {
+      if (typeof c === 'string' && c.trim() && !existing.has(c.trim())) {
+        targetStory.acceptanceCriteria.push(c.trim());
+        existing.add(c.trim());
+        added.push(c.trim());
+      }
+    }
+
+    fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+
+    res.json({
+      ok: true,
+      storyId,
+      addedCount: added.length,
+      totalCriteria: targetStory.acceptanceCriteria.length,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Accept criteria error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
