@@ -40,6 +40,8 @@ import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
 import { rateLimiter } from './lib/rate-limiter';
 import { errorHandler } from './lib/error-handler';
+import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
+import { db } from './db/index';
 
 dotenv.config();
 
@@ -57,6 +59,9 @@ app.use(express.json({
     }
   },
 }));
+
+// V2-099: Query timing middleware — logs requests taking >100ms
+app.use(queryTimerMiddleware);
 
 // ─── Public routes (no auth required) ───
 app.use('/api/health', healthRouter);
@@ -124,6 +129,8 @@ if (process.env.NODE_ENV !== 'test') {
     console.log(`Rorcha backend listening on port ${PORT}`);
     startScheduler();
     cleanupOldLogs();
+    // V2-099: Run EXPLAIN QUERY PLAN audit at startup
+    runQueryPlanAudit(db);
   });
 }
 
