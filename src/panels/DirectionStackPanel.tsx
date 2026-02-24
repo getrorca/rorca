@@ -3,6 +3,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useDirectionLayer } from '../hooks/useDirectionLayer';
 import { apiFetch } from '../lib/apiFetch';
 import BootstrapContextModal from '../components/BootstrapContextModal';
+import AISetupWizard from '../components/AISetupWizard';
 import { HelpTooltip } from '../components/HelpTooltip';
 
 type LayerTab = 1 | 2 | 3;
@@ -19,6 +20,7 @@ export default function DirectionStackPanel() {
   const { workspaceId } = useWorkspace();
   const [activeTab, setActiveTab] = useState<LayerTab>(1);
   const [showBootstrap, setShowBootstrap] = useState(false);
+  const [showAISetup, setShowAISetup] = useState(false);
 
   // L1/L2/L3 persisted layers
   const l1 = useDirectionLayer(workspaceId, 1);
@@ -42,6 +44,12 @@ export default function DirectionStackPanel() {
   const handleBootstrapAccept = useCallback((yaml: string) => {
     active.setContent(yaml);
   }, [active]);
+
+  const handleAISetupComplete = useCallback((layers: { l1: string; l2: string; l3: string }) => {
+    l1.setContent(layers.l1);
+    l2.setContent(layers.l2);
+    l3.setContent(layers.l3);
+  }, [l1, l2, l3]);
 
   // L4/L5 ephemeral (no save)
   const [l4, setL4] = useState('');
@@ -118,12 +126,21 @@ export default function DirectionStackPanel() {
               </button>
             ))}
           </div>
-          <button
-            onClick={() => setShowBootstrap(true)}
-            className="px-2.5 py-1.5 text-xs text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap"
-          >
-            Bootstrap Context &#10022;
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setShowAISetup(true)}
+              className="px-2.5 py-1.5 text-xs font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap"
+            >
+              Setup with AI &#10022;
+            </button>
+            <span className="text-border">|</span>
+            <button
+              onClick={() => setShowBootstrap(true)}
+              className="px-2.5 py-1.5 text-xs text-muted hover:text-text transition-colors whitespace-nowrap"
+            >
+              Bootstrap
+            </button>
+          </div>
         </div>
 
         {/* First-run banner */}
@@ -131,14 +148,14 @@ export default function DirectionStackPanel() {
           <div className="flex items-center justify-between px-3 py-2.5 bg-accent/5 border-b border-accent/20">
             <div className="text-xs text-text">
               <span className="mr-1">&#10022;</span>
-              This workspace has no context yet. Bootstrap your Direction Stack to get better specs.
+              This workspace has no context yet. Answer a few questions and AI will set up your Direction Stack.
             </div>
             <div className="flex items-center gap-2 ml-3 shrink-0">
               <button
-                onClick={() => setShowBootstrap(true)}
+                onClick={() => setShowAISetup(true)}
                 className="px-2.5 py-1 text-xs font-medium bg-accent hover:bg-[var(--accent-hover)] text-white rounded transition-colors"
               >
-                Bootstrap Context &rarr;
+                Setup with AI &rarr;
               </button>
               <button
                 onClick={handleDismissBanner}
@@ -246,6 +263,16 @@ export default function DirectionStackPanel() {
           activeLayer={activeTab}
           onAccept={handleBootstrapAccept}
           onClose={() => setShowBootstrap(false)}
+        />
+      )}
+
+      {/* AI Setup Wizard */}
+      {showAISetup && workspaceId && (
+        <AISetupWizard
+          workspaceId={workspaceId}
+          onComplete={handleAISetupComplete}
+          onClose={() => setShowAISetup(false)}
+          hasExistingLayers={!allEmpty}
         />
       )}
     </div>
