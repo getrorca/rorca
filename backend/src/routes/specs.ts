@@ -3369,6 +3369,328 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
   }
 });
 
+// ─── V2-058: POST /:specId/import — Unified Linear + GitHub Issue Import ─────
+
+interface LinearIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  description: string | null;
+  url: string;
+  labels: { nodes: Array<{ name: string }> };
+  state: { name: string };
+}
+
+interface LinearIssuesResponse {
+  data?: {
+    issues: {
+      nodes: LinearIssue[];
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    };
+  };
+  errors?: Array<{ message: string }>;
+}
+
+async function fetchLinearIssues(
+  apiKey: string,
+  filters: { teamId?: string; projectId?: string; labelIds?: string[] },
+): Promise<{ issues: LinearIssue[]; errors: string[] }> {
+  const filterParts: string[] = [];
+  if (filters.teamId) filterParts.push(`team: { id: { eq: "${filters.teamId}" } }`);
+  if (filters.projectId) filterParts.push(`project: { id: { eq: "${filters.projectId}" } }`);
+  if (filters.labelIds && filters.labelIds.length > 0) {
+    filterParts.push(`labels: { id: { in: [${filters.labelIds.map(id => `"${id}"`).join(', ')}] } }`);
+  }
+
+  const filterStr = filterParts.length > 0 ? `filter: { ${filterParts.join(', ')} }` : '';
+
+  const allIssues: LinearIssue[] = [];
+  let cursor: string | null = null;
+  const errors: string[] = [];
+
+  // Paginate through all matching issues
+  for (let page = 0; page < 10; page++) { // safety cap at 10 pages (500 issues)
+    const afterClause = cursor ? `, after: "${cursor}"` : '';
+    const query = `{
+      issues(first: 50${afterClause}${filterStr ? `, ${filterStr}` : ''}) {
+        nodes {
+          id
+          identifier
+          title
+          description
+          url
+          labels { nodes { name } }
+          state { name }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }`;
+
+    const res = await fetch('https://api.linear.app/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': apiKey,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    if (!res.ok) {
+      errors.push(`Linear API ${res.status}: ${res.statusText}`);
+      break;
+    }
+
+    const body = (await res.json()) as LinearIssuesResponse;
+    if (body.errors) {
+      errors.push(...body.errors.map(e => e.message));
+      break;
+    }
+
+    const nodes = body.data?.issues?.nodes ?? [];
+    allIssues.push(...nodes);
+
+    if (!body.data?.issues?.pageInfo?.hasNextPage) break;
+    cursor = body.data.issues.pageInfo.endCursor;
+  }
+
+  return { issues: allIssues, errors };
+}
+
+function linearIssueToStory(
+  issue: LinearIssue,
+  storyId: string,
+): UserStory & { sourceUrl: string; tags: string[] } {
+  const tags = issue.labels.nodes.map(l => l.name);
+  return {
+    id: storyId,
+    title: issue.title,
+    description: issue.description ?? '',
+    acceptanceCriteria: [],
+    dependsOn: [],
+    passes: false,
+    sourceUrl: issue.url,
+    tags,
+  };
+}
+
+function githubIssueToStoryWithSource(
+  issue: GitHubIssue,
+  storyId: string,
+): UserStory & { sourceUrl: string; tags: string[] } {
+  const tags = issue.labels.map(l => l.name);
+  return {
+    id: storyId,
+    title: issue.title,
+    description: issue.body ?? '',
+    acceptanceCriteria: [],
+    dependsOn: [],
+    passes: false,
+    sourceUrl: issue.html_url,
+    tags,
+  };
+}
+
+async function fetchGithubIssuesDirect(
+  owner: string,
+  repo: string,
+  token: string,
+  milestone?: string,
+): Promise<{ issues: GitHubIssue[]; errors: string[] }> {
+  const issues: GitHubIssue[] = [];
+  const errors: string[] = [];
+  let page = 1;
+  const perPage = 100;
+
+  while (true) {
+    let url = `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`;
+    if (milestone) url += `&milestone=${encodeURIComponent(milestone)}`;
+
+    const res = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+
+    if (!res.ok) {
+      errors.push(`GitHub API ${res.status}: ${res.statusText}`);
+      break;
+    }
+
+    const pageIssues = (await res.json()) as GitHubIssue[];
+    const realIssues = pageIssues.filter(i => !('pull_request' in i));
+    issues.push(...realIssues);
+
+    if (pageIssues.length < perPage) break;
+    page++;
+  }
+
+  return { issues, errors };
+}
+
+type ImportSource = 'linear' | 'github';
+
+interface ImportRequestBody {
+  workspaceId: string;
+  source: ImportSource;
+  preview?: boolean;
+  // Linear-specific
+  linearApiKey?: string;
+  linearTeamId?: string;
+  linearProjectId?: string;
+  linearLabelIds?: string[];
+  // GitHub-specific
+  githubToken?: string;
+  githubOwner?: string;
+  githubRepo?: string;
+  githubMilestone?: string;
+}
+
+router.post('/:specId/import', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const body = req.body as ImportRequestBody;
+    const { workspaceId, source, preview } = body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+    if (!source || !['linear', 'github'].includes(source)) {
+      res.status(400).json({ error: "Missing or invalid 'source'. Must be 'linear' or 'github'." });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Find the spec on disk
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFilePath: string;
+    if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
+    else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
+    else { res.status(404).json({ error: 'Spec not found' }); return; }
+
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    const existingStories: Array<{ id: string }> =
+      specContent.userStories ?? specContent.stories ?? [];
+
+    // Determine next story ID
+    const storyPrefix = existingStories[0]?.id?.match(/^([A-Z]+)/)?.[1] ?? 'US';
+    const maxN = existingStories.reduce((max: number, s: { id: string }) => {
+      const n = parseInt(s.id?.replace(/\D/g, '') || '0', 10);
+      return n > max ? n : max;
+    }, 0);
+
+    let newStories: Array<UserStory & { sourceUrl: string; tags: string[] }>;
+    let importErrors: string[] = [];
+
+    if (source === 'linear') {
+      // Linear import
+      if (!body.linearApiKey) {
+        res.status(400).json({ error: 'Missing required field: linearApiKey' });
+        return;
+      }
+
+      const { issues, errors } = await fetchLinearIssues(body.linearApiKey, {
+        teamId: body.linearTeamId,
+        projectId: body.linearProjectId,
+        labelIds: body.linearLabelIds,
+      });
+      importErrors = errors;
+
+      if (issues.length === 0 && errors.length > 0) {
+        res.status(502).json({ error: 'Failed to fetch Linear issues', details: errors });
+        return;
+      }
+
+      newStories = issues.map((issue, idx) => {
+        const storyNum = maxN + idx + 1;
+        const storyId = `${storyPrefix}-${String(storyNum).padStart(3, '0')}`;
+        return linearIssueToStory(issue, storyId);
+      });
+    } else {
+      // GitHub import
+      if (!body.githubToken || !body.githubOwner || !body.githubRepo) {
+        res.status(400).json({ error: 'Missing required fields: githubToken, githubOwner, githubRepo' });
+        return;
+      }
+
+      const { issues, errors } = await fetchGithubIssuesDirect(
+        body.githubOwner,
+        body.githubRepo,
+        body.githubToken,
+        body.githubMilestone,
+      );
+      importErrors = errors;
+
+      if (issues.length === 0 && errors.length > 0) {
+        res.status(502).json({ error: 'Failed to fetch GitHub issues', details: errors });
+        return;
+      }
+
+      newStories = issues.map((issue, idx) => {
+        const storyNum = maxN + idx + 1;
+        const storyId = `${storyPrefix}-${String(storyNum).padStart(3, '0')}`;
+        return githubIssueToStoryWithSource(issue, storyId);
+      });
+    }
+
+    // Preview mode — return proposed stories without saving
+    if (preview) {
+      res.json({
+        ok: true,
+        preview: true,
+        source,
+        stories: newStories,
+        errors: importErrors,
+      });
+      return;
+    }
+
+    // Commit mode — append stories and write to disk
+    specContent.userStories = [...existingStories, ...newStories];
+
+    // Regenerate mermaidDiagram with all stories
+    const { generateStoryDepsDiagram } = await import('../lib/diagram-generator');
+    const depsDiagram = generateStoryDepsDiagram(specContent.userStories);
+    specContent.mermaidDiagram = depsDiagram.mermaid;
+
+    fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+
+    // Emit WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('issues_imported', ?, ?, ?)`
+    ).run(specId, workspaceId, JSON.stringify({
+      source,
+      issueCount: newStories.length,
+    }));
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({
+      ok: true,
+      preview: false,
+      source,
+      importedCount: newStories.length,
+      stories: newStories,
+      errors: importErrors,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Issue import error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── Story Comments ──────────────────────────────────────────────────────────
 
 interface StoryCommentRow {
