@@ -1,5 +1,5 @@
 import { createContext, useContext, useCallback, useEffect, useState, type ReactNode } from 'react';
-import { apiFetch, setTokens, clearTokens, getAccessToken, getRefreshToken } from '../lib/apiFetch';
+import { apiFetch, BASE_URL, setTokens, clearTokens, getAccessToken, getRefreshToken } from '../lib/apiFetch';
 
 export interface AuthUser {
   id: string;
@@ -93,8 +93,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const loginWithGitHub = useCallback(() => {
-    const base = import.meta.env.VITE_API_URL || 'http://localhost:3030';
-    window.location.href = `${base}/api/auth/github`;
+    window.location.href = `${BASE_URL}/api/auth/github`;
   }, []);
 
   // On 401 (auth expired) — clear session so AuthGate redirects to login

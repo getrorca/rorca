@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, BASE_URL } from '../lib/apiFetch';
 
 /* ─── Types ──────────────────────────────────────────────────────── */
 
@@ -156,8 +156,7 @@ export default function BatchForge() {
   useEffect(() => {
     if (!batchId) return;
 
-    const base = import.meta.env.VITE_API_URL || 'http://localhost:3030';
-    const es = new EventSource(`${base}/api/specs/generate/batch/${batchId}/stream`);
+    const es = new EventSource(`${BASE_URL}/api/specs/generate/batch/${batchId}/stream`);
     eventSourceRef.current = es;
 
     es.addEventListener('snapshot', (e) => {
