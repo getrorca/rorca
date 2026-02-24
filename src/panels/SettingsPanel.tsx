@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, Bell, Key, Monitor, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle } from 'lucide-react';
+import { User, Bell, Key, Monitor, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
 import { apiFetch, clearTokens } from '../lib/apiFetch';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type SettingsTab = 'profile' | 'notifications' | 'api-keys' | 'display' | 'account';
+type SettingsTab = 'profile' | 'notifications' | 'providers' | 'display' | 'account';
 
 interface ProfileData {
   id: string;
@@ -24,9 +25,18 @@ interface ApiKeyEntry {
   provider: string;
   label: string;
   masked_key: string;
+  base_url: string | null;
   spend_total_usd: number;
   last_used_at: string | null;
   created_at: string;
+}
+
+interface ProviderStatus {
+  id: string;
+  name: string;
+  configured: boolean;
+  hasKey: boolean;
+  baseUrl: string | null;
 }
 
 interface DisplaySettings {
@@ -42,7 +52,7 @@ interface ModelOption {
 const TABS: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: 'profile', label: 'Profile', icon: User },
   { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'api-keys', label: 'API Keys', icon: Key },
+  { id: 'providers', label: 'Providers', icon: Zap },
   { id: 'display', label: 'Display', icon: Monitor },
   { id: 'account', label: 'Account', icon: AlertTriangle },
 ];
@@ -116,7 +126,7 @@ export default function SettingsPanel() {
         <div className="flex-1 overflow-y-auto p-4 sm:p-6">
           {activeTab === 'profile' && <ProfileSection />}
           {activeTab === 'notifications' && <NotificationsSection />}
-          {activeTab === 'api-keys' && <ApiKeysSection />}
+          {activeTab === 'providers' && <ProvidersSection />}
           {activeTab === 'display' && <DisplaySection />}
           {activeTab === 'account' && <AccountDeletionSection />}
         </div>
@@ -439,44 +449,76 @@ function NotificationsSection() {
   );
 }
 
-// ─── API Keys Section ────────────────────────────────────────────────────────
+// ─── Providers Section ──────────────────────────────────────────────────────
 
-function ApiKeysSection() {
+const PROVIDER_DESCRIPTIONS: Record<string, string> = {
+  'claude-cli': 'Uses your Claude subscription via the claude CLI. No API key needed.',
+  'anthropic': 'Direct API access to Claude models. Requires an Anthropic API key.',
+  'openai-compat': 'Any OpenAI-compatible endpoint (OpenAI, Groq, Together, DeepSeek, Ollama, etc.).',
+  'openrouter': 'Access 200+ models through a single API key.',
+};
+
+function ProvidersSection() {
+  const { workspaceId } = useWorkspace();
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showAdd, setShowAdd] = useState(false);
-  const [addProvider, setAddProvider] = useState('anthropic');
-  const [addLabel, setAddLabel] = useState('');
+  const [defaultProvider, setDefaultProvider] = useState('claude-cli');
+  const [savingDefault, setSavingDefault] = useState(false);
+  const [savedDefault, setSavedDefault] = useState(false);
+
+  // Add key form per provider
+  const [addingFor, setAddingFor] = useState<string | null>(null);
   const [addKey, setAddKey] = useState('');
+  const [addBaseUrl, setAddBaseUrl] = useState('');
+  const [addLabel, setAddLabel] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
 
-  const fetchKeys = useCallback(async () => {
+  // Test connection state
+  const [testingProvider, setTestingProvider] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ provider: string; ok: boolean; latencyMs?: number; response?: string; error?: string } | null>(null);
+
+  const fetchData = useCallback(async () => {
     try {
-      const data = await apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys');
-      setKeys(data.keys);
+      const [provData, keyData, defaultData] = await Promise.all([
+        apiFetch<{ providers: ProviderStatus[] }>('/api/vault/keys/providers'),
+        apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+        workspaceId
+          ? apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`)
+          : Promise.resolve({ provider: 'claude-cli' }),
+      ]);
+      setProviders(provData.providers);
+      setKeys(keyData.keys);
+      setDefaultProvider(defaultData.provider);
     } catch {
       // silent
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [workspaceId]);
 
-  useEffect(() => { fetchKeys(); }, [fetchKeys]);
+  useEffect(() => { fetchData(); }, [fetchData]);
 
-  const addApiKey = async () => {
+  const handleAddKey = async (providerId: string) => {
     setAdding(true);
     setAddError(null);
     try {
       await apiFetch('/api/vault/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: addProvider, key: addKey, label: addLabel }),
+        body: JSON.stringify({
+          provider: providerId,
+          key: addKey,
+          label: addLabel,
+          base_url: providerId === 'openai-compat' && addBaseUrl ? addBaseUrl : undefined,
+        }),
       });
       setAddKey('');
+      setAddBaseUrl('');
       setAddLabel('');
-      setShowAdd(false);
-      fetchKeys();
+      setAddingFor(null);
+      fetchData();
     } catch (err: any) {
       setAddError(err.message || 'Failed to add key');
     } finally {
@@ -487,117 +529,261 @@ function ApiKeysSection() {
   const removeKey = async (id: string) => {
     try {
       await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
-      setKeys(prev => prev.filter(k => k.id !== id));
+      fetchData();
     } catch {
       // silent
     }
   };
 
+  const testConnection = async (providerId: string) => {
+    setTestingProvider(providerId);
+    setTestResult(null);
+    try {
+      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/vault/keys/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: providerId }),
+      });
+      setTestResult({ provider: providerId, ok: true, latencyMs: result.latencyMs, response: result.response });
+    } catch (err: any) {
+      setTestResult({ provider: providerId, ok: false, error: err.message || 'Connection failed' });
+    } finally {
+      setTestingProvider(null);
+    }
+  };
+
+  const saveDefaultProvider = async (provider: string) => {
+    if (!workspaceId) return;
+    setSavingDefault(true);
+    setSavedDefault(false);
+    try {
+      await apiFetch('/api/vault/keys/default-provider', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, provider }),
+      });
+      setDefaultProvider(provider);
+      setSavedDefault(true);
+      setTimeout(() => setSavedDefault(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSavingDefault(false);
+    }
+  };
+
   if (loading) {
-    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading API keys...</div>;
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading provider configuration...</div>;
   }
 
   return (
-    <div className="max-w-lg space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--text)]">API Keys</h2>
-          <p className="text-xs text-muted mt-0.5">Bring Your Own Key (BYOB) — stored encrypted, never sent to Rorcha servers</p>
-        </div>
-        <button
-          onClick={() => setShowAdd(!showAdd)}
-          className="flex items-center gap-1 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 transition-colors"
-        >
-          <Plus size={14} /> Add Key
-        </button>
+    <div className="max-w-2xl space-y-6">
+      <div>
+        <h2 className="text-sm font-semibold text-[var(--text)]">Provider Configuration</h2>
+        <p className="text-xs text-muted mt-0.5">
+          Configure LLM providers for spec generation. Keys are AES-256-GCM encrypted at rest.
+        </p>
       </div>
 
-      {/* Add form */}
-      {showAdd && (
-        <div className="border border-border rounded p-4 space-y-3 bg-bg">
-          <div>
-            <label className="block text-xs text-muted mb-1">Provider</label>
-            <select
-              value={addProvider}
-              onChange={e => setAddProvider(e.target.value)}
-              className="w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
-            >
-              {PROVIDER_OPTIONS.map(p => (
-                <option key={p.value} value={p.value}>{p.label}</option>
-              ))}
-            </select>
+      {/* Default provider selector */}
+      {workspaceId && (
+        <div className="border border-border rounded p-4 bg-bg">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-medium text-[var(--text)]">Default Provider</h3>
+              <p className="text-xs text-muted mt-0.5">Used when no per-spec model override is set</p>
+            </div>
+            {savedDefault && (
+              <span className="flex items-center gap-1 text-xs text-green-500">
+                <Check size={12} /> Saved
+              </span>
+            )}
           </div>
-          <div>
-            <label className="block text-xs text-muted mb-1">Label (optional)</label>
-            <input
-              type="text"
-              value={addLabel}
-              onChange={e => setAddLabel(e.target.value)}
-              placeholder="e.g. Personal, Work"
-              className="w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-muted mb-1">API Key</label>
-            <input
-              type="password"
-              value={addKey}
-              onChange={e => setAddKey(e.target.value)}
-              placeholder="sk-..."
-              className="w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none font-mono"
-            />
-          </div>
-          {addError && <p className="text-xs text-red-500">{addError}</p>}
-          <div className="flex gap-2">
-            <button
-              onClick={addApiKey}
-              disabled={adding || !addKey}
-              className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
-            >
-              {adding ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-              Add
-            </button>
-            <button
-              onClick={() => { setShowAdd(false); setAddError(null); }}
-              className="px-4 py-2 text-sm text-muted hover:text-[var(--text)] transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
+          <select
+            value={defaultProvider}
+            onChange={e => saveDefaultProvider(e.target.value)}
+            disabled={savingDefault}
+            className="mt-3 w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
+          >
+            {providers.map(p => (
+              <option key={p.id} value={p.id} disabled={p.id !== 'claude-cli' && !p.configured}>
+                {p.name}{!p.configured && p.id !== 'claude-cli' ? ' (not configured)' : ''}
+              </option>
+            ))}
+          </select>
         </div>
       )}
 
-      {/* Keys list */}
-      {keys.length === 0 && !showAdd ? (
-        <div className="text-sm text-muted py-8 text-center border border-dashed border-border rounded">
-          No API keys stored. Add one to use Rorcha with your own LLM provider.
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {keys.map(k => (
-            <div key={k.id} className="flex items-center justify-between px-4 py-3 border border-border rounded bg-bg">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium px-2 py-0.5 rounded bg-accent/10 text-accent">{k.provider}</span>
-                  {k.label && <span className="text-sm text-[var(--text)] truncate">{k.label}</span>}
+      {/* Provider cards */}
+      <div className="space-y-3">
+        {providers.map(p => {
+          const providerKeys = keys.filter(k => k.provider === p.id);
+          const isDefault = defaultProvider === p.id;
+
+          return (
+            <div key={p.id} className={`border rounded p-4 transition-colors ${
+              isDefault ? 'border-accent/40 bg-accent/5' : 'border-border bg-bg'
+            }`}>
+              {/* Provider header */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={`w-2 h-2 rounded-full ${p.configured ? 'bg-green-500' : 'bg-zinc-500'}`} />
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-[var(--text)]">{p.name}</span>
+                      {isDefault && (
+                        <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-accent/15 text-accent">
+                          Default
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted mt-0.5">{PROVIDER_DESCRIPTIONS[p.id]}</p>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 mt-1 text-xs text-muted">
-                  <span className="font-mono">{k.masked_key}</span>
-                  {k.spend_total_usd > 0 && <span>${k.spend_total_usd.toFixed(2)} spent</span>}
-                  {k.last_used_at && <span>Last used {new Date(k.last_used_at).toLocaleDateString()}</span>}
+                <div className="flex items-center gap-2">
+                  {/* Test button */}
+                  {p.configured && (
+                    <button
+                      onClick={() => testConnection(p.id)}
+                      disabled={testingProvider === p.id}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border rounded hover:border-accent/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+                    >
+                      {testingProvider === p.id ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <Globe size={12} />
+                      )}
+                      Test
+                    </button>
+                  )}
+                  {/* Add key button (not for claude-cli) */}
+                  {p.id !== 'claude-cli' && (
+                    <button
+                      onClick={() => {
+                        setAddingFor(addingFor === p.id ? null : p.id);
+                        setAddKey('');
+                        setAddBaseUrl('');
+                        setAddLabel('');
+                        setAddError(null);
+                      }}
+                      className="flex items-center gap-1 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 transition-colors"
+                    >
+                      <Plus size={12} /> {providerKeys.length > 0 ? 'Replace' : 'Add'} Key
+                    </button>
+                  )}
                 </div>
               </div>
-              <button
-                onClick={() => removeKey(k.id)}
-                className="p-1.5 text-muted hover:text-red-500 transition-colors"
-                title="Remove key"
-              >
-                <Trash2 size={14} />
-              </button>
+
+              {/* Test result */}
+              {testResult && testResult.provider === p.id && (
+                <div className={`mt-3 px-3 py-2 rounded text-xs flex items-center gap-2 ${
+                  testResult.ok
+                    ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+                    : 'bg-red-500/10 border border-red-500/20 text-red-400'
+                }`}>
+                  {testResult.ok ? (
+                    <>
+                      <CheckCircle2 size={14} />
+                      Connected ({testResult.latencyMs}ms)
+                      {testResult.response && <span className="text-muted ml-1 truncate">— {testResult.response}</span>}
+                    </>
+                  ) : (
+                    <>
+                      <XCircle size={14} />
+                      {testResult.error}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Existing keys */}
+              {providerKeys.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {providerKeys.map(k => (
+                    <div key={k.id} className="flex items-center justify-between px-3 py-2 rounded border border-border bg-panel">
+                      <div className="min-w-0 flex items-center gap-3">
+                        <Key size={12} className="text-muted shrink-0" />
+                        <span className="font-mono text-xs text-muted">{k.masked_key}</span>
+                        {k.label && <span className="text-xs text-[var(--text)] truncate">{k.label}</span>}
+                        {k.base_url && (
+                          <span className="text-xs text-muted truncate" title={k.base_url}>
+                            {k.base_url}
+                          </span>
+                        )}
+                        {k.spend_total_usd > 0 && <span className="text-xs text-muted">${k.spend_total_usd.toFixed(2)}</span>}
+                      </div>
+                      <button
+                        onClick={() => removeKey(k.id)}
+                        className="p-1 text-muted hover:text-red-500 transition-colors shrink-0"
+                        title="Remove key"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Add key form */}
+              {addingFor === p.id && (
+                <div className="mt-3 border border-border rounded p-3 space-y-3 bg-panel">
+                  <div>
+                    <label className="block text-xs text-muted mb-1">API Key</label>
+                    <input
+                      type="password"
+                      value={addKey}
+                      onChange={e => setAddKey(e.target.value)}
+                      placeholder="sk-..."
+                      className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none font-mono"
+                      autoFocus
+                    />
+                  </div>
+                  {p.id === 'openai-compat' && (
+                    <div>
+                      <label className="block text-xs text-muted mb-1">Base URL</label>
+                      <input
+                        type="url"
+                        value={addBaseUrl}
+                        onChange={e => setAddBaseUrl(e.target.value)}
+                        placeholder="https://api.openai.com/v1"
+                        className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none font-mono"
+                      />
+                      <p className="text-[10px] text-muted mt-1">Custom endpoint for Groq, Together, DeepSeek, Ollama, etc.</p>
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-xs text-muted mb-1">Label (optional)</label>
+                    <input
+                      type="text"
+                      value={addLabel}
+                      onChange={e => setAddLabel(e.target.value)}
+                      placeholder="e.g. Personal, Work"
+                      className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+                    />
+                  </div>
+                  {addError && <p className="text-xs text-red-500">{addError}</p>}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleAddKey(p.id)}
+                      disabled={adding || !addKey}
+                      className="flex items-center gap-2 px-4 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+                    >
+                      {adding ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                      Save Key
+                    </button>
+                    <button
+                      onClick={() => { setAddingFor(null); setAddError(null); }}
+                      className="px-4 py-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
-          ))}
-        </div>
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 }
