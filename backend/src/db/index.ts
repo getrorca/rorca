@@ -175,6 +175,41 @@ export function runMigrations() {
     db.pragma('foreign_keys = ON');
   }
 
+  // V2-101: Add 'cancelled' to pipeline_runs status CHECK constraint (idempotent)
+  const tableSqlV101 = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (!tableSqlV101.includes('cancelled')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE pipeline_runs_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec_path TEXT NOT NULL,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+        status TEXT NOT NULL CHECK(status IN ('running','paused','done','failed','partial_failure','cancelled')),
+        pid INTEGER,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT,
+        branch_name TEXT,
+        worktree_path TEXT,
+        trigger_type TEXT NOT NULL DEFAULT 'manual'
+      );
+      INSERT INTO pipeline_runs_new SELECT id, spec_path, workspace_id, status, pid, started_at, finished_at, branch_name, worktree_path, trigger_type FROM pipeline_runs;
+      DROP TABLE pipeline_runs;
+      ALTER TABLE pipeline_runs_new RENAME TO pipeline_runs;
+    `);
+    db.pragma('foreign_keys = ON');
+
+    // Re-add columns that were added after the initial table definition
+    const colsAfterRebuild = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+    if (!colsAfterRebuild.some(c => c.name === 'retried_from_run_id')) {
+      db.exec('ALTER TABLE pipeline_runs ADD COLUMN retried_from_run_id INTEGER REFERENCES pipeline_runs(id)');
+    }
+    if (!colsAfterRebuild.some(c => c.name === 'log_path')) {
+      db.exec('ALTER TABLE pipeline_runs ADD COLUMN log_path TEXT');
+    }
+  }
+
   // V2-020: Ensure trigger_type exists after potential rebuild (idempotent)
   const runColsPost = db.pragma('table_info(pipeline_runs)') as { name: string }[];
   if (!runColsPost.some(c => c.name === 'trigger_type')) {
