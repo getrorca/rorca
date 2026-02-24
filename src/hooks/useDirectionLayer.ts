@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiFetch } from '../lib/apiFetch';
 
-export function useDirectionLayer(workspaceId: string | null, layer: 1 | 2 | 3) {
+export function useDirectionLayer(workspaceId: string | null, layer: 1 | 2 | 3, opts?: { skipValidation?: boolean }) {
   const [content, setContentRaw] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const savedRef = useRef(''); // tracks last-saved value
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipValidation = opts?.skipValidation ?? false;
 
   // Load on mount / when workspace or layer changes
   useEffect(() => {
@@ -28,7 +29,7 @@ export function useDirectionLayer(workspaceId: string | null, layer: 1 | 2 | 3) 
       apiFetch<{ ok: boolean }>('/api/direction', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ layer, workspaceId, contentYaml: value }),
+        body: JSON.stringify({ layer, workspaceId, contentYaml: value, ...(skipValidation ? { skipValidation: true } : {}) }),
       })
         .then(() => {
           savedRef.current = value;
@@ -37,7 +38,7 @@ export function useDirectionLayer(workspaceId: string | null, layer: 1 | 2 | 3) 
         .catch(console.error)
         .finally(() => setIsSaving(false));
     },
-    [workspaceId, layer],
+    [workspaceId, layer, skipValidation],
   );
 
   const setContent = useCallback(
