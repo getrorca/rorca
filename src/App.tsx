@@ -27,6 +27,7 @@ import CostBreakdownPanel from './panels/CostBreakdownPanel';
 import ModelComparisonPanel from './panels/ModelComparisonPanel';
 import VelocityChartPanel from './panels/VelocityChartPanel';
 import CompletionRatePanel from './panels/CompletionRatePanel';
+import HealthDashboardPanel from './panels/HealthDashboardPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -106,6 +107,7 @@ function AppContent() {
       {activePanel === 'models'    && <ModelComparisonPanel />}
       {activePanel === 'velocity'  && <VelocityChartPanel />}
       {activePanel === 'completion' && <CompletionRatePanel />}
+      {activePanel === 'health'    && <HealthDashboardPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
       {showCommandPalette && (

@@ -508,5 +508,32 @@ Key decisions:
 - byTag results sorted by passRate ascending (worst first) so improvement opportunities are most visible
 - Used layout="vertical" BarChart for horizontal bars — better readability for group labels
 
+## Story V2-064: Health Monitoring Endpoints — DONE
+Files touched:
+- backend/src/routes/health.ts (new — GET /api/health + GET /api/health/detailed)
+- backend/src/server.ts (modified — replaced inline health handler with health router)
+- backend/src/routes/__tests__/health.test.ts (new — 10 tests)
+- src/panels/HealthDashboardPanel.tsx (new — admin panel with live metrics + uptime history)
+- src/components/Sidebar.tsx (modified — added 'health' PanelId + HeartPulse icon)
+- src/App.tsx (modified — import + render HealthDashboardPanel)
+
+What was built:
+- GET /api/health returns {status, version, uptime, db_connected, active_runs} — 200 when healthy, 503 when degraded
+- GET /api/health/detailed extends basic with db_size, pending_specs_count, memory_usage (rss/heapTotal/heapUsed/external), last_backup_at
+- DB connectivity check: executes `SELECT 1` and verifies completion within 1s — sets db_connected=false and status=degraded on failure
+- Both endpoints include Cache-Control: no-cache, no-store, must-revalidate + Pragma: no-cache + Expires: 0
+- HealthDashboardPanel: status banner, 6 metric cards, memory usage bar, backup status, uptime history timeline (green/yellow/red blocks), heap memory trend chart (Recharts LineChart), recent checks table
+- Panel polls /api/health/detailed at configurable interval (10s/30s/60s), stores last 60 data points in-memory for charting
+- Both health endpoints are public (no auth) — mounted before authRequired middleware
+- 10 backend tests covering response shape, cache headers, no-auth requirement, active run counting, pending spec counting, memory values, backup_at null case
+
+Key decisions:
+- Health endpoints are public (no auth) — uptime services need unauthenticated access
+- Created dedicated health.ts route file instead of extending inline handler — cleaner separation
+- DB timeout check uses simple `SELECT 1` query with elapsed time comparison (not actual Node.js timeout since better-sqlite3 is synchronous)
+- uptime tracked via module-level `startTime` — resets on backend restart (correct behavior)
+- HealthDashboardPanel stores uptime history client-side (not in wal_events) — appropriate for real-time dashboard, not audit trail
+- last_backup_at sourced from listBackups() (filesystem-based, reads backup directory)
+
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
