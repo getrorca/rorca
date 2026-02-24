@@ -35,7 +35,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3030;
 
-app.use(cors({ origin: 'http://localhost:5210' }));
+app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5210' }));
 
 // Capture raw body for webhook signature verification.
 // The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.

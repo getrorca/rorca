@@ -1,0 +1,12 @@
+node_modules
+backend/node_modules
+dist
+backend/dist
+backend/rorcha.db
+backend/rorcha.db-wal
+backend/rorcha.db-shm
+*.log
+.git
+.env
+.env.local
+.DS_Store
