@@ -13,6 +13,7 @@ import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
+import { createNotification } from './notifications';
 
 const router = Router();
 
@@ -3921,6 +3922,35 @@ router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) 
       JOIN users u ON u.id = sc.user_id
       WHERE sc.id = ?
     `).get(id) as StoryCommentRow;
+
+    // Parse @mentions and create notifications for each mentioned user
+    const mentionPattern = /@([\w.\-]+(?:\s[\w.\-]+)?)/g;
+    const mentionedNames = new Set<string>();
+    let match: RegExpExecArray | null;
+    while ((match = mentionPattern.exec(body)) !== null) {
+      mentionedNames.add(match[1]);
+    }
+
+    if (mentionedNames.size > 0) {
+      const allUsers = db.prepare(
+        'SELECT id, display_name FROM users'
+      ).all() as { id: string; display_name: string }[];
+
+      const userByName = new Map(allUsers.map(u => [u.display_name.toLowerCase(), u.id]));
+
+      for (const name of mentionedNames) {
+        const mentionedUserId = userByName.get(name.toLowerCase());
+        if (mentionedUserId && mentionedUserId !== user.id) {
+          createNotification(
+            mentionedUserId,
+            'mention',
+            `${comment.display_name} mentioned you in a comment`,
+            body.length > 120 ? body.slice(0, 120) + '...' : body,
+            `/specs/${specId}?story=${storyId}&comment=${id}`,
+          );
+        }
+      }
+    }
 
     res.status(201).json(comment);
   } catch (error: any) {
