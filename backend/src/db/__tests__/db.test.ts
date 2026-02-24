@@ -68,6 +68,7 @@ test('all core tables plus FTS5 tables exist in sqlite_master', () => {
     'template_ratings',
     'templates',
     'token_usage',
+    'user_settings',
     'users',
     'wal_events',
     'workspace_access',

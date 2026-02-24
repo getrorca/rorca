@@ -32,6 +32,7 @@ import { registerWebhookHandlers } from './routes/webhook-handlers';
 import agentHooksRouter from './routes/agent-hooks';
 import agentProfilesRouter from './routes/agent-profiles';
 import notificationsRouter from './routes/notifications';
+import settingsRouter from './routes/settings';
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { subscribe } from './lib/sse-hub';
@@ -105,6 +106,7 @@ app.use('/api/users', usersRouter);
 app.use('/api/onboarding', onboardingRouter);
 app.use('/api/admin', backupsRouter);
 app.use('/api/notifications', notificationsRouter);
+app.use('/api/settings', settingsRouter);
 
 // V2-069: Subscribe agent hook runner to all WAL broadcasts
 subscribe(fireAgentHooks);
