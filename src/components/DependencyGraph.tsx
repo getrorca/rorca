@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { AlertTriangle, Loader2 } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { AlertTriangle, Loader2, Sparkles, Check, X, RotateCcw } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -27,6 +27,16 @@ interface GraphErrorResponse {
   cycle?: string[];
 }
 
+interface DependencySuggestion {
+  from: string;
+  to: string;
+  reason: string;
+}
+
+interface DetectResponse {
+  suggestions: DependencySuggestion[];
+}
+
 interface DependencyGraphProps {
   specId: string;
   workspaceId: string;
@@ -45,7 +55,12 @@ const STATUS_STYLES: Record<GraphNode['status'], string> = {
 
 /* ─── Build Mermaid diagram text from graph response ─────────────── */
 
-function buildMermaidText(graph: GraphResponse): string {
+function buildMermaidText(
+  graph: GraphResponse,
+  suggestions?: DependencySuggestion[],
+  acceptedSet?: Set<string>,
+  rejectedSet?: Set<string>,
+): string {
   const lines: string[] = ['graph TD'];
 
   for (const node of graph.nodes) {
@@ -56,6 +71,21 @@ function buildMermaidText(graph: GraphResponse): string {
 
   for (const edge of graph.edges) {
     lines.push(`  ${edge.from} --> ${edge.to}`);
+  }
+
+  // Add suggested edges as dotted lines (only pending/accepted ones)
+  if (suggestions) {
+    for (const s of suggestions) {
+      const key = `${s.from}->${s.to}`;
+      if (rejectedSet?.has(key)) continue;
+      if (acceptedSet?.has(key)) {
+        // Accepted suggestions show as solid green arrows
+        lines.push(`  ${s.from} -->|accepted| ${s.to}`);
+      } else {
+        // Pending suggestions show as dotted arrows
+        lines.push(`  ${s.from} -.->|suggested| ${s.to}`);
+      }
+    }
   }
 
   // Apply status styles
@@ -77,6 +107,14 @@ export default function DependencyGraph({ specId, workspaceId, runId }: Dependen
   const [svgContent, setSvgContent] = useState('');
   const [renderError, setRenderError] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Suggestion state
+  const [suggestions, setSuggestions] = useState<DependencySuggestion[]>([]);
+  const [detecting, setDetecting] = useState(false);
+  const [detectError, setDetectError] = useState('');
+  const [accepted, setAccepted] = useState<Set<string>>(new Set());
+  const [rejected, setRejected] = useState<Set<string>>(new Set());
+  const [applying, setApplying] = useState(false);
 
   // Fetch graph data
   useEffect(() => {
@@ -121,7 +159,7 @@ export default function DependencyGraph({ specId, workspaceId, runId }: Dependen
     return () => { cancelled = true; };
   }, [specId, workspaceId, runId]);
 
-  // Render Mermaid when graph data changes
+  // Render Mermaid when graph data or suggestions change
   useEffect(() => {
     if (!graph || graph.nodes.length === 0) {
       setSvgContent('');
@@ -129,7 +167,10 @@ export default function DependencyGraph({ specId, workspaceId, runId }: Dependen
     }
 
     let cancelled = false;
-    const mermaidText = buildMermaidText(graph);
+    const pendingSuggestions = suggestions.filter(
+      s => !rejected.has(`${s.from}->${s.to}`)
+    );
+    const mermaidText = buildMermaidText(graph, pendingSuggestions, accepted, rejected);
 
     (async () => {
       try {
@@ -161,7 +202,88 @@ export default function DependencyGraph({ specId, workspaceId, runId }: Dependen
     })();
 
     return () => { cancelled = true; };
-  }, [graph]);
+  }, [graph, suggestions, accepted, rejected]);
+
+  // Detect dependencies via LLM
+  const handleDetect = useCallback(async () => {
+    setDetecting(true);
+    setDetectError('');
+    setSuggestions([]);
+    setAccepted(new Set());
+    setRejected(new Set());
+
+    try {
+      const data = await apiFetch<DetectResponse>(`/api/specs/${specId}/detect-dependencies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      setSuggestions(data.suggestions);
+    } catch (err) {
+      setDetectError(err instanceof Error ? err.message : 'Detection failed');
+    } finally {
+      setDetecting(false);
+    }
+  }, [specId, workspaceId]);
+
+  // Accept a suggestion
+  const handleAccept = useCallback((from: string, to: string) => {
+    const key = `${from}->${to}`;
+    setAccepted(prev => new Set(prev).add(key));
+    setRejected(prev => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
+  // Reject a suggestion
+  const handleReject = useCallback((from: string, to: string) => {
+    const key = `${from}->${to}`;
+    setRejected(prev => new Set(prev).add(key));
+    setAccepted(prev => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+
+  // Apply accepted dependencies
+  const handleApply = useCallback(async () => {
+    if (accepted.size === 0) return;
+    setApplying(true);
+
+    const deps = suggestions
+      .filter(s => accepted.has(`${s.from}->${s.to}`))
+      .map(s => ({ from: s.from, to: s.to }));
+
+    try {
+      await apiFetch(`/api/specs/${specId}/apply-dependencies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, dependencies: deps }),
+      });
+      // Clear suggestions and reload graph
+      setSuggestions([]);
+      setAccepted(new Set());
+      setRejected(new Set());
+      // Re-trigger graph fetch
+      setLoading(true);
+      const params = new URLSearchParams({ workspaceId });
+      if (runId) params.set('runId', String(runId));
+      const data = await apiFetch<GraphResponse>(`/api/specs/${specId}/graph?${params}`);
+      setGraph(data);
+    } catch (err) {
+      setDetectError(err instanceof Error ? err.message : 'Failed to apply dependencies');
+    } finally {
+      setApplying(false);
+      setLoading(false);
+    }
+  }, [accepted, suggestions, specId, workspaceId, runId]);
+
+  const pendingSuggestions = suggestions.filter(
+    s => !accepted.has(`${s.from}->${s.to}`) && !rejected.has(`${s.from}->${s.to}`)
+  );
 
   // Loading
   if (loading) {
@@ -227,6 +349,135 @@ export default function DependencyGraph({ specId, workspaceId, runId }: Dependen
 
   return (
     <div className="p-4 space-y-4">
+      {/* Detect Dependencies button */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleDetect}
+          disabled={detecting}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-accent/15 text-accent hover:bg-accent/25 transition-colors disabled:opacity-50"
+        >
+          {detecting ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Sparkles size={12} />
+          )}
+          {detecting ? 'Analyzing stories...' : 'Detect Missing Dependencies'}
+        </button>
+        {suggestions.length > 0 && (
+          <span className="text-xs text-muted">
+            {suggestions.length} suggestion{suggestions.length !== 1 ? 's' : ''} found
+          </span>
+        )}
+      </div>
+
+      {/* Detection error */}
+      {detectError && (
+        <div className="rounded border border-error/30 bg-error/10 p-3">
+          <p className="text-xs text-error">{detectError}</p>
+        </div>
+      )}
+
+      {/* Suggestion list with accept/reject controls */}
+      {suggestions.length > 0 && (
+        <div className="rounded border border-accent/30 bg-accent/5 p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-medium text-accent">
+              Suggested Dependencies
+            </p>
+            <div className="flex items-center gap-2">
+              {accepted.size > 0 && (
+                <button
+                  onClick={handleApply}
+                  disabled={applying}
+                  className="flex items-center gap-1 px-2 py-1 text-[10px] font-semibold rounded bg-green-500/15 text-green-400 hover:bg-green-500/25 transition-colors disabled:opacity-50"
+                >
+                  {applying ? (
+                    <Loader2 size={10} className="animate-spin" />
+                  ) : (
+                    <Check size={10} />
+                  )}
+                  Apply {accepted.size} accepted
+                </button>
+              )}
+              <button
+                onClick={() => { setSuggestions([]); setAccepted(new Set()); setRejected(new Set()); }}
+                className="flex items-center gap-1 px-2 py-1 text-[10px] font-semibold rounded bg-panel border border-border text-muted hover:text-text transition-colors"
+              >
+                <RotateCcw size={10} />
+                Dismiss all
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {suggestions.map((s) => {
+              const key = `${s.from}->${s.to}`;
+              const isAccepted = accepted.has(key);
+              const isRejected = rejected.has(key);
+
+              return (
+                <div
+                  key={key}
+                  className={`flex items-start gap-2 p-2 rounded border transition-colors ${
+                    isAccepted
+                      ? 'border-green-500/30 bg-green-500/10'
+                      : isRejected
+                        ? 'border-border/50 bg-panel/50 opacity-50'
+                        : 'border-border bg-panel'
+                  }`}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-accent/15 text-accent">
+                        {s.from}
+                      </span>
+                      <span className="text-muted text-xs">&rarr;</span>
+                      <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-accent/15 text-accent">
+                        {s.to}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted leading-tight">{s.reason}</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => handleAccept(s.from, s.to)}
+                      className={`p-1 rounded transition-colors ${
+                        isAccepted
+                          ? 'bg-green-500/25 text-green-400'
+                          : 'hover:bg-green-500/15 text-muted hover:text-green-400'
+                      }`}
+                      title="Accept"
+                    >
+                      <Check size={14} />
+                    </button>
+                    <button
+                      onClick={() => handleReject(s.from, s.to)}
+                      className={`p-1 rounded transition-colors ${
+                        isRejected
+                          ? 'bg-red-500/25 text-red-400'
+                          : 'hover:bg-red-500/15 text-muted hover:text-red-400'
+                      }`}
+                      title="Reject"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Summary */}
+          {(accepted.size > 0 || rejected.size > 0) && (
+            <div className="flex gap-3 text-[10px] text-muted pt-1 border-t border-border/50">
+              <span className="text-green-400">{accepted.size} accepted</span>
+              <span className="text-red-400">{rejected.size} rejected</span>
+              <span>{pendingSuggestions.length} pending</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Mermaid DAG */}
       {renderError ? (
         <div className="text-sm text-error">
@@ -252,17 +503,14 @@ export default function DependencyGraph({ specId, workspaceId, runId }: Dependen
                   {i + 1}
                 </span>
                 <div className="flex flex-wrap gap-1">
-                  {group.map(id => {
-                    const node = graph.nodes.find(n => n.id === id);
-                    return (
-                      <span
-                        key={id}
-                        className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-panel border border-border text-text"
-                      >
-                        {id}
-                      </span>
-                    );
-                  })}
+                  {group.map(id => (
+                    <span
+                      key={id}
+                      className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-panel border border-border text-text"
+                    >
+                      {id}
+                    </span>
+                  ))}
                 </div>
                 {group.length > 1 && (
                   <span className="text-[10px] text-muted">(parallel)</span>
@@ -287,6 +535,12 @@ export default function DependencyGraph({ specId, workspaceId, runId }: Dependen
             <span className="text-muted">{item.label}</span>
           </div>
         ))}
+        {suggestions.length > 0 && (
+          <div className="flex items-center gap-1.5 ml-2 pl-2 border-l border-border">
+            <span className="inline-block w-5 h-0.5 border-t-2 border-dashed border-accent" />
+            <span className="text-muted">Suggested</span>
+          </div>
+        )}
       </div>
     </div>
   );
