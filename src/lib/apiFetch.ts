@@ -1,5 +1,23 @@
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3030';
 
+// Global error listeners — components subscribe to receive API error notifications
+type ErrorListener = (message: string) => void;
+const errorListeners = new Set<ErrorListener>();
+
+export function onApiFetchError(listener: ErrorListener): () => void {
+  errorListeners.add(listener);
+  return () => { errorListeners.delete(listener); };
+}
+
+function notifyError(message: string) {
+  errorListeners.forEach((fn) => fn(message));
+}
+
+// Custom event for 401 auth failures (components listen via window event)
+export function dispatch401() {
+  window.dispatchEvent(new CustomEvent('rorcha:auth-expired'));
+}
+
 // In-memory token storage (not localStorage — XSS safety)
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
@@ -93,9 +111,16 @@ export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> 
       }
     }
 
+    dispatch401();
+    const msg401 = body?.error || 'Unauthorized';
+    notifyError(msg401);
     throw new Error(`401 ${body ? JSON.stringify(body) : 'Unauthorized'}`);
   }
 
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    notifyError(`${res.status}: ${errText.slice(0, 200)}`);
+    throw new Error(`${res.status} ${errText}`);
+  }
   return res.json() as Promise<T>;
 }

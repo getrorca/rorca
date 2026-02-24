@@ -1374,7 +1374,8 @@
       "dependsOn": [],
       "passes": false,
       "skipped": true,
-      "notes": "Skipped after max retries \u2014 fix manually and re-run with --story V2-082"
+      "notes": "Skipped after max retries \u2014 fix manually and re-run with --story V2-082",
+      "excluded": false
     },
     {
       "id": "V2-083",
@@ -1462,7 +1463,8 @@
       "dependsOn": [
         "V2-006"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "V2-088",
