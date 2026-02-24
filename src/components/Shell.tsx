@@ -5,6 +5,8 @@ import { useAuth } from '../contexts/AuthContext';
 import { useHelpTips } from '../contexts/HelpTipsContext';
 import AddWorkspaceModal from './AddWorkspaceModal';
 import ThemeToggle from './ThemeToggle';
+import NotificationBell from './NotificationBell';
+import type { PanelId } from './Sidebar';
 
 function WorkspaceSelector() {
   const { workspaceId, setWorkspaceId, workspaces, addWorkspace } = useWorkspace();
@@ -127,9 +129,10 @@ interface ShellProps {
   children?: React.ReactNode;
   onMenuToggle?: () => void;
   showMenuButton?: boolean;
+  onNavigate?: (panel: PanelId) => void;
 }
 
-export default function Shell({ sidebar, children, onMenuToggle, showMenuButton }: ShellProps) {
+export default function Shell({ sidebar, children, onMenuToggle, showMenuButton, onNavigate }: ShellProps) {
   return (
     <div className="h-screen flex flex-col bg-bg">
       {/* Top Nav — 48px */}
@@ -150,6 +153,7 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton 
         <div className="flex items-center gap-1 sm:gap-2">
           <WorkspaceSelector />
           <ShowTipsToggle />
+          <NotificationBell onNavigate={onNavigate} />
           <ThemeToggle />
           <UserMenu />
         </div>
