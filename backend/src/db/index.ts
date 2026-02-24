@@ -302,6 +302,12 @@ export function runMigrations() {
     db.exec("ALTER TABLE model_pricing ADD COLUMN effective_date TEXT DEFAULT ''");
     db.exec("UPDATE model_pricing SET effective_date = datetime('now') WHERE effective_date = ''");
   }
+
+  // V2-115: Add base_url column to api_key_vault for OpenAI-compat configurable endpoints (idempotent)
+  const vaultCols = db.pragma('table_info(api_key_vault)') as { name: string }[];
+  if (!vaultCols.some(c => c.name === 'base_url')) {
+    db.exec('ALTER TABLE api_key_vault ADD COLUMN base_url TEXT');
+  }
 }
 
 runMigrations();
