@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import simpleGit from 'simple-git';
+import path from 'path';
 import { db } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 
@@ -183,7 +184,6 @@ router.post('/', async (req: Request, res: Response) => {
     const git = simpleGit(workspace.path);
 
     // Derive worktree path: {workspacePath}/../{repoName}-{branchSlug}
-    const path = await import('path');
     const repoName = path.basename(workspace.path);
     const branchSlug = branchName.replace(/\//g, '-');
     const targetPath = worktreePath || path.resolve(workspace.path, '..', `${repoName}-${branchSlug}`);
@@ -267,6 +267,153 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
   }
 });
 
+// ─── Conflict parsing helper ────────────────────────────────────────────────
+
+interface ConflictFile {
+  path: string;
+  markers: string;
+}
+
+/**
+ * Parse conflict markers from files in the working directory after a failed merge.
+ * Reads each conflicting file and extracts the sections between <<<<<<< and >>>>>>>
+ */
+async function extractConflictMarkers(git: ReturnType<typeof simpleGit>, repoPath: string, conflictPaths: string[]): Promise<ConflictFile[]> {
+  const fs = await import('fs/promises');
+  const results: ConflictFile[] = [];
+
+  for (const filePath of conflictPaths) {
+    const absPath = path.join(repoPath, filePath);
+    try {
+      const content = await fs.readFile(absPath, 'utf-8');
+      // Extract conflict sections (everything between <<<<<<< and >>>>>>>)
+      const markers: string[] = [];
+      const lines = content.split('\n');
+      let inConflict = false;
+      let section: string[] = [];
+
+      for (const line of lines) {
+        if (line.startsWith('<<<<<<<')) {
+          inConflict = true;
+          section = [line];
+        } else if (line.startsWith('>>>>>>>') && inConflict) {
+          section.push(line);
+          markers.push(section.join('\n'));
+          inConflict = false;
+          section = [];
+        } else if (inConflict) {
+          section.push(line);
+        }
+      }
+
+      results.push({ path: filePath, markers: markers.join('\n\n---\n\n') || '(conflict markers not found)' });
+    } catch {
+      results.push({ path: filePath, markers: '(unable to read file)' });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * @swagger
+ * /api/worktrees/merge/preview:
+ *   post:
+ *     tags: [Worktrees]
+ *     summary: Dry-run merge to detect conflicts
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, branchName]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               branchName: { type: string }
+ *     responses:
+ *       200:
+ *         description: Merge preview result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 canMerge: { type: boolean }
+ *                 hasConflicts: { type: boolean }
+ *                 conflictFiles: { type: array, items: { type: object, properties: { path: { type: string }, markers: { type: string } } } }
+ *                 filesChanged: { type: number }
+ */
+router.post('/merge/preview', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, branchName } = req.body;
+
+    if (!workspaceId || !branchName) {
+      res.status(400).json({ error: 'Missing required fields: workspaceId, branchName' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const git = simpleGit(workspace.path);
+
+    // Get diff stats to show what would change
+    let filesChanged = 0;
+    try {
+      const diffOutput = await git.raw(['diff', '--stat', `HEAD...${branchName}`]);
+      const statLine = diffOutput.trim().split('\n').pop() || '';
+      const match = statLine.match(/(\d+)\s+files?\s+changed/);
+      filesChanged = match ? parseInt(match[1], 10) : 0;
+    } catch {
+      // If diff fails (e.g., branch doesn't exist), we'll catch it in the merge attempt below
+    }
+
+    // Attempt a dry-run merge using --no-commit --no-ff, then abort
+    try {
+      await git.merge([branchName, '--no-commit', '--no-ff']);
+      // If merge succeeds without conflicts, abort it (dry-run)
+      await git.merge(['--abort']);
+      res.json({ canMerge: true, hasConflicts: false, conflictFiles: [], filesChanged });
+    } catch (mergeError: any) {
+      if (mergeError.message?.includes('CONFLICT') || mergeError.message?.includes('Automatic merge failed')) {
+        // Merge failed with conflicts — extract conflict info before aborting
+        let conflictFiles: ConflictFile[] = [];
+        try {
+          // Get list of unmerged files
+          const statusOutput = await git.raw(['diff', '--name-only', '--diff-filter=U']);
+          const conflictPaths = statusOutput.trim().split('\n').filter(Boolean);
+          conflictFiles = await extractConflictMarkers(git, workspace.path, conflictPaths);
+        } catch {
+          // Fallback: parse conflict file list from error message
+          const conflictMatch = mergeError.message.match(/CONFLICT \([^)]+\): Merge conflict in (.+)/g);
+          if (conflictMatch) {
+            conflictFiles = conflictMatch.map((line: string) => {
+              const fileMatch = line.match(/Merge conflict in (.+)/);
+              return { path: fileMatch?.[1] || 'unknown', markers: '' };
+            });
+          }
+        }
+
+        // Always abort the failed merge to restore clean state
+        try { await git.merge(['--abort']); } catch { /* already aborted */ }
+
+        res.json({ canMerge: false, hasConflicts: true, conflictFiles, filesChanged });
+      } else {
+        // Non-conflict error — try to abort and propagate
+        try { await git.merge(['--abort']); } catch { /* nothing to abort */ }
+        throw mergeError;
+      }
+    }
+  } catch (error: any) {
+    console.error('[Worktrees] Merge preview error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 /**
  * @swagger
  * /api/worktrees/merge:
@@ -283,13 +430,31 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
  *             properties:
  *               workspaceId: { type: string }
  *               branchName: { type: string }
+ *               force: { type: boolean, description: "Accept target branch version for all conflicts" }
  *     responses:
- *       200: { description: "Merged", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
- *       409: { description: "Merge conflict", content: { application/json: { schema: { type: object, properties: { conflict: { type: boolean }, details: { type: string } } } } } }
+ *       200:
+ *         description: Merged
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 mergeCommitSha: { type: string }
+ *       409:
+ *         description: Merge conflict
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 conflict: { type: boolean }
+ *                 details: { type: string }
+ *                 conflictFiles: { type: array, items: { type: object } }
  */
 router.post('/merge', async (req: Request, res: Response) => {
   try {
-    const { workspaceId, branchName } = req.body;
+    const { workspaceId, branchName, force } = req.body;
 
     if (!workspaceId || !branchName) {
       res.status(400).json({ error: 'Missing required fields: workspaceId, branchName' });
@@ -303,16 +468,50 @@ router.post('/merge', async (req: Request, res: Response) => {
     }
 
     const git = simpleGit(workspace.path);
-    await git.merge([branchName, '--no-ff']);
 
-    emitWalEvent('worktree_merged', workspaceId, { branchName });
+    if (force) {
+      // Force merge: use -X theirs to auto-resolve conflicts in favor of the incoming branch
+      try {
+        await git.merge([branchName, '--no-ff', '-X', 'theirs']);
+      } catch (mergeError: any) {
+        // Even -X theirs can fail on delete/modify conflicts; handle those
+        if (mergeError.message?.includes('CONFLICT')) {
+          try { await git.merge(['--abort']); } catch { /* already clean */ }
+          res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles: [] });
+          return;
+        }
+        throw mergeError;
+      }
+    } else {
+      try {
+        await git.merge([branchName, '--no-ff']);
+      } catch (mergeError: any) {
+        if (mergeError.message?.includes('CONFLICT') || mergeError.message?.includes('Automatic merge failed')) {
+          // Extract conflict file list before aborting
+          let conflictFiles: ConflictFile[] = [];
+          try {
+            const statusOutput = await git.raw(['diff', '--name-only', '--diff-filter=U']);
+            const conflictPaths = statusOutput.trim().split('\n').filter(Boolean);
+            conflictFiles = await extractConflictMarkers(git, workspace.path, conflictPaths);
+          } catch { /* fallback without conflict details */ }
 
-    res.json({ ok: true });
-  } catch (error: any) {
-    if (error.message?.includes('CONFLICT')) {
-      res.status(409).json({ conflict: true, details: error.message });
-      return;
+          try { await git.merge(['--abort']); } catch { /* already aborted */ }
+
+          res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles });
+          return;
+        }
+        throw mergeError;
+      }
     }
+
+    // Get the merge commit SHA
+    const logOutput = await git.raw(['rev-parse', 'HEAD']);
+    const mergeCommitSha = logOutput.trim();
+
+    emitWalEvent('worktree_merged', workspaceId, { branchName, mergeCommitSha });
+
+    res.json({ ok: true, mergeCommitSha });
+  } catch (error: any) {
     console.error('[Worktrees] Merge error:', error);
     res.status(500).json({ error: error.message });
   }
