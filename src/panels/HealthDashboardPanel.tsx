@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { HeartPulse, Database, Clock, Cpu, HardDrive, FileText, RefreshCw, AlertTriangle, CheckCircle } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { BASE_URL } from '../lib/apiFetch';
 
 interface HealthBasic {
   status: string;
@@ -73,7 +74,7 @@ export default function HealthDashboardPanel() {
 
   const fetchHealth = useCallback(async () => {
     try {
-      const res = await fetch('http://localhost:3030/api/health/detailed');
+      const res = await fetch(`${BASE_URL}/api/health/detailed`);
       const data = await res.json() as HealthDetailed;
       setHealth(data);
       setError(null);

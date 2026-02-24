@@ -8,7 +8,12 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 export function runMigrations() {
-  const migrationsDir = path.join(__dirname, 'migrations');
+  // Migrations are .sql files in src/db/migrations/ — resolve for both dev (tsx) and compiled (dist/) modes
+  let migrationsDir = path.join(__dirname, 'migrations');
+  if (!fs.existsSync(migrationsDir)) {
+    // Running from compiled backend/dist/db/ — look at source directory
+    migrationsDir = path.join(__dirname, '..', '..', 'src', 'db', 'migrations');
+  }
   const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
   for (const file of files) {
     const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');

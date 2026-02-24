@@ -3,7 +3,7 @@ import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, Gr
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 import { HelpTooltip } from '../components/HelpTooltip';
@@ -827,7 +827,7 @@ export default function PipelineMonitorPanel() {
                 {selectedRunId && (
                   <div className="flex justify-end px-2 py-1 border-b border-[var(--border)] shrink-0">
                     <a
-                      href={`${import.meta.env.VITE_API_URL || 'http://localhost:3030'}/api/pipeline/runs/${selectedRunId}/log`}
+                      href={`${BASE_URL}/api/pipeline/runs/${selectedRunId}/log`}
                       download={`run-${selectedRunId}.log`}
                       className="flex items-center gap-1 px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] rounded transition-colors hover:bg-[var(--surface-hover)]"
                       title="Download log file"
