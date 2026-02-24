@@ -55,6 +55,7 @@ interface PipelineRunRow {
   trigger_type: string;
   started_at: string;
   finished_at: string | null;
+  retried_from_run_id: number | null;
 }
 
 interface StoryResultRow {
@@ -725,45 +726,43 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
  */
 router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
   try {
-    const runId = parseInt(String(req.params.runId), 10);
-    if (isNaN(runId)) {
+    const originalRunId = parseInt(String(req.params.runId), 10);
+    if (isNaN(originalRunId)) {
       res.status(400).json({ error: 'Invalid runId' });
       return;
     }
 
     const { storyIds } = req.body as { storyIds?: string[] };
 
-    // 1. Fetch the run
-    const run = db.prepare(
+    // 1. Fetch the original run
+    const originalRun = db.prepare(
       'SELECT * FROM pipeline_runs WHERE id = ?'
-    ).get(runId) as PipelineRunRow | undefined;
+    ).get(originalRunId) as PipelineRunRow | undefined;
 
-    if (!run) {
+    if (!originalRun) {
       res.status(404).json({ error: 'Run not found' });
       return;
     }
 
     // Only retry runs that have terminal failure states
-    if (!['failed', 'done', 'partial_failure'].includes(run.status)) {
-      res.status(409).json({ error: `Cannot retry run with status '${run.status}'` });
+    if (!['failed', 'done', 'partial_failure'].includes(originalRun.status)) {
+      res.status(409).json({ error: `Cannot retry run with status '${originalRun.status}'` });
       return;
     }
 
-    // 2. Find failed stories for this run
+    // 2. Find all stories and their latest status from the original run
     const allStories = db.prepare(
       'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
-    ).all(runId) as StoryResultRow[];
+    ).all(originalRunId) as StoryResultRow[];
 
-    // Get the latest result per story_id (highest retry count)
+    // Get the latest result per story_id (last row wins — ordered by id ASC)
     const latestByStory = new Map<string, StoryResultRow>();
     for (const s of allStories) {
-      const existing = latestByStory.get(s.story_id);
-      if (!existing || s.retries > existing.retries) {
-        latestByStory.set(s.story_id, s);
-      }
+      latestByStory.set(s.story_id, s);
     }
 
     const failedStories = Array.from(latestByStory.values()).filter(s => s.status === 'fail');
+    const passedStories = Array.from(latestByStory.values()).filter(s => s.status === 'pass');
 
     if (failedStories.length === 0) {
       res.status(422).json({ error: 'No failed stories to retry' });
@@ -783,7 +782,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     }
 
     // 4. Look up workspace
-    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(run.workspace_id) as
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(originalRun.workspace_id) as
       { id: string; label: string; path: string } | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -791,16 +790,49 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     }
 
     // 5. Verify run-loop.sh exists
-    const cwd = run.worktree_path || workspace.path;
+    const cwd = originalRun.worktree_path || workspace.path;
     const runLoopScript = path.join(cwd, 'scripts', 'run-loop.sh');
     if (!fs.existsSync(runLoopScript)) {
       res.status(422).json({ error: `run-loop.sh not found at ${runLoopScript}` });
       return;
     }
 
-    // 6. Create new story_result rows with incremented retry count + emit WAL events
-    const newStoryResults: Array<{ storyId: string; attempt: number }> = [];
-    const insertStory = db.prepare(
+    // 6. Create a NEW pipeline_run linked to the original via retried_from_run_id
+    const newRunResult = db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id)
+       VALUES (?, ?, 'running', 'retry', ?, ?, ?)`
+    ).run(
+      originalRun.spec_path,
+      originalRun.workspace_id,
+      originalRun.branch_name,
+      originalRun.worktree_path,
+      originalRunId,
+    );
+    const newRunId = newRunResult.lastInsertRowid as number;
+
+    // 7. Copy successful story results from the original run to the new run
+    const insertCopied = db.prepare(
+      `INSERT INTO story_results (run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const passed of passedStories) {
+      insertCopied.run(
+        newRunId,
+        passed.story_id,
+        'pass',
+        passed.retries,
+        passed.log_path,
+        passed.started_at,
+        passed.finished_at,
+        passed.elapsed_seconds,
+        passed.input_tokens,
+        passed.output_tokens,
+      );
+    }
+
+    // 8. Insert 'retry' placeholder rows for stories being retried + emit WAL events
+    const retriedStoryInfo: Array<{ storyId: string; attempt: number }> = [];
+    const insertRetryStory = db.prepare(
       `INSERT INTO story_results (run_id, story_id, status, retries) VALUES (?, ?, 'retry', ?)`
     );
     const insertWal = db.prepare(
@@ -809,29 +841,37 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
 
     for (const story of storiesToRetry) {
       const attempt = story.retries + 1;
-      insertStory.run(runId, story.story_id, attempt);
+      insertRetryStory.run(newRunId, story.story_id, attempt);
 
       const walResult = insertWal.run(
-        run.workspace_id,
+        originalRun.workspace_id,
         story.story_id,
-        JSON.stringify({ run_id: runId, story_id: story.story_id, attempt })
+        JSON.stringify({ run_id: newRunId, original_run_id: originalRunId, story_id: story.story_id, attempt }),
       );
-
       const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
         walResult.lastInsertRowid
       ) as WalEvent;
       broadcastAll(walEvent);
 
-      newStoryResults.push({ storyId: story.story_id, attempt });
+      retriedStoryInfo.push({ storyId: story.story_id, attempt });
     }
 
-    // 7. Transition run status to 'running'
-    db.prepare(
-      `UPDATE pipeline_runs SET status = 'running', finished_at = NULL WHERE id = ?`
-    ).run(runId);
+    // Emit run_started WAL event for the new retry run
+    const runStartWal = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_started', ?, ?)`
+    ).run(originalRun.workspace_id, JSON.stringify({
+      run_id: newRunId,
+      spec_path: originalRun.spec_path,
+      retried_from_run_id: originalRunId,
+      retried_stories: storiesToRetry.map(s => s.story_id),
+    }));
+    const runStartEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      runStartWal.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(runStartEvent);
 
-    // 8. Read the original spec and create a filtered version with only retry stories
-    const absSpecPath = path.join(workspace.path, 'scripts', run.spec_path);
+    // 9. Read the original spec and create a filtered version with only retry stories
+    const absSpecPath = path.join(workspace.path, 'scripts', originalRun.spec_path);
     if (!fs.existsSync(absSpecPath)) {
       res.status(422).json({ error: `Spec file not found at ${absSpecPath}` });
       return;
@@ -845,13 +885,13 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     };
 
     // Write temporary retry spec
-    const retrySpecName = `retry-${runId}-${Date.now()}.json`;
+    const retrySpecName = `retry-${newRunId}-${Date.now()}.json`;
     const retrySpecDir = path.join(workspace.path, 'scripts', 'ralph', 'specs', 'approved');
     const retrySpecPath = path.join(retrySpecDir, retrySpecName);
     fs.mkdirSync(retrySpecDir, { recursive: true });
     fs.writeFileSync(retrySpecPath, JSON.stringify(retrySpec, null, 2));
 
-    // 9. Build clean env
+    // 10. Build clean env
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
@@ -859,14 +899,13 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       }
     }
 
-    // 9b. Inject workspace-specific env vars (decrypted)
-    const wsEnvVars = getWorkspaceEnvVars(run.workspace_id);
+    const wsEnvVars = getWorkspaceEnvVars(originalRun.workspace_id);
     for (const [k, v] of Object.entries(wsEnvVars)) {
       env[k] = v;
     }
 
-    // 10. Spawn run-loop.sh with the retry spec — detached, output to log file
-    const retryLogPath = runLogPath(runId);
+    // 11. Spawn run-loop.sh with the retry spec — detached, output to log file
+    const retryLogPath = runLogPath(newRunId);
     const retryLogFd = fs.openSync(retryLogPath, 'a');
     const child = spawn('bash', [runLoopScript, '--json', retrySpecPath], {
       cwd,
@@ -878,12 +917,12 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     child.unref();
 
     if (child.pid) {
-      db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, runId);
+      db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, newRunId);
     }
 
-    // 11. Set up output buffer — tail log file for live streaming
+    // 12. Set up output buffer — tail log file for live streaming
     const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
-    outputBuffers.set(runId, buf);
+    outputBuffers.set(newRunId, buf);
 
     let retryTailPos = 0;
     const retryTailInterval = setInterval(() => {
@@ -902,7 +941,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       } catch { /* ignore */ }
     }, 200);
 
-    // 12. Handle process exit — determine final status based on story outcomes
+    // 13. Handle process exit — determine final status based on all story outcomes in new run
     child.on('exit', (code) => {
       clearInterval(retryTailInterval);
       try {
@@ -917,28 +956,21 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
         }
       } catch { /* ignore */ }
 
-      // Guard: DB may be closed if the process exits after test teardown
       if (!db.open) {
         buf.done = true;
         buf.subscribers.clear();
         return;
       }
 
-      // Check if all stories in this run are now passing
+      // Check all stories in the new run (copied passes + retried stories)
       const currentStories = db.prepare(
         'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
-      ).all(runId) as StoryResultRow[];
+      ).all(newRunId) as StoryResultRow[];
 
-      // Build latest status per story_id
+      // Build latest status per story_id (last row wins)
       const latest = new Map<string, string>();
       for (const s of currentStories) {
-        const existing = latest.get(s.story_id);
-        if (!existing) {
-          latest.set(s.story_id, s.status);
-        } else {
-          // Later rows (higher id) are more recent
-          latest.set(s.story_id, s.status);
-        }
+        latest.set(s.story_id, s.status);
       }
 
       const hasFailures = Array.from(latest.values()).some(st => st === 'fail');
@@ -946,12 +978,16 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
 
       db.prepare(
         `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
-      ).run(finalStatus, runId);
+      ).run(finalStatus, newRunId);
 
       const walResult = db.prepare(
         `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
-      ).run(run.workspace_id, JSON.stringify({ run_id: runId, status: finalStatus, exit_code: code }));
-
+      ).run(originalRun.workspace_id, JSON.stringify({
+        run_id: newRunId,
+        retried_from_run_id: originalRunId,
+        status: finalStatus,
+        exit_code: code,
+      }));
       const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
         walResult.lastInsertRowid
       ) as WalEvent;
@@ -961,7 +997,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`));
       buf.subscribers.clear();
       setTimeout(() => {
-        outputBuffers.delete(runId);
+        outputBuffers.delete(newRunId);
         try { fs.unlinkSync(retryLogPath); } catch { /* already gone */ }
       }, 30 * 60 * 1000);
 
@@ -969,10 +1005,12 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       try { fs.unlinkSync(retrySpecPath); } catch { /* ignore */ }
     });
 
-    res.status(200).json({
+    res.status(201).json({
       ok: true,
-      runId,
-      retriedStories: newStoryResults,
+      runId: newRunId,
+      originalRunId: originalRunId,
+      retriedStories: retriedStoryInfo,
+      copiedStories: passedStories.map(s => s.story_id),
     });
   } catch (error: any) {
     console.error('[Pipeline] Retry error:', error);
