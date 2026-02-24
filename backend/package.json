@@ -21,6 +21,7 @@
     "js-yaml": "^4.1.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.0.2",
+    "openai": "^6.24.0",
     "simple-git": "^3.27.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",

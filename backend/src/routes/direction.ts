@@ -2,7 +2,8 @@ import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { chatComplete } from '../lib/llm-client';
-import { isValidModel, SUPPORTED_MODELS, MODEL_INFO, DEFAULT_MODEL } from '../lib/llm-client';
+import { isValidModel, SUPPORTED_MODELS, DEFAULT_MODEL, ALL_MODELS, getModelsForProviders } from '../lib/llm-client';
+import type { ProviderType } from '../lib/llm-client';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 
 const router = Router();
@@ -268,19 +269,44 @@ router.get('/models', (req: Request, res: Response) => {
 
   const recommendedId = workspaceDefault || DEFAULT_MODEL;
 
+  // Determine which providers the user has configured (vault keys + claude-cli always available)
+  const configuredProviders: ProviderType[] = ['claude-cli'];
+
+  // Check vault for stored API keys (any user — vault keys indicate configured providers)
+  const vaultProviders = db.prepare(
+    'SELECT DISTINCT provider FROM api_key_vault'
+  ).all() as { provider: string }[];
+  for (const row of vaultProviders) {
+    if (['anthropic', 'openai-compat', 'openrouter'].includes(row.provider)) {
+      configuredProviders.push(row.provider as ProviderType);
+    }
+  }
+
+  // Also check env vars for API keys
+  if (process.env.ANTHROPIC_API_KEY && !configuredProviders.includes('anthropic')) {
+    configuredProviders.push('anthropic');
+  }
+  if (process.env.OPENROUTER_API_KEY && !configuredProviders.includes('openrouter')) {
+    configuredProviders.push('openrouter');
+  }
+  if (process.env.OPENAI_API_KEY && !configuredProviders.includes('openai-compat')) {
+    configuredProviders.push('openai-compat');
+  }
+
+  const models = getModelsForProviders(configuredProviders);
+
   res.json({
-    models: SUPPORTED_MODELS.map(id => {
-      const info = MODEL_INFO[id];
-      return {
-        id,
-        label: info.label,
-        provider: info.provider,
-        costPer1kInput: info.costPer1kInput,
-        costPer1kOutput: info.costPer1kOutput,
-        recommended: id === recommendedId,
-      };
-    }),
+    models: models.map(info => ({
+      id: info.id,
+      label: info.label,
+      provider: info.provider,
+      providerType: info.providerType,
+      costPer1kInput: info.costPer1kInput,
+      costPer1kOutput: info.costPer1kOutput,
+      recommended: info.id === recommendedId,
+    })),
     defaultModel: recommendedId,
+    configuredProviders,
   });
 });
 

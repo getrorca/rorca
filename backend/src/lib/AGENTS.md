@@ -6,7 +6,7 @@ Core service libraries. None are Express routes — they're pure logic called by
 
 | File | Purpose |
 |------|---------|
-| `llm-client.ts` | OpenRouter chat API wrapper. Returns `ChatResult { text, usage }` |
+| `llm-client.ts` | Multi-provider LLM abstraction (claude-cli, anthropic, openai-compat, openrouter). Returns `ChatResult { text, usage }` |
 | `sse-hub.ts` | WAL event broadcast to SSE subscribers |
 | `direction-stack.ts` | Synthesize all 5 layers into a single context string |
 | `schema-hydrator.ts` | Extract CREATE TABLE blocks from migrations/*.sql (no DB connection) |
@@ -20,15 +20,24 @@ Core service libraries. None are Express routes — they're pure logic called by
 ```typescript
 import { chatComplete } from '../lib/llm-client';
 
+// Default (claude-cli, uses Claude subscription)
 const result = await chatComplete([{ role: 'user', content: prompt }]);
+
+// Explicit provider + model
+const result2 = await chatComplete(messages, {
+  provider: 'openai-compat',
+  model: 'gpt-4o',
+  apiKey: '...',
+  baseUrl: 'https://api.openai.com/v1',
+});
+
 const text = result.text;       // ALWAYS use .text — result is ChatResult, NOT a string
 const usage = result.usage;     // { inputTokens, outputTokens }
 ```
 
-**Supported models** (pass as first arg or use default):
-- `claude-sonnet-4-5-20250929`
-- `claude-opus-4-6` (default)
-- `claude-haiku-4-5-20251001`
+**Providers**: `claude-cli` (default, subscription), `anthropic` (SDK), `openai-compat` (OpenAI/Groq/Together/DeepSeek/Mistral/Ollama), `openrouter` (Gemini/Grok/etc)
+
+**Provider resolution order**: explicit `opts.provider` → model registry lookup → apiKey implies `anthropic` → `claude-cli`
 
 **Critical**: removes all 4 Claude Code env vars before spawning nested processes (so Claude Code can invoke Claude Code). This is already done in `llm-client.ts` — don't duplicate in other files.
 
