@@ -39,6 +39,7 @@ import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
 import { rateLimiter } from './lib/rate-limiter';
+import { errorHandler } from './lib/error-handler';
 
 dotenv.config();
 
@@ -107,6 +108,9 @@ app.use('/api/onboarding', onboardingRouter);
 app.use('/api/admin', backupsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/settings', settingsRouter);
+
+// V2-094: Centralized error handler (must be after all routes)
+app.use(errorHandler);
 
 // V2-069: Subscribe agent hook runner to all WAL broadcasts
 subscribe(fireAgentHooks);
