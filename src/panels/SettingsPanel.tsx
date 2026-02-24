@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, Bell, Key, Monitor, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check } from 'lucide-react';
+import { User, Bell, Key, Monitor, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -144,6 +144,11 @@ function ProfileSection() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSaved, setPasswordSaved] = useState(false);
 
+  // Email verification resend
+  const [verificationSending, setVerificationSending] = useState(false);
+  const [verificationSent, setVerificationSent] = useState(false);
+  const [verificationError, setVerificationError] = useState<string | null>(null);
+
   useEffect(() => {
     apiFetch<ProfileData>('/api/settings/profile')
       .then(data => {
@@ -215,6 +220,42 @@ function ProfileSection() {
               disabled
               className="w-full px-3 py-2 text-sm bg-bg border border-border rounded opacity-60 cursor-not-allowed"
             />
+            {user && !user.emailVerified && (
+              <div className="mt-2 flex items-center gap-2 text-xs">
+                <Mail size={12} className="text-amber-500" />
+                <span className="text-amber-400">Email not verified</span>
+                <button
+                  onClick={async () => {
+                    if (!user.email) return;
+                    setVerificationSending(true);
+                    setVerificationError(null);
+                    setVerificationSent(false);
+                    try {
+                      await apiFetch('/api/auth/resend-verification', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: user.email }),
+                      });
+                      setVerificationSent(true);
+                    } catch (err: any) {
+                      setVerificationError(err.message || 'Failed to resend');
+                    } finally {
+                      setVerificationSending(false);
+                    }
+                  }}
+                  disabled={verificationSending || verificationSent}
+                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2 disabled:opacity-50"
+                >
+                  {verificationSending ? 'Sending...' : verificationSent ? 'Sent!' : 'Resend verification'}
+                </button>
+                {verificationError && <span className="text-red-400">{verificationError}</span>}
+              </div>
+            )}
+            {user?.emailVerified && (
+              <div className="mt-2 flex items-center gap-1 text-xs text-green-500">
+                <Check size={12} /> Verified
+              </div>
+            )}
           </div>
 
           <div>
