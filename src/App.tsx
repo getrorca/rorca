@@ -1,16 +1,20 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { HelpTipsProvider } from './contexts/HelpTipsContext';
+import { ToastProvider, useGlobalToast } from './contexts/ToastContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
 import OnboardingWizard from './components/OnboardingWizard';
 import CommandPalette from './components/CommandPalette';
 import KeyboardShortcutsPanel from './components/KeyboardShortcutsPanel';
+import ErrorBoundary from './components/ErrorBoundary';
+import NetworkBanner from './components/NetworkBanner';
 import LoginPage from './components/LoginPage';
 import RegisterPage from './components/RegisterPage';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
+import { onApiFetchError } from './lib/apiFetch';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
 import DirectionStackPanel from './panels/DirectionStackPanel';
 import ReviewQueuePanel from './panels/ReviewQueuePanel';
@@ -57,6 +61,96 @@ function AuthGate() {
   );
 }
 
+/** Subscribes to apiFetch error events and unhandled rejections, shows toasts */
+function GlobalErrorWiring() {
+  const { show } = useGlobalToast();
+
+  // Track recent messages to avoid duplicate toasts (apiFetch errors + unhandled rejections)
+  const recentRef = useRef(new Set<string>());
+
+  const showDeduped = useCallback((message: string) => {
+    const key = message.slice(0, 100);
+    if (recentRef.current.has(key)) return;
+    recentRef.current.add(key);
+    setTimeout(() => recentRef.current.delete(key), 2000);
+    show(message, 'error');
+  }, [show]);
+
+  // API fetch errors → toast
+  useEffect(() => {
+    return onApiFetchError((message) => {
+      showDeduped(message);
+    });
+  }, [showDeduped]);
+
+  // Unhandled promise rejections → toast
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (detail) {
+        showDeduped(detail.slice(0, 200));
+      }
+    };
+    window.addEventListener('rorcha:unhandled-error', handler);
+    return () => window.removeEventListener('rorcha:unhandled-error', handler);
+  }, [showDeduped]);
+
+  return null;
+}
+
+/** Renders the active panel component */
+function ActivePanel({ id, onNavigate }: { id: PanelId; onNavigate: (p: PanelId) => void }) {
+  switch (id) {
+    case 'forge': return <SpecForgePanelPage />;
+    case 'stack': return <DirectionStackPanel />;
+    case 'team-direction': return <TeamDirectionPanel />;
+    case 'queue': return <ReviewQueuePanel />;
+    case 'pipeline': return <PipelineMonitorPanel />;
+    case 'worktrees': return <WorktreesPanel />;
+    case 'compare': return <CompareRunsPanel onBack={() => onNavigate('pipeline')} />;
+    case 'archive': return <ArchivePanel onNavigate={onNavigate} />;
+    case 'marketplace': return <TemplateMarketplacePanel />;
+    case 'usage': return <UsageDashboardPanel />;
+    case 'costs': return <CostBreakdownPanel />;
+    case 'models': return <ModelComparisonPanel />;
+    case 'velocity': return <VelocityChartPanel />;
+    case 'completion': return <CompletionRatePanel />;
+    case 'roi': return <RoiCalculatorPanel />;
+    case 'health': return <HealthDashboardPanel />;
+    case 'audit-log': return <AuditLogPanel />;
+    case 'activity': return <ActivityFeedPanel />;
+    case 'github': return <GitHubSettingsPanel />;
+    case 'workspace-settings': return <WorkspaceSettingsPanel />;
+    case 'settings': return <SettingsPanel />;
+    default: return null;
+  }
+}
+
+/** Panel label for ErrorBoundary fallback */
+const PANEL_LABELS: Record<PanelId, string> = {
+  forge: 'Spec Forge',
+  stack: 'Direction Stack',
+  'team-direction': 'Team Direction',
+  queue: 'Review Queue',
+  pipeline: 'Pipeline Monitor',
+  worktrees: 'Worktree Manager',
+  compare: 'Compare Runs',
+  archive: 'Archive',
+  marketplace: 'Template Marketplace',
+  usage: 'Token Usage',
+  costs: 'Cost Breakdown',
+  models: 'Model Comparison',
+  velocity: 'Velocity Chart',
+  completion: 'Completion Rates',
+  roi: 'ROI Calculator',
+  health: 'Health Dashboard',
+  'audit-log': 'Audit Log',
+  activity: 'Activity Feed',
+  github: 'GitHub Settings',
+  'workspace-settings': 'Workspace Settings',
+  settings: 'Settings',
+};
+
 function AppContent() {
   const [activePanel, setActivePanel] = useState<PanelId>('forge');
   const { workspaces } = useWorkspace();
@@ -98,27 +192,10 @@ function AppContent() {
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
       onNavigate={setActivePanel}
     >
-      {activePanel === 'forge'           && <SpecForgePanelPage />}
-      {activePanel === 'stack'           && <DirectionStackPanel />}
-      {activePanel === 'team-direction'  && <TeamDirectionPanel />}
-      {activePanel === 'queue'           && <ReviewQueuePanel />}
-      {activePanel === 'pipeline'  && <PipelineMonitorPanel />}
-      {activePanel === 'worktrees' && <WorktreesPanel />}
-      {activePanel === 'compare'   && <CompareRunsPanel onBack={() => setActivePanel('pipeline')} />}
-      {activePanel === 'archive'   && <ArchivePanel onNavigate={setActivePanel} />}
-      {activePanel === 'marketplace' && <TemplateMarketplacePanel />}
-      {activePanel === 'usage'     && <UsageDashboardPanel />}
-      {activePanel === 'costs'     && <CostBreakdownPanel />}
-      {activePanel === 'models'    && <ModelComparisonPanel />}
-      {activePanel === 'velocity'  && <VelocityChartPanel />}
-      {activePanel === 'completion' && <CompletionRatePanel />}
-      {activePanel === 'roi'       && <RoiCalculatorPanel />}
-      {activePanel === 'health'    && <HealthDashboardPanel />}
-      {activePanel === 'audit-log' && <AuditLogPanel />}
-      {activePanel === 'activity'  && <ActivityFeedPanel />}
-      {activePanel === 'github'   && <GitHubSettingsPanel />}
-      {activePanel === 'workspace-settings' && <WorkspaceSettingsPanel />}
-      {activePanel === 'settings' && <SettingsPanel />}
+      {/* key={activePanel} resets ErrorBoundary when switching panels */}
+      <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel]}>
+        <ActivePanel id={activePanel} onNavigate={setActivePanel} />
+      </ErrorBoundary>
       {showCommandPalette && (
         <CommandPalette
           onNavigate={setActivePanel}
@@ -136,9 +213,13 @@ function App() {
   return (
     <ThemeProvider>
       <HelpTipsProvider>
-        <AuthProvider>
-          <AuthGate />
-        </AuthProvider>
+        <ToastProvider>
+          <AuthProvider>
+            <NetworkBanner />
+            <GlobalErrorWiring />
+            <AuthGate />
+          </AuthProvider>
+        </ToastProvider>
       </HelpTipsProvider>
     </ThemeProvider>
   );

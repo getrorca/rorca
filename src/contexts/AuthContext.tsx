@@ -97,6 +97,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.href = `${base}/api/auth/github`;
   }, []);
 
+  // On 401 (auth expired) — clear session so AuthGate redirects to login
+  useEffect(() => {
+    const handler = () => {
+      clearTokens();
+      setUser(null);
+      // Store current panel/path as return URL for post-login redirect
+      try {
+        sessionStorage.setItem('rorcha:returnUrl', window.location.href);
+      } catch { /* sessionStorage unavailable */ }
+    };
+    window.addEventListener('rorcha:auth-expired', handler);
+    return () => window.removeEventListener('rorcha:auth-expired', handler);
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       const rt = getRefreshToken();
