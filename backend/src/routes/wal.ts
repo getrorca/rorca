@@ -1,5 +1,6 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
+import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
 const router = Router();
@@ -92,6 +93,42 @@ router.get('/', (req, res) => {
     ...result,
     eventTypes: eventTypes.map(r => r.event_type),
   });
+});
+
+/**
+ * POST /api/wal
+ * Insert a WAL event (used by run-loop.ts to report story progress).
+ * Broadcasts to all SSE subscribers.
+ */
+router.post('/', (req: Request, res: Response) => {
+  try {
+    const { event_type, workspace_id, story_id, spec_id, payload } = req.body;
+    if (!event_type) {
+      res.status(400).json({ error: 'event_type is required' });
+      return;
+    }
+
+    const result = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(
+      event_type,
+      workspace_id ?? null,
+      spec_id ?? null,
+      story_id ?? null,
+      payload ? JSON.stringify(payload) : null,
+    );
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      result.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.status(201).json({ ok: true, id: result.lastInsertRowid });
+  } catch (error: any) {
+    console.error('[WAL] POST error:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;
