@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import Stripe from 'stripe';
 import { db } from '../db';
 
 const router = Router();
@@ -797,6 +798,101 @@ router.post('/reset-password', (req: Request, res: Response) => {
   ).run(JSON.stringify({ userId: resetToken.user_id, email: user?.email }));
 
   res.json({ message: 'Password has been reset successfully. Please sign in with your new password.' });
+});
+
+// ─── Account Deletion (GDPR Article 17) ───
+
+/**
+ * @swagger
+ * /api/auth/account:
+ *   delete:
+ *     tags: [Auth]
+ *     summary: Permanently delete user account and all associated data
+ *     description: |
+ *       Irreversible account deletion per GDPR Article 17 (Right to Erasure).
+ *       Cancels active Stripe subscription, deletes all user data via CASCADE,
+ *       and logs a final confirmation.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [password]
+ *             properties:
+ *               password: { type: string, description: "Current password for confirmation" }
+ *     responses:
+ *       200: { description: "Account permanently deleted" }
+ *       400: { description: "Password is required" }
+ *       401: { description: "Not authenticated" }
+ *       403: { description: "Incorrect password" }
+ */
+router.delete('/account', authRequired, async (req: Request, res: Response) => {
+  const authReq = req as Request & { user: AuthUser };
+  const { password } = req.body;
+
+  if (!password || typeof password !== 'string') {
+    res.status(400).json({ error: 'Password is required to confirm account deletion' });
+    return;
+  }
+
+  // Verify the user still exists
+  const user = db.prepare(
+    'SELECT id, email, password_hash FROM users WHERE id = ?'
+  ).get(authReq.user.id) as Pick<UserRow, 'id' | 'email' | 'password_hash'> | undefined;
+
+  if (!user) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  // GitHub-only accounts have unusable password hashes (prefix: "github:")
+  if (user.password_hash.startsWith('github:')) {
+    res.status(400).json({ error: 'GitHub-only accounts cannot be deleted via password. Please disconnect GitHub first and set a password.' });
+    return;
+  }
+
+  // Verify password
+  if (!bcrypt.compareSync(password, user.password_hash)) {
+    res.status(403).json({ error: 'Incorrect password' });
+    return;
+  }
+
+  // Cancel active Stripe subscription if present
+  const subscription = db.prepare(
+    `SELECT stripe_subscription_id, stripe_customer_id FROM subscriptions
+     WHERE user_id = ? AND status IN ('active', 'past_due') AND stripe_subscription_id IS NOT NULL`
+  ).get(user.id) as { stripe_subscription_id: string; stripe_customer_id: string } | undefined;
+
+  if (subscription?.stripe_subscription_id) {
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+    if (stripeKey) {
+      try {
+        const stripe = new Stripe(stripeKey);
+        await stripe.subscriptions.cancel(subscription.stripe_subscription_id);
+      } catch (err) {
+        console.error(`[auth] Failed to cancel Stripe subscription ${subscription.stripe_subscription_id} for user ${user.id}:`, err);
+        // Proceed with deletion even if Stripe cancel fails — the webhook will eventually reconcile
+      }
+    }
+  }
+
+  // Emit WAL event BEFORE deletion (so we have an audit trail)
+  db.prepare(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('account_deleted', '', ?)"
+  ).run(JSON.stringify({ userId: user.id, email: user.email, deletedAt: new Date().toISOString() }));
+
+  // Delete user — ON DELETE CASCADE handles:
+  // refresh_tokens, subscriptions, user_settings, github_connections, api_key_vault,
+  // teams (owned), team_members, team_invites (sent), password_reset_tokens,
+  // email_verification_tokens, notifications, notification_preferences, story_comments,
+  // spec_assignments (assignee)
+  db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
+
+  // Log final confirmation (Rorcha is local-first; email would go here in production)
+  console.log(`[auth] Account deleted: ${user.email} (id: ${user.id}). All data permanently removed.`);
+
+  res.json({ message: 'Your account and all associated data have been permanently deleted.' });
 });
 
 // ─── Token encryption helpers ───
