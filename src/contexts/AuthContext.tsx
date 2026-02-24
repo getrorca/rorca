@@ -7,6 +7,7 @@ export interface AuthUser {
   displayName: string;
   githubConnected?: boolean;
   emailVerified?: boolean;
+  plan?: 'free' | 'solo' | 'pro' | 'team';
 }
 
 interface AuthContextValue {

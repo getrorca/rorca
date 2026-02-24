@@ -52,6 +52,7 @@ export interface AuthUser {
   id: string;
   email: string;
   role: string;
+  plan?: string;
 }
 
 interface GitHubConnectionRow {
@@ -465,8 +466,8 @@ router.post('/logout', (req: Request, res: Response) => {
 router.get('/me', authRequired, (req: Request, res: Response) => {
   const authReq = req as Request & { user: AuthUser };
   const user = db.prepare(
-    'SELECT id, email, display_name, github_id, email_verified_at FROM users WHERE id = ?'
-  ).get(authReq.user.id) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> | undefined;
+    'SELECT id, email, display_name, github_id, email_verified_at, plan FROM users WHERE id = ?'
+  ).get(authReq.user.id) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> & { plan?: string } | undefined;
 
   if (!user) {
     res.status(401).json({ error: 'User not found' });
@@ -480,6 +481,7 @@ router.get('/me', authRequired, (req: Request, res: Response) => {
       displayName: user.display_name,
       githubConnected: !!user.github_id,
       emailVerified: !!user.email_verified_at,
+      plan: user.plan || 'free',
     },
   });
 });
