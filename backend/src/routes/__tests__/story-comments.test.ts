@@ -247,3 +247,78 @@ describe('GET /api/specs/:specId/comments/counts', () => {
     expect(res.body.counts).toEqual({});
   });
 });
+
+describe('@mention notifications', () => {
+  let mentionedUserId: string;
+
+  beforeEach(async () => {
+    // Register a second user to be mentioned
+    await request(app).post('/api/auth/register').send({
+      email: 'mentioned@example.com',
+      password: 'securepass123',
+      displayName: 'Mentioned User',
+    });
+    const row = db.prepare("SELECT id FROM users WHERE email = 'mentioned@example.com'").get() as { id: string };
+    mentionedUserId = row.id;
+  });
+
+  it('creates a notification when a user is @mentioned', async () => {
+    const res = await request(app)
+      .post(`/api/specs/${SPEC_ID}/stories/${STORY_ID}/comments`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ body: 'Hey @Mentioned User can you review this?' });
+
+    expect(res.status).toBe(201);
+
+    const notif = db.prepare(
+      "SELECT * FROM notifications WHERE user_id = ? AND type = 'mention'"
+    ).get(mentionedUserId) as { title: string; body: string; link: string } | undefined;
+
+    expect(notif).toBeDefined();
+    expect(notif!.title).toContain('mentioned you');
+    expect(notif!.link).toContain(SPEC_ID);
+    expect(notif!.link).toContain(STORY_ID);
+  });
+
+  it('does not notify the comment author if they mention themselves', async () => {
+    const res = await request(app)
+      .post(`/api/specs/${SPEC_ID}/stories/${STORY_ID}/comments`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ body: 'Note to @Auth Test User (myself)' });
+
+    expect(res.status).toBe(201);
+
+    const authorId = (db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string }).id;
+    const notif = db.prepare(
+      "SELECT * FROM notifications WHERE user_id = ? AND type = 'mention'"
+    ).get(authorId) as { id: string } | undefined;
+
+    expect(notif).toBeUndefined();
+  });
+
+  it('creates separate notifications for multiple mentions', async () => {
+    // Register a third user
+    await request(app).post('/api/auth/register').send({
+      email: 'third@example.com',
+      password: 'securepass123',
+      displayName: 'Third User',
+    });
+    const thirdRow = db.prepare("SELECT id FROM users WHERE email = 'third@example.com'").get() as { id: string };
+
+    const res = await request(app)
+      .post(`/api/specs/${SPEC_ID}/stories/${STORY_ID}/comments`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ body: '@Mentioned User and @Third User please review' });
+
+    expect(res.status).toBe(201);
+
+    const notifs = db.prepare(
+      "SELECT * FROM notifications WHERE type = 'mention'"
+    ).all() as { user_id: string }[];
+
+    const notifiedIds = notifs.map(n => n.user_id);
+    expect(notifiedIds).toContain(mentionedUserId);
+    expect(notifiedIds).toContain(thirdRow.id);
+    expect(notifs).toHaveLength(2);
+  });
+});
