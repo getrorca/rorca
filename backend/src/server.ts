@@ -6,7 +6,7 @@ import directionRouter from './routes/direction';
 import specsRouter from './routes/specs';
 import walRouter from './routes/wal';
 import contextRouter from './routes/context';
-import pipelineRouter from './routes/pipeline';
+import pipelineRouter, { cleanupOldLogs } from './routes/pipeline';
 import hooksRouter from './routes/hooks';
 import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
@@ -117,6 +117,7 @@ if (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
     console.log(`Rorcha backend listening on port ${PORT}`);
     startScheduler();
+    cleanupOldLogs();
   });
 }
 
