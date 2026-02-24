@@ -17,6 +17,8 @@ import {
   Loader2,
   Plus,
   Sparkles,
+  Upload,
+  ExternalLink,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -543,6 +545,20 @@ function SpecPreviewDrawer({
   const [forkState, setForkState] = useState<'idle' | 'forking' | 'done' | 'error'>('idle');
   const [forkError, setForkError] = useState('');
   const [forkId, setForkId] = useState('');
+  // Import stories state
+  const [importState, setImportState] = useState<'idle' | 'form' | 'loading' | 'preview' | 'importing' | 'done' | 'error'>('idle');
+  const [importSource, setImportSource] = useState<'linear' | 'github'>('linear');
+  const [importError, setImportError] = useState('');
+  const [importPreviewStories, setImportPreviewStories] = useState<Array<{ id: string; title: string; description: string; sourceUrl: string; tags: string[] }>>([]);
+  // Linear fields
+  const [linearApiKey, setLinearApiKey] = useState('');
+  const [linearTeamId, setLinearTeamId] = useState('');
+  const [linearProjectId, setLinearProjectId] = useState('');
+  // GitHub fields
+  const [importGithubToken, setImportGithubToken] = useState('');
+  const [importGithubOwner, setImportGithubOwner] = useState('');
+  const [importGithubRepo, setImportGithubRepo] = useState('');
+  const [importGithubMilestone, setImportGithubMilestone] = useState('');
   const [localStories, setLocalStories] = useState<Story[]>([]);
 
   // Sync localStories when spec detail loads or changes
@@ -590,6 +606,83 @@ function SpecPreviewDrawer({
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'Failed to generate stories');
       setAddState('error');
+    }
+  };
+
+  const handleImportPreview = async () => {
+    if (!workspaceId || !summary) return;
+    setImportState('loading');
+    setImportError('');
+    try {
+      const payload: Record<string, unknown> = {
+        workspaceId,
+        source: importSource,
+        preview: true,
+      };
+      if (importSource === 'linear') {
+        if (!linearApiKey) { setImportError('Linear API key is required'); setImportState('form'); return; }
+        payload.linearApiKey = linearApiKey;
+        if (linearTeamId) payload.linearTeamId = linearTeamId;
+        if (linearProjectId) payload.linearProjectId = linearProjectId;
+      } else {
+        if (!importGithubToken || !importGithubOwner || !importGithubRepo) {
+          setImportError('GitHub token, owner, and repo are required');
+          setImportState('form');
+          return;
+        }
+        payload.githubToken = importGithubToken;
+        payload.githubOwner = importGithubOwner;
+        payload.githubRepo = importGithubRepo;
+        if (importGithubMilestone) payload.githubMilestone = importGithubMilestone;
+      }
+
+      const res = await apiFetch<{ ok: boolean; stories: Array<{ id: string; title: string; description: string; sourceUrl: string; tags: string[] }>; errors: string[] }>(
+        `/api/specs/${summary.id}/import`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
+      );
+      if (res.ok) {
+        setImportPreviewStories(res.stories);
+        setImportState('preview');
+      }
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Failed to fetch issues');
+      setImportState('form');
+    }
+  };
+
+  const handleImportCommit = async () => {
+    if (!workspaceId || !summary) return;
+    setImportState('importing');
+    setImportError('');
+    try {
+      const payload: Record<string, unknown> = {
+        workspaceId,
+        source: importSource,
+        preview: false,
+      };
+      if (importSource === 'linear') {
+        payload.linearApiKey = linearApiKey;
+        if (linearTeamId) payload.linearTeamId = linearTeamId;
+        if (linearProjectId) payload.linearProjectId = linearProjectId;
+      } else {
+        payload.githubToken = importGithubToken;
+        payload.githubOwner = importGithubOwner;
+        payload.githubRepo = importGithubRepo;
+        if (importGithubMilestone) payload.githubMilestone = importGithubMilestone;
+      }
+
+      const res = await apiFetch<{ ok: boolean; importedCount: number }>(
+        `/api/specs/${summary.id}/import`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
+      );
+      if (res.ok) {
+        setImportState('done');
+        setImportPreviewStories([]);
+        setTimeout(() => setImportState('idle'), 3000);
+      }
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Failed to import issues');
+      setImportState('error');
     }
   };
 
@@ -911,6 +1004,170 @@ function SpecPreviewDrawer({
                 )}
                 {addState === 'error' && (
                   <p className="text-xs text-error">{addError}</p>
+                )}
+              </div>
+            )}
+
+            {/* Import Stories from Linear / GitHub */}
+            {summary?.status === 'approved' && (
+              <div>
+                {importState === 'idle' && (
+                  <button
+                    onClick={() => setImportState('form')}
+                    className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors"
+                  >
+                    <Upload size={14} />
+                    Import from Linear / GitHub
+                  </button>
+                )}
+                {importState === 'form' && (
+                  <div className="rounded border border-border bg-panel p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-muted shrink-0">Source</label>
+                      <select
+                        value={importSource}
+                        onChange={e => setImportSource(e.target.value as 'linear' | 'github')}
+                        className="flex-1 px-2 py-1 text-xs rounded border border-border bg-bg text-text"
+                      >
+                        <option value="linear">Linear</option>
+                        <option value="github">GitHub Issues</option>
+                      </select>
+                    </div>
+                    {importSource === 'linear' ? (
+                      <>
+                        <input
+                          type="password"
+                          placeholder="Linear API Key *"
+                          value={linearApiKey}
+                          onChange={e => setLinearApiKey(e.target.value)}
+                          className="w-full px-2 py-1.5 text-xs rounded border border-border bg-bg text-text placeholder:text-muted"
+                        />
+                        <input
+                          placeholder="Team ID (optional)"
+                          value={linearTeamId}
+                          onChange={e => setLinearTeamId(e.target.value)}
+                          className="w-full px-2 py-1.5 text-xs rounded border border-border bg-bg text-text placeholder:text-muted"
+                        />
+                        <input
+                          placeholder="Project ID (optional)"
+                          value={linearProjectId}
+                          onChange={e => setLinearProjectId(e.target.value)}
+                          className="w-full px-2 py-1.5 text-xs rounded border border-border bg-bg text-text placeholder:text-muted"
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <input
+                          type="password"
+                          placeholder="GitHub Token *"
+                          value={importGithubToken}
+                          onChange={e => setImportGithubToken(e.target.value)}
+                          className="w-full px-2 py-1.5 text-xs rounded border border-border bg-bg text-text placeholder:text-muted"
+                        />
+                        <div className="flex gap-2">
+                          <input
+                            placeholder="Owner *"
+                            value={importGithubOwner}
+                            onChange={e => setImportGithubOwner(e.target.value)}
+                            className="flex-1 px-2 py-1.5 text-xs rounded border border-border bg-bg text-text placeholder:text-muted"
+                          />
+                          <input
+                            placeholder="Repo *"
+                            value={importGithubRepo}
+                            onChange={e => setImportGithubRepo(e.target.value)}
+                            className="flex-1 px-2 py-1.5 text-xs rounded border border-border bg-bg text-text placeholder:text-muted"
+                          />
+                        </div>
+                        <input
+                          placeholder="Milestone (optional)"
+                          value={importGithubMilestone}
+                          onChange={e => setImportGithubMilestone(e.target.value)}
+                          className="w-full px-2 py-1.5 text-xs rounded border border-border bg-bg text-text placeholder:text-muted"
+                        />
+                      </>
+                    )}
+                    {importError && <p className="text-xs text-error">{importError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleImportPreview}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 transition-opacity"
+                      >
+                        Preview
+                      </button>
+                      <button
+                        onClick={() => { setImportState('idle'); setImportError(''); }}
+                        className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {importState === 'loading' && (
+                  <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-muted">
+                    <Loader2 size={14} className="animate-spin" />
+                    Fetching {importSource === 'linear' ? 'Linear' : 'GitHub'} issues...
+                  </div>
+                )}
+                {importState === 'preview' && (
+                  <div className="rounded border border-border bg-panel p-3 space-y-2">
+                    <p className="text-xs font-medium text-text">
+                      {importPreviewStories.length} {importPreviewStories.length === 1 ? 'issue' : 'issues'} found:
+                    </p>
+                    <div className="max-h-48 overflow-y-auto space-y-1.5">
+                      {importPreviewStories.map(s => (
+                        <div key={s.id} className="flex items-start gap-2 text-xs p-1.5 rounded bg-bg border border-border/50">
+                          <span className="font-mono text-muted shrink-0">{s.id}</span>
+                          <span className="text-text flex-1 truncate">{s.title}</span>
+                          <a href={s.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline shrink-0">
+                            <ExternalLink size={12} />
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                    {importPreviewStories.length === 0 && (
+                      <p className="text-xs text-muted">No issues matched your filters.</p>
+                    )}
+                    <div className="flex gap-2">
+                      {importPreviewStories.length > 0 && (
+                        <button
+                          onClick={handleImportCommit}
+                          className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 transition-opacity"
+                        >
+                          Import {importPreviewStories.length} {importPreviewStories.length === 1 ? 'story' : 'stories'}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => { setImportState('form'); setImportPreviewStories([]); }}
+                        className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text transition-colors"
+                      >
+                        Back
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {importState === 'importing' && (
+                  <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-muted">
+                    <Loader2 size={14} className="animate-spin" />
+                    Importing stories...
+                  </div>
+                )}
+                {importState === 'done' && (
+                  <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30">
+                    <Check size={14} />
+                    Stories imported — reload to see them
+                  </div>
+                )}
+                {importState === 'error' && (
+                  <div>
+                    <p className="text-xs text-error">{importError}</p>
+                    <button
+                      onClick={() => setImportState('form')}
+                      className="text-xs text-accent hover:underline mt-1"
+                    >
+                      Try again
+                    </button>
+                  </div>
                 )}
               </div>
             )}
