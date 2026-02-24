@@ -26,6 +26,7 @@ import usersRouter from './routes/users';
 import authRouter, { authRequired } from './routes/auth';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
+import healthRouter from './routes/health';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
 import swaggerUi from 'swagger-ui-express';
@@ -49,9 +50,7 @@ app.use(express.json({
 }));
 
 // ─── Public routes (no auth required) ───
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, ts: new Date().toISOString() });
-});
+app.use('/api/health', healthRouter);
 
 app.get('/api/docs/openapi.json', (_req, res) => {
   res.json(swaggerSpec);
