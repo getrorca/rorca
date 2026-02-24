@@ -323,10 +323,10 @@ test('POST /api/specs/generate with explicit model uses that model', async () =>
   expect(res.body.model).toBe('claude-opus-4-6');
   expect(res.body.usage).toEqual({ inputTokens: 50, outputTokens: 100 });
 
-  // chatComplete should have been called with the model
+  // chatComplete should have been called with the model in options object
   expect(mockChatComplete).toHaveBeenCalledWith(
     expect.any(Array),
-    'claude-opus-4-6',
+    expect.objectContaining({ model: 'claude-opus-4-6' }),
   );
 });
 
@@ -368,7 +368,7 @@ test('POST /api/specs/generate without model uses workspace L3 preferred_model',
   expect(res.body.model).toBe('claude-haiku-4-5-20251001');
   expect(mockChatComplete).toHaveBeenCalledWith(
     expect.any(Array),
-    'claude-haiku-4-5-20251001',
+    expect.objectContaining({ model: 'claude-haiku-4-5-20251001' }),
   );
 });
 
