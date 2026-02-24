@@ -29,6 +29,9 @@ import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
+import agentHooksRouter from './routes/agent-hooks';
+import { fireAgentHooks } from './lib/agent-hook-runner';
+import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
 import { rateLimiter } from './lib/rate-limiter';
@@ -87,6 +90,7 @@ app.use('/api/templates', templatesRouter);
 app.use('/api/stories', storiesRouter);
 app.use('/api/workspaces/:id/env-vars', envVarsRouter);
 app.use('/api/workspaces/:id/budget', budgetRouter);
+app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/github', workspaceGithubRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/teams', teamsRouter);
@@ -96,6 +100,9 @@ app.use('/api/vault/keys', vaultRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/onboarding', onboardingRouter);
 app.use('/api/admin', backupsRouter);
+
+// V2-069: Subscribe agent hook runner to all WAL broadcasts
+subscribe(fireAgentHooks);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
