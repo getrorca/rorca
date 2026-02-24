@@ -10,8 +10,9 @@ import { getAuthToken } from './helpers/auth-helper';
 
 const mockRaw = jest.fn<Promise<string>, [string[]]>();
 const mockStatus = jest.fn();
-const mockGit = jest.fn<{ raw: typeof mockRaw; status: typeof mockStatus }, [string]>(
-  () => ({ raw: mockRaw, status: mockStatus })
+const mockMerge = jest.fn<Promise<any>, [string[]]>();
+const mockGit = jest.fn<{ raw: typeof mockRaw; status: typeof mockStatus; merge: typeof mockMerge }, [string]>(
+  () => ({ raw: mockRaw, status: mockStatus, merge: mockMerge })
 );
 
 jest.mock('simple-git', () => ({
@@ -36,6 +37,9 @@ beforeEach(async () => {
     __esModule: true,
     default: (p: string) => mockGit(p),
   }));
+
+  // Reset merge mock default (resolves cleanly)
+  mockMerge.mockResolvedValue({});
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-wt-test-'));
   dbPath = path.join(tmpDir, 'test.db');
@@ -474,5 +478,155 @@ describe('Integration: /api/worktrees/status response shape', () => {
     expect(res.body.modifiedFiles).toEqual([]);
     expect(res.body.ahead).toBe(0);
     expect(res.body.behind).toBe(0);
+  });
+});
+
+// ─── POST /api/worktrees/merge/preview ─────────────────────────────────────
+
+describe('POST /api/worktrees/merge/preview', () => {
+  test('returns canMerge=true when no conflicts', async () => {
+    // diff --stat for filesChanged
+    mockRaw.mockResolvedValueOnce(' 3 files changed, 10 insertions(+), 2 deletions(-)');
+    // merge --no-commit --no-ff succeeds
+    const mockMerge = jest.fn().mockResolvedValue({});
+    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
+
+    const res = await request(app)
+      .post('/api/worktrees/merge/preview')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-1', branchName: 'feat/clean' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.canMerge).toBe(true);
+    expect(res.body.hasConflicts).toBe(false);
+    expect(res.body.conflictFiles).toEqual([]);
+    expect(res.body.filesChanged).toBe(3);
+  });
+
+  test('returns hasConflicts=true with conflict files', async () => {
+    // diff --stat for filesChanged
+    mockRaw.mockResolvedValueOnce(' 2 files changed');
+    // diff --name-only --diff-filter=U for conflict file list
+    mockRaw.mockResolvedValueOnce('src/index.ts\nREADME.md\n');
+
+    const mockMerge = jest.fn()
+      .mockRejectedValueOnce(new Error('CONFLICT (content): Merge conflict in src/index.ts'))
+      .mockResolvedValueOnce({}); // merge --abort
+
+    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
+
+    const res = await request(app)
+      .post('/api/worktrees/merge/preview')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-1', branchName: 'feat/conflicting' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.canMerge).toBe(false);
+    expect(res.body.hasConflicts).toBe(true);
+    expect(res.body.conflictFiles).toHaveLength(2);
+    expect(res.body.conflictFiles[0].path).toBe('src/index.ts');
+    expect(res.body.conflictFiles[1].path).toBe('README.md');
+  });
+
+  test('returns 400 without required fields', async () => {
+    const res = await request(app)
+      .post('/api/worktrees/merge/preview')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-1' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('branchName');
+  });
+
+  test('returns 404 for nonexistent workspace', async () => {
+    const res = await request(app)
+      .post('/api/worktrees/merge/preview')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'no-such', branchName: 'feat/test' });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─── POST /api/worktrees/merge (enhanced) ──────────────────────────────────
+
+describe('POST /api/worktrees/merge', () => {
+  test('successful merge returns mergeCommitSha', async () => {
+    const mockMerge = jest.fn().mockResolvedValue({});
+    mockRaw.mockResolvedValueOnce('abc123def456\n'); // rev-parse HEAD
+    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
+
+    const res = await request(app)
+      .post('/api/worktrees/merge')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-1', branchName: 'feat/with-sha' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.mergeCommitSha).toBe('abc123def456');
+  });
+
+  test('successful merge emits WAL event with branchName and mergeCommitSha', async () => {
+    const mockMerge = jest.fn().mockResolvedValue({});
+    mockRaw.mockResolvedValueOnce('sha789\n'); // rev-parse HEAD
+    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
+
+    await request(app)
+      .post('/api/worktrees/merge')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-1', branchName: 'feat/wal-sha' });
+
+    const events = db
+      .prepare("SELECT * FROM wal_events WHERE event_type = 'worktree_merged'")
+      .all() as Array<{ event_type: string; workspace_id: string; payload: string }>;
+
+    expect(events).toHaveLength(1);
+    const payload = JSON.parse(events[0].payload);
+    expect(payload.branchName).toBe('feat/wal-sha');
+    expect(payload.mergeCommitSha).toBe('sha789');
+  });
+
+  test('force merge uses -X theirs strategy', async () => {
+    const mockMerge = jest.fn().mockResolvedValue({});
+    mockRaw.mockResolvedValueOnce('forced123\n'); // rev-parse HEAD
+    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
+
+    const res = await request(app)
+      .post('/api/worktrees/merge')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-1', branchName: 'feat/force', force: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(mockMerge).toHaveBeenCalledWith(['feat/force', '--no-ff', '-X', 'theirs']);
+  });
+
+  test('conflict returns 409 with conflictFiles', async () => {
+    mockRaw.mockResolvedValueOnce('src/app.ts\n'); // diff --name-only --diff-filter=U
+
+    const mockMerge = jest.fn()
+      .mockRejectedValueOnce(new Error('CONFLICT (content): Merge conflict in src/app.ts'))
+      .mockResolvedValueOnce({}); // merge --abort
+
+    mockGit.mockReturnValue({ raw: mockRaw, merge: mockMerge, status: mockStatus } as any);
+
+    const res = await request(app)
+      .post('/api/worktrees/merge')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-1', branchName: 'feat/conflict' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.conflict).toBe(true);
+    expect(res.body.conflictFiles).toBeDefined();
+  });
+
+  test('returns 400 without required fields', async () => {
+    const res = await request(app)
+      .post('/api/worktrees/merge')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-1' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('branchName');
   });
 });
