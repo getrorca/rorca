@@ -4,6 +4,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { HelpTipsProvider } from './contexts/HelpTipsContext';
 import { ToastProvider, useGlobalToast } from './contexts/ToastContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
+import { NotificationProvider } from './contexts/NotificationContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
 import OnboardingWizard from './components/OnboardingWizard';
@@ -55,9 +56,11 @@ function AuthGate() {
   void isAuthenticated; void authPage; void setAuthPage;
 
   return (
-    <WorkspaceProvider>
-      <AppContent />
-    </WorkspaceProvider>
+    <NotificationProvider>
+      <WorkspaceProvider>
+        <AppContent />
+      </WorkspaceProvider>
+    </NotificationProvider>
   );
 }
 
