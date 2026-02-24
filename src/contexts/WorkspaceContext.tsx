@@ -47,14 +47,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   };
 
   const refreshWorkspaces = useCallback(async () => {
-    const res = await apiFetch<{ workspaces: WorkspaceRow[] }>('/api/workspaces');
-    setWorkspaces(res.workspaces.map(toWorkspace));
+    const res = await apiFetch<{ items: WorkspaceRow[]; total: number; hasMore: boolean; cursor?: string }>('/api/workspaces');
+    setWorkspaces(res.items.map(toWorkspace));
   }, []);
 
   useEffect(() => {
-    apiFetch<{ workspaces: WorkspaceRow[] }>('/api/workspaces')
+    apiFetch<{ items: WorkspaceRow[]; total: number; hasMore: boolean; cursor?: string }>('/api/workspaces')
       .then((res) => {
-        const ws = res.workspaces.map(toWorkspace);
+        const ws = res.items.map(toWorkspace);
         setWorkspaces(ws);
         // Fall back to first workspace if none selected or stale
         if (ws.length > 0 && (!workspaceId || !ws.some((w) => w.id === workspaceId))) {

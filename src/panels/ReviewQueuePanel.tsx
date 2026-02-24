@@ -131,10 +131,10 @@ export default function ReviewQueuePanel() {
     setLoading(true);
     setError('');
     try {
-      const res = await apiFetch<{ specs: SpecSummary[] }>(
+      const res = await apiFetch<{ items: SpecSummary[]; total: number; hasMore: boolean; cursor?: string }>(
         `/api/specs?workspaceId=${workspaceId}&status=pending`,
       );
-      setSpecs(res.specs);
+      setSpecs(res.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load specs');
     } finally {

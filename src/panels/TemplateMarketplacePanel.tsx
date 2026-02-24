@@ -87,8 +87,8 @@ export default function TemplateMarketplacePanel() {
     setLoading(true);
     try {
       const params = new URLSearchParams({ scope: scopeFilter });
-      const data = await apiFetch<{ templates: TemplateSummary[] }>(`/api/templates?${params}`);
-      setTemplates(data.templates);
+      const data = await apiFetch<{ items: TemplateSummary[]; total: number; hasMore: boolean; cursor?: string }>(`/api/templates?${params}`);
+      setTemplates(data.items);
     } catch (err) {
       console.error('Failed to fetch templates:', err);
     } finally {

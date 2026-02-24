@@ -8,6 +8,7 @@ import {
   gitReduceStep,
   getLatestHash,
 } from '../lib/git-hydrator';
+import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
 const router = Router();
 
@@ -127,9 +128,10 @@ router.post('/', (req, res) => {
 });
 
 // GET /api/workspaces
-router.get('/', (_req, res) => {
+router.get('/', (req, res) => {
   const rows = db.prepare('SELECT * FROM workspaces ORDER BY created_at DESC').all() as WorkspaceRow[];
-  res.json({ workspaces: rows.map(parseWorkspace) });
+  const pagination = parsePaginationParams(req);
+  res.json(paginateArray(rows.map(parseWorkspace), pagination, { cursorKey: (w) => w.id }));
 });
 
 /**

@@ -6,6 +6,7 @@ import type { AuthUser } from './auth';
 import { requireRole } from './auth';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { synthesize } from '../lib/direction-stack';
+import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
 const router = Router();
 
@@ -124,7 +125,8 @@ router.get('/', (req: Request, res: Response) => {
       role: string;
     }>;
 
-    res.json(rows);
+    const pagination = parsePaginationParams(req);
+    res.json(paginateArray(rows, pagination, { cursorKey: (t) => t.id }));
   } catch (error: unknown) {
     console.error('[Teams] list error:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
