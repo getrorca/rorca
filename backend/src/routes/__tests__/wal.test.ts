@@ -48,14 +48,12 @@ test('GET /api/wal returns all 3 inserted events, newest first', async () => {
   const res = await request(app).get('/api/wal').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.events).toHaveLength(3);
+  expect(res.body.items).toHaveLength(3);
   expect(res.body.total).toBe(3);
-  expect(res.body.limit).toBe(50);
-  expect(res.body.offset).toBe(0);
   // Newest first (DESC by id)
-  expect(res.body.events[0].event_type).toBe('generate');
-  expect(res.body.events[1].event_type).toBe('direction_update');
-  expect(res.body.events[2].event_type).toBe('workspace_create');
+  expect(res.body.items[0].event_type).toBe('generate');
+  expect(res.body.items[1].event_type).toBe('direction_update');
+  expect(res.body.items[2].event_type).toBe('workspace_create');
 });
 
 test('limit=2 returns only 2 events, total still reflects full count', async () => {
@@ -66,9 +64,8 @@ test('limit=2 returns only 2 events, total still reflects full count', async () 
   const res = await request(app).get('/api/wal?limit=2').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.events).toHaveLength(2);
+  expect(res.body.items).toHaveLength(2);
   expect(res.body.total).toBe(3);
-  expect(res.body.limit).toBe(2);
 });
 
 test('offset=1 skips the newest event', async () => {
@@ -79,19 +76,16 @@ test('offset=1 skips the newest event', async () => {
   const res = await request(app).get('/api/wal?offset=1').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.events).toHaveLength(2);
-  expect(res.body.offset).toBe(1);
+  expect(res.body.items).toHaveLength(2);
   // Skipped 'generate' (newest), first result is 'direction_update'
-  expect(res.body.events[0].event_type).toBe('direction_update');
-  expect(res.body.events[1].event_type).toBe('workspace_create');
+  expect(res.body.items[0].event_type).toBe('direction_update');
+  expect(res.body.items[1].event_type).toBe('workspace_create');
 });
 
 test('empty WAL returns events:[], total:0', async () => {
   const res = await request(app).get('/api/wal').set('Authorization', `Bearer ${authToken}`);
 
   expect(res.status).toBe(200);
-  expect(res.body.events).toEqual([]);
+  expect(res.body.items).toEqual([]);
   expect(res.body.total).toBe(0);
-  expect(res.body.limit).toBe(50);
-  expect(res.body.offset).toBe(0);
 });

@@ -35,7 +35,7 @@ describe('GET /api/notifications', () => {
       .get('/api/notifications')
       .set('Authorization', `Bearer ${tokenFor(user)}`);
     expect(res.status).toBe(200);
-    expect(res.body.notifications).toEqual([]);
+    expect(res.body.items).toEqual([]);
     expect(res.body.unreadCount).toBe(0);
   });
 
@@ -47,8 +47,8 @@ describe('GET /api/notifications', () => {
       .get('/api/notifications')
       .set('Authorization', `Bearer ${tokenFor(user)}`);
     expect(res.status).toBe(200);
-    expect(res.body.notifications).toHaveLength(1);
-    expect(res.body.notifications[0].title).toBe('Spec approved');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].title).toBe('Spec approved');
     expect(res.body.unreadCount).toBe(1);
   });
 
@@ -61,7 +61,7 @@ describe('GET /api/notifications', () => {
       .get('/api/notifications')
       .set('Authorization', `Bearer ${tokenFor(user2)}`);
     expect(res.status).toBe(200);
-    expect(res.body.notifications).toHaveLength(0);
+    expect(res.body.items).toHaveLength(0);
   });
 });
 
@@ -129,7 +129,7 @@ describe('DELETE /api/notifications/:id', () => {
     const listRes = await request(app)
       .get('/api/notifications')
       .set('Authorization', `Bearer ${tokenFor(user)}`);
-    expect(listRes.body.notifications).toHaveLength(0);
+    expect(listRes.body.items).toHaveLength(0);
   });
 });
 

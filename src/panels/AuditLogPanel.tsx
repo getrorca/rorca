@@ -26,10 +26,10 @@ interface WalEvent {
 }
 
 interface AuditResponse {
-  events: WalEvent[];
+  items: WalEvent[];
   total: number;
-  limit: number;
-  offset: number;
+  hasMore: boolean;
+  cursor?: string;
   eventTypes: string[];
 }
 
@@ -132,7 +132,7 @@ export default function AuditLogPanel() {
       if (searchQuery) params.set('q', searchQuery);
 
       const data = await apiFetch<AuditResponse>(`/api/wal?${params}`);
-      setEvents(data.events);
+      setEvents(data.items);
       setTotal(data.total);
       setEventTypes(data.eventTypes);
     } catch (err) {

@@ -101,13 +101,13 @@ export function SpecVersionHistory({
     setLoading(true);
     setError('');
     try {
-      const res = await apiFetch<{ specSlug: string; versions: VersionInfo[] }>(
+      const res = await apiFetch<{ items: VersionInfo[]; total: number; hasMore: boolean; cursor?: string }>(
         `/api/specs/${specId}/versions`
       );
-      setVersions(res.versions);
+      setVersions(res.items);
       // Auto-select latest two versions for diff
-      if (res.versions.length >= 2) {
-        const sorted = [...res.versions].sort((a, b) => b.version - a.version);
+      if (res.items.length >= 2) {
+        const sorted = [...res.items].sort((a, b) => b.version - a.version);
         setSelectedV1(sorted[1].version);
         setSelectedV2(sorted[0].version);
       }
