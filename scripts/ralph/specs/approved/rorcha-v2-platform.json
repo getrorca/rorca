@@ -1372,7 +1372,9 @@
         "Failed generations include the error message and do not block remaining briefs in the batch"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": false,
+      "skipped": true,
+      "notes": "Skipped after max retries \u2014 fix manually and re-run with --story V2-082"
     },
     {
       "id": "V2-083",
@@ -1388,7 +1390,8 @@
       "dependsOn": [
         "V2-011"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "V2-084",

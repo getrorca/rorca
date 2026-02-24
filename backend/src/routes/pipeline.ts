@@ -340,6 +340,26 @@ router.post('/trigger', async (req: Request, res: Response) => {
         .run(child.pid, branchName, worktreePath, runId);
     }
 
+    // 9b. Record excluded stories immediately — run-loop.sh will skip them,
+    //     but we insert story_results rows so the UI shows them as excluded.
+    try {
+      const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+      const excludedStories = (specJson.userStories ?? []).filter(
+        (s: { excluded?: boolean }) => s.excluded === true
+      );
+      const insertExcluded = db.prepare(
+        `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, ?, 'excluded', datetime('now'))`
+      );
+      for (const s of excludedStories) {
+        insertExcluded.run(runId, s.id);
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_excluded_from_run', ?, ?, ?, ?)`
+        ).run(workspaceId, path.basename(specPath, '.json'), s.id, JSON.stringify({ run_id: runId }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+        broadcastAll(walEvent);
+      }
+    } catch { /* spec read error — non-fatal, run-loop will handle */ }
+
     // 10. Set up in-memory output buffer — tail the log file at 200ms for live streaming
     const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
     outputBuffers.set(runId, buf);

@@ -28,6 +28,7 @@ interface UserStory {
   description: string;
   acceptanceCriteria: string[];
   dependsOn?: string[];
+  excluded?: boolean;
 }
 
 interface ModelPricingRow {
@@ -125,8 +126,9 @@ export function estimateDryRunCost(
   // 3. Get historical output estimate
   const avgOutputTokens = getHistoricalOutputEstimate(workspaceId);
 
-  // 4. Estimate per-story costs
-  const stories: StoryCostEstimate[] = specJson.userStories.map((story) => {
+  // 4. Estimate per-story costs (skip excluded stories)
+  const activeStories = specJson.userStories.filter((s) => s.excluded !== true);
+  const stories: StoryCostEstimate[] = activeStories.map((story) => {
     // Each story prompt includes: direction context + story-specific content
     const storyPrompt = [
       story.title,
