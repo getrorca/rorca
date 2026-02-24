@@ -10,6 +10,8 @@ jest.mock('../../lib/llm-client', () => ({
   getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
   isValidModel: jest.fn().mockReturnValue(true),
   DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  resolveVaultProvider: jest.fn().mockReturnValue(null),
+  getModelInfo: jest.fn().mockReturnValue(undefined),
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
 }));
 
@@ -25,6 +27,8 @@ beforeEach(() => {
     getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
     isValidModel: jest.fn().mockReturnValue(true),
     DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+    resolveVaultProvider: jest.fn().mockReturnValue(null),
+    getModelInfo: jest.fn().mockReturnValue(undefined),
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
   }));
 

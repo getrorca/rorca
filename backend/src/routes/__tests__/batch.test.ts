@@ -14,6 +14,8 @@ jest.mock('../../lib/llm-client', () => ({
     ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
   ),
   DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  resolveVaultProvider: jest.fn().mockReturnValue(null),
+  getModelInfo: jest.fn().mockReturnValue(undefined),
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
 
@@ -45,6 +47,8 @@ beforeEach(async () => {
       ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
     ),
     DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+    resolveVaultProvider: jest.fn().mockReturnValue(null),
+    getModelInfo: jest.fn().mockReturnValue(undefined),
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   }));
 
@@ -137,19 +141,20 @@ test('POST /api/specs/generate/batch validates brief fields', async () => {
   expect(res.body.error).toContain('index 1');
 });
 
-test('POST /api/specs/generate/batch validates model per brief', async () => {
+test('POST /api/specs/generate/batch accepts any model string (pass-through)', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+
   const res = await request(app)
     .post('/api/specs/generate/batch')
     .set('Authorization', `Bearer ${authToken}`)
     .send({
       briefs: [
-        { title: 'Auth System', brief: 'Build auth', workspaceId: 'ws-test', model: 'gpt-4o' },
+        { title: 'Auth System', brief: 'Build auth', workspaceId: 'ws-test', model: 'custom-model-v1' },
       ],
     });
 
-  expect(res.status).toBe(400);
-  expect(res.body.error).toContain('invalid model');
-  expect(res.body.error).toContain('gpt-4o');
+  // Any model string is accepted for openai-compat pass-through
+  expect(res.status).not.toBe(400);
 });
 
 test('POST /api/specs/generate/batch emits batch_started WAL event', async () => {

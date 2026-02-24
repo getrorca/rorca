@@ -47,9 +47,15 @@ interface VaultRow {
   provider: string;
   encrypted_key: string;
   label: string;
+  base_url: string | null;
   spend_total_usd: number;
   last_used_at: string | null;
   created_at: string;
+}
+
+export interface VaultKeyResult {
+  key: string;
+  baseUrl: string | null;
 }
 
 // ─── POST /api/vault/keys ───────────────────────────────────────────────────
@@ -57,7 +63,7 @@ interface VaultRow {
 router.post('/', (req: Request, res: Response) => {
   const user = (req as Request & { user: AuthUser }).user;
 
-  const { provider, key, label } = req.body;
+  const { provider, key, label, base_url } = req.body;
 
   if (!provider || typeof provider !== 'string') {
     res.status(400).json({ error: 'provider is required' });
@@ -77,15 +83,17 @@ router.post('/', (req: Request, res: Response) => {
   const id = crypto.randomUUID();
   const encryptedKey = encrypt(key);
   const safeLabel = typeof label === 'string' ? label.trim() : '';
+  const safeBaseUrl = typeof base_url === 'string' && base_url.trim() ? base_url.trim() : null;
 
   db.prepare(
-    'INSERT INTO api_key_vault (id, user_id, provider, encrypted_key, label) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, user.id, provider, encryptedKey, safeLabel);
+    'INSERT INTO api_key_vault (id, user_id, provider, encrypted_key, label, base_url) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(id, user.id, provider, encryptedKey, safeLabel, safeBaseUrl);
 
   res.status(201).json({
     id,
     provider,
     label: safeLabel,
+    base_url: safeBaseUrl,
     masked_key: key.length > 4 ? '****' + key.slice(-4) : '****',
     created_at: new Date().toISOString(),
   });
@@ -97,13 +105,14 @@ router.get('/', (req: Request, res: Response) => {
   const user = (req as Request & { user: AuthUser }).user;
 
   const rows = db.prepare(
-    'SELECT id, provider, encrypted_key, label, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE user_id = ? ORDER BY created_at DESC'
+    'SELECT id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE user_id = ? ORDER BY created_at DESC'
   ).all(user.id) as VaultRow[];
 
   const keys = rows.map(row => ({
     id: row.id,
     provider: row.provider,
     label: row.label,
+    base_url: row.base_url,
     masked_key: maskKey(row.encrypted_key),
     spend_total_usd: row.spend_total_usd,
     last_used_at: row.last_used_at,
@@ -136,10 +145,10 @@ router.delete('/:id', (req: Request, res: Response) => {
 
 // ─── Exported helper: resolve a user's vault key for a provider ─────────────
 
-export function getVaultKey(userId: string, provider: string): string | null {
+export function getVaultKey(userId: string, provider: string): VaultKeyResult | null {
   const row = db.prepare(
-    'SELECT id, encrypted_key FROM api_key_vault WHERE user_id = ? AND provider = ? ORDER BY created_at DESC LIMIT 1'
-  ).get(userId, provider) as Pick<VaultRow, 'id' | 'encrypted_key'> | undefined;
+    'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = ? AND provider = ? ORDER BY created_at DESC LIMIT 1'
+  ).get(userId, provider) as Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'> | undefined;
 
   if (!row) return null;
 
@@ -147,7 +156,7 @@ export function getVaultKey(userId: string, provider: string): string | null {
   db.prepare('UPDATE api_key_vault SET last_used_at = datetime(\'now\') WHERE id = ?').run(row.id);
 
   try {
-    return decrypt(row.encrypted_key);
+    return { key: decrypt(row.encrypted_key), baseUrl: row.base_url };
   } catch {
     return null;
   }

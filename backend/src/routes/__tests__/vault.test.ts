@@ -14,6 +14,8 @@ jest.mock('../../lib/llm-client', () => ({
     ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
   ),
   DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+  resolveVaultProvider: jest.fn().mockReturnValue(null),
+  getModelInfo: jest.fn().mockReturnValue(undefined),
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
 
@@ -32,6 +34,8 @@ beforeEach(async () => {
       ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
     ),
     DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+    resolveVaultProvider: jest.fn().mockReturnValue(null),
+    getModelInfo: jest.fn().mockReturnValue(undefined),
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   }));
 
@@ -211,7 +215,9 @@ describe('getVaultKey', () => {
 
     const { getVaultKey } = require('../vault');
     const result = getVaultKey(user.id, 'anthropic');
-    expect(result).toBe(plainKey);
+    expect(result).not.toBeNull();
+    expect(result.key).toBe(plainKey);
+    expect(result.baseUrl).toBeNull();
   });
 
   test('returns null when no key exists for provider', async () => {

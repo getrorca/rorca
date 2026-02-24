@@ -97,6 +97,76 @@ export const ALL_MODELS: ModelInfo[] = [
     costPer1kInput: 0.00055,
     costPer1kOutput: 0.0022,
   },
+  // ── Groq ──
+  {
+    id: 'llama-3.3-70b-versatile',
+    label: 'Llama 3.3 70B',
+    provider: 'Groq',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.00059,
+    costPer1kOutput: 0.00079,
+  },
+  {
+    id: 'gemma2-9b-it',
+    label: 'Gemma 2 9B',
+    provider: 'Groq',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.0002,
+    costPer1kOutput: 0.0002,
+  },
+  // ── Together AI ──
+  {
+    id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    label: 'Llama 3.3 70B (Together)',
+    provider: 'Together AI',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.00088,
+    costPer1kOutput: 0.00088,
+  },
+  // ── Fireworks ──
+  {
+    id: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+    label: 'Llama 3.3 70B (Fireworks)',
+    provider: 'Fireworks',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.0009,
+    costPer1kOutput: 0.0009,
+  },
+  // ── Mistral ──
+  {
+    id: 'mistral-large-latest',
+    label: 'Mistral Large',
+    provider: 'Mistral',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.002,
+    costPer1kOutput: 0.006,
+  },
+  {
+    id: 'codestral-latest',
+    label: 'Codestral',
+    provider: 'Mistral',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.0003,
+    costPer1kOutput: 0.0009,
+  },
+  // ── Cerebras ──
+  {
+    id: 'llama-3.3-70b',
+    label: 'Llama 3.3 70B (Cerebras)',
+    provider: 'Cerebras',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.00085,
+    costPer1kOutput: 0.00085,
+  },
+  // ── Perplexity ──
+  {
+    id: 'sonar-pro',
+    label: 'Sonar Pro',
+    provider: 'Perplexity',
+    providerType: 'openai-compat',
+    costPer1kInput: 0.003,
+    costPer1kOutput: 0.015,
+  },
   // ── OpenRouter (covers Gemini, Grok, and any other outlier) ──
   {
     id: 'google/gemini-2.5-pro-preview',
@@ -178,8 +248,10 @@ const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
  * Resolve which provider to use. Priority:
  * 1. Explicit `opts.provider` param
  * 2. Infer from model registry (look up providerType)
- * 3. If apiKey provided but no provider, assume 'anthropic' (backward compat)
- * 4. Default: 'claude-cli'
+ * 3. If baseUrl is set, assume 'openai-compat' (custom endpoint)
+ * 4. If apiKey provided but model is unknown, assume 'openai-compat' (pass-through)
+ * 5. If apiKey provided and no model, assume 'anthropic' (backward compat)
+ * 6. Default: 'claude-cli'
  */
 function resolveProvider(opts: ChatOptions): ProviderType {
   if (opts.provider) return opts.provider;
@@ -191,9 +263,12 @@ function resolveProvider(opts: ChatOptions): ProviderType {
       if (info.providerType === 'anthropic' && !opts.apiKey) return 'claude-cli';
       return info.providerType;
     }
+    // Model not in registry — custom/pass-through model
+    if (opts.baseUrl) return 'openai-compat';
+    if (opts.apiKey) return 'openai-compat';
   }
 
-  // Backward compat: apiKey without provider = anthropic
+  // Backward compat: apiKey without provider or model = anthropic
   if (opts.apiKey) return 'anthropic';
 
   return 'claude-cli';
@@ -383,6 +458,31 @@ export function chatComplete(messages: ChatMessage[], modelOrOpts?: string | Cha
     default:
       throw new Error(`Unknown provider: ${provider}`);
   }
+}
+
+/**
+ * Map a provider type to the vault provider string used in api_key_vault.
+ * 'claude-cli' doesn't need a vault key, returns null.
+ */
+export function vaultProviderForType(providerType: ProviderType): string | null {
+  switch (providerType) {
+    case 'claude-cli': return null;
+    case 'anthropic': return 'anthropic';
+    case 'openai-compat': return 'openai-compat';
+    case 'openrouter': return 'openrouter';
+    default: return null;
+  }
+}
+
+/**
+ * Given a model ID, determine the vault provider string to look up API keys.
+ * Returns null for claude-cli (no key needed) or unrecognized models.
+ */
+export function resolveVaultProvider(modelId: string): string | null {
+  const info = getModelInfo(modelId);
+  if (info) return vaultProviderForType(info.providerType);
+  // Unrecognized model — could be a pass-through openai-compat model
+  return null;
 }
 
 // ─── Status Helpers ──────────────────────────────────────────────────────────
