@@ -1,0 +1,331 @@
+# Rorcha Production Deployment Guide
+
+Step-by-step instructions for deploying Rorcha to a production server.
+
+## Prerequisites
+
+- Linux server (Ubuntu 22.04+ recommended) or macOS
+- Docker 24+ and Docker Compose v2
+- Domain name with DNS pointed to your server
+- SSL certificate (Let's Encrypt recommended)
+- 2GB+ RAM, 10GB+ disk
+
+## 1. Clone and Configure
+
+```bash
+git clone https://github.com/your-org/rorcha.git /opt/rorcha
+cd /opt/rorcha
+```
+
+Copy and fill in environment variables:
+
+```bash
+cp deploy/env.production.example .env
+```
+
+**Required variables** (see `deploy/env.production.example` for full docs):
+
+| Variable | Example | Notes |
+|----------|---------|-------|
+| `JWT_SECRET` | (generate below) | Auth token signing key |
+| `CORS_ORIGIN` | `https://app.rorcha.dev` | Exact frontend URL |
+| `RORCHA_BASE_URL` | `https://app.rorcha.dev` | OAuth callbacks |
+
+Generate a secure JWT secret:
+
+```bash
+openssl rand -base64 32
+```
+
+## 2. SSL Certificate
+
+### Option A: Let's Encrypt (recommended)
+
+```bash
+# Install certbot
+sudo apt install certbot
+
+# Get certificate (standalone — stop nginx first if running)
+sudo certbot certonly --standalone -d app.rorcha.dev
+
+# Certificates saved to:
+#   /etc/letsencrypt/live/app.rorcha.dev/fullchain.pem
+#   /etc/letsencrypt/live/app.rorcha.dev/privkey.pem
+```
+
+Copy or symlink certificates for nginx:
+
+```bash
+sudo mkdir -p /etc/nginx/ssl
+sudo ln -sf /etc/letsencrypt/live/app.rorcha.dev/fullchain.pem /etc/nginx/ssl/fullchain.pem
+sudo ln -sf /etc/letsencrypt/live/app.rorcha.dev/privkey.pem /etc/nginx/ssl/privkey.pem
+```
+
+Set up auto-renewal:
+
+```bash
+sudo systemctl enable certbot.timer
+```
+
+### Option B: Self-signed (testing only)
+
+```bash
+sudo mkdir -p /etc/nginx/ssl
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/nginx/ssl/privkey.pem \
+  -out /etc/nginx/ssl/fullchain.pem \
+  -subj "/CN=localhost"
+```
+
+## 3. Nginx Setup
+
+Install the production nginx config:
+
+```bash
+# Replace $DOMAIN with your actual domain
+sed 's/\$DOMAIN/app.rorcha.dev/g' deploy/nginx.conf > /tmp/rorcha-nginx.conf
+sudo cp /tmp/rorcha-nginx.conf /etc/nginx/sites-available/rorcha
+sudo ln -sf /etc/nginx/sites-available/rorcha /etc/nginx/sites-enabled/rorcha
+sudo rm -f /etc/nginx/sites-enabled/default
+
+# Test and reload
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+The production config (`deploy/nginx.conf`) includes:
+- HTTPS termination with TLS 1.2/1.3
+- Security headers (HSTS, CSP, X-Frame-Options, X-Content-Type-Options)
+- Gzip compression
+- Static asset caching (1 year for hashed assets)
+- Rate limiting: 30 req/s API, 5 req/min auth, 3 req/min LLM generation
+- SSE proxy with long timeouts for pipeline streaming
+- Dotfile access denied
+
+## 4. Database Migration
+
+Database migrations run automatically on first backend startup. The SQLite database is created at `DB_PATH` (default: `/data/rorcha.db`).
+
+For Docker deployments, the `rorcha-data` volume persists the database across container restarts.
+
+### Manual migration (non-Docker)
+
+```bash
+cd /opt/rorcha/backend
+NODE_ENV=production npx tsx src/server.ts
+# Server starts, runs migrations, then Ctrl+C
+```
+
+Verify:
+
+```bash
+sqlite3 /data/rorcha.db ".tables"
+# Should list: workspaces direction_layers pipeline_runs story_results wal_events ...
+```
+
+## 5. Build and Deploy
+
+### Option A: Docker Compose (recommended)
+
+```bash
+cd /opt/rorcha
+
+# Build images
+docker compose build
+
+# Start services
+docker compose up -d
+
+# Verify
+docker compose ps
+docker compose logs -f rorcha-backend
+```
+
+### Option B: Direct (no Docker)
+
+```bash
+# Install dependencies
+cd /opt/rorcha && npm ci
+cd /opt/rorcha/backend && npm ci
+
+# Build
+cd /opt/rorcha && npm run build
+
+# Start backend
+cd /opt/rorcha/backend
+NODE_ENV=production node dist/server.js &
+
+# Serve frontend via nginx (copy build output)
+sudo cp -r /opt/rorcha/dist/* /usr/share/nginx/html/
+sudo systemctl reload nginx
+```
+
+## 6. Backup Configuration
+
+### Automated SQLite Backups
+
+Rorcha has a built-in backup system. Configure the backup directory:
+
+```bash
+# .env
+BACKUP_DIR=/data/backups
+```
+
+Set up a cron job for regular backups:
+
+```bash
+# Daily backup at 2 AM
+echo "0 2 * * * cd /opt/rorcha/backend && sqlite3 /data/rorcha.db '.backup /data/backups/rorcha-$(date +\%Y\%m\%d).db'" | sudo crontab -
+```
+
+### Off-site Backup
+
+```bash
+# Sync backups to S3 (daily, after local backup)
+# 15 2 * * * aws s3 sync /data/backups/ s3://your-bucket/rorcha-backups/ --delete
+```
+
+### Restore from Backup
+
+```bash
+# Stop the backend
+docker compose stop rorcha-backend
+
+# Replace database
+cp /data/backups/rorcha-20260224.db /data/rorcha.db
+
+# Restart
+docker compose start rorcha-backend
+```
+
+## 7. Log Rotation
+
+Install the logrotate configuration:
+
+```bash
+sudo cp deploy/logrotate.conf /etc/logrotate.d/rorcha
+```
+
+This rotates:
+- Pipeline run logs (daily, 14 days retention, 100MB max)
+- Application logs (daily, 30 days retention, 50MB max)
+- Nginx access/error logs (daily, 30 days retention)
+
+Test with dry run:
+
+```bash
+sudo logrotate -d /etc/logrotate.d/rorcha
+```
+
+For Docker deployments, container logs are managed by Docker's logging driver. Configure in `daemon.json`:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "50m",
+    "max-file": "5"
+  }
+}
+```
+
+## 8. Health Monitoring
+
+### Health Check Script
+
+```bash
+# Basic check
+./deploy/healthcheck.sh
+
+# JSON output (for monitoring integrations)
+./deploy/healthcheck.sh --json
+
+# Quiet mode (exit code only — for cron/alerting)
+./deploy/healthcheck.sh --quiet
+```
+
+Exit codes: `0` = healthy, `1` = degraded, `2` = critical.
+
+The script checks:
+- Backend API responsiveness
+- Database connectivity and file integrity
+- Disk space (warn at 85%, critical at 95%)
+- Backend process presence
+- Stale pipeline run detection
+
+### Monitoring Integration
+
+```bash
+# Cron-based alerting (every 5 minutes)
+*/5 * * * * /opt/rorcha/deploy/healthcheck.sh --quiet || echo "Rorcha unhealthy" | mail -s "ALERT" ops@example.com
+
+# Datadog/Nagios custom check
+*/1 * * * * /opt/rorcha/deploy/healthcheck.sh --json >> /var/log/rorcha/healthcheck.json
+```
+
+### API Health Endpoints
+
+| Endpoint | Auth | Purpose |
+|----------|------|---------|
+| `GET /api/health` | No | Basic: status, uptime, DB connected, active runs |
+| `GET /api/health/detailed` | No | Extended: DB size, memory, pending specs, last backup |
+
+## 9. Security Checklist
+
+- [ ] `JWT_SECRET` is unique, randomly generated, and not the default
+- [ ] SSL certificate installed and auto-renewing
+- [ ] `.env` file is not in version control (check `.gitignore`)
+- [ ] Firewall allows only ports 80, 443, and SSH
+- [ ] Database file permissions are restrictive (`chmod 600`)
+- [ ] Nginx denies access to dotfiles
+- [ ] Rate limiting is active on auth and LLM endpoints
+- [ ] CORS_ORIGIN matches only your frontend domain
+- [ ] GitHub OAuth secrets (if used) are set via environment, not code
+- [ ] Regular backups are configured and tested with a restore drill
+
+## 10. Troubleshooting
+
+### Backend won't start
+
+```bash
+# Check logs
+docker compose logs rorcha-backend
+
+# Common: port already in use
+lsof -ti:3030 | xargs kill -9
+```
+
+### Database locked
+
+SQLite WAL mode handles concurrent reads, but only one writer at a time. If you see "database is locked":
+
+```bash
+# Check for stale processes
+fuser /data/rorcha.db
+
+# Force checkpoint WAL
+sqlite3 /data/rorcha.db "PRAGMA wal_checkpoint(TRUNCATE);"
+```
+
+### Stale pipeline runs
+
+After a server restart, running pipelines are orphaned:
+
+```bash
+sqlite3 /data/rorcha.db "UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE status='running';"
+```
+
+### SSE streams disconnecting
+
+Ensure nginx has:
+- `proxy_buffering off` on SSE endpoints
+- `proxy_read_timeout 3600s` (1 hour minimum)
+- No CDN/proxy in front that buffers responses
+
+### Certificate renewal failed
+
+```bash
+sudo certbot renew --dry-run
+# If standalone fails because port 80 is in use:
+sudo certbot renew --webroot -w /usr/share/nginx/html
+```
