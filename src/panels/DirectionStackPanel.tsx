@@ -4,6 +4,7 @@ import { useDirectionLayer } from '../hooks/useDirectionLayer';
 import { apiFetch } from '../lib/apiFetch';
 import BootstrapContextModal from '../components/BootstrapContextModal';
 import AISetupWizard from '../components/AISetupWizard';
+import DirectionHealthIndicator from '../components/DirectionHealthIndicator';
 import { HelpTooltip } from '../components/HelpTooltip';
 
 interface ScanResult {
@@ -255,8 +256,11 @@ export default function DirectionStackPanel() {
           {/* Simple mode: spacer */}
           {isSimple && <div className="flex-1" />}
 
+          {/* Health indicator */}
+          <DirectionHealthIndicator l1={l1} l2={l2} l3={l3} />
+
           {/* Action buttons */}
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 ml-1">
             <button
               onClick={handleScanRepo}
               disabled={isScanning}
