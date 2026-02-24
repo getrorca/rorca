@@ -130,15 +130,19 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.body.error).toBe('Workspace not found');
   });
 
-  test('returns 422 when run-loop.sh not found', async () => {
-    // Don't create run-loop.sh — should fail
+  test('falls back to TypeScript run-loop when run-loop.sh not found', async () => {
+    // Don't create run-loop.sh — backend's run-loop.ts should be used as fallback
+    seedSpec('approved', 'ts-fallback');
+
     const res = await request(app)
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ specPath: 'ralph/specs/approved/test.json', workspaceId: 'ws-pipe' });
+      .send({ specPath: 'ralph/specs/approved/ts-fallback.json', workspaceId: 'ws-pipe' });
 
-    expect(res.status).toBe(422);
-    expect(res.body.error).toContain('run-loop.sh not found');
+    // Should succeed because backend/src/lib/run-loop.ts exists
+    expect(res.status).toBe(201);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.runId).toBeDefined();
   });
 
   test('detects conflict when another run is active for same workspace', async () => {
