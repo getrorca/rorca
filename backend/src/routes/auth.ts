@@ -441,6 +441,187 @@ router.get('/me', authRequired, (req: Request, res: Response) => {
   });
 });
 
+// ─── Password reset constants ───
+
+const RESET_TOKEN_EXPIRES_HOURS = 1;
+const RESET_RATE_LIMIT_PER_HOUR = 3;
+
+interface PasswordResetTokenRow {
+  id: string;
+  user_id: string;
+  token_hash: string;
+  expires_at: string;
+  created_at: string;
+  used_at: string | null;
+}
+
+/**
+ * @swagger
+ * /api/auth/forgot-password:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Request a password reset link
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *     responses:
+ *       200: { description: "If the email exists, a reset link has been sent" }
+ *       400: { description: "Validation error" }
+ *       429: { description: "Too many reset requests" }
+ */
+router.post('/forgot-password', (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email || typeof email !== 'string') {
+    res.status(400).json({ error: 'Email is required' });
+    return;
+  }
+
+  const trimmedEmail = email.trim().toLowerCase();
+  if (!EMAIL_REGEX.test(trimmedEmail)) {
+    res.status(400).json({ error: 'Invalid email format' });
+    return;
+  }
+
+  // Always return success to prevent email enumeration
+  const successMessage = 'If an account with that email exists, a password reset link has been sent.';
+
+  const user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(trimmedEmail) as Pick<UserRow, 'id' | 'email'> | undefined;
+  if (!user) {
+    // Don't reveal that the email doesn't exist
+    res.json({ message: successMessage });
+    return;
+  }
+
+  // Rate limit: max 3 reset requests per email per hour
+  const recentCount = (db.prepare(
+    "SELECT COUNT(*) as count FROM password_reset_tokens WHERE user_id = ? AND created_at > datetime('now', '-1 hour')"
+  ).get(user.id) as { count: number }).count;
+
+  if (recentCount >= RESET_RATE_LIMIT_PER_HOUR) {
+    res.status(429).json({ error: 'Too many reset requests. Please try again later.' });
+    return;
+  }
+
+  // Generate reset token
+  const rawToken = crypto.randomBytes(48).toString('hex');
+  const tokenHash = hashToken(rawToken);
+  const tokenId = crypto.randomUUID();
+
+  db.prepare(
+    "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, datetime('now', '+1 hour'))"
+  ).run(tokenId, user.id, tokenHash);
+
+  // Emit WAL event
+  db.prepare(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('password_reset_requested', '', ?)"
+  ).run(JSON.stringify({ userId: user.id, email: trimmedEmail }));
+
+  // Build reset link (for local dev, log to console; in production this would send an email)
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
+  const resetLink = `${frontendUrl}/reset-password?token=${rawToken}`;
+
+  // Log the reset link for local development (Rorcha is a local-first tool)
+  console.log(`[auth] Password reset link for ${trimmedEmail}: ${resetLink}`);
+
+  res.json({
+    message: successMessage,
+    // Include resetLink in dev mode so the user can see it
+    ...(process.env.NODE_ENV !== 'production' && { resetLink }),
+  });
+});
+
+/**
+ * @swagger
+ * /api/auth/reset-password:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Reset password using a reset token
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [token, newPassword]
+ *             properties:
+ *               token: { type: string }
+ *               newPassword: { type: string, minLength: 8 }
+ *     responses:
+ *       200: { description: "Password reset successfully" }
+ *       400: { description: "Invalid or expired token, or validation error" }
+ */
+router.post('/reset-password', (req: Request, res: Response) => {
+  const { token, newPassword } = req.body;
+
+  if (!token || typeof token !== 'string') {
+    res.status(400).json({ error: 'Reset token is required' });
+    return;
+  }
+
+  if (!newPassword || typeof newPassword !== 'string') {
+    res.status(400).json({ error: 'New password is required' });
+    return;
+  }
+
+  if (newPassword.length < 8) {
+    res.status(400).json({ error: 'Password must be at least 8 characters' });
+    return;
+  }
+
+  const tokenHash = hashToken(token);
+  const resetToken = db.prepare(
+    'SELECT *, (expires_at <= datetime(\'now\')) as is_expired FROM password_reset_tokens WHERE token_hash = ?'
+  ).get(tokenHash) as (PasswordResetTokenRow & { is_expired: number }) | undefined;
+
+  if (!resetToken) {
+    res.status(400).json({ error: 'Invalid or expired reset token' });
+    return;
+  }
+
+  if (resetToken.used_at) {
+    res.status(400).json({ error: 'This reset token has already been used' });
+    return;
+  }
+
+  if (resetToken.is_expired) {
+    res.status(400).json({ error: 'This reset token has expired' });
+    return;
+  }
+
+  // Update password
+  const passwordHash = bcrypt.hashSync(newPassword, BCRYPT_COST);
+  db.prepare(
+    "UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(passwordHash, resetToken.user_id);
+
+  // Mark token as used
+  db.prepare(
+    "UPDATE password_reset_tokens SET used_at = datetime('now') WHERE id = ?"
+  ).run(resetToken.id);
+
+  // Invalidate all existing refresh tokens for this user (force re-login)
+  db.prepare(
+    "UPDATE refresh_tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL"
+  ).run(resetToken.user_id);
+
+  // Emit WAL event
+  const user = db.prepare('SELECT email FROM users WHERE id = ?').get(resetToken.user_id) as Pick<UserRow, 'email'> | undefined;
+  db.prepare(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('password_reset', '', ?)"
+  ).run(JSON.stringify({ userId: resetToken.user_id, email: user?.email }));
+
+  res.json({ message: 'Password has been reset successfully. Please sign in with your new password.' });
+});
+
 // ─── Token encryption helpers ───
 
 export function encryptToken(plaintext: string): string {
