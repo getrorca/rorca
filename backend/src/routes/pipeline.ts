@@ -1225,6 +1225,113 @@ router.post('/runs/:runId/resume', (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/pipeline/runs/:runId/cancel — Cancel a running/paused pipeline ─
+// Sends SIGTERM to the process group. If the process doesn't exit within 5s,
+// escalates to SIGKILL. Idempotent: if the PID is already dead, still marks
+// the run as cancelled.
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/cancel:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Cancel a running or paused pipeline
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: "Cancelled", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, status: { type: string } } } } } }
+ *       404: { description: "Run not found" }
+ */
+router.post('/runs/:runId/cancel', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    if (run.status !== 'running' && run.status !== 'paused') {
+      res.status(409).json({ error: `Cannot cancel run with status '${run.status}'` });
+      return;
+    }
+
+    const pidAlive = run.pid != null && isPidAlive(run.pid);
+
+    if (pidAlive) {
+      // Send SIGTERM to process group (negative pid)
+      try {
+        process.kill(-run.pid!, 'SIGTERM');
+      } catch {
+        // Process may have died between check and kill — that's OK
+      }
+
+      // Schedule SIGKILL after 5s if still alive
+      setTimeout(() => {
+        try {
+          if (isPidAlive(run.pid!)) {
+            process.kill(-run.pid!, 'SIGKILL');
+          }
+        } catch {
+          // Already dead — ignore
+        }
+      }, 5000);
+    }
+
+    // Mark run as cancelled
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'cancelled', finished_at = datetime('now') WHERE id = ?`
+    ).run(runId);
+
+    // Append [Run cancelled] message to the output buffer
+    const buf = outputBuffers.get(runId);
+    if (buf) {
+      const cancelMsg = '\r\n\x1b[1;33m[Run cancelled]\x1b[0m\r\n';
+      buf.chunks.push(cancelMsg);
+      for (const sub of buf.subscribers) sub(cancelMsg);
+      buf.done = true;
+      buf.subscribers.clear();
+    }
+
+    // Compute elapsed time and completed story count for the WAL event
+    const elapsedMs = Date.now() - new Date(run.started_at + 'Z').getTime();
+    const elapsedSeconds = Math.floor(elapsedMs / 1000);
+    const completedStories = db.prepare(
+      `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status IN ('pass', 'fail')`
+    ).get(runId) as { cnt: number };
+
+    // Emit WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', ?, ?)`
+    ).run(run.workspace_id, JSON.stringify({
+      run_id: runId,
+      elapsed_seconds: elapsedSeconds,
+      completed_stories: completedStories.cnt,
+    }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({ ok: true, runId, status: 'cancelled' });
+  } catch (error: any) {
+    console.error('[Pipeline] Cancel error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
 // Streams raw stdout/stderr (with ANSI codes) to xterm.js on the frontend.
 // Late-joiners receive a full replay of buffered chunks, then live updates.

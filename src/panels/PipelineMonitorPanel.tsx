@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -16,7 +16,7 @@ interface PipelineRun {
   id: number;
   spec_path: string;
   workspace_id: string;
-  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure';
+  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
   pid: number | null;
   started_at: string;
   finished_at: string | null;
@@ -68,6 +68,7 @@ const STATUS_DOTS: Record<string, string> = {
   failed: 'bg-red-500',
   partial_failure: 'bg-orange-500',
   paused: 'bg-yellow-500',
+  cancelled: 'bg-gray-500',
 };
 
 const STORY_ICONS: Record<StoryStatus, string> = {
@@ -362,7 +363,7 @@ export default function PipelineMonitorPanel() {
 
     // Check lifecycle events in order — last one wins
     const lifecycleEvents = sseEvents.filter(
-      (e) => e.event_type === 'run_finished' || e.event_type === 'run_paused' || e.event_type === 'run_resumed'
+      (e) => e.event_type === 'run_finished' || e.event_type === 'run_paused' || e.event_type === 'run_resumed' || e.event_type === 'run_cancelled'
     );
 
     if (lifecycleEvents.length > 0) {
@@ -374,6 +375,8 @@ export default function PipelineMonitorPanel() {
         run = { ...run, status: 'paused' };
       } else if (last.event_type === 'run_resumed') {
         run = { ...run, status: 'running' };
+      } else if (last.event_type === 'run_cancelled') {
+        run = { ...run, status: 'cancelled', finished_at: last.ts };
       }
     }
 
@@ -449,6 +452,27 @@ export default function PipelineMonitorPanel() {
       console.error(`[Pipeline] ${action} failed:`, err);
     } finally {
       setPauseLoading(false);
+    }
+  }, [selectedRunId, liveRun, workspaceId]);
+
+  // ─── Cancel handler ────────────────────────────────────────────────
+  const [cancelLoading, setCancelLoading] = useState(false);
+
+  const handleCancel = useCallback(async () => {
+    if (!selectedRunId || !liveRun) return;
+    setCancelLoading(true);
+    try {
+      await apiFetch(`/api/pipeline/runs/${selectedRunId}/cancel`, { method: 'POST' });
+      const [detail, runList] = await Promise.all([
+        apiFetch<{ run: PipelineRun; stories: StoryResult[] }>(`/api/pipeline/runs/${selectedRunId}`),
+        apiFetch<{ items: PipelineRun[]; total: number; hasMore: boolean; cursor?: string }>(`/api/pipeline/runs?workspaceId=${workspaceId}`),
+      ]);
+      setSelectedRunDetail(detail);
+      setRuns(runList.items);
+    } catch (err) {
+      console.error('[Pipeline] Cancel failed:', err);
+    } finally {
+      setCancelLoading(false);
     }
   }, [selectedRunId, liveRun, workspaceId]);
 
@@ -669,9 +693,11 @@ export default function PipelineMonitorPanel() {
                       ? 'bg-blue-500/20 text-blue-400'
                       : liveRun.status === 'done'
                         ? 'bg-emerald-500/20 text-emerald-400'
-                        : liveRun.status === 'failed' || liveRun.status === 'partial_failure'
-                          ? 'bg-red-500/20 text-red-400'
-                          : 'bg-yellow-500/20 text-yellow-400'
+                        : liveRun.status === 'cancelled'
+                          ? 'bg-gray-500/20 text-gray-400'
+                          : liveRun.status === 'failed' || liveRun.status === 'partial_failure'
+                            ? 'bg-red-500/20 text-red-400'
+                            : 'bg-yellow-500/20 text-yellow-400'
                   }`}
                 >
                   {liveRun.status === 'partial_failure' ? 'partial failure' : liveRun.status}
@@ -715,6 +741,17 @@ export default function PipelineMonitorPanel() {
                         Pause
                       </>
                     )}
+                  </button>
+                )}
+                {(liveRun.status === 'running' || liveRun.status === 'paused') && (
+                  <button
+                    onClick={handleCancel}
+                    disabled={cancelLoading}
+                    className="ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50"
+                    title="Cancel pipeline run"
+                  >
+                    <XCircle className="w-3 h-3" />
+                    {cancelLoading ? 'Cancelling...' : 'Cancel'}
                   </button>
                 )}
               </div>
