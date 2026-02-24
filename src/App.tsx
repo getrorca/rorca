@@ -31,6 +31,7 @@ import HealthDashboardPanel from './panels/HealthDashboardPanel';
 import AuditLogPanel from './panels/AuditLogPanel';
 import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
 import SettingsPanel from './panels/SettingsPanel';
+import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
 
 type AuthPage = 'login' | 'register';
 
@@ -116,6 +117,7 @@ function AppContent() {
       {activePanel === 'audit-log' && <AuditLogPanel />}
       {activePanel === 'activity'  && <ActivityFeedPanel />}
       {activePanel === 'github'   && <GitHubSettingsPanel />}
+      {activePanel === 'workspace-settings' && <WorkspaceSettingsPanel />}
       {activePanel === 'settings' && <SettingsPanel />}
       {showCommandPalette && (
         <CommandPalette

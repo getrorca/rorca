@@ -1,6 +1,6 @@
-import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp, BarChart3, HeartPulse, ScrollText, Calculator, Settings, X } from 'lucide-react';
+import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp, BarChart3, HeartPulse, ScrollText, Calculator, Settings, Settings2, X } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'settings';
+export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'settings' | 'workspace-settings';
 
 export const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'forge',           label: 'Spec Forge',         icon: Wand2          },
@@ -21,8 +21,9 @@ export const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'health',           label: 'Health',               icon: HeartPulse     },
   { id: 'audit-log',       label: 'Audit Log',            icon: ScrollText     },
   { id: 'activity',        label: 'Activity Feed',       icon: Rss            },
-  { id: 'github',          label: 'GitHub',              icon: Github         },
-  { id: 'settings',        label: 'Settings',            icon: Settings       },
+  { id: 'github',              label: 'GitHub',              icon: Github         },
+  { id: 'workspace-settings', label: 'Workspace Settings',  icon: Settings2      },
+  { id: 'settings',           label: 'Settings',            icon: Settings       },
 ];
 
 interface SidebarProps {
