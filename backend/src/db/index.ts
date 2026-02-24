@@ -79,6 +79,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE users ADD COLUMN avatar_url TEXT');
   }
 
+  // V2-110: Add email_verified_at column to users (idempotent)
+  const userColsV2110 = db.pragma('table_info(users)') as { name: string }[];
+  if (!userColsV2110.some(c => c.name === 'email_verified_at')) {
+    db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT');
+  }
+
   // V2-017: Add 'timeout' to story_results status CHECK + elapsed_seconds column (idempotent)
   const storyResultsSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_results'`

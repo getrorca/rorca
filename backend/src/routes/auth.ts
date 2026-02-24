@@ -13,6 +13,10 @@ const REFRESH_TOKEN_EXPIRES_DAYS = 7;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_COST = 12;
 
+// Email verification constants
+const VERIFICATION_TOKEN_EXPIRES_HOURS = 24;
+const VERIFICATION_RATE_LIMIT_PER_HOUR = 3;
+
 // GitHub OAuth config
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
@@ -30,8 +34,18 @@ interface UserRow {
   password_hash: string;
   github_id: string | null;
   role: string;
+  email_verified_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface EmailVerificationTokenRow {
+  id: string;
+  user_id: string;
+  token_hash: string;
+  expires_at: string;
+  created_at: string;
+  used_at: string | null;
 }
 
 export interface AuthUser {
@@ -97,6 +111,27 @@ function storeRefreshToken(userId: string, rawToken: string): void {
   db.prepare(
     'INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)'
   ).run(id, userId, tokenHash, expiresAt);
+}
+
+/**
+ * Generate an email verification token, store its hash, and log the verification link.
+ * Returns the raw token (for inclusion in dev response).
+ */
+function generateAndStoreVerificationToken(userId: string, email: string): string {
+  const rawToken = crypto.randomBytes(48).toString('hex');
+  const tokenHash = hashToken(rawToken);
+  const tokenId = crypto.randomUUID();
+
+  db.prepare(
+    `INSERT INTO email_verification_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, datetime('now', '+${VERIFICATION_TOKEN_EXPIRES_HOURS} hours'))`
+  ).run(tokenId, userId, tokenHash);
+
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
+  const verifyLink = `http://localhost:3030/api/auth/verify-email?token=${rawToken}`;
+
+  console.log(`[auth] Email verification link for ${email}: ${verifyLink}`);
+
+  return rawToken;
 }
 
 /**
@@ -181,7 +216,10 @@ router.post('/register', (req: Request, res: Response) => {
     'INSERT INTO users (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)'
   ).run(userId, trimmedEmail, displayName.trim(), passwordHash);
 
-  // Generate tokens
+  // Generate email verification token
+  const verificationToken = generateAndStoreVerificationToken(userId, trimmedEmail);
+
+  // Generate auth tokens
   const accessToken = generateAccessToken(userId, trimmedEmail);
   const refreshToken = generateRefreshToken();
   storeRefreshToken(userId, refreshToken);
@@ -196,9 +234,12 @@ router.post('/register', (req: Request, res: Response) => {
       id: userId,
       email: trimmedEmail,
       displayName: displayName.trim(),
+      emailVerified: false,
     },
     accessToken,
     refreshToken,
+    // Include verification link in dev mode
+    ...(process.env.NODE_ENV !== 'production' && { verificationToken }),
   });
 });
 
@@ -276,6 +317,7 @@ router.post('/login', (req: Request, res: Response) => {
       id: user.id,
       email: user.email,
       displayName: user.display_name,
+      emailVerified: !!user.email_verified_at,
     },
     accessToken,
     refreshToken,
@@ -423,8 +465,8 @@ router.post('/logout', (req: Request, res: Response) => {
 router.get('/me', authRequired, (req: Request, res: Response) => {
   const authReq = req as Request & { user: AuthUser };
   const user = db.prepare(
-    'SELECT id, email, display_name, github_id FROM users WHERE id = ?'
-  ).get(authReq.user.id) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id'> | undefined;
+    'SELECT id, email, display_name, github_id, email_verified_at FROM users WHERE id = ?'
+  ).get(authReq.user.id) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> | undefined;
 
   if (!user) {
     res.status(401).json({ error: 'User not found' });
@@ -437,7 +479,140 @@ router.get('/me', authRequired, (req: Request, res: Response) => {
       email: user.email,
       displayName: user.display_name,
       githubConnected: !!user.github_id,
+      emailVerified: !!user.email_verified_at,
     },
+  });
+});
+
+// ─── Email verification endpoints ───
+
+/**
+ * @swagger
+ * /api/auth/verify-email:
+ *   get:
+ *     tags: [Auth]
+ *     summary: Verify email address using a verification token
+ *     security: []
+ *     parameters:
+ *       - in: query
+ *         name: token
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       302: { description: "Redirects to app on success" }
+ *       400: { description: "Invalid or expired token" }
+ */
+router.get('/verify-email', (req: Request, res: Response) => {
+  const { token } = req.query;
+
+  if (!token || typeof token !== 'string') {
+    res.status(400).json({ error: 'Verification token is required' });
+    return;
+  }
+
+  const tokenHash = hashToken(token);
+  const verificationToken = db.prepare(
+    "SELECT *, (expires_at <= datetime('now')) as is_expired FROM email_verification_tokens WHERE token_hash = ?"
+  ).get(tokenHash) as (EmailVerificationTokenRow & { is_expired: number }) | undefined;
+
+  if (!verificationToken) {
+    res.status(400).json({ error: 'Invalid or expired verification token' });
+    return;
+  }
+
+  if (verificationToken.used_at) {
+    // Already used — just redirect to app
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
+    res.redirect(`${frontendUrl}/?verified=already`);
+    return;
+  }
+
+  if (verificationToken.is_expired) {
+    res.status(400).json({ error: 'This verification token has expired. Please request a new one.' });
+    return;
+  }
+
+  // Mark email as verified
+  db.prepare(
+    "UPDATE users SET email_verified_at = datetime('now'), updated_at = datetime('now') WHERE id = ?"
+  ).run(verificationToken.user_id);
+
+  // Mark token as used
+  db.prepare(
+    "UPDATE email_verification_tokens SET used_at = datetime('now') WHERE id = ?"
+  ).run(verificationToken.id);
+
+  // Emit WAL event
+  const user = db.prepare('SELECT email FROM users WHERE id = ?').get(verificationToken.user_id) as Pick<UserRow, 'email'> | undefined;
+  db.prepare(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('email_verified', '', ?)"
+  ).run(JSON.stringify({ userId: verificationToken.user_id, email: user?.email }));
+
+  // Redirect to app with success indicator
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
+  res.redirect(`${frontendUrl}/?verified=true`);
+});
+
+/**
+ * @swagger
+ * /api/auth/resend-verification:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Resend email verification link
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *     responses:
+ *       200: { description: "Verification email sent (if account exists)" }
+ *       429: { description: "Too many verification requests" }
+ */
+router.post('/resend-verification', (req: Request, res: Response) => {
+  const { email } = req.body;
+
+  if (!email || typeof email !== 'string') {
+    res.status(400).json({ error: 'Email is required' });
+    return;
+  }
+
+  const trimmedEmail = email.trim().toLowerCase();
+  const successMessage = 'If an account with that email exists and is unverified, a verification link has been sent.';
+
+  const user = db.prepare('SELECT id, email, email_verified_at FROM users WHERE email = ?').get(trimmedEmail) as Pick<UserRow, 'id' | 'email' | 'email_verified_at'> | undefined;
+
+  if (!user) {
+    // Don't reveal whether email exists
+    res.json({ message: successMessage });
+    return;
+  }
+
+  if (user.email_verified_at) {
+    // Already verified
+    res.json({ message: 'Email is already verified.' });
+    return;
+  }
+
+  // Rate limit: max 3 verification requests per email per hour
+  const recentCount = (db.prepare(
+    "SELECT COUNT(*) as count FROM email_verification_tokens WHERE user_id = ? AND created_at > datetime('now', '-1 hour')"
+  ).get(user.id) as { count: number }).count;
+
+  if (recentCount >= VERIFICATION_RATE_LIMIT_PER_HOUR) {
+    res.status(429).json({ error: 'Too many verification requests. Please try again later.' });
+    return;
+  }
+
+  const rawToken = generateAndStoreVerificationToken(user.id, trimmedEmail);
+
+  res.json({
+    message: successMessage,
+    // Include token in dev mode
+    ...(process.env.NODE_ENV !== 'production' && { verificationLink: `http://localhost:3030/api/auth/verify-email?token=${rawToken}` }),
   });
 });
 
@@ -801,9 +976,14 @@ router.get('/github/callback', async (req: Request, res: Response) => {
         // Use a random unusable password hash for GitHub-only users
         const noPasswordHash = `github:${crypto.randomBytes(32).toString('hex')}`;
         db.prepare(
-          'INSERT INTO users (id, email, display_name, password_hash, github_id) VALUES (?, ?, ?, ?, ?)'
+          "INSERT INTO users (id, email, display_name, password_hash, github_id, email_verified_at) VALUES (?, ?, ?, ?, ?, datetime('now'))"
         ).run(userId, userEmail, displayName, noPasswordHash, githubUserId);
       }
+
+      // GitHub verifies emails — mark as verified if not already
+      db.prepare(
+        "UPDATE users SET email_verified_at = COALESCE(email_verified_at, datetime('now')), updated_at = datetime('now') WHERE id = ?"
+      ).run(userId);
 
       // Create github_connection
       const connectionId = crypto.randomUUID();
