@@ -33,16 +33,19 @@ export default function SpecForgePanelPage() {
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
+  const [activeProvider, setActiveProvider] = useState<string>('claude-cli');
 
-  // Fetch available models (includes recommended badge based on workspace default)
+  // Fetch available models and active provider
   useEffect(() => {
     if (!workspaceId) return;
-    apiFetch<{ models: ModelOption[]; defaultModel: string }>(`/api/direction/models?workspaceId=${workspaceId}`)
-      .then(data => {
-        setAvailableModels(data.models);
-        setDefaultModelId(data.defaultModel);
-      })
-      .catch(() => {});
+    Promise.all([
+      apiFetch<{ models: ModelOption[]; defaultModel: string }>(`/api/direction/models?workspaceId=${workspaceId}`),
+      apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`),
+    ]).then(([modelData, providerData]) => {
+      setAvailableModels(modelData.models);
+      setDefaultModelId(modelData.defaultModel);
+      setActiveProvider(providerData.provider);
+    }).catch(() => {});
   }, [workspaceId]);
 
   // Section 2: Direction Stack Overrides
@@ -253,7 +256,25 @@ export default function SpecForgePanelPage() {
                 Spec Parameters
               </h3>
               <div className="space-y-4">
-                <Field label="LLM Model">
+                <Field label={
+                  <span className="flex items-center gap-2">
+                    LLM Model
+                    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${
+                      activeProvider === 'claude-cli'
+                        ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                        : 'bg-accent/10 text-accent border border-accent/20'
+                    }`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${
+                        activeProvider === 'claude-cli' ? 'bg-green-500' : 'bg-accent'
+                      }`} />
+                      {activeProvider === 'claude-cli' ? 'Subscription' :
+                       activeProvider === 'anthropic' ? 'Anthropic API' :
+                       activeProvider === 'openai-compat' ? 'OpenAI Compat' :
+                       activeProvider === 'openrouter' ? 'OpenRouter' :
+                       activeProvider}
+                    </span>
+                  </span>
+                }>
                   <div className="space-y-1.5">
                     {availableModels.map((m) => (
                       <label
@@ -456,7 +477,7 @@ function Field({
   className,
   children,
 }: {
-  label: string;
+  label: React.ReactNode;
   error?: string;
   className?: string;
   children: React.ReactNode;
