@@ -31,6 +31,7 @@ import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
+import { rateLimiter } from './lib/rate-limiter';
 
 dotenv.config();
 
@@ -60,13 +61,17 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   customSiteTitle: 'Rorcha API Docs',
 }));
 
-app.use('/api/auth', authRouter);
+// Rate limit public routes by IP (unauthenticated tier)
+app.use('/api/auth', rateLimiter, authRouter);
 app.use('/api/webhooks', webhooksRouter);
-app.use('/api/invites', invitesRouter);
+app.use('/api/invites', rateLimiter, invitesRouter);
 registerWebhookHandlers();
 
 // ─── Auth middleware (all routes below require authentication) ───
 app.use(authRequired);
+
+// ─── Rate limiting (after auth so req.user is available) ───
+app.use(rateLimiter);
 
 // ─── Protected routes ───
 app.use('/api/workspaces', workspacesRouter);
