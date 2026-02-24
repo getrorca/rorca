@@ -31,7 +31,9 @@ import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
 import agentHooksRouter from './routes/agent-hooks';
 import agentProfilesRouter from './routes/agent-profiles';
+import notificationsRouter from './routes/notifications';
 import { fireAgentHooks } from './lib/agent-hook-runner';
+import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
@@ -102,9 +104,13 @@ app.use('/api/vault/keys', vaultRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/onboarding', onboardingRouter);
 app.use('/api/admin', backupsRouter);
+app.use('/api/notifications', notificationsRouter);
 
 // V2-069: Subscribe agent hook runner to all WAL broadcasts
 subscribe(fireAgentHooks);
+
+// V2-073: Subscribe notification dispatcher to WAL broadcasts
+startNotificationDispatcher();
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {

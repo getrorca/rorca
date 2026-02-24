@@ -93,6 +93,7 @@ function AppContent() {
       sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />}
       showMenuButton
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
+      onNavigate={setActivePanel}
     >
       {activePanel === 'forge'           && <SpecForgePanelPage />}
       {activePanel === 'stack'           && <DirectionStackPanel />}
