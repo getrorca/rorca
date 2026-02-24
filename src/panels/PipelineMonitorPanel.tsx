@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -786,14 +786,29 @@ export default function PipelineMonitorPanel() {
 
             {/* Terminal tab — xterm.js live output */}
             {detailTab === 'terminal' && (
-              <div className="flex-1 min-h-0 overflow-hidden">
-                {selectedRunId ? (
-                  <RunTerminal key={selectedRunId} runId={selectedRunId} />
-                ) : (
-                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-                    Select a run to view output
+              <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                {selectedRunId && (
+                  <div className="flex justify-end px-2 py-1 border-b border-[var(--border)] shrink-0">
+                    <a
+                      href={`${import.meta.env.VITE_API_URL || 'http://localhost:3030'}/api/pipeline/runs/${selectedRunId}/log`}
+                      download={`run-${selectedRunId}.log`}
+                      className="flex items-center gap-1 px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] rounded transition-colors hover:bg-[var(--surface-hover)]"
+                      title="Download log file"
+                    >
+                      <Download className="w-3 h-3" />
+                      Download Log
+                    </a>
                   </div>
                 )}
+                <div className="flex-1 min-h-0 overflow-hidden">
+                  {selectedRunId ? (
+                    <RunTerminal key={selectedRunId} runId={selectedRunId} />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                      Select a run to view output
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
