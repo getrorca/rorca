@@ -1,6 +1,6 @@
-import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp, BarChart3, HeartPulse, X } from 'lucide-react';
+import { Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight, Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp, BarChart3, HeartPulse, ScrollText, X } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health';
+export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health';
 
 export const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'forge',           label: 'Spec Forge',         icon: Wand2          },
@@ -18,6 +18,7 @@ export const NAV_ITEMS: { id: PanelId; label: string; icon: typeof Wand2 }[] = [
   { id: 'velocity',        label: 'Velocity Chart',       icon: TrendingUp     },
   { id: 'completion',      label: 'Completion Rates',     icon: BarChart3      },
   { id: 'health',           label: 'Health',               icon: HeartPulse     },
+  { id: 'audit-log',       label: 'Audit Log',            icon: ScrollText     },
   { id: 'activity',        label: 'Activity Feed',       icon: Rss            },
   { id: 'github',          label: 'GitHub',              icon: Github         },
 ];
