@@ -98,7 +98,7 @@ export interface StoryComment {
 
 // ─── Pipeline types ───────────────────────────────────────────────────────────
 
-export type RunStatus = 'running' | 'paused' | 'done' | 'failed' | 'partial_failure';
+export type RunStatus = 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
 
 export interface PipelineRun {
   id: number;
