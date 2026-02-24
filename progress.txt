@@ -537,3 +537,23 @@ Key decisions:
 
 ## Specs Loaded
 - All AGENTS.md files throughout Rorcha codebase (newly created this session)
+
+## Story V2-068: MCP Pipeline Control & Analytics Tools — DONE
+Files touched:
+- backend/src/mcp/server.ts (modified — added 5 new tools)
+- backend/src/mcp/__tests__/pipeline-control.test.ts (new — 23 tests)
+- backend/src/mcp/AGENTS.md (modified — updated tool count and table)
+
+What was built:
+- `rorcha_trigger_run`: Starts pipeline run for approved spec, supports dryRun and autoWorktree
+- `rorcha_run_status`: Detailed per-story progress with tokens, elapsed time, retry info
+- `rorcha_usage_stats`: Token usage and cost summary via analytics API, grouped by model/spec/story/user
+- `rorcha_retry_story`: Retry failed stories in completed runs (specific IDs or all failed)
+- `rorcha_list_runs`: Recent pipeline runs with status, spec, elapsed time, branch info
+
+Key decisions:
+- All 5 tools call existing HTTP API endpoints (no direct DB access from MCP)
+- Spec path constructed as `ralph/specs/approved/${specId}.json` matching backend convention
+- `rorcha_list_runs` slices client-side since /api/pipeline/runs doesn't have limit param
+- `rorcha_usage_stats` delegates to /api/analytics/usage (already has groupBy, dateRange, timeSeries)
+- Tool output is human-readable text, not raw JSON — matches existing tool patterns
