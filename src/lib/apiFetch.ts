@@ -1,6 +1,20 @@
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3030';
 
-// Global error listeners — components subscribe to receive API error notifications
+// ─── Typed API Error ──────────────────────────────────────────────────────────
+
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+// ─── Global error listeners ───────────────────────────────────────────────────
+
 type ErrorListener = (message: string) => void;
 const errorListeners = new Set<ErrorListener>();
 
@@ -18,7 +32,8 @@ export function dispatch401() {
   window.dispatchEvent(new CustomEvent('rorcha:auth-expired'));
 }
 
-// In-memory token storage (not localStorage — XSS safety)
+// ─── Token storage (in-memory — XSS safety) ──────────────────────────────────
+
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
 
@@ -74,6 +89,23 @@ async function attemptRefresh(): Promise<boolean> {
   return refreshPromise;
 }
 
+// ─── Parse error body into ApiError ───────────────────────────────────────────
+
+function parseErrorBody(status: number, text: string): ApiError {
+  try {
+    const json = JSON.parse(text);
+    return new ApiError(
+      status,
+      json.code || json.error || `HTTP_${status}`,
+      json.message || json.error || text,
+    );
+  } catch {
+    return new ApiError(status, `HTTP_${status}`, text || `HTTP ${status}`);
+  }
+}
+
+// ─── Core fetch ───────────────────────────────────────────────────────────────
+
 export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   const at = getAccessToken();
 
@@ -106,7 +138,10 @@ export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> 
           retryHeaders['Authorization'] = `Bearer ${newToken}`;
         }
         const retryRes = await fetch(`${BASE_URL}${path}`, { ...opts, headers: retryHeaders });
-        if (!retryRes.ok) throw new Error(`${retryRes.status} ${await retryRes.text()}`);
+        if (!retryRes.ok) {
+          const errText = await retryRes.text();
+          throw parseErrorBody(retryRes.status, errText);
+        }
         return retryRes.json() as Promise<T>;
       }
     }
@@ -114,13 +149,13 @@ export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> 
     dispatch401();
     const msg401 = body?.error || 'Unauthorized';
     notifyError(msg401);
-    throw new Error(`401 ${body ? JSON.stringify(body) : 'Unauthorized'}`);
+    throw new ApiError(401, 'UNAUTHORIZED', msg401);
   }
 
   if (!res.ok) {
     const errText = await res.text();
     notifyError(`${res.status}: ${errText.slice(0, 200)}`);
-    throw new Error(`${res.status} ${errText}`);
+    throw parseErrorBody(res.status, errText);
   }
   return res.json() as Promise<T>;
 }
