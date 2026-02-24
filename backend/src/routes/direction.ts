@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
-import { isValidModel, SUPPORTED_MODELS } from '../lib/llm-client';
+import { isValidModel, SUPPORTED_MODELS, MODEL_INFO, DEFAULT_MODEL } from '../lib/llm-client';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 
 const router = Router();
@@ -251,9 +251,33 @@ router.get('/all', (req: Request, res: Response) => {
  *                       id: { type: string, example: "claude-sonnet-4-5-20250929" }
  *                       label: { type: string }
  */
-router.get('/models', (_req: Request, res: Response) => {
+router.get('/models', (req: Request, res: Response) => {
+  const { workspaceId } = req.query;
+
+  // Resolve workspace default model for "recommended" badge
+  let workspaceDefault: string | null = null;
+  if (workspaceId) {
+    const l3Pref = db.prepare(
+      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+    ).get(String(workspaceId)) as { preferred_model: string | null } | undefined;
+    workspaceDefault = l3Pref?.preferred_model ?? null;
+  }
+
+  const recommendedId = workspaceDefault || DEFAULT_MODEL;
+
   res.json({
-    models: SUPPORTED_MODELS.map(id => ({ id, label: id })),
+    models: SUPPORTED_MODELS.map(id => {
+      const info = MODEL_INFO[id];
+      return {
+        id,
+        label: info.label,
+        provider: info.provider,
+        costPer1kInput: info.costPer1kInput,
+        costPer1kOutput: info.costPer1kOutput,
+        recommended: id === recommendedId,
+      };
+    }),
+    defaultModel: recommendedId,
   });
 });
 
