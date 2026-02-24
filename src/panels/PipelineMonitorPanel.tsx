@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3 } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -20,6 +20,7 @@ interface PipelineRun {
   pid: number | null;
   started_at: string;
   finished_at: string | null;
+  retried_from_run_id: number | null;
 }
 
 type RunStatus = PipelineRun['status'];
@@ -451,6 +452,31 @@ export default function PipelineMonitorPanel() {
     }
   }, [selectedRunId, liveRun, workspaceId]);
 
+  // ─── Retry Failed handler ──────────────────────────────────────────
+  const [retryLoading, setRetryLoading] = useState(false);
+
+  const handleRetryFailed = useCallback(async () => {
+    if (!selectedRunId || !liveRun) return;
+    setRetryLoading(true);
+    try {
+      const result = await apiFetch<{ ok: boolean; runId: number }>(`/api/pipeline/runs/${selectedRunId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (result.ok && result.runId) {
+        // Refresh run list and switch to the new retry run
+        const runList = await apiFetch<{ runs: PipelineRun[] }>(`/api/pipeline/runs?workspaceId=${workspaceId}`);
+        setRuns(runList.runs);
+        setSelectedRunId(result.runId);
+      }
+    } catch (err) {
+      console.error('[Pipeline] Retry failed:', err);
+    } finally {
+      setRetryLoading(false);
+    }
+  }, [selectedRunId, liveRun, workspaceId]);
+
   const handleCopyCommand = () => {
     const cmd = `./scripts/ralph/run-loop.sh --json specs/approved/<spec>.json`;
     navigator.clipboard.writeText(cmd);
@@ -611,6 +637,11 @@ export default function PipelineMonitorPanel() {
               <div className="flex items-center gap-2">
                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS_DOTS[run.status] || 'bg-zinc-500'}`} />
                 <span className="text-sm truncate capitalize">{specName(run.spec_path)}</span>
+                {run.retried_from_run_id != null && (
+                  <span className="px-1 py-0.5 text-[9px] font-medium rounded bg-purple-500/20 text-purple-400 flex-shrink-0">
+                    retry
+                  </span>
+                )}
               </div>
               <div className="mt-1 text-xs text-[var(--text-muted)] pl-4">
                 {elapsedTime(run.started_at, run.finished_at)}
@@ -645,6 +676,23 @@ export default function PipelineMonitorPanel() {
                 >
                   {liveRun.status === 'partial_failure' ? 'partial failure' : liveRun.status}
                 </span>
+                {liveRun.retried_from_run_id != null && (
+                  <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-500/20 text-purple-400 flex items-center gap-1">
+                    <RotateCcw className="w-3 h-3" />
+                    retry of #{liveRun.retried_from_run_id}
+                  </span>
+                )}
+                {(liveRun.status === 'failed' || liveRun.status === 'partial_failure') && (
+                  <button
+                    onClick={handleRetryFailed}
+                    disabled={retryLoading}
+                    className="ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 disabled:opacity-50"
+                    title="Retry failed stories in a new run"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    {retryLoading ? 'Retrying...' : 'Retry Failed'}
+                  </button>
+                )}
                 {(liveRun.status === 'running' || liveRun.status === 'paused') && (
                   <button
                     onClick={handlePauseResume}

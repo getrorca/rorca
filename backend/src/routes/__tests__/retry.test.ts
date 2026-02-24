@@ -75,107 +75,120 @@ function createRunWithStories(workspaceId = 'ws-retry-1') {
   return runId;
 }
 
-// ─── Test 1: Retry all failed stories when storyIds omitted ──────────────────
+// ─── Test 1: Retry all failed stories creates new run ──────────────────────────
 
-test('POST /api/pipeline/runs/:runId/retry retries all failed stories when storyIds omitted', async () => {
+test('POST /api/pipeline/runs/:runId/retry creates new run and retries all failed stories when storyIds omitted', async () => {
   createWorkspace();
-  const runId = createRunWithStories();
+  const originalRunId = createRunWithStories();
 
   const res = await request(app)
-    .post(`/api/pipeline/runs/${runId}/retry`)
+    .post(`/api/pipeline/runs/${originalRunId}/retry`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
-  expect(res.status).toBe(200);
+  expect(res.status).toBe(201);
   expect(res.body.ok).toBe(true);
-  expect(res.body.runId).toBe(runId);
+  expect(res.body.originalRunId).toBe(originalRunId);
+  expect(res.body.runId).not.toBe(originalRunId); // New run created
   expect(res.body.retriedStories).toHaveLength(2);
   expect(res.body.retriedStories.map((s: any) => s.storyId).sort()).toEqual(['US-002', 'US-003']);
   expect(res.body.retriedStories[0].attempt).toBe(1);
+  expect(res.body.copiedStories).toEqual(['US-001']); // Passed story copied
 
-  // Run should be back to 'running'
-  const run = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(runId) as any;
-  expect(run.status).toBe('running');
+  // New run should be 'running' with retried_from_run_id
+  const newRun = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(res.body.runId) as any;
+  expect(newRun.status).toBe('running');
+  expect(newRun.retried_from_run_id).toBe(originalRunId);
+
+  // Original run stays as 'failed'
+  const originalRun = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(originalRunId) as any;
+  expect(originalRun.status).toBe('failed');
 });
 
 // ─── Test 2: Retry specific stories via storyIds ─────────────────────────────
 
 test('POST /api/pipeline/runs/:runId/retry retries only specified storyIds', async () => {
   createWorkspace();
-  const runId = createRunWithStories();
+  const originalRunId = createRunWithStories();
 
   const res = await request(app)
-    .post(`/api/pipeline/runs/${runId}/retry`)
+    .post(`/api/pipeline/runs/${originalRunId}/retry`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-002'] });
 
-  expect(res.status).toBe(200);
+  expect(res.status).toBe(201);
   expect(res.body.retriedStories).toHaveLength(1);
   expect(res.body.retriedStories[0].storyId).toBe('US-002');
   expect(res.body.retriedStories[0].attempt).toBe(1);
 });
 
-// ─── Test 3: New story_result rows created with incremented retry count ──────
+// ─── Test 3: New run gets copied pass results + retry placeholders ────────────
 
-test('Retry creates new story_result rows with incremented retry count', async () => {
+test('Retry creates new run with copied pass results and retry placeholders', async () => {
   createWorkspace();
-  const runId = createRunWithStories();
+  const originalRunId = createRunWithStories();
 
-  await request(app)
-    .post(`/api/pipeline/runs/${runId}/retry`)
+  const res = await request(app)
+    .post(`/api/pipeline/runs/${originalRunId}/retry`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-002'] });
 
-  const stories = db.prepare(
-    `SELECT * FROM story_results WHERE run_id = ? AND story_id = 'US-002' ORDER BY id ASC`
-  ).all(runId) as any[];
+  const newRunId = res.body.runId;
 
-  // Original + retry
-  expect(stories).toHaveLength(2);
-  expect(stories[0].status).toBe('fail');
-  expect(stories[0].retries).toBe(0);
-  expect(stories[1].status).toBe('retry');
-  expect(stories[1].retries).toBe(1);
+  // New run should have: 1 copied pass (US-001) + 1 retry placeholder (US-002)
+  const newStories = db.prepare(
+    `SELECT * FROM story_results WHERE run_id = ? ORDER BY story_id ASC`
+  ).all(newRunId) as any[];
+
+  expect(newStories).toHaveLength(2);
+
+  const us001 = newStories.find((s: any) => s.story_id === 'US-001');
+  expect(us001.status).toBe('pass'); // Copied from original
+  expect(us001.retries).toBe(0);
+
+  const us002 = newStories.find((s: any) => s.story_id === 'US-002');
+  expect(us002.status).toBe('retry');
+  expect(us002.retries).toBe(1);
 });
 
-// ─── Test 4: Original failed story_result rows preserved ─────────────────────
+// ─── Test 4: Original run's story results are untouched ─────────────────────
 
-test('Original failed story_result rows are preserved (audit trail)', async () => {
+test('Original run story_result rows are preserved unchanged', async () => {
   createWorkspace();
-  const runId = createRunWithStories();
+  const originalRunId = createRunWithStories();
 
   const beforeStories = db.prepare(
     `SELECT * FROM story_results WHERE run_id = ?`
-  ).all(runId) as any[];
+  ).all(originalRunId) as any[];
   expect(beforeStories).toHaveLength(3);
 
   await request(app)
-    .post(`/api/pipeline/runs/${runId}/retry`)
+    .post(`/api/pipeline/runs/${originalRunId}/retry`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
+  // Original run should still have exactly 3 stories, unchanged
   const afterStories = db.prepare(
     `SELECT * FROM story_results WHERE run_id = ?`
-  ).all(runId) as any[];
+  ).all(originalRunId) as any[];
+  expect(afterStories).toHaveLength(3);
 
-  // Original 3 + 2 retry rows = 5
-  expect(afterStories).toHaveLength(5);
-
-  // Original rows still present
   const originals = afterStories.filter((s: any) => s.retries === 0);
   expect(originals).toHaveLength(3);
 });
 
-// ─── Test 5: story_retried WAL events emitted ────────────────────────────────
+// ─── Test 5: story_retried WAL events emitted with new run ID ────────────────
 
-test('Retry emits story_retried WAL events for each retried story', async () => {
+test('Retry emits story_retried WAL events referencing the new run', async () => {
   createWorkspace();
-  const runId = createRunWithStories();
+  const originalRunId = createRunWithStories();
 
-  await request(app)
-    .post(`/api/pipeline/runs/${runId}/retry`)
+  const res = await request(app)
+    .post(`/api/pipeline/runs/${originalRunId}/retry`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({});
+
+  const newRunId = res.body.runId;
 
   const events = db.prepare(
     `SELECT * FROM wal_events WHERE event_type = 'story_retried'`
@@ -184,7 +197,8 @@ test('Retry emits story_retried WAL events for each retried story', async () => 
   expect(events).toHaveLength(2);
 
   const payloads = events.map((e: any) => JSON.parse(e.payload));
-  expect(payloads[0].run_id).toBe(runId);
+  expect(payloads[0].run_id).toBe(newRunId);
+  expect(payloads[0].original_run_id).toBe(originalRunId);
   expect(payloads[0].attempt).toBe(1);
   expect(payloads.map((p: any) => p.story_id).sort()).toEqual(['US-002', 'US-003']);
 });
@@ -261,7 +275,7 @@ test('POST /api/pipeline/runs/:runId/retry returns 422 when storyIds do not matc
 
 test('story_retried events are broadcast to SSE subscribers', async () => {
   createWorkspace();
-  const runId = createRunWithStories();
+  const originalRunId = createRunWithStories();
 
   const sseHub = require('../../lib/sse-hub');
   const received: any[] = [];
@@ -269,10 +283,12 @@ test('story_retried events are broadcast to SSE subscribers', async () => {
     received.push(event);
   });
 
-  await request(app)
-    .post(`/api/pipeline/runs/${runId}/retry`)
+  const res = await request(app)
+    .post(`/api/pipeline/runs/${originalRunId}/retry`)
     .set('Authorization', `Bearer ${authToken}`)
     .send({ storyIds: ['US-002'] });
+
+  const newRunId = res.body.runId;
 
   const retryEvents = received.filter((e: any) => e.event_type === 'story_retried');
   expect(retryEvents).toHaveLength(1);
@@ -280,7 +296,7 @@ test('story_retried events are broadcast to SSE subscribers', async () => {
 
   const payload = JSON.parse(retryEvents[0].payload);
   expect(payload.attempt).toBe(1);
-  expect(payload.run_id).toBe(runId);
+  expect(payload.run_id).toBe(newRunId);
 
   unsubscribe();
 });
@@ -297,41 +313,53 @@ test('partial_failure status is accepted in pipeline_runs table', () => {
   expect(run.status).toBe('partial_failure');
 });
 
-// ─── Test 12: Retry increments attempt on subsequent retries ─────────────────
+// ─── Test 12: Retry uses same spec_path and direction as original ─────────────
 
-test('Second retry increments attempt number to 2', async () => {
+test('New retry run uses the same spec_path as the original run', async () => {
   createWorkspace();
-  const runId = createRunWithStories();
+  const originalRunId = createRunWithStories();
 
-  // First retry
-  await request(app)
-    .post(`/api/pipeline/runs/${runId}/retry`)
-    .set('Authorization', `Bearer ${authToken}`)
-    .send({ storyIds: ['US-002'] });
-
-  // Simulate the retry failing again: update the retry row to 'fail'
-  db.prepare(
-    `UPDATE story_results SET status = 'fail', finished_at = datetime('now') WHERE run_id = ? AND story_id = 'US-002' AND retries = 1`
-  ).run(runId);
-
-  // Set run back to failed so we can retry again
-  db.prepare(`UPDATE pipeline_runs SET status = 'failed', finished_at = datetime('now') WHERE id = ?`).run(runId);
-
-  // Second retry
   const res = await request(app)
-    .post(`/api/pipeline/runs/${runId}/retry`)
+    .post(`/api/pipeline/runs/${originalRunId}/retry`)
     .set('Authorization', `Bearer ${authToken}`)
-    .send({ storyIds: ['US-002'] });
+    .send({});
 
-  expect(res.status).toBe(200);
-  expect(res.body.retriedStories[0].attempt).toBe(2);
+  const newRunId = res.body.runId;
+  const originalRun = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(originalRunId) as any;
+  const newRun = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(newRunId) as any;
 
-  const stories = db.prepare(
-    `SELECT * FROM story_results WHERE run_id = ? AND story_id = 'US-002' ORDER BY id ASC`
-  ).all(runId) as any[];
+  expect(newRun.spec_path).toBe(originalRun.spec_path);
+  expect(newRun.workspace_id).toBe(originalRun.workspace_id);
+  expect(newRun.retried_from_run_id).toBe(originalRunId);
+  expect(newRun.trigger_type).toBe('retry');
+});
 
-  expect(stories).toHaveLength(3); // original fail + retry 1 + retry 2
-  expect(stories[0].retries).toBe(0);
-  expect(stories[1].retries).toBe(1);
-  expect(stories[2].retries).toBe(2);
+// ─── Test 13: run_started WAL event emitted for new retry run ─────────────────
+
+test('run_started WAL event is emitted for the new retry run', async () => {
+  createWorkspace();
+  const originalRunId = createRunWithStories();
+
+  const res = await request(app)
+    .post(`/api/pipeline/runs/${originalRunId}/retry`)
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({});
+
+  const newRunId = res.body.runId;
+
+  const events = db.prepare(
+    `SELECT * FROM wal_events WHERE event_type = 'run_started'`
+  ).all() as any[];
+
+  expect(events.length).toBeGreaterThanOrEqual(1);
+
+  const retryRunEvent = events.find((e: any) => {
+    const payload = JSON.parse(e.payload);
+    return payload.run_id === newRunId;
+  });
+  expect(retryRunEvent).toBeDefined();
+
+  const payload = JSON.parse(retryRunEvent.payload);
+  expect(payload.retried_from_run_id).toBe(originalRunId);
+  expect(payload.retried_stories).toEqual(expect.arrayContaining(['US-002', 'US-003']));
 });

@@ -153,6 +153,12 @@ export function runMigrations() {
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'");
   }
 
+  // V2-078: Add retried_from_run_id column to pipeline_runs (idempotent)
+  const runColsV2078 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsV2078.some(c => c.name === 'retried_from_run_id')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN retried_from_run_id INTEGER REFERENCES pipeline_runs(id)');
+  }
+
   // V2-031: Add pr_template column to workspaces (idempotent)
   const wsCols = db.pragma('table_info(workspaces)') as { name: string }[];
   if (!wsCols.some(c => c.name === 'pr_template')) {
