@@ -491,6 +491,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
       '- Each story needs 3-5 specific testable acceptanceCriteria',
       '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
+      '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
       '- Stories should be concrete and implementable, not vague',
       '- Each story must have a "complexity" field: integer 1-5 (1=trivial one-liner, 2=simple, 3=moderate, 4=complex multi-file, 5=epic cross-cutting). Base on acceptance criteria count, description scope, and dependency depth',
       '- Your entire response must be valid JSON parseable by JSON.parse()',
@@ -1625,7 +1626,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
       '',
       'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown. No preamble. Start with { and end with }.',
       'JSON schema: {"stories":[{"id":"string","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["string"]}]}',
-      'Rules: 3-5 testable acceptanceCriteria per story. dependsOn lists IDs this story requires first (empty array if none).',
+      'Rules: 3-5 testable acceptanceCriteria per story. dependsOn lists IDs this story requires first (empty array if none). Analyze story content to determine dependencies — if a new story references components, APIs, or data models from existing stories, add those to dependsOn.',
     ].filter(Boolean).join('\n');
 
     const { chatComplete: chatCompleteFn } = await import('../lib/llm-client');
@@ -3046,6 +3047,272 @@ router.get('/:specId/graph', (req: Request, res: Response) => {
     res.json({ nodes, edges, parallelGroups } as GraphResponse);
   } catch (error: any) {
     console.error('[Specs] Graph error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-076: POST /:specId/detect-dependencies — AI dependency detection ─────
+
+interface DependencySuggestion {
+  from: string;   // dependency story ID
+  to: string;     // dependent story ID
+  reason: string; // why this dependency is suggested
+}
+
+router.post('/:specId/detect-dependencies', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Load spec from pending or approved
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specContent: { userStories?: UserStory[]; stories?: UserStory[]; title?: string };
+    if (fs.existsSync(pendingFile)) {
+      specContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories: UserStory[] = (specContent.userStories ?? specContent.stories ?? []).map(s => ({
+      ...s,
+      dependsOn: s.dependsOn ?? [],
+    }));
+
+    if (stories.length < 2) {
+      res.json({ suggestions: [] });
+      return;
+    }
+
+    // Build existing edges set for deduplication
+    const existingEdges = new Set<string>();
+    for (const s of stories) {
+      for (const dep of s.dependsOn) {
+        existingEdges.add(`${dep}->${s.id}`);
+      }
+    }
+
+    // Build story summaries for LLM
+    const storySummaries = stories.map(s => ({
+      id: s.id,
+      title: s.title,
+      description: s.description,
+      acceptanceCriteria: s.acceptanceCriteria,
+      dependsOn: s.dependsOn,
+    }));
+
+    const prompt = [
+      '=== INSTRUCTIONS: READ THIS FIRST ===',
+      'You are a dependency analyzer. Your ONLY job is to output a single valid JSON object.',
+      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+      'Output ONLY the raw JSON object. If you output anything else, you have failed.',
+      '=== END INSTRUCTIONS ===',
+      '',
+      'TASK: Analyze these user stories and identify MISSING dependencies that are not yet declared.',
+      'A dependency exists when story B requires work from story A to be completed first.',
+      '',
+      'Look for these dependency signals:',
+      '- Story B references a component, API endpoint, or data model that story A creates',
+      '- Story B extends or modifies functionality introduced in story A',
+      '- Story B requires authentication/authorization that story A implements',
+      '- Story B uses a UI component, service, or utility built in story A',
+      '- Story B tests or validates behavior implemented in story A',
+      '',
+      'IMPORTANT: Only suggest dependencies that are NOT already declared in dependsOn.',
+      'Do NOT suggest self-dependencies or circular chains.',
+      '',
+      'Stories to analyze:',
+      JSON.stringify(storySummaries, null, 2),
+      '',
+      'OUTPUT FORMAT: {"suggestions":[{"from":"STORY-001","to":"STORY-002","reason":"Brief reason"}]}',
+      'Rules:',
+      '- "from" is the prerequisite story ID, "to" is the dependent story ID',
+      '- Only include genuinely missing dependencies — be conservative, not exhaustive',
+      '- Each reason should be 1 sentence explaining the dependency signal',
+      '- Return empty array if no missing dependencies found',
+    ].join('\n');
+
+    const user = (req as Request & { user: AuthUser }).user;
+    const vaultApiKey = getVaultKey(user.id, 'anthropic');
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: prompt }],
+      { apiKey: vaultApiKey ?? undefined },
+    );
+
+    // Parse response
+    let parsed: { suggestions: DependencySuggestion[] };
+    try {
+      const responseText = llmResult.text;
+      const fenceMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonStr = fenceMatch ? fenceMatch[1].trim() : responseText.trim();
+      const jsonStart = jsonStr.indexOf('{');
+      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+    } catch {
+      res.status(500).json({ error: 'LLM returned non-JSON', raw: llmResult.text });
+      return;
+    }
+
+    if (!Array.isArray(parsed.suggestions)) {
+      res.json({ suggestions: [] });
+      return;
+    }
+
+    // Filter: remove duplicates of existing edges, self-deps, and invalid story IDs
+    const storyIds = new Set(stories.map(s => s.id));
+    const filtered = parsed.suggestions.filter(s => {
+      if (!storyIds.has(s.from) || !storyIds.has(s.to)) return false;
+      if (s.from === s.to) return false;
+      if (existingEdges.has(`${s.from}->${s.to}`)) return false;
+      return true;
+    });
+
+    // Validate each suggestion doesn't create a cycle
+    const validSuggestions: DependencySuggestion[] = [];
+    for (const suggestion of filtered) {
+      // Simulate adding this edge and check for cycles
+      const testStories = stories.map(s => ({
+        ...s,
+        dependsOn: s.id === suggestion.to
+          ? [...s.dependsOn, suggestion.from]
+          : [...s.dependsOn],
+      }));
+      // Also include previously accepted suggestions in this batch
+      for (const prev of validSuggestions) {
+        const target = testStories.find(s => s.id === prev.to);
+        if (target && !target.dependsOn.includes(prev.from)) {
+          target.dependsOn.push(prev.from);
+        }
+      }
+      const cycle = detectCycle(testStories);
+      if (!cycle) {
+        validSuggestions.push(suggestion);
+      }
+    }
+
+    // Emit WAL event
+    db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
+    ).run('dependencies_detected', specId, workspaceId, JSON.stringify({
+      suggestedCount: validSuggestions.length,
+      filteredCount: filtered.length - validSuggestions.length,
+    }));
+
+    res.json({
+      suggestions: validSuggestions,
+      tokenUsage: llmResult.usage,
+    });
+  } catch (error: any) {
+    console.error('[Specs] Detect dependencies error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── V2-076: POST /:specId/apply-dependencies — Accept suggested dependencies ─
+
+router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId, dependencies } = req.body as {
+      workspaceId: string;
+      dependencies: Array<{ from: string; to: string }>;
+    };
+
+    if (!workspaceId || !Array.isArray(dependencies) || dependencies.length === 0) {
+      res.status(400).json({ error: 'Missing workspaceId or dependencies array' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Load spec
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specContent: Record<string, unknown>;
+    let specFilePath: string;
+    if (fs.existsSync(pendingFile)) {
+      specContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+      specFilePath = pendingFile;
+    } else if (fs.existsSync(approvedFile)) {
+      specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+      specFilePath = approvedFile;
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories = (specContent.userStories ?? specContent.stories ?? []) as UserStory[];
+    const storyMap = new Map(stories.map(s => [s.id, s]));
+
+    // Apply accepted dependencies
+    let appliedCount = 0;
+    for (const dep of dependencies) {
+      const story = storyMap.get(dep.to);
+      if (!story) continue;
+      if (!story.dependsOn) story.dependsOn = [];
+      if (!story.dependsOn.includes(dep.from) && storyMap.has(dep.from)) {
+        story.dependsOn.push(dep.from);
+        appliedCount++;
+      }
+    }
+
+    if (appliedCount === 0) {
+      res.json({ ok: true, appliedCount: 0 });
+      return;
+    }
+
+    // Validate no cycles were introduced
+    const allStories: UserStory[] = stories.map(s => ({
+      ...s,
+      dependsOn: s.dependsOn ?? [],
+    }));
+    const cycle = detectCycle(allStories);
+    if (cycle) {
+      res.status(422).json({ error: 'Accepting these dependencies would create a circular dependency', cycle });
+      return;
+    }
+
+    // Regenerate mermaid diagram
+    const diagBundle = generateDiagramBundle(allStories, ['storyDeps']);
+    if (diagBundle.storyDeps) {
+      specContent.mermaidDiagram = diagBundle.storyDeps.mermaid;
+    }
+
+    // Write back
+    fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+
+    // Emit WAL event
+    db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
+    ).run('dependencies_applied', specId, workspaceId, JSON.stringify({
+      appliedCount,
+      edges: dependencies.slice(0, 20),
+    }));
+
+    res.json({ ok: true, appliedCount });
+  } catch (error: any) {
+    console.error('[Specs] Apply dependencies error:', error);
     res.status(500).json({ error: error.message });
   }
 });
