@@ -1,6 +1,7 @@
 import { CronExpressionParser } from 'cron-parser';
 import { db } from '../db/index';
 import { INTERNAL_SERVICE_TOKEN } from '../routes/auth';
+import { createBackup, pruneOldBackups } from './backup';
 
 interface ScheduleRow {
   id: number;
@@ -90,14 +91,42 @@ function checkSchedules(): void {
   }
 }
 
+// ─── Daily backup cron ──────────────────────────────────────────────────────
+
+let lastBackupDate: string | null = null;
+
+async function checkDailyBackup(): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  if (lastBackupDate === today) return;
+
+  const now = new Date();
+  // Run daily backup at 2:00 AM local time
+  if (now.getHours() < 2) return;
+
+  lastBackupDate = today;
+  try {
+    const result = await createBackup();
+    const pruned = pruneOldBackups();
+    console.log(`[Scheduler] Daily backup created: ${result.filename} (${result.size} bytes), pruned ${pruned}`);
+  } catch (error) {
+    console.error('[Scheduler] Daily backup failed:', error);
+    // Reset so it retries next interval
+    lastBackupDate = null;
+  }
+}
+
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
 
 export function startScheduler(): void {
   if (intervalHandle) return;
   console.log('[Scheduler] Starting — checking every 60s');
-  intervalHandle = setInterval(checkSchedules, 60_000);
+  intervalHandle = setInterval(() => {
+    checkSchedules();
+    checkDailyBackup().catch(err => console.error('[Scheduler] Backup check error:', err));
+  }, 60_000);
   // Run immediately on startup to catch any missed triggers
   checkSchedules();
+  checkDailyBackup().catch(err => console.error('[Scheduler] Initial backup check error:', err));
 }
 
 export function stopScheduler(): void {
