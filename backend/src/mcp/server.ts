@@ -752,6 +752,176 @@ server.registerTool(
   }
 );
 
+// ─── V2-072: Workspace & Team Administration MCP Tools ──────────────────────
+
+server.registerTool(
+  'rorcha_list_workspaces',
+  {
+    description: 'List all registered workspaces the user has access to. Returns workspace ID, label, filesystem path, and domain tags. Use this to find workspace IDs for other tools (rorcha_generate_spec, rorcha_trigger_run, etc.).',
+    inputSchema: {},
+  },
+  async () => {
+    const res = await fetch(`${RORCHA_API}/api/workspaces`);
+    if (!res.ok) throw new Error(`Failed to list workspaces: ${res.status}`);
+    const { workspaces } = await res.json() as {
+      workspaces: Array<{
+        id: string; label: string; path: string;
+        domains: string[]; created_at: string;
+      }>;
+    };
+
+    if (workspaces.length === 0) {
+      return { content: [{ type: 'text' as const, text: 'No workspaces registered. Use rorcha_create_workspace to register one.' }] };
+    }
+
+    const lines = workspaces.map(w =>
+      `${w.label} (${w.id})\n  Path: ${w.path}\n  Domains: ${w.domains.length > 0 ? w.domains.join(', ') : 'none'}`
+    );
+    return { content: [{ type: 'text' as const, text: `Workspaces (${workspaces.length}):\n\n${lines.join('\n\n')}` }] };
+  }
+);
+
+server.registerTool(
+  'rorcha_create_workspace',
+  {
+    description: 'Register a new workspace by its filesystem path. The path must exist and should be a git repository root. Optionally provide a human label and domain tags (e.g. "saas", "fintech") for Direction Stack L2 matching.',
+    inputSchema: {
+      id: z.string().describe('Unique workspace ID (slug, e.g. "my-project")'),
+      path: z.string().describe('Absolute filesystem path to the project root (must exist)'),
+      label: z.string().optional().describe('Human-readable label (defaults to the directory name)'),
+      domains: z.array(z.string()).optional().default([]).describe('Domain tags for L2 direction matching (e.g. ["saas", "fintech"])'),
+    },
+  },
+  async ({ id, path: wsPath, label, domains }) => {
+    const resolvedLabel = label ?? wsPath.split('/').pop() ?? id;
+    const resolvedDomains = domains ?? [];
+    const res = await fetch(`${RORCHA_API}/api/workspaces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id,
+        label: resolvedLabel,
+        path: wsPath,
+        domains: resolvedDomains,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to create workspace (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as { workspace: { id: string; label: string; path: string; domains: string[] } };
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Workspace registered:\n  ID: ${data.workspace.id}\n  Label: ${data.workspace.label}\n  Path: ${data.workspace.path}\n  Domains: ${data.workspace.domains.join(', ') || 'none'}`
+      }]
+    };
+  }
+);
+
+server.registerTool(
+  'rorcha_workspace_stats',
+  {
+    description: 'Get summary statistics for a workspace: spec count (pending/approved), pipeline run count (total/active/completed/failed), story pass rate, and last activity timestamp. Useful for a quick health check or dashboard overview.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+    },
+  },
+  async ({ workspaceId }) => {
+    const res = await fetch(`${RORCHA_API}/api/workspaces/${encodeURIComponent(workspaceId)}/stats`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to get workspace stats (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      workspaceId: string;
+      specs: { pending: number; approved: number; total: number };
+      runs: { total: number; active: number; completed: number; failed: number; lastRunAt: string | null };
+      stories: { total: number; passed: number; failed: number; passRate: number };
+      lastActivity: string | null;
+    };
+
+    const lines = [
+      `Workspace Stats: ${data.workspaceId}`,
+      '',
+      `Specs: ${data.specs.total} total (${data.specs.pending} pending, ${data.specs.approved} approved)`,
+      `Runs: ${data.runs.total} total (${data.runs.active} active, ${data.runs.completed} completed, ${data.runs.failed} failed)`,
+      `Stories: ${data.stories.total} executed — ${data.stories.passRate}% pass rate (${data.stories.passed} pass / ${data.stories.failed} fail)`,
+      `Last activity: ${data.lastActivity ?? 'never'}`,
+    ];
+    if (data.runs.lastRunAt) {
+      lines.push(`Last run: ${data.runs.lastRunAt}`);
+    }
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
+server.registerTool(
+  'rorcha_team_members',
+  {
+    description: 'Get the team member list for a workspace. Looks up the team associated with the workspace via workspace_access and returns all members with their roles (admin/editor/viewer), email, and last activity. Returns an empty list if the workspace is not team-scoped.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID — must be linked to a team via workspace_access'),
+    },
+  },
+  async ({ workspaceId }) => {
+    const res = await fetch(`${RORCHA_API}/api/workspaces/${encodeURIComponent(workspaceId)}/team-members`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to get team members (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      teamScoped: boolean;
+      team: { id: string; name: string; slug: string; permission: string } | null;
+      members: Array<{
+        userId: string;
+        email: string;
+        displayName: string;
+        role: string;
+        joinedAt: string;
+        acceptedAt: string | null;
+        lastActiveAt: string | null;
+      }>;
+    };
+
+    if (!data.teamScoped || !data.team) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Workspace ${workspaceId} is not linked to any team. Use team management to associate this workspace with a team first.`
+        }]
+      };
+    }
+
+    if (data.members.length === 0) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Team "${data.team.name}" has no members yet.`
+        }]
+      };
+    }
+
+    const memberLines = data.members.map(m => {
+      const status = m.acceptedAt ? 'active' : 'invited';
+      const lastActive = m.lastActiveAt ? ` (last active: ${m.lastActiveAt})` : '';
+      return `  ${m.displayName || m.email} <${m.email}> — ${m.role} [${status}]${lastActive}`;
+    });
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Team "${data.team.name}" members (${data.members.length}) — workspace permission: ${data.team.permission}\n\n${memberLines.join('\n')}`
+      }]
+    };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
