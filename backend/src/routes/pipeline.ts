@@ -13,6 +13,7 @@ import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
+import type { AgentProfileRow } from './agent-profiles';
 
 /** Persistent log file path for a run — survives backend restarts */
 const runLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
@@ -233,6 +234,24 @@ router.post('/trigger', async (req: Request, res: Response) => {
     const anthropicVaultKey = getVaultKey(pipelineUser.id, 'anthropic');
     if (anthropicVaultKey) {
       env['ANTHROPIC_API_KEY'] = anthropicVaultKey;
+    }
+
+    // 7d. Inject active agent profile (system prompt + allowed tools + model override)
+    const activeProfile = db.prepare(
+      'SELECT * FROM agent_profiles WHERE workspace_id = ? AND is_active = 1 LIMIT 1'
+    ).get(workspaceId) as AgentProfileRow | undefined;
+
+    if (activeProfile) {
+      if (activeProfile.system_prompt_override) {
+        env['RORCHA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
+      }
+      const tools = JSON.parse(activeProfile.allowed_tools) as string[];
+      if (tools.length > 0) {
+        env['RORCHA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
+      }
+      if (activeProfile.model_override) {
+        env['RORCHA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
+      }
     }
 
     // 8. Run pre-run hooks — abort if any exit non-zero
