@@ -25,6 +25,7 @@ import vaultRouter from './routes/vault';
 import usersRouter from './routes/users';
 import authRouter, { authRequired } from './routes/auth';
 import onboardingRouter from './routes/onboarding';
+import backupsRouter from './routes/backups';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
 import swaggerUi from 'swagger-ui-express';
@@ -90,6 +91,7 @@ app.use('/api/analytics', analyticsRouter);
 app.use('/api/vault/keys', vaultRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/onboarding', onboardingRouter);
+app.use('/api/admin', backupsRouter);
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
