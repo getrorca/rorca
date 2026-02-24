@@ -8,6 +8,8 @@ import {
   gitReduceStep,
   getLatestHash,
 } from '../lib/git-hydrator';
+import { chatComplete } from '../lib/llm-client';
+import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 
 const router = Router();
@@ -666,6 +668,147 @@ router.get('/:id/team-members', (req, res) => {
     team: { id: access.team_id, name: access.team_name, slug: access.team_slug, permission: access.permission },
     members,
   });
+});
+
+/**
+ * POST /api/workspaces/:id/scan-direction
+ * Scans repo structure (package.json, CLAUDE.md, README.md, top-level dirs)
+ * and uses Claude to generate draft L1/L2/L3 direction layer content.
+ */
+router.post('/:id/scan-direction', async (req, res) => {
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  if (!fs.existsSync(workspace.path)) {
+    res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+    return;
+  }
+
+  try {
+    // 1. Scan key files from the workspace
+    const scannedFiles: Record<string, string> = {};
+    const filesToScan = ['package.json', 'CLAUDE.md', 'README.md', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'tsconfig.json'];
+
+    for (const filename of filesToScan) {
+      const filePath = path.join(workspace.path, filename);
+      if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        // Truncate large files to avoid token explosion
+        scannedFiles[filename] = content.length > 4000 ? content.slice(0, 4000) + '\n... (truncated)' : content;
+      }
+    }
+
+    // 2. Get top-level directory listing (max 500 entries per AC)
+    let dirListing: string[] = [];
+    try {
+      const entries = fs.readdirSync(workspace.path, { withFileTypes: true });
+      dirListing = entries
+        .slice(0, 500)
+        .map(e => e.isDirectory() ? `${e.name}/` : e.name)
+        .filter(name => !name.startsWith('.'));
+    } catch {
+      // Non-fatal — directory listing is supplementary
+    }
+
+    // 3. Determine confidence based on what was found
+    const foundFiles = Object.keys(scannedFiles);
+    let confidence: 'low' | 'medium' | 'high' = 'low';
+    if (foundFiles.length >= 3) confidence = 'high';
+    else if (foundFiles.length >= 1) confidence = 'medium';
+
+    // 4. Build LLM prompt
+    const fileContext = foundFiles.length > 0
+      ? foundFiles.map(f => `--- ${f} ---\n${scannedFiles[f]}`).join('\n\n')
+      : '(no recognized project files found)';
+
+    const prompt = `=== INSTRUCTIONS: READ THIS FIRST ===
+You MUST return ONLY a JSON object. No markdown fences, no explanation, no preamble.
+The JSON object must have exactly three keys: "l1", "l2", "l3".
+Each value is a string containing valid YAML for that direction layer.
+
+=== CONTEXT ===
+You are analyzing a software repository to auto-generate a "Direction Stack" — a 3-layer context cascade that guides AI code generation.
+
+L1 (Global Standards): Engineering principles, coding style, output format preferences, testing philosophy. Plain text or YAML.
+
+L2 (Domain Profile): Domain-specific knowledge — industry concepts, regulatory constraints, business terminology. Plain text or YAML.
+
+L3 (Project Brief): Project-specific context. MUST be a YAML mapping with these required fields:
+  - name: string (project name)
+  - type: string (e.g. "web-app", "api", "cli", "mobile-app")
+  - stack: array of strings (technologies used)
+  - purpose: string (what the project does)
+  - key_modules: array of strings (main components/modules)
+Additional optional L3 fields: constraints, deployment_target, integrations
+
+=== REPOSITORY DATA ===
+Repository name: ${path.basename(workspace.path)}
+Workspace label: ${workspace.label}
+Workspace domains: ${JSON.parse(workspace.domains).join(', ') || '(none)'}
+
+Files found:
+${fileContext}
+
+Top-level directory structure:
+${dirListing.join('\n') || '(empty)'}
+
+=== OUTPUT FORMAT ===
+Return a JSON object with exactly this structure (no markdown, no fences):
+{
+  "l1": "the L1 YAML content as a string",
+  "l2": "the L2 YAML content as a string",
+  "l3": "the L3 YAML content as a string"
+}
+
+Infer the tech stack, project purpose, coding conventions, and domain from the scanned files. Be specific — use actual dependency names, real directory paths, and concrete conventions you can observe. L3 MUST include name, type, stack, purpose, and key_modules fields.`;
+
+    const result = await chatComplete([{ role: 'user', content: prompt }]);
+    let text = result.text.trim();
+
+    // Strip markdown fences if LLM wrapped them
+    if (text.startsWith('```')) {
+      text = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+    }
+
+    let parsed: { l1: string; l2: string; l3: string };
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      res.status(502).json({ error: 'LLM returned invalid JSON', raw: text.slice(0, 500) });
+      return;
+    }
+
+    if (!parsed.l1 || !parsed.l2 || !parsed.l3) {
+      res.status(502).json({ error: 'LLM response missing required l1/l2/l3 keys', raw: text.slice(0, 500) });
+      return;
+    }
+
+    // Validate L3 against direction schema
+    const l3Validation = validateDirectionYaml(3, parsed.l3);
+
+    // WAL event
+    db.prepare(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('direction_scan', ?, ?)"
+    ).run(req.params.id, JSON.stringify({ confidence, filesScanned: foundFiles }));
+
+    res.json({
+      l1Draft: parsed.l1,
+      l2Draft: parsed.l2,
+      l3Draft: parsed.l3,
+      confidence,
+      filesScanned: foundFiles,
+      dirCount: dirListing.length,
+      l3Valid: l3Validation.valid,
+      l3Errors: l3Validation.errors,
+      usage: result.usage,
+    });
+  } catch (err: any) {
+    console.error('[scan-direction] error:', err.message);
+    res.status(500).json({ error: err.message || 'Repo scan failed' });
+  }
 });
 
 // DELETE /api/workspaces/:id
