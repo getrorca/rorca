@@ -1186,4 +1186,275 @@ router.get('/export', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/analytics/roi — ROI calculator ─────────────────────────────────
+// Estimates developer hours saved based on passed stories, configurable rates,
+// and actual LLM cost data. Deduplicates retried stories to avoid double-counting.
+// Query params:
+//   workspace_id — required
+//   from         — ISO date (inclusive), default 30 days ago
+//   to           — ISO date (inclusive), default now
+
+interface WorkspaceROIConfig {
+  id: string;
+  roi_hours_per_story: number;
+  roi_hourly_rate: number;
+}
+
+interface ROITimeSeriesRow {
+  date: string;
+  stories_passed: number;
+  hours_saved: number;
+  llm_cost: number;
+  net_savings: number;
+}
+
+/**
+ * @swagger
+ * /api/analytics/roi:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: ROI calculator — estimated developer hours saved
+ *     parameters:
+ *       - in: query
+ *         name: workspace_id
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: ROI metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 total_stories_passed: { type: integer }
+ *                 estimated_hours_saved: { type: number }
+ *                 total_llm_cost: { type: number }
+ *                 net_savings: { type: number }
+ *                 roi_multiplier: { type: number }
+ *                 config: { type: object }
+ *                 timeSeries: { type: array }
+ *       400: { description: "Missing workspace_id" }
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/roi', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspace_id as string;
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspace_id' });
+      return;
+    }
+
+    // Fetch workspace ROI config
+    const workspace = db.prepare(
+      'SELECT id, roi_hours_per_story, roi_hourly_rate FROM workspaces WHERE id = ?'
+    ).get(workspaceId) as WorkspaceROIConfig | undefined;
+
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const hoursPerStory = workspace.roi_hours_per_story ?? 4.0;
+    const hourlyRate = workspace.roi_hourly_rate ?? 75.0;
+
+    // Date range
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const from = (req.query.from as string) || thirtyDaysAgo.toISOString();
+    const to = (req.query.to as string) || now.toISOString();
+
+    // Count unique passed stories, deduplicating retries.
+    // For each (run, story_id), take only the LATEST result (highest id).
+    // Then only count stories whose latest status is 'pass'.
+    // Also exclude retry runs' copied passes by grouping across all runs.
+    const passedResult = db.prepare(`
+      SELECT COUNT(*) AS total_stories_passed
+      FROM (
+        SELECT sr.story_id, sr.status
+        FROM story_results sr
+        JOIN pipeline_runs pr ON sr.run_id = pr.id
+        WHERE pr.workspace_id = ?
+          AND sr.finished_at >= ? AND sr.finished_at <= ?
+          AND sr.status IN ('pass', 'fail', 'skip', 'retry', 'timeout')
+        GROUP BY pr.id, sr.story_id
+        HAVING sr.id = MAX(sr.id)
+      ) latest
+      WHERE latest.status = 'pass'
+    `).get(workspaceId, from, to) as { total_stories_passed: number };
+
+    const totalStoriesPassed = passedResult.total_stories_passed;
+
+    // Get total LLM cost from token_usage for this workspace + date range
+    const costResult = db.prepare(`
+      SELECT COALESCE(SUM(tu.cost_usd), 0) AS total_llm_cost
+      FROM token_usage tu
+      WHERE tu.workspace_id = ?
+        AND tu.recorded_at >= ? AND tu.recorded_at <= ?
+    `).get(workspaceId, from, to) as { total_llm_cost: number };
+
+    const totalLlmCost = costResult.total_llm_cost;
+
+    // Calculate ROI metrics
+    const estimatedHoursSaved = totalStoriesPassed * hoursPerStory;
+    const savingsValue = estimatedHoursSaved * hourlyRate;
+    const netSavings = savingsValue - totalLlmCost;
+    const roiMultiplier = totalLlmCost > 0
+      ? Math.round((savingsValue / totalLlmCost) * 10) / 10
+      : totalStoriesPassed > 0 ? Infinity : 0;
+
+    // Time series: daily breakdown for trend chart
+    const timeSeries = db.prepare(`
+      SELECT
+        DATE(sr.finished_at) AS date,
+        COUNT(DISTINCT sr.story_id || '-' || sr.run_id) AS stories_passed
+      FROM story_results sr
+      JOIN pipeline_runs pr ON sr.run_id = pr.id
+      WHERE pr.workspace_id = ?
+        AND sr.finished_at >= ? AND sr.finished_at <= ?
+        AND sr.status = 'pass'
+      GROUP BY DATE(sr.finished_at)
+      ORDER BY date ASC
+    `).all(workspaceId, from, to) as { date: string; stories_passed: number }[];
+
+    // Get daily LLM cost
+    const dailyCosts = db.prepare(`
+      SELECT
+        DATE(tu.recorded_at) AS date,
+        COALESCE(SUM(tu.cost_usd), 0) AS llm_cost
+      FROM token_usage tu
+      WHERE tu.workspace_id = ?
+        AND tu.recorded_at >= ? AND tu.recorded_at <= ?
+      GROUP BY DATE(tu.recorded_at)
+      ORDER BY date ASC
+    `).all(workspaceId, from, to) as { date: string; llm_cost: number }[];
+
+    // Merge daily stories + costs into unified time series
+    const costByDate = new Map(dailyCosts.map(r => [r.date, r.llm_cost]));
+    const allDates = new Set([
+      ...timeSeries.map(r => r.date),
+      ...dailyCosts.map(r => r.date),
+    ]);
+    const sortedDates = Array.from(allDates).sort();
+
+    let cumulativeHours = 0;
+    let cumulativeCost = 0;
+    const mergedTimeSeries: ROITimeSeriesRow[] = sortedDates.map(date => {
+      const dayStories = timeSeries.find(r => r.date === date)?.stories_passed ?? 0;
+      const dayCost = costByDate.get(date) ?? 0;
+      const dayHours = dayStories * hoursPerStory;
+      cumulativeHours += dayHours;
+      cumulativeCost += dayCost;
+
+      return {
+        date,
+        stories_passed: dayStories,
+        hours_saved: Math.round(dayHours * 10) / 10,
+        llm_cost: Math.round(dayCost * 100) / 100,
+        net_savings: Math.round((cumulativeHours * hourlyRate - cumulativeCost) * 100) / 100,
+      };
+    });
+
+    res.json({
+      total_stories_passed: totalStoriesPassed,
+      estimated_hours_saved: Math.round(estimatedHoursSaved * 10) / 10,
+      total_llm_cost: Math.round(totalLlmCost * 100) / 100,
+      savings_value: Math.round(savingsValue * 100) / 100,
+      net_savings: Math.round(netSavings * 100) / 100,
+      roi_multiplier: roiMultiplier === Infinity ? null : roiMultiplier,
+      config: {
+        hours_per_story: hoursPerStory,
+        hourly_rate: hourlyRate,
+      },
+      timeSeries: mergedTimeSeries,
+      dateRange: { from, to },
+    });
+  } catch (error: any) {
+    console.error('[Analytics] ROI query error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── PUT /api/analytics/roi/config — Update ROI config for a workspace ───────
+
+/**
+ * @swagger
+ * /api/analytics/roi/config:
+ *   put:
+ *     tags: [Analytics]
+ *     summary: Update ROI calculator configuration
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspace_id]
+ *             properties:
+ *               workspace_id: { type: string }
+ *               hours_per_story: { type: number }
+ *               hourly_rate: { type: number }
+ *     responses:
+ *       200: { description: "Config updated" }
+ *       400: { description: "Invalid input" }
+ *       404: { description: "Workspace not found" }
+ */
+router.put('/roi/config', (req: Request, res: Response) => {
+  try {
+    const { workspace_id, hours_per_story, hourly_rate } = req.body as {
+      workspace_id: string;
+      hours_per_story?: number;
+      hourly_rate?: number;
+    };
+
+    if (!workspace_id) {
+      res.status(400).json({ error: 'workspace_id is required' });
+      return;
+    }
+
+    const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspace_id);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    if (hours_per_story != null) {
+      if (hours_per_story < 0 || hours_per_story > 100) {
+        res.status(400).json({ error: 'hours_per_story must be between 0 and 100' });
+        return;
+      }
+      db.prepare('UPDATE workspaces SET roi_hours_per_story = ? WHERE id = ?')
+        .run(hours_per_story, workspace_id);
+    }
+
+    if (hourly_rate != null) {
+      if (hourly_rate < 0 || hourly_rate > 1000) {
+        res.status(400).json({ error: 'hourly_rate must be between 0 and 1000' });
+        return;
+      }
+      db.prepare('UPDATE workspaces SET roi_hourly_rate = ? WHERE id = ?')
+        .run(hourly_rate, workspace_id);
+    }
+
+    const updated = db.prepare(
+      'SELECT roi_hours_per_story, roi_hourly_rate FROM workspaces WHERE id = ?'
+    ).get(workspace_id) as { roi_hours_per_story: number; roi_hourly_rate: number };
+
+    res.json({
+      workspace_id,
+      hours_per_story: updated.roi_hours_per_story,
+      hourly_rate: updated.roi_hourly_rate,
+    });
+  } catch (error: any) {
+    console.error('[Analytics] ROI config update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
