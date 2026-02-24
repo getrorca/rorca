@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   GitBranch, ChevronRight, Plus, X, Copy, Check,
   Terminal, Play, Trash2, AlertTriangle, Loader2,
+  FileWarning, ChevronDown, ChevronUp, Eye, EyeOff, Merge,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
@@ -23,6 +24,18 @@ interface WorktreeStatus {
   behind: number;
   isClean: boolean;
   modifiedFiles: string[];
+}
+
+interface ConflictFile {
+  path: string;
+  markers: string;
+}
+
+interface MergePreview {
+  canMerge: boolean;
+  hasConflicts: boolean;
+  conflictFiles: ConflictFile[];
+  filesChanged: number;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -66,9 +79,15 @@ export default function WorktreesPanel() {
   const [removing, setRemoving] = useState(false);
 
   // Merge state
-  type MergeState = 'idle' | 'merging' | 'done' | 'conflict' | 'error';
+  type MergeState = 'idle' | 'previewing' | 'preview' | 'merging' | 'done' | 'conflict' | 'error';
   const [mergeState, setMergeState] = useState<MergeState>('idle');
   const [mergeError, setMergeError] = useState('');
+  const [mergePreview, setMergePreview] = useState<MergePreview | null>(null);
+  const [mergeCommitSha, setMergeCommitSha] = useState<string | null>(null);
+
+  // Per-file conflict expand/skip state
+  const [expandedConflicts, setExpandedConflicts] = useState<Record<string, boolean>>({});
+  const [skippedFiles, setSkippedFiles] = useState<Record<string, boolean>>({});
 
   // Copy states
   const [copiedPath, setCopiedPath] = useState(false);
@@ -117,6 +136,10 @@ export default function WorktreesPanel() {
   useEffect(() => {
     setMergeState('idle');
     setMergeError('');
+    setMergePreview(null);
+    setMergeCommitSha(null);
+    setExpandedConflicts({});
+    setSkippedFiles({});
   }, [selectedPath]);
 
   // ─── Fetch detail status when selection changes ─────────────────────────
@@ -490,55 +513,205 @@ export default function WorktreesPanel() {
 
               {/* Merge to main — only for non-main worktrees */}
               {worktrees[0]?.path !== selectedWorktree.path && selectedWorktree.branch && selectedWorktree.branch !== '(detached)' && (
-                <div>
+                <div className="space-y-2">
                   {mergeState === 'done' ? (
                     <div className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
                       <Check className="w-3.5 h-3.5" />
-                      <span>Merged successfully</span>
+                      <span>Merged successfully{mergeCommitSha ? ` (${mergeCommitSha.slice(0, 8)})` : ''}</span>
                     </div>
-                  ) : mergeState === 'conflict' || mergeState === 'error' ? (
+                  ) : mergeState === 'error' ? (
                     <div className="rounded border border-red-500/30 bg-red-500/10 p-2 space-y-1.5">
-                      <p className="text-xs text-red-400 font-medium">
-                        {mergeState === 'conflict' ? 'Merge conflict — resolve manually' : 'Merge failed'}
-                      </p>
+                      <p className="text-xs text-red-400 font-medium">Merge failed</p>
                       {mergeError && (
                         <p className="text-[10px] text-red-400/70 font-mono break-all line-clamp-3">{mergeError}</p>
                       )}
                       <button
-                        onClick={() => { setMergeState('idle'); setMergeError(''); }}
+                        onClick={() => { setMergeState('idle'); setMergeError(''); setMergePreview(null); }}
                         className="text-[10px] text-red-400 hover:text-red-300 underline"
                       >
                         Dismiss
                       </button>
                     </div>
+                  ) : mergeState === 'preview' && mergePreview?.hasConflicts ? (
+                    /* ── Conflict detail panel ── */
+                    <div className="rounded border border-amber-500/30 bg-amber-500/5 overflow-hidden">
+                      <div className="px-3 py-2 border-b border-amber-500/20 flex items-center gap-2">
+                        <FileWarning className="w-3.5 h-3.5 text-amber-400" />
+                        <span className="text-xs font-medium text-amber-400">
+                          {mergePreview.conflictFiles.length} conflicting file{mergePreview.conflictFiles.length !== 1 ? 's' : ''}
+                        </span>
+                        <button
+                          onClick={() => { setMergeState('idle'); setMergePreview(null); setExpandedConflicts({}); setSkippedFiles({}); }}
+                          className="ml-auto text-[10px] text-amber-400 hover:text-amber-300 underline"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+
+                      {/* Per-file conflict list */}
+                      <div className="max-h-64 overflow-y-auto divide-y divide-[var(--border)]">
+                        {mergePreview.conflictFiles.map((cf) => (
+                          <div key={cf.path} className={`${skippedFiles[cf.path] ? 'opacity-50' : ''}`}>
+                            <div className="flex items-center gap-2 px-3 py-1.5">
+                              {/* Expand/collapse toggle */}
+                              <button
+                                onClick={() => setExpandedConflicts((prev) => ({ ...prev, [cf.path]: !prev[cf.path] }))}
+                                className="p-0.5 rounded hover:bg-[var(--border)]"
+                              >
+                                {expandedConflicts[cf.path] ? (
+                                  <ChevronUp className="w-3 h-3 text-[var(--text-muted)]" />
+                                ) : (
+                                  <ChevronDown className="w-3 h-3 text-[var(--text-muted)]" />
+                                )}
+                              </button>
+                              <span className="text-xs font-mono truncate flex-1">{cf.path}</span>
+                              {/* Skip toggle */}
+                              <button
+                                onClick={() => setSkippedFiles((prev) => ({ ...prev, [cf.path]: !prev[cf.path] }))}
+                                className="p-1 rounded hover:bg-[var(--border)] flex items-center gap-1"
+                                title={skippedFiles[cf.path] ? 'Include this file' : 'Skip this file'}
+                              >
+                                {skippedFiles[cf.path] ? (
+                                  <EyeOff className="w-3 h-3 text-zinc-500" />
+                                ) : (
+                                  <Eye className="w-3 h-3 text-amber-400" />
+                                )}
+                                <span className="text-[10px] text-[var(--text-muted)]">
+                                  {skippedFiles[cf.path] ? 'skipped' : 'resolve'}
+                                </span>
+                              </button>
+                            </div>
+
+                            {/* Expanded conflict markers */}
+                            {expandedConflicts[cf.path] && cf.markers && (
+                              <div className="mx-3 mb-2 rounded bg-[var(--bg)] border border-[var(--border)] overflow-x-auto">
+                                <pre className="text-[10px] font-mono p-2 leading-relaxed whitespace-pre-wrap">
+                                  {cf.markers.split('\n').map((line, i) => {
+                                    let cls = 'text-[var(--text-muted)]';
+                                    if (line.startsWith('<<<<<<<')) cls = 'text-red-400 font-bold';
+                                    else if (line.startsWith('=======')) cls = 'text-amber-400 font-bold';
+                                    else if (line.startsWith('>>>>>>>')) cls = 'text-emerald-400 font-bold';
+                                    else if (line === '---') cls = 'text-zinc-600';
+                                    return (
+                                      <span key={i} className={cls}>
+                                        {line}
+                                        {'\n'}
+                                      </span>
+                                    );
+                                  })}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Force merge action */}
+                      <div className="px-3 py-2 border-t border-amber-500/20 flex gap-2">
+                        <button
+                          disabled={mergeState === 'merging' as MergeState}
+                          onClick={async () => {
+                            if (!workspaceId || !selectedWorktree.branch) return;
+                            setMergeState('merging');
+                            setMergeError('');
+                            try {
+                              const result = await apiFetch<{ ok: boolean; mergeCommitSha?: string }>('/api/worktrees/merge', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ workspaceId, branchName: selectedWorktree.branch, force: true }),
+                              });
+                              setMergeCommitSha(result.mergeCommitSha ?? null);
+                              setMergeState('done');
+                            } catch (err: any) {
+                              setMergeState('error');
+                              setMergeError(err instanceof Error ? err.message : String(err));
+                            }
+                          }}
+                          className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded bg-amber-600 hover:bg-amber-700 text-white transition-colors disabled:opacity-50"
+                        >
+                          <Merge className="w-3 h-3" />
+                          Force Merge (accept theirs)
+                        </button>
+                      </div>
+                    </div>
+                  ) : mergeState === 'preview' && mergePreview && !mergePreview.hasConflicts ? (
+                    /* ── Clean preview — confirm merge ── */
+                    <div className="rounded border border-blue-500/30 bg-blue-500/5 p-3 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Check className="w-3.5 h-3.5 text-blue-400" />
+                        <span className="text-xs text-blue-400 font-medium">No conflicts detected</span>
+                        <span className="text-[10px] text-[var(--text-muted)]">
+                          ({mergePreview.filesChanged} file{mergePreview.filesChanged !== 1 ? 's' : ''} changed)
+                        </span>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => { setMergeState('idle'); setMergePreview(null); }}
+                          className="px-3 py-1.5 text-xs rounded border border-[var(--border)] hover:bg-[var(--surface)] transition-colors"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          disabled={mergeState === 'merging' as MergeState}
+                          onClick={async () => {
+                            if (!workspaceId || !selectedWorktree.branch) return;
+                            setMergeState('merging');
+                            setMergeError('');
+                            try {
+                              const result = await apiFetch<{ ok: boolean; mergeCommitSha?: string }>('/api/worktrees/merge', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ workspaceId, branchName: selectedWorktree.branch }),
+                              });
+                              setMergeCommitSha(result.mergeCommitSha ?? null);
+                              setMergeState('done');
+                            } catch (err: any) {
+                              const isConflict = err?.message?.includes('CONFLICT') || err?.message?.includes('409');
+                              setMergeState(isConflict ? 'conflict' : 'error');
+                              setMergeError(err instanceof Error ? err.message : String(err));
+                            }
+                          }}
+                          className="flex-1 px-3 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-700 text-white transition-colors disabled:opacity-50"
+                        >
+                          Confirm Merge
+                        </button>
+                      </div>
+                    </div>
                   ) : (
+                    /* ── Initial "Merge to main" button → triggers preview ── */
                     <button
-                      disabled={mergeState === 'merging'}
+                      disabled={mergeState === 'previewing' || mergeState === 'merging'}
                       onClick={async () => {
                         if (!workspaceId || !selectedWorktree.branch) return;
-                        setMergeState('merging');
+                        setMergeState('previewing');
                         setMergeError('');
                         try {
-                          await apiFetch('/api/worktrees/merge', {
+                          const preview = await apiFetch<MergePreview>('/api/worktrees/merge/preview', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ workspaceId, branchName: selectedWorktree.branch }),
                           });
-                          setMergeState('done');
+                          setMergePreview(preview);
+                          setMergeState('preview');
+                          // Auto-expand first conflict for visibility
+                          if (preview.hasConflicts && preview.conflictFiles.length > 0) {
+                            setExpandedConflicts({ [preview.conflictFiles[0].path]: true });
+                          }
                         } catch (err: any) {
-                          const isConflict = err?.message?.includes('CONFLICT') || err?.status === 409;
-                          setMergeState(isConflict ? 'conflict' : 'error');
+                          setMergeState('error');
                           setMergeError(err instanceof Error ? err.message : String(err));
                         }
                       }}
                       className="w-full flex items-center gap-2 px-3 py-2 text-xs rounded border border-blue-500/30 text-blue-400 hover:bg-blue-500/10 transition-colors disabled:opacity-50"
                     >
-                      {mergeState === 'merging' ? (
+                      {mergeState === 'previewing' ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : mergeState === 'merging' ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       ) : (
                         <GitBranch className="w-3.5 h-3.5" />
                       )}
-                      <span>{mergeState === 'merging' ? 'Merging...' : 'Merge to main'}</span>
+                      <span>{mergeState === 'previewing' ? 'Checking for conflicts...' : mergeState === 'merging' ? 'Merging...' : 'Merge to main'}</span>
                     </button>
                   )}
                 </div>
