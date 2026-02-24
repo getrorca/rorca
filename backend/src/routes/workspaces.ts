@@ -488,6 +488,137 @@ router.patch('/:id', (req, res) => {
   res.json({ workspace: parseWorkspace(updated) });
 });
 
+// GET /api/workspaces/:id/stats — Summary stats for a workspace
+router.get('/:id/stats', (req, res) => {
+  const workspaceId = req.params.id;
+  const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+  if (!row) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  // Count specs (pending + approved) from filesystem
+  let pendingSpecs = 0;
+  let approvedSpecs = 0;
+  const pendingDir = path.join(row.path, 'scripts/ralph/specs/pending');
+  const approvedDir = path.join(row.path, 'scripts/ralph/specs/approved');
+  if (fs.existsSync(pendingDir)) {
+    pendingSpecs = fs.readdirSync(pendingDir).filter(f => f.endsWith('.json')).length;
+  }
+  if (fs.existsSync(approvedDir)) {
+    approvedSpecs = fs.readdirSync(approvedDir).filter(f => f.endsWith('.json')).length;
+  }
+
+  // Pipeline run stats
+  const runStats = db.prepare(`
+    SELECT
+      COUNT(*) AS total_runs,
+      SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS active_runs,
+      SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS completed_runs,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_runs,
+      MAX(started_at) AS last_run_at
+    FROM pipeline_runs WHERE workspace_id = ?
+  `).get(workspaceId) as {
+    total_runs: number;
+    active_runs: number;
+    completed_runs: number;
+    failed_runs: number;
+    last_run_at: string | null;
+  };
+
+  // Story pass rate
+  const storyStats = db.prepare(`
+    SELECT
+      COUNT(*) AS total_stories,
+      SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END) AS passed_stories,
+      SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END) AS failed_stories
+    FROM story_results sr
+    JOIN pipeline_runs pr ON sr.run_id = pr.id
+    WHERE pr.workspace_id = ?
+  `).get(workspaceId) as {
+    total_stories: number;
+    passed_stories: number;
+    failed_stories: number;
+  };
+
+  const passRate = storyStats.total_stories > 0
+    ? Math.round((storyStats.passed_stories / storyStats.total_stories) * 100)
+    : 0;
+
+  // Last activity from WAL
+  const lastActivity = db.prepare(
+    'SELECT MAX(created_at) AS last_at FROM wal_events WHERE workspace_id = ?'
+  ).get(workspaceId) as { last_at: string | null };
+
+  res.json({
+    workspaceId,
+    specs: { pending: pendingSpecs, approved: approvedSpecs, total: pendingSpecs + approvedSpecs },
+    runs: {
+      total: runStats.total_runs,
+      active: runStats.active_runs,
+      completed: runStats.completed_runs,
+      failed: runStats.failed_runs,
+      lastRunAt: runStats.last_run_at,
+    },
+    stories: {
+      total: storyStats.total_stories,
+      passed: storyStats.passed_stories,
+      failed: storyStats.failed_stories,
+      passRate,
+    },
+    lastActivity: lastActivity.last_at ?? runStats.last_run_at,
+  });
+});
+
+// GET /api/workspaces/:id/team-members — Team members for a workspace (via workspace_access)
+router.get('/:id/team-members', (req, res) => {
+  const workspaceId = req.params.id;
+  const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+  if (!row) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  // Find team linked to this workspace via workspace_access
+  const access = db.prepare(
+    'SELECT wa.team_id, wa.permission, t.name AS team_name, t.slug AS team_slug FROM workspace_access wa JOIN teams t ON wa.team_id = t.id WHERE wa.workspace_id = ?'
+  ).get(workspaceId) as { team_id: string; permission: string; team_name: string; team_slug: string } | undefined;
+
+  if (!access) {
+    res.json({ teamScoped: false, team: null, members: [] });
+    return;
+  }
+
+  const members = db.prepare(`
+    SELECT
+      tm.user_id AS userId,
+      u.email,
+      u.display_name AS displayName,
+      tm.role,
+      tm.invited_at AS joinedAt,
+      tm.accepted_at AS acceptedAt,
+      tm.last_active_at AS lastActiveAt
+    FROM team_members tm
+    JOIN users u ON tm.user_id = u.id
+    WHERE tm.team_id = ?
+    ORDER BY tm.invited_at ASC
+  `).all(access.team_id) as Array<{
+    userId: string;
+    email: string;
+    displayName: string;
+    role: string;
+    joinedAt: string;
+    acceptedAt: string | null;
+    lastActiveAt: string | null;
+  }>;
+
+  res.json({
+    teamScoped: true,
+    team: { id: access.team_id, name: access.team_name, slug: access.team_slug, permission: access.permission },
+    members,
+  });
+});
+
 // DELETE /api/workspaces/:id
 router.delete('/:id', (req, res) => {
   db.prepare('DELETE FROM workspaces WHERE id = ?').run(req.params.id);
