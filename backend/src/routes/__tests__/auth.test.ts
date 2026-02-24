@@ -540,6 +540,275 @@ describe('Global auth middleware', () => {
   });
 });
 
+// ─── POST /api/auth/forgot-password ───
+
+describe('POST /api/auth/forgot-password', () => {
+  test('returns 200 with success message for existing email', async () => {
+    await registerUser();
+
+    const res = await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
+    expect(res.status).toBe(200);
+    expect(res.body.message).toContain('If an account with that email exists');
+    expect(res.body.resetLink).toBeDefined();
+  });
+
+  test('returns 200 with same message for non-existent email (no enumeration)', async () => {
+    const res = await request(app).post('/api/auth/forgot-password').send({ email: 'nobody@example.com' });
+    expect(res.status).toBe(200);
+    expect(res.body.message).toContain('If an account with that email exists');
+    // No resetLink for non-existent email
+    expect(res.body.resetLink).toBeUndefined();
+  });
+
+  test('stores hashed reset token in database', async () => {
+    await registerUser();
+
+    await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
+
+    const tokens = db.prepare('SELECT * FROM password_reset_tokens').all() as Record<string, unknown>[];
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].token_hash).toBeDefined();
+    expect(tokens[0].expires_at).toBeDefined();
+    expect(tokens[0].used_at).toBeNull();
+  });
+
+  test('reset token expires in ~1 hour', async () => {
+    await registerUser();
+
+    await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
+
+    const token = db.prepare('SELECT * FROM password_reset_tokens').get() as Record<string, unknown>;
+    // SQLite datetime('now') stores UTC without timezone suffix — append 'Z' for correct JS parsing
+    const expiresAt = new Date((token.expires_at as string) + 'Z').getTime();
+    const createdAt = new Date((token.created_at as string) + 'Z').getTime();
+    const hoursUntilExpiry = (expiresAt - createdAt) / (1000 * 60 * 60);
+    expect(hoursUntilExpiry).toBeGreaterThan(0.9);
+    expect(hoursUntilExpiry).toBeLessThan(1.1);
+  });
+
+  test('returns 400 for missing email', async () => {
+    const res = await request(app).post('/api/auth/forgot-password').send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Email is required');
+  });
+
+  test('returns 400 for invalid email format', async () => {
+    const res = await request(app).post('/api/auth/forgot-password').send({ email: 'not-an-email' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid email format');
+  });
+
+  test('normalizes email to lowercase', async () => {
+    await registerUser();
+
+    const res = await request(app).post('/api/auth/forgot-password').send({ email: 'Test@EXAMPLE.COM' });
+    expect(res.status).toBe(200);
+    expect(res.body.resetLink).toBeDefined();
+  });
+
+  test('rate limits to 3 requests per email per hour', async () => {
+    await registerUser();
+
+    // First 3 should succeed
+    for (let i = 0; i < 3; i++) {
+      const res = await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
+      expect(res.status).toBe(200);
+    }
+
+    // 4th should be rate limited
+    const res = await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
+    expect(res.status).toBe(429);
+    expect(res.body.error).toContain('Too many reset requests');
+  });
+
+  test('emits password_reset_requested WAL event', async () => {
+    await registerUser();
+
+    await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
+
+    const event = db.prepare("SELECT * FROM wal_events WHERE event_type = 'password_reset_requested'").get() as Record<string, unknown>;
+    expect(event).toBeDefined();
+    const payload = JSON.parse(event.payload as string);
+    expect(payload.email).toBe('test@example.com');
+  });
+});
+
+// ─── POST /api/auth/reset-password ───
+
+describe('POST /api/auth/reset-password', () => {
+  /** Helper: request a reset token and return the raw token */
+  async function getResetToken(email = 'test@example.com'): Promise<string> {
+    const res = await request(app).post('/api/auth/forgot-password').send({ email });
+    // Extract token from resetLink URL
+    const url = new URL(res.body.resetLink);
+    return url.searchParams.get('token')!;
+  }
+
+  test('resets password with valid token', async () => {
+    await registerUser();
+    const token = await getResetToken();
+
+    const res = await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'newpassword123',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message).toContain('Password has been reset successfully');
+  });
+
+  test('can login with new password after reset', async () => {
+    await registerUser();
+    const token = await getResetToken();
+
+    await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'newpassword123',
+    });
+
+    // Old password should fail
+    const oldRes = await request(app).post('/api/auth/login').send({
+      email: 'test@example.com',
+      password: 'securepass123',
+    });
+    expect(oldRes.status).toBe(401);
+
+    // New password should succeed
+    const newRes = await request(app).post('/api/auth/login').send({
+      email: 'test@example.com',
+      password: 'newpassword123',
+    });
+    expect(newRes.status).toBe(200);
+    expect(newRes.body.accessToken).toBeDefined();
+  });
+
+  test('marks token as used after reset', async () => {
+    await registerUser();
+    const token = await getResetToken();
+
+    await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'newpassword123',
+    });
+
+    const resetToken = db.prepare('SELECT * FROM password_reset_tokens').get() as Record<string, unknown>;
+    expect(resetToken.used_at).not.toBeNull();
+  });
+
+  test('returns 400 for already-used token', async () => {
+    await registerUser();
+    const token = await getResetToken();
+
+    // First use succeeds
+    await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'newpassword123',
+    });
+
+    // Second use fails
+    const res = await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'anotherpassword',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('This reset token has already been used');
+  });
+
+  test('returns 400 for expired token', async () => {
+    await registerUser();
+    const token = await getResetToken();
+
+    // Manually expire the token
+    const crypto = require('crypto');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    db.prepare("UPDATE password_reset_tokens SET expires_at = datetime('now', '-1 hour') WHERE token_hash = ?").run(tokenHash);
+
+    const res = await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'newpassword123',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('This reset token has expired');
+  });
+
+  test('returns 400 for invalid token', async () => {
+    const res = await request(app).post('/api/auth/reset-password').send({
+      token: 'completely-invalid-token',
+      newPassword: 'newpassword123',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid or expired reset token');
+  });
+
+  test('returns 400 for missing token', async () => {
+    const res = await request(app).post('/api/auth/reset-password').send({ newPassword: 'newpassword123' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Reset token is required');
+  });
+
+  test('returns 400 for missing newPassword', async () => {
+    const res = await request(app).post('/api/auth/reset-password').send({ token: 'sometoken' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('New password is required');
+  });
+
+  test('returns 400 for password shorter than 8 characters', async () => {
+    await registerUser();
+    const token = await getResetToken();
+
+    const res = await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'short',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Password must be at least 8 characters');
+  });
+
+  test('invalidates all refresh tokens for the user', async () => {
+    const { refreshToken } = await registerUser();
+    const token = await getResetToken();
+
+    await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'newpassword123',
+    });
+
+    // Old refresh token should be revoked
+    const refreshRes = await request(app).post('/api/auth/refresh').send({ refreshToken });
+    expect(refreshRes.status).toBe(401);
+  });
+
+  test('emits password_reset WAL event', async () => {
+    await registerUser();
+    const token = await getResetToken();
+
+    await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'newpassword123',
+    });
+
+    const event = db.prepare("SELECT * FROM wal_events WHERE event_type = 'password_reset'").get() as Record<string, unknown>;
+    expect(event).toBeDefined();
+    const payload = JSON.parse(event.payload as string);
+    expect(payload.email).toBe('test@example.com');
+  });
+
+  test('stores new password as bcrypt hash', async () => {
+    await registerUser();
+    const token = await getResetToken();
+
+    await request(app).post('/api/auth/reset-password').send({
+      token,
+      newPassword: 'newpassword123',
+    });
+
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get('test@example.com') as Record<string, unknown>;
+    expect(user.password_hash).toBeDefined();
+    expect(user.password_hash).not.toBe('newpassword123');
+    expect((user.password_hash as string).startsWith('$2a$12$') || (user.password_hash as string).startsWith('$2b$12$')).toBe(true);
+  });
+});
+
 // ─── Token encryption helpers ───
 
 describe('encryptToken / decryptToken', () => {

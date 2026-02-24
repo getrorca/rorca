@@ -3,9 +3,10 @@ import { useAuth } from '../contexts/AuthContext';
 
 interface LoginPageProps {
   onSwitchToRegister: () => void;
+  onSwitchToForgotPassword: () => void;
 }
 
-export default function LoginPage({ onSwitchToRegister }: LoginPageProps) {
+export default function LoginPage({ onSwitchToRegister, onSwitchToForgotPassword }: LoginPageProps) {
   const { login, loginWithGitHub } = useAuth();
 
   const [email, setEmail] = useState('');
@@ -68,9 +69,18 @@ export default function LoginPage({ onSwitchToRegister }: LoginPageProps) {
             </div>
 
             <div>
-              <label htmlFor="login-password" className="block text-sm text-muted mb-1">
-                Password
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label htmlFor="login-password" className="block text-sm text-muted">
+                  Password
+                </label>
+                <button
+                  type="button"
+                  onClick={onSwitchToForgotPassword}
+                  className="text-xs text-accent hover:text-accent-hover transition-colors"
+                >
+                  Forgot password?
+                </button>
+              </div>
               <input
                 id="login-password"
                 type="password"

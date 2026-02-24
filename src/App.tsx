@@ -14,6 +14,8 @@ import ErrorBoundary from './components/ErrorBoundary';
 import NetworkBanner from './components/NetworkBanner';
 import LoginPage from './components/LoginPage';
 import RegisterPage from './components/RegisterPage';
+import ForgotPasswordPage from './components/ForgotPasswordPage';
+import ResetPasswordPage from './components/ResetPasswordPage';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { onApiFetchError } from './lib/apiFetch';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
@@ -38,17 +40,37 @@ import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
 import SettingsPanel from './panels/SettingsPanel';
 import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
 
-type AuthPage = 'login' | 'register';
+type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
 function AuthGate() {
   const { isAuthenticated, loading } = useAuth();
-  const [authPage, setAuthPage] = useState<AuthPage>('login');
+  const [authPage, setAuthPage] = useState<AuthPage>(() => {
+    // Check if landing on /reset-password with a token
+    if (window.location.pathname === '/reset-password') return 'reset-password';
+    return 'login';
+  });
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-bg">
         <div className="text-muted text-sm">Loading...</div>
       </div>
+    );
+  }
+
+  // Handle /reset-password route — show reset page even when auth is bypassed
+  if (authPage === 'reset-password') {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token') || '';
+    if (!token) {
+      // No token provided — go to forgot password
+      return <ForgotPasswordPage onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }} />;
+    }
+    return (
+      <ResetPasswordPage
+        token={token}
+        onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }}
+      />
     );
   }
 
