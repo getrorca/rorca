@@ -174,6 +174,63 @@ router.put('/', (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/direction/all:
+ *   get:
+ *     tags: [Direction Stack]
+ *     summary: Fetch all direction layers for a workspace
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: All direction layers
+ *       400: { description: "Missing workspaceId" }
+ */
+router.get('/all', (req: Request, res: Response) => {
+  const { workspaceId } = req.query;
+
+  if (!workspaceId) {
+    res.status(400).json({ error: 'Missing required query param: workspaceId' });
+    return;
+  }
+
+  const wsId = String(workspaceId);
+
+  // L1: global (no workspace, no domain)
+  const l1Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+  ).get() as { content_yaml: string } | undefined;
+
+  // L2: workspace-scoped
+  const l2Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+  ).get(wsId) as { content_yaml: string } | undefined;
+
+  // L3: workspace-scoped with preferred_model
+  const l3Row = db.prepare(
+    `SELECT content_yaml, preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+  ).get(wsId) as { content_yaml: string; preferred_model: string | null } | undefined;
+
+  // Team L1/L2 overrides
+  const teamLayers = getTeamLayers(wsId);
+
+  res.json({
+    layers: {
+      l1: { content: l1Row?.content_yaml ?? null, source: teamLayers.teamL1 ? 'team' : 'global' },
+      l2: { content: l2Row?.content_yaml ?? null, teamOverride: teamLayers.teamL2 ?? null },
+      l3: { content: l3Row?.content_yaml ?? null, preferredModel: l3Row?.preferred_model ?? null },
+      l4: { content: null, note: 'L4 (spec brief) is provided per-request, not persisted' },
+      l5: { content: null, note: 'L5 (story annotations) is provided per-request, not persisted' },
+    },
+    teamL1: teamLayers.teamL1 ?? null,
+    teamL2: teamLayers.teamL2 ?? null,
+  });
+});
+
+/**
+ * @swagger
  * /api/direction/models:
  *   get:
  *     tags: [Direction Stack]

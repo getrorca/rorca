@@ -610,6 +610,148 @@ server.registerTool(
   }
 );
 
+// ─── V2-071: Direction Stack MCP Tools ─────────────────────────────────────────
+
+server.registerTool(
+  'rorcha_get_direction',
+  {
+    description: 'Get the full direction stack for a workspace, returning all layers (L1 global brain, L2 domain profile, L3 project brief) and their raw content. L4 (spec brief) and L5 (story annotations) are per-request and not persisted. Also returns team-level L1/L2 overrides if the workspace belongs to a team.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+    },
+  },
+  async ({ workspaceId }) => {
+    const res = await fetch(`${RORCHA_API}/api/direction/all?workspaceId=${encodeURIComponent(workspaceId)}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to get direction stack (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      layers: {
+        l1: { content: string | null; source: string };
+        l2: { content: string | null; teamOverride: string | null };
+        l3: { content: string | null; preferredModel: string | null };
+        l4: { content: null; note: string };
+        l5: { content: null; note: string };
+      };
+      teamL1: string | null;
+      teamL2: string | null;
+    };
+
+    const lines: string[] = [`Direction Stack for workspace ${workspaceId}:\n`];
+
+    // L1
+    if (data.teamL1) {
+      lines.push(`=== L1: Global Brain (team override) ===\n${data.teamL1}\n`);
+    } else if (data.layers.l1.content) {
+      lines.push(`=== L1: Global Brain ===\n${data.layers.l1.content}\n`);
+    } else {
+      lines.push(`=== L1: Global Brain ===\n(not configured)\n`);
+    }
+
+    // L2
+    if (data.teamL2) {
+      lines.push(`=== L2: Domain Profile (team override) ===\n${data.teamL2}\n`);
+    } else if (data.layers.l2.content) {
+      lines.push(`=== L2: Domain Profile ===\n${data.layers.l2.content}\n`);
+    } else {
+      lines.push(`=== L2: Domain Profile ===\n(not configured)\n`);
+    }
+
+    // L3
+    if (data.layers.l3.content) {
+      lines.push(`=== L3: Project Brief ===\n${data.layers.l3.content}`);
+      if (data.layers.l3.preferredModel) {
+        lines.push(`Preferred model: ${data.layers.l3.preferredModel}`);
+      }
+      lines.push('');
+    } else {
+      lines.push(`=== L3: Project Brief ===\n(not configured)\n`);
+    }
+
+    // L4/L5
+    lines.push(`=== L4: Spec Brief ===\n${data.layers.l4.note}\n`);
+    lines.push(`=== L5: Story Annotations ===\n${data.layers.l5.note}`);
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
+server.registerTool(
+  'rorcha_update_direction',
+  {
+    description: 'Update a specific direction layer (L1, L2, or L3) for a workspace. Content must be valid YAML. L1 is the global brain (engineering principles), L2 is the domain profile (auth patterns, API conventions), L3 is the project brief (stack, architecture, constraints). L4/L5 are per-request and cannot be persisted via this tool. Changes take effect immediately in subsequent spec generations.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID — required for L2 and L3, optional for L1 (global)'),
+      layer: z.number().min(1).max(3).describe('Direction layer number: 1 (global brain), 2 (domain profile), or 3 (project brief)'),
+      contentYaml: z.string().describe('YAML content for the layer'),
+      domain: z.string().optional().describe('Domain name (only relevant for L2 domain-scoped layers)'),
+      preferredModel: z.string().optional().describe('Preferred LLM model (only valid for L3)'),
+    },
+  },
+  async ({ workspaceId, layer, contentYaml, domain, preferredModel }) => {
+    const body: Record<string, unknown> = {
+      layer,
+      contentYaml,
+    };
+    // L1 is global — workspaceId is optional for L1 but required for L2/L3
+    if (layer >= 2) {
+      body.workspaceId = workspaceId;
+    }
+    if (domain !== undefined) body.domain = domain;
+    if (preferredModel !== undefined) body.preferredModel = preferredModel;
+
+    const res = await fetch(`${RORCHA_API}/api/direction`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to update direction layer L${layer} (${res.status}): ${err}`);
+    }
+
+    const layerNames: Record<number, string> = { 1: 'Global Brain', 2: 'Domain Profile', 3: 'Project Brief' };
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Direction layer L${layer} (${layerNames[layer]}) updated successfully for workspace ${workspaceId}.${preferredModel ? `\nPreferred model: ${preferredModel}` : ''}\n\nChanges will be reflected in subsequent spec generations.`
+      }]
+    };
+  }
+);
+
+server.registerTool(
+  'rorcha_synthesize_direction',
+  {
+    description: 'Get the fully synthesized direction stack as a single merged string, exactly as it would be sent to the LLM during spec generation. Merges L1 through L5 in priority order with team overrides, auto-hydrated schema/git context, and optional L4/L5 content. Use this to preview what the LLM will see.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorcha workspace ID'),
+      specBrief: z.string().optional().describe('L4: spec brief text (one-paragraph description). If omitted, shows synthesis without L4.'),
+      storyAnnotations: z.string().optional().describe('L5: story-level annotations, edge cases, or implementation hints'),
+    },
+  },
+  async ({ workspaceId, specBrief, storyAnnotations }) => {
+    const res = await fetch(`${RORCHA_API}/api/direction/synthesize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workspaceId,
+        l4SpecBrief: specBrief ?? '',
+        l5Annotations: storyAnnotations,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Direction synthesis failed (${res.status}): ${err}`);
+    }
+    const { synthesized } = await res.json() as { synthesized: string };
+    return { content: [{ type: 'text' as const, text: synthesized }] };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
