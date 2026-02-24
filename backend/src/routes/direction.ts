@@ -2,9 +2,10 @@ import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { synthesize } from '../lib/direction-stack';
 import { chatComplete } from '../lib/llm-client';
-import { DEFAULT_MODEL, ALL_MODELS, getModelsForProviders } from '../lib/llm-client';
-import type { ProviderType } from '../lib/llm-client';
+import { DEFAULT_MODEL, ALL_MODELS, getModelsForProviders, fetchOpenRouterModels } from '../lib/llm-client';
+import type { ProviderType, ModelInfo } from '../lib/llm-client';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
+import { getVaultKey } from './vault';
 
 const router = Router();
 
@@ -250,7 +251,7 @@ router.get('/all', (req: Request, res: Response) => {
  *                       id: { type: string, example: "claude-sonnet-4-5-20250929" }
  *                       label: { type: string }
  */
-router.get('/models', (req: Request, res: Response) => {
+router.get('/models', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
 
   // Resolve workspace default model for "recommended" badge
@@ -288,7 +289,40 @@ router.get('/models', (req: Request, res: Response) => {
     configuredProviders.push('openai-compat');
   }
 
-  const models = getModelsForProviders(configuredProviders);
+  // Start with hardcoded models for non-openrouter providers
+  let models: ModelInfo[] = getModelsForProviders(configuredProviders);
+
+  // If OpenRouter is configured, fetch live catalog from their API
+  if (configuredProviders.includes('openrouter')) {
+    let openrouterKey: string | undefined;
+
+    // Try vault first — find any user who has an openrouter key (single-user tool)
+    const vaultUser = db.prepare(
+      'SELECT user_id FROM api_key_vault WHERE provider = ? ORDER BY created_at DESC LIMIT 1'
+    ).get('openrouter') as { user_id: string } | undefined;
+
+    if (vaultUser) {
+      const result = getVaultKey(vaultUser.user_id, 'openrouter');
+      if (result) openrouterKey = result.key;
+    }
+
+    // Fallback to env var
+    if (!openrouterKey) {
+      openrouterKey = process.env.OPENROUTER_API_KEY;
+    }
+
+    if (openrouterKey) {
+      try {
+        const catalogModels = await fetchOpenRouterModels(openrouterKey);
+        // Replace hardcoded openrouter models with live catalog
+        models = models.filter(m => m.providerType !== 'openrouter');
+        models.push(...catalogModels);
+      } catch (err: any) {
+        console.warn('[direction/models] Failed to fetch OpenRouter catalog:', err.message);
+        // Keep hardcoded openrouter models as fallback
+      }
+    }
+  }
 
   res.json({
     models: models.map(info => ({
