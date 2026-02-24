@@ -1704,7 +1704,9 @@
         "WAL event 'run_cancelled' is emitted on successful cancel",
         "If PID is already dead, the endpoint still marks the run as cancelled and returns 200 (idempotent)"
       ],
-      "dependsOn": []
+      "dependsOn": [],
+      "passes": true,
+      "notes": "Completed by ralph loop"
     },
     {
       "id": "V2-102",

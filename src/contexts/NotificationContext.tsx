@@ -109,7 +109,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
         // Notification-triggering events — refresh count when these arrive
         const triggerTypes = new Set([
           'spec_approved', 'spec_rejected', 'run_finished',
-          'run_failed', 'review_requested', 'budget_alert',
+          'run_failed', 'run_cancelled', 'review_requested', 'budget_alert',
         ]);
         if (triggerTypes.has(data.event_type)) {
           refreshUnreadCount();
