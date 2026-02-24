@@ -410,7 +410,66 @@ async function chatCompleteOpenAICompat(
 // ─── OpenRouter ──────────────────────────────────────────────────────────────
 
 async function chatCompleteOpenRouter(messages: ChatMessage[], model: string, apiKey: string): Promise<ChatResult> {
-  return chatCompleteOpenAICompat(messages, model, apiKey, OPENROUTER_BASE_URL);
+  const client = new OpenAI({
+    apiKey,
+    baseURL: OPENROUTER_BASE_URL,
+    defaultHeaders: {
+      'HTTP-Referer': 'https://rorcha.dev',
+      'X-Title': 'Rorcha',
+    },
+  });
+
+  const response = await client.chat.completions.create({
+    model,
+    messages: messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+    max_tokens: 16384,
+  });
+
+  const text = response.choices[0]?.message?.content ?? '';
+  const usage = response.usage;
+
+  return {
+    text,
+    usage: {
+      inputTokens: usage?.prompt_tokens ?? 0,
+      outputTokens: usage?.completion_tokens ?? 0,
+    },
+  };
+}
+
+/**
+ * Fetch the full model catalog from OpenRouter's /api/v1/models endpoint.
+ * Returns a list of ModelInfo objects.
+ */
+export async function fetchOpenRouterModels(apiKey: string): Promise<ModelInfo[]> {
+  const res = await fetch(`${OPENROUTER_BASE_URL}/models`, {
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'HTTP-Referer': 'https://rorcha.dev',
+      'X-Title': 'Rorcha',
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`OpenRouter /models returned ${res.status}: ${await res.text().catch(() => 'unknown')}`);
+  }
+
+  const body = await res.json() as {
+    data: Array<{
+      id: string;
+      name: string;
+      pricing?: { prompt?: string; completion?: string };
+    }>;
+  };
+
+  return body.data.map(m => ({
+    id: m.id,
+    label: m.name,
+    provider: 'OpenRouter',
+    providerType: 'openrouter' as ProviderType,
+    costPer1kInput: m.pricing?.prompt ? parseFloat(m.pricing.prompt) * 1000 : 0,
+    costPer1kOutput: m.pricing?.completion ? parseFloat(m.pricing.completion) * 1000 : 0,
+  }));
 }
 
 // ─── Unified Entry Point ─────────────────────────────────────────────────────
