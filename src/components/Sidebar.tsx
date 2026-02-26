@@ -5,7 +5,7 @@ import {
   Plus, Hammer, X,
 } from 'lucide-react';
 
-export type PanelId = 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'settings' | 'workspace-settings';
+export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'settings' | 'workspace-settings';
 
 interface NavItem {
   id: PanelId;
@@ -90,7 +90,7 @@ interface MinimalNavItem {
 
 const MINIMAL_NAV: MinimalNavItem[] = [
   { id: 'new',      label: 'New Spec',  icon: Plus,     panel: 'forge'    },
-  { id: 'hub',      label: 'Hub',       icon: LayoutGrid, panel: 'pipeline' },
+  { id: 'hub',      label: 'Hub',       icon: LayoutGrid, panel: 'hub'      },
   { id: 'forge',    label: 'Forge',     icon: Hammer,   panel: 'forge'    },
   { id: 'settings', label: 'Settings',  icon: Settings, panel: 'settings' },
 ];
@@ -98,7 +98,8 @@ const MINIMAL_NAV: MinimalNavItem[] = [
 /** Maps any PanelId to the MinimalNavId that should be highlighted */
 function resolveActiveNav(panel: PanelId): MinimalNavId {
   switch (panel) {
-    // Hub — pipeline, monitoring, analytics, activity, health
+    // Hub — hub screen, pipeline, monitoring, analytics, activity, health
+    case 'hub':
     case 'pipeline':
     case 'worktrees':
     case 'compare':
