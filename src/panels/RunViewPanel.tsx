@@ -8,6 +8,8 @@ import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
+import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
+import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
 import WorktreesPanel from './WorktreesPanel';
 import type { PanelId } from '../components/Sidebar';
@@ -102,6 +104,13 @@ function relativeTime(dateStr: string): string {
   if (diffHr < 24) return `${diffHr}h ago`;
   const diffDays = Math.floor(diffHr / 24);
   return `${diffDays}d ago`;
+}
+
+/** Extract spec slug from spec_path like "forge/specs/approved/my-spec.json" → "my-spec" */
+function extractSpecId(specPath: string): string {
+  const parts = specPath.split('/');
+  const file = parts[parts.length - 1] || specPath;
+  return file.replace(/\.json$/, '');
 }
 
 /** Extract story ID from commit message patterns like feat(US-001): or test(US-003): */
@@ -333,6 +342,33 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     return status;
   }, [run, walEvents]);
 
+  // Derive per-story live statuses from SSE events for the graph
+  const liveStatuses = useMemo(() => {
+    const map = new Map<string, DerivedStatus>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      const id = evt.story_id;
+      if (evt.event_type === 'story_started') {
+        map.set(id, { storyId: id, status: 'running', startedAt: evt.ts, elapsed: '' });
+      } else if (evt.event_type === 'story_passed') {
+        const prev = map.get(id);
+        const elapsed = prev?.startedAt
+          ? `${Math.round((new Date(evt.ts).getTime() - new Date(prev.startedAt).getTime()) / 1000)}s`
+          : '';
+        map.set(id, { storyId: id, status: 'passed', startedAt: prev?.startedAt ?? null, elapsed });
+      } else if (evt.event_type === 'story_failed') {
+        const prev = map.get(id);
+        const elapsed = prev?.startedAt
+          ? `${Math.round((new Date(evt.ts).getTime() - new Date(prev.startedAt).getTime()) / 1000)}s`
+          : '';
+        map.set(id, { storyId: id, status: 'failed', startedAt: prev?.startedAt ?? null, elapsed });
+      } else if (evt.event_type === 'story_skipped') {
+        map.set(id, { storyId: id, status: 'skipped', startedAt: null, elapsed: '' });
+      }
+    }
+    return map;
+  }, [walEvents]);
+
   const fetchRun = useCallback(async () => {
     if (!workspaceId) return;
     try {
@@ -434,7 +470,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       case 'stories':
         return <TabPlaceholder label="Stories" />;
       case 'graph':
-        return <TabPlaceholder label="Graph" />;
+        return (
+          <InteractiveDependencyGraph
+            specId={extractSpecId(run.spec_path)}
+            workspaceId={run.workspace_id}
+            runId={run.id}
+            liveStatuses={liveStatuses}
+          />
+        );
       case 'compare':
         return <CompareRunsPanel onBack={() => handleTabChange('terminal')} />;
       case 'worktrees':
