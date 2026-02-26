@@ -130,7 +130,7 @@ function GlobalErrorWiring() {
 function ActivePanel({ id, onNavigate, onNavigateToRun }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void }) {
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} />;
-    case 'forge': return <SpecForgePanelPage />;
+    case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} />;
     case 'stack': return <DirectionStackPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'queue': return <ReviewQueuePanel />;

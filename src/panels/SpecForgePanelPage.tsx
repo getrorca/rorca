@@ -3,6 +3,9 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
 import BatchForge from './BatchForge';
+import DirectionPreviewSidebar from '../components/DirectionPreviewSidebar';
+
+import type { PanelId } from '../components/Sidebar';
 
 type ForgeMode = 'single' | 'batch';
 type DiagramType = 'flowchart' | 'sequenceDiagram' | 'ascii';
@@ -19,7 +22,7 @@ interface ModelOption {
 
 const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
-export default function SpecForgePanelPage() {
+export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
   const { workspaceId, workspaces } = useWorkspace();
   const workspace = workspaces.find((w) => w.id === workspaceId);
   const [forgeMode, setForgeMode] = useState<ForgeMode>('single');
@@ -492,6 +495,11 @@ export default function SpecForgePanelPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Center pane: Direction preview sidebar (30% width) */}
+      <div className="w-[30%] shrink-0 min-w-[200px] max-w-[320px]">
+        <DirectionPreviewSidebar onNavigateToStack={onNavigate ? () => onNavigate('stack') : undefined} />
       </div>
 
       {/* Right pane: Output tabs */}
