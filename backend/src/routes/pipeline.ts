@@ -1339,6 +1339,119 @@ router.post('/runs/:runId/resume', (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/pipeline/runs/:runId/context — Inject context into a blocked run ─
+// When a run_blocked WAL event fires (HITL pause), the user can inject free-text
+// context. This writes the context to a file the run-loop can read, emits a
+// run_resumed WAL event, and sends SIGCONT to resume the process.
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/context:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Inject context into a blocked (HITL) pipeline run and resume
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [context]
+ *             properties:
+ *               context: { type: string, description: "Free-text context to inject" }
+ *     responses:
+ *       200: { description: "Context injected and run resumed" }
+ *       400: { description: "Missing or empty context" }
+ *       404: { description: "Run not found" }
+ *       409: { description: "Run is not in blocked or paused state" }
+ */
+router.post('/runs/:runId/context', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const { context } = req.body as { context?: string };
+    if (!context || context.trim().length === 0) {
+      res.status(400).json({ error: 'Context is required and cannot be empty' });
+      return;
+    }
+
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    // Accept context injection when run is blocked or paused
+    if (run.status !== 'paused' && run.status !== 'running') {
+      res.status(409).json({ error: `Cannot inject context into run with status '${run.status}'` });
+      return;
+    }
+
+    // Write context to a file the run-loop can pick up
+    const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(run.workspace_id) as { path: string } | undefined;
+    if (workspace) {
+      const contextDir = path.join(workspace.path, 'forge', 'logs');
+      fs.mkdirSync(contextDir, { recursive: true });
+      const contextFile = path.join(contextDir, `run-${runId}-context.txt`);
+      fs.writeFileSync(contextFile, context.trim(), 'utf8');
+    }
+
+    // If process is stopped (paused/blocked), send SIGCONT to resume
+    if (run.pid && isPidAlive(run.pid)) {
+      try {
+        process.kill(-run.pid, 'SIGCONT');
+      } catch {
+        // Process may have already exited
+      }
+    }
+
+    // Update status back to running
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'running' WHERE id = ?`
+    ).run(runId);
+
+    // Emit run_resumed WAL event with injected context info
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_resumed', ?, ?)`
+    ).run(run.workspace_id, JSON.stringify({
+      run_id: runId,
+      context_injected: true,
+      context_length: context.trim().length,
+    }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    // Also append context to the output buffer so it shows in the terminal
+    const buf = outputBuffers.get(runId);
+    if (buf) {
+      const contextMsg = `\r\n\x1b[1;33m[Context injected by user]\x1b[0m\r\n\x1b[36m${context.trim()}\x1b[0m\r\n`;
+      buf.chunks.push(contextMsg);
+      buf.subscribers.forEach(cb => cb(contextMsg));
+    }
+
+    res.json({ ok: true, runId, status: 'running' });
+  } catch (error: any) {
+    console.error('[Pipeline] Context injection error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── POST /api/pipeline/runs/:runId/cancel — Cancel a running/paused pipeline ─
 // Sends SIGTERM to the process group. If the process doesn't exit within 5s,
 // escalates to SIGKILL. Idempotent: if the PID is already dead, still marks
@@ -1734,7 +1847,7 @@ router.get('/stream', (req: Request, res: Response) => {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
              AND (payload LIKE ? OR spec_id IS NOT NULL)
            ORDER BY id ASC
            LIMIT 50`
@@ -1743,7 +1856,7 @@ router.get('/stream', (req: Request, res: Response) => {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
            ORDER BY id ASC
            LIMIT 50`
         ).all(lastSeenId);

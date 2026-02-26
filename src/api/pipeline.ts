@@ -91,6 +91,19 @@ export function retryRun(
   });
 }
 
+export function injectContext(
+  runId: number,
+  context: string,
+  opts?: ApiOptions,
+): Promise<{ ok: true; runId: number; status: 'running' }> {
+  return apiFetch(`/api/pipeline/runs/${runId}/context`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ context }),
+    signal: opts?.signal,
+  });
+}
+
 export function cancelRun(
   runId: number,
   opts?: ApiOptions,
