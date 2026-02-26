@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from '../components/Sidebar';
 
@@ -76,11 +76,55 @@ const STATUS_DOTS: Record<string, string> = {
   cancelled: 'bg-gray-500',
 };
 
+const STATUS_BADGE_STYLES: Record<string, string> = {
+  running: 'bg-blue-500/10 text-blue-500',
+  paused: 'bg-yellow-500/10 text-yellow-500',
+  done: 'bg-emerald-500/10 text-emerald-500',
+  failed: 'bg-red-500/10 text-red-500',
+  partial_failure: 'bg-orange-500/10 text-orange-500',
+  cancelled: 'bg-gray-500/10 text-gray-400',
+};
+
+const STATUS_BADGE_LABELS: Record<string, string> = {
+  running: 'Running',
+  paused: 'Paused',
+  done: 'Passed',
+  failed: 'Failed',
+  partial_failure: 'Partial',
+  cancelled: 'Cancelled',
+};
+
+function formatDuration(startedAt: string, finishedAt: string | null): string {
+  const start = parseUtc(startedAt).getTime();
+  const end = finishedAt ? parseUtc(finishedAt).getTime() : Date.now();
+  const diffMs = Math.max(0, end - start);
+  const totalSecs = Math.floor(diffMs / 1000);
+  if (totalSecs < 60) return `${totalSecs}s`;
+  const mins = Math.floor(totalSecs / 60);
+  const secs = totalSecs % 60;
+  if (mins < 60) return `${mins}m ${secs}s`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hrs}h ${remMins}m`;
+}
+
+function formatTimestamp(iso: string): string {
+  try {
+    const d = parseUtc(iso);
+    return d.toLocaleString(undefined, {
+      month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+  } catch {
+    return '';
+  }
+}
+
 // ─── Section Header ─────────────────────────────────────────────────────────
 
-function SectionHeader({ icon: Icon, label, badge }: { icon: typeof Play; label: string; badge?: number }) {
+function SectionHeader({ icon: Icon, label, badge, noMargin }: { icon: typeof Play; label: string; badge?: number; noMargin?: boolean }) {
   return (
-    <h2 className="flex items-center gap-2 text-sm font-bold text-[var(--text)] mb-3">
+    <h2 className={`flex items-center gap-2 text-sm font-bold text-[var(--text)]${noMargin ? '' : ' mb-3'}`}>
       <Icon size={16} className="text-muted" />
       {label}
       {badge != null && badge > 0 && (
@@ -355,21 +399,28 @@ function RecentRunRow({ run, onNavigate }: {
   return (
     <button
       onClick={() => onNavigate('pipeline')}
-      className="w-full text-left px-3 py-2.5 hover:bg-bg rounded-lg transition-colors group"
+      className="w-full text-left px-3 py-2.5 hover:bg-bg transition-colors group"
     >
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
+        {/* Left: spec name + run ID */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOTS[run.status] || 'bg-gray-500'}`} />
           <span className="text-sm text-[var(--text)] truncate capitalize">
             {specLabel(run.spec_path)}
           </span>
+          <span className="text-[11px] text-muted font-mono shrink-0">#{run.id}</span>
         </div>
+
+        {/* Right: status badge + timestamp + duration */}
         <div className="flex items-center gap-2 shrink-0">
-          <span className={`text-xs capitalize ${STATUS_COLORS[run.status] || 'text-muted'}`}>
-            {run.status === 'partial_failure' ? 'partial' : run.status}
+          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${STATUS_BADGE_STYLES[run.status] || 'bg-gray-500/10 text-gray-400'}`}>
+            {STATUS_BADGE_LABELS[run.status] || run.status}
           </span>
-          <span className="text-xs text-muted">
-            {relativeTime(run.finished_at || run.started_at)}
+          <span className="text-xs text-muted whitespace-nowrap">
+            {formatTimestamp(run.started_at)}
+          </span>
+          <span className="text-xs text-muted font-mono tabular-nums whitespace-nowrap">
+            {formatDuration(run.started_at, run.finished_at)}
           </span>
         </div>
       </div>
@@ -440,6 +491,26 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
     return () => clearInterval(interval);
   }, [fetchData]);
 
+  // SSE: re-fetch immediately when a run completes, fails, or is cancelled
+  const fetchRef = useRef(fetchData);
+  fetchRef.current = fetchData;
+  useEffect(() => {
+    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
+    const RUN_TERMINAL_EVENTS = new Set([
+      'run_finished', 'run_failed', 'run_cancelled',
+      'run_started', 'run_paused', 'run_resumed',
+    ]);
+    es.addEventListener('wal_event', (e) => {
+      try {
+        const evt = JSON.parse(e.data);
+        if (RUN_TERMINAL_EVENTS.has(evt.event_type)) {
+          fetchRef.current();
+        }
+      } catch { /* ignore malformed events */ }
+    });
+    return () => es.close();
+  }, []);
+
   if (!loaded) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -508,7 +579,15 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
         {/* Recent Runs */}
         {hasRecent && (
           <section>
-            <SectionHeader icon={Clock} label="Recent Runs" />
+            <div className="flex items-center justify-between mb-3">
+              <SectionHeader icon={Clock} label="Recent Runs" noMargin />
+              <button
+                onClick={() => onNavigate('archive')}
+                className="flex items-center gap-1 text-xs text-accent hover:underline"
+              >
+                View all <ArrowRight size={12} />
+              </button>
+            </div>
             <div className="bg-panel border border-border rounded-lg divide-y divide-border">
               {recentRuns.map((run) => (
                 <RecentRunRow key={run.id} run={run} onNavigate={onNavigate} />
