@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2 } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
+import { pauseRun, resumeRun, cancelRun } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
 import SplitPane from '../components/SplitPane';
@@ -246,6 +247,36 @@ function CommitsTab({ runId }: { runId: number }) {
   );
 }
 
+// ─── Kill Confirmation Dialog ────────────────────────────────────────────────
+
+function KillConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="bg-panel border border-border rounded-lg shadow-xl p-5 max-w-sm w-full mx-4">
+        <div className="flex items-center gap-2 mb-3">
+          <Square size={16} className="text-red-400" />
+          <h3 className="text-sm font-semibold text-[var(--text)]">Kill this run?</h3>
+        </div>
+        <p className="text-sm text-muted mb-5">This cannot be undone.</p>
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1.5 text-xs font-medium rounded border border-border text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="px-3 py-1.5 text-xs font-medium rounded bg-red-600 text-white hover:bg-red-700 transition-colors"
+          >
+            Kill
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── RunViewPanel ───────────────────────────────────────────────────────────
 
 interface RunViewPanelProps {
@@ -260,6 +291,9 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<RunViewTab>(getTabFromHash);
   const terminalRef = useRef<RunTerminalHandle>(null);
+  const [pauseLoading, setPauseLoading] = useState(false);
+  const [killLoading, setKillLoading] = useState(false);
+  const [showKillConfirm, setShowKillConfirm] = useState(false);
 
   // Sync tab selection to URL hash
   const handleTabChange = useCallback((tab: RunViewTab) => {
@@ -308,6 +342,38 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   useEffect(() => {
     fetchRun();
   }, [fetchRun]);
+
+  const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused';
+
+  const handlePauseResume = useCallback(async () => {
+    if (!isActive) return;
+    setPauseLoading(true);
+    try {
+      if (effectiveStatus === 'paused') {
+        await resumeRun(runId);
+      } else {
+        await pauseRun(runId);
+      }
+      await fetchRun();
+    } catch (err) {
+      console.error('[RunView] Pause/Resume failed:', err);
+    } finally {
+      setPauseLoading(false);
+    }
+  }, [runId, effectiveStatus, isActive, fetchRun]);
+
+  const handleKill = useCallback(async () => {
+    setShowKillConfirm(false);
+    setKillLoading(true);
+    try {
+      await cancelRun(runId);
+      await fetchRun();
+    } catch (err) {
+      console.error('[RunView] Kill failed:', err);
+    } finally {
+      setKillLoading(false);
+    }
+  }, [runId, fetchRun]);
 
   if (loading) {
     return (
@@ -382,7 +448,56 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             {STATUS_BADGE_LABELS[effectiveStatus] || effectiveStatus}
           </span>
         </div>
+
+        {/* Pipeline controls */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Pause / Resume */}
+          <button
+            onClick={handlePauseResume}
+            disabled={!isActive || pauseLoading}
+            title={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
+            className={`p-1.5 rounded-lg transition-colors ${
+              isActive && !pauseLoading
+                ? 'hover:bg-bg text-muted hover:text-[var(--text)]'
+                : 'text-muted/30 cursor-not-allowed'
+            }`}
+          >
+            {pauseLoading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : effectiveStatus === 'paused' ? (
+              <Play size={16} />
+            ) : (
+              <Pause size={16} />
+            )}
+          </button>
+
+          {/* Kill */}
+          <button
+            onClick={() => setShowKillConfirm(true)}
+            disabled={!isActive || killLoading}
+            title="Kill run"
+            className={`p-1.5 rounded-lg transition-colors ${
+              isActive && !killLoading
+                ? 'hover:bg-red-500/10 text-muted hover:text-red-400'
+                : 'text-muted/30 cursor-not-allowed'
+            }`}
+          >
+            {killLoading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Square size={16} />
+            )}
+          </button>
+        </div>
       </div>
+
+      {/* Kill confirmation dialog */}
+      {showKillConfirm && (
+        <KillConfirmDialog
+          onConfirm={handleKill}
+          onCancel={() => setShowKillConfirm(false)}
+        />
+      )}
 
       {/* Tab bar */}
       <div className="shrink-0 px-4 border-b border-border bg-panel flex items-center gap-0.5 overflow-x-auto">
