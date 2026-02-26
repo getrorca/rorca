@@ -3,7 +3,7 @@ const mockFetch = jest.fn();
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCHA_API } from '../server';
+import { server, RORCA_API } from '../server';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -16,9 +16,9 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
-test('rorcha_approve_spec is registered on the McpServer', () => {
+test('rorca_approve_spec is registered on the McpServer', () => {
   const tools = (server as any)._registeredTools;
-  expect(tools['rorcha_approve_spec']).toBeDefined();
+  expect(tools['rorca_approve_spec']).toBeDefined();
 });
 
 test('calls POST /api/specs/:specId/approve with workspaceId and notes in body', async () => {
@@ -27,11 +27,11 @@ test('calls POST /api/specs/:specId/approve with workspaceId and notes in body',
     json: async () => ({ path: 'specs/approved/auth-system.json' }),
   });
 
-  const handler = getToolHandler('rorcha_approve_spec');
+  const handler = getToolHandler('rorca_approve_spec');
   await handler({ workspaceId: 'ws-123', specId: 'spec-42', notes: 'LGTM' });
 
   expect(mockFetch).toHaveBeenCalledWith(
-    `${RORCHA_API}/api/specs/spec-42/approve`,
+    `${RORCA_API}/api/specs/spec-42/approve`,
     expect.objectContaining({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -48,7 +48,7 @@ test('returns success message with approved path and run command', async () => {
     json: async () => ({ path: 'specs/approved/auth-system.json' }),
   });
 
-  const handler = getToolHandler('rorcha_approve_spec');
+  const handler = getToolHandler('rorca_approve_spec');
   const result = await handler({ workspaceId: 'ws-123', specId: 'spec-42' });
 
   expect(result.content).toHaveLength(1);
@@ -64,7 +64,7 @@ test('throws with error message when API returns non-200', async () => {
     text: async () => 'Spec not found',
   });
 
-  const handler = getToolHandler('rorcha_approve_spec');
+  const handler = getToolHandler('rorca_approve_spec');
   await expect(
     handler({ workspaceId: 'ws-123', specId: 'bad-id' })
   ).rejects.toThrow('Approval failed (404): Spec not found');
@@ -76,7 +76,7 @@ test('notes is optional (omit from body when not provided)', async () => {
     json: async () => ({ path: 'specs/approved/dashboard.json' }),
   });
 
-  const handler = getToolHandler('rorcha_approve_spec');
+  const handler = getToolHandler('rorca_approve_spec');
   await handler({ workspaceId: 'ws-789', specId: 'spec-99' });
 
   const body = JSON.parse(mockFetch.mock.calls[0][1].body);

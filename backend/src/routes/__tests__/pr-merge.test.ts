@@ -71,7 +71,7 @@ function createSpecFile(stories: Array<{ id: string; title: string; passes?: boo
 
 beforeEach(async () => {
   jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-pr-merge-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pr-merge-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';

@@ -35,7 +35,7 @@ beforeEach(async () => {
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
   }));
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-backup-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-backup-test-'));
   backupDir = path.join(tmpDir, 'backups');
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
@@ -66,7 +66,7 @@ describe('POST /api/admin/backup', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.backup).toBeDefined();
-    expect(res.body.backup.filename).toMatch(/^rorcha-backup-.*\.db$/);
+    expect(res.body.backup.filename).toMatch(/^rorca-backup-.*\.db$/);
     expect(res.body.backup.size).toBeGreaterThan(0);
     expect(typeof res.body.pruned).toBe('number');
 
@@ -116,7 +116,7 @@ describe('GET /api/admin/backups', () => {
     expect(res.status).toBe(200);
     expect(res.body.backups).toHaveLength(1);
     const backup = res.body.backups[0];
-    expect(backup.filename).toMatch(/^rorcha-backup-.*\.db$/);
+    expect(backup.filename).toMatch(/^rorca-backup-.*\.db$/);
     expect(backup.size).toBeGreaterThan(0);
     expect(backup.createdAt).toBeTruthy();
   });
@@ -145,7 +145,7 @@ describe('backup retention', () => {
   it('prunes old backups beyond 30 days', async () => {
     // Create a fake old backup
     fs.mkdirSync(backupDir, { recursive: true });
-    const oldFile = path.join(backupDir, 'rorcha-backup-old.db');
+    const oldFile = path.join(backupDir, 'rorca-backup-old.db');
     fs.writeFileSync(oldFile, 'fake');
     // Set mtime to 31 days ago
     const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
@@ -161,7 +161,7 @@ describe('backup retention', () => {
     const files = fs.readdirSync(backupDir);
     // Should have the new backup; old one may or may not be pruned
     // depending on OS birthtime support — at minimum the new one exists
-    expect(files.some(f => f !== 'rorcha-backup-old.db')).toBe(true);
+    expect(files.some(f => f !== 'rorca-backup-old.db')).toBe(true);
   });
 });
 

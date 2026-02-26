@@ -406,7 +406,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                       </div>
                       <div className="flex items-center gap-2">
                         {spec.readinessPercent != null && (
-                          <ReadinessRing percent={spec.readinessPercent} size={28} showHelp />
+                          <ReadinessRing percent={spec.readinessPercent} size={28} />
                         )}
                         <span className="text-[10px] text-muted flex items-center gap-1">
                           <Clock size={10} />
@@ -705,7 +705,7 @@ function SpecPreviewDrawer({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            specPath: `ralph/specs/approved/${summary.id}.json`,
+            specPath: `forge/specs/approved/${summary.id}.json`,
             workspaceId,
             autoWorktree,
           }),

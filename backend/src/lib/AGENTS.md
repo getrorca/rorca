@@ -14,6 +14,7 @@ Core service libraries. None are Express routes — they're pure logic called by
 | `context-extractor.ts` | Multi-source YAML context extraction (file, paste, URL) |
 | `spec-writer.ts` | Write generated spec JSON to disk |
 | `diagram-generator.ts` | Generate Mermaid + ASCII dep graphs from story list |
+| `execution-engine.ts` | Universal TypeScript execution engine — spawns claude/opencode/codex per story, handles retries, writes WAL events. **Built by rorca-opencode-integration spec.** |
 
 ## llm-client.ts
 
@@ -107,6 +108,21 @@ await writeSpec(workspacePath, slug, specContent);
 ```
 
 Creates directories if missing. Overwrites if exists (used on regenerate).
+
+## execution-engine.ts
+
+Planned canonical execution engine — replaces bash `run-loop.sh` entirely. Built by `rorca-opencode-integration` spec.
+
+**Responsibilities**:
+- Per-story process spawning (`claude --print`, `opencode run`, or `codex --approval-mode auto-edit`) based on `RORCA_AGENT` env var
+- Strips 4 Claude Code env vars before spawning nested processes
+- Selective retry: skip already-passed stories on re-run
+- WAL events emitted: `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `run_blocked`, `story_escalated`
+- Invoked only via `POST /api/pipeline/trigger` — never called directly from other routes
+
+**RORCA_AGENT values**: `claude` (default, subscription) | `opencode` (OpenCode CLI) | `codex` (Codex CLI, ChatGPT subscription)
+
+**Model cascading**: only active when `RORCA_AGENT=opencode` with API keys (Haiku → Sonnet → Opus on failure). Disabled for `claude` and `codex` (flat-rate subscriptions).
 
 ## Common Mistakes
 

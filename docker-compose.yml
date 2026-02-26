@@ -1,22 +1,22 @@
 services:
-  rorcha-frontend:
+  rorca-frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
     ports:
-      - "${RORCHA_PORT:-5210}:80"
+      - "${RORCA_PORT:-5210}:80"
     depends_on:
-      rorcha-backend:
+      rorca-backend:
         condition: service_healthy
     restart: unless-stopped
 
-  rorcha-backend:
+  rorca-backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
     environment:
       - PORT=3030
-      - DB_PATH=/data/rorcha.db
+      - DB_PATH=/data/rorca.db
       - NODE_ENV=production
       - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5210}
       - SPEC_PROVIDER=${SPEC_PROVIDER:-claude}
@@ -24,9 +24,9 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
     volumes:
-      - rorcha-data:/data
+      - rorca-data:/data
     restart: unless-stopped
 
 volumes:
-  rorcha-data:
+  rorca-data:
     driver: local

@@ -31,7 +31,7 @@ function makePayload(overrides: Record<string, any> = {}) {
 
 beforeEach(async () => {
   jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-webhook-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-webhook-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';

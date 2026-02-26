@@ -321,13 +321,13 @@ export default function GitHubSettingsPanel() {
           <h2 className="text-sm font-semibold">GitHub Actions Workflow</h2>
         </div>
         <p className="text-xs text-muted mb-3">
-          Download a GitHub Actions workflow that triggers Rorcha pipeline runs on push to main.
-          Place the file at <code className="bg-surface px-1 rounded">.github/workflows/rorcha-pipeline.yml</code> in your repository.
+          Download a GitHub Actions workflow that triggers Rorca pipeline runs on push to main.
+          Place the file at <code className="bg-surface px-1 rounded">.github/workflows/rorca-pipeline.yml</code> in your repository.
         </p>
         <p className="text-xs text-muted mb-3">
           Required repository secrets:{' '}
-          <code className="bg-surface px-1 rounded">RORCHA_API_URL</code>,{' '}
-          <code className="bg-surface px-1 rounded">RORCHA_API_TOKEN</code>,{' '}
+          <code className="bg-surface px-1 rounded">RORCA_API_URL</code>,{' '}
+          <code className="bg-surface px-1 rounded">RORCA_API_TOKEN</code>,{' '}
           <code className="bg-surface px-1 rounded">WORKSPACE_ID</code>
         </p>
         <button
@@ -344,7 +344,7 @@ export default function GitHubSettingsPanel() {
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url;
-              a.download = 'rorcha-pipeline.yml';
+              a.download = 'rorca-pipeline.yml';
               a.click();
               URL.revokeObjectURL(url);
             } catch (err: any) {

@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { db } from '../db/index';
 import { AuthUser } from './auth';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { getEffectiveUser } from '../lib/get-user';
 
 const router = Router();
 
@@ -136,7 +137,8 @@ function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
  */
 router.post('/', (req: Request, res: Response) => {
   try {
-    const user = (req as Request & { user: AuthUser }).user;
+    const user = getEffectiveUser(req);
+    if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
     const { name, description, sourceSpecId, brief, storyStructure, directionLayers, teamId } = req.body;
 
     if (!name || !sourceSpecId || !brief || !storyStructure) {
@@ -191,7 +193,8 @@ router.post('/', (req: Request, res: Response) => {
 
 router.get('/', (req: Request, res: Response) => {
   try {
-    const user = (req as Request & { user: AuthUser }).user;
+    const user = getEffectiveUser(req);
+    if (!user) { res.json({ templates: [] }); return; }
     const scope = (req.query.scope as string) || 'all';
 
     let rows: TemplateRow[];
@@ -282,7 +285,8 @@ router.get('/', (req: Request, res: Response) => {
  */
 router.post('/:id/rate', (req: Request, res: Response) => {
   try {
-    const user = (req as Request & { user: AuthUser }).user;
+    const user = getEffectiveUser(req);
+    if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
     const templateId = req.params.id as string;
     const { rating } = req.body;
 
@@ -356,7 +360,8 @@ router.post('/:id/rate', (req: Request, res: Response) => {
  */
 router.get('/:id', (req: Request, res: Response) => {
   try {
-    const user = (req as Request & { user: AuthUser }).user;
+    const user = getEffectiveUser(req);
+    if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
     const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id) as TemplateRow | undefined;
 
     if (!row) {

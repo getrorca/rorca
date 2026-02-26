@@ -36,7 +36,7 @@ beforeEach(async () => {
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
   }));
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-pipeline-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pipeline-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';
@@ -576,14 +576,14 @@ describe('GET /api/pipeline/runs/:runId/log', () => {
   });
 
   test('returns 404 when no log file exists', async () => {
-    // Use a high ID to avoid collision with legacy /tmp/rorcha-run-{id}.log files
+    // Use a high ID to avoid collision with legacy /tmp/rorca-run-{id}.log files
     const runId = 999999;
     db.prepare(
       `INSERT INTO pipeline_runs (id, spec_path, workspace_id, status) VALUES (?, ?, ?, ?)`
     ).run(runId, 'ralph/specs/approved/test-spec.json', 'ws-pipe', 'done');
 
     // Ensure no legacy log file exists
-    const legacyPath = path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
+    const legacyPath = path.join(os.tmpdir(), `rorca-run-${runId}.log`);
     try { fs.unlinkSync(legacyPath); } catch { /* ignore */ }
 
     const res = await request(app)

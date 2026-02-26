@@ -551,8 +551,8 @@ router.get('/:id/stats', (req, res) => {
   // Count specs (pending + approved) from filesystem
   let pendingSpecs = 0;
   let approvedSpecs = 0;
-  const pendingDir = path.join(row.path, 'scripts/ralph/specs/pending');
-  const approvedDir = path.join(row.path, 'scripts/ralph/specs/approved');
+  const pendingDir = path.join(row.path, 'forge/specs/pending');
+  const approvedDir = path.join(row.path, 'forge/specs/approved');
   if (fs.existsSync(pendingDir)) {
     pendingSpecs = fs.readdirSync(pendingDir).filter(f => f.endsWith('.json')).length;
   }

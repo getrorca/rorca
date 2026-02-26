@@ -18,7 +18,7 @@ app.use('/api/worktrees', worktreesRouter);
 app.use('/api/context', contextRouter);
 app.use('/api/wal', walRouter);
 ```
-No auth middleware — Rorcha is local-only.
+No auth middleware — Rorca is local-only.
 
 ## Key Patterns
 

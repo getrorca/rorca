@@ -4,7 +4,7 @@ SQLite database layer. `better-sqlite3` — fully synchronous. Never use async/a
 
 ## index.ts
 
-Opens `DB_PATH` (env var or `./rorcha.db`). On startup:
+Opens `DB_PATH` (env var or `./rorca.db`). On startup:
 - Enables WAL mode: `PRAGMA journal_mode = WAL`
 - Enables foreign keys: `PRAGMA foreign_keys = ON`
 - Runs all `.sql` files in `migrations/` (alphabetical order, auto-idempotent via `IF NOT EXISTS`)
@@ -29,7 +29,7 @@ const newId = result.lastInsertRowid; // bigint
 |-------|------------|-------------|
 | `workspaces` | `id` INTEGER | Registered project repos. `path` = absolute filesystem path. |
 | `direction_layers` | `id` INTEGER | L1–L3 YAML content. One row per `(layer, workspace_id, domain)`. |
-| `pipeline_runs` | `id` INTEGER | Spawned run-loop.sh processes. `pid`, `status`, `branch_name`, `worktree_path`. |
+| `pipeline_runs` | `id` INTEGER | Execution engine runs. `pid`, `status`, `branch_name`, `worktree_path`. |
 | `story_results` | `id` INTEGER | Per-story pass/fail/skip per run. `run_id` FK → `pipeline_runs`. |
 | `wal_events` | `id` INTEGER | Audit log + SSE feed. `event_type`, `workspace_id`, `spec_id`, `payload` JSON. |
 | `workspace_context` | `id` INTEGER | Hydrated schema snapshot + git memory YAML. One row per workspace. |
@@ -39,7 +39,7 @@ const newId = result.lastInsertRowid; // bigint
 ## Key Column Details
 
 ### workspaces
-- `path`: absolute path e.g. `/Users/dimitriteravanessian/Cashflow-App`. Backend uses this to find `scripts/run-loop.sh`.
+- `path`: absolute path e.g. `/Users/dimitriteravanessian/Cashflow-App`. Backend uses this as the working directory for `execution-engine.ts` and to resolve spec file paths.
 - `domains`: JSON array of domain strings e.g. `["fintech", "saas"]`
 
 ### direction_layers
@@ -64,7 +64,7 @@ const newId = result.lastInsertRowid; // bigint
 - `log_path`: path to story log file in workspace `scripts/ralph/logs/`
 
 ### wal_events
-- `event_type`: `workspace_create` | `direction_upsert` | `spec_generate` | `spec_approve` | `spec_reject` | `run_started` | `run_finished` | `story_pass` | `story_fail` | `worktree_create` | `worktree_merged`
+- `event_type`: `workspace_create` | `direction_upsert` | `spec_generate` | `spec_approve` | `spec_reject` | `run_started` | `run_finished` | `story_started` | `story_passed` | `story_failed` | `story_skipped` | `run_blocked` | `context_file_changed` | `story_escalated` | `worktree_created` | `worktree_merged`
 - `payload`: JSON object. Shape varies by event_type.
 
 ### spec_versions
@@ -74,7 +74,7 @@ const newId = result.lastInsertRowid; // bigint
 
 ## Adding a Migration
 
-1. Create `backend/src/db/migrations/007_my_feature.sql`
+1. Create `backend/src/db/migrations/039_my_feature.sql` (migrations 001–038 already exist — use next available number)
 2. Use `IF NOT EXISTS` / `IF NOT EXISTS column` for idempotency:
    ```sql
    -- New table

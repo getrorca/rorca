@@ -21,20 +21,20 @@ if (args.includes('--version') || args.includes('-v')) {
 
 if (args.includes('--help') || args.includes('-h') || args.length === 0) {
   console.log(`
-rorcha v${pkg.version} — AI spec orchestration pipeline
+rorca v${pkg.version} — AI spec orchestration pipeline
 
 Usage:
-  rorcha start [options]    Start the Rorcha server
-  rorcha --version          Print version
+  rorca start [options]    Start the Rorca server
+  rorca --version          Print version
 
 Options:
   --port <port>             Server port (default: 3030)
   --no-open                 Don't open browser on start
 
 Examples:
-  rorcha start
-  rorcha start --port 4040
-  rorcha start --no-open
+  rorca start
+  rorca start --port 4040
+  rorca start --no-open
 `);
   process.exit(0);
 }
@@ -42,7 +42,7 @@ Examples:
 const command = args[0];
 
 if (command !== 'start') {
-  console.error(`Unknown command: ${command}\nRun "rorcha --help" for usage.`);
+  console.error(`Unknown command: ${command}\nRun "rorca --help" for usage.`);
   process.exit(1);
 }
 
@@ -58,14 +58,14 @@ if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
   process.exit(1);
 }
 
-// ─── Ensure ~/.rorcha/ exists ───
-const rorchHome = join(homedir(), '.rorcha');
+// ─── Ensure ~/.rorca/ exists ───
+const rorchHome = join(homedir(), '.rorca');
 if (!existsSync(rorchHome)) {
   mkdirSync(rorchHome, { recursive: true });
   console.log(`Created config directory: ${rorchHome}`);
 }
 
-const dbPath = join(rorchHome, 'rorcha.db');
+const dbPath = join(rorchHome, 'rorca.db');
 
 // ─── Auto-build frontend if dist/ is missing ───
 const distDir = join(__dirname, 'dist');
@@ -80,16 +80,16 @@ if (!existsSync(join(distDir, 'index.html'))) {
 }
 
 // ─── Start the server ───
-console.log(`Starting Rorcha on port ${portNum}...`);
+console.log(`Starting Rorca on port ${portNum}...`);
 console.log(`Database: ${dbPath}`);
 
 const env = {
   ...process.env,
   PORT: String(portNum),
   DB_PATH: dbPath,
-  RORCHA_SERVE_STATIC: '1',
-  RORCHA_STATIC_DIR: distDir,
-  RORCHA_HOME: rorchHome,
+  RORCA_SERVE_STATIC: '1',
+  RORCA_STATIC_DIR: distDir,
+  RORCA_HOME: rorchHome,
   NODE_ENV: process.env.NODE_ENV || 'production',
 };
 

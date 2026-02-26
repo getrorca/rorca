@@ -3,7 +3,7 @@ const mockFetch = jest.fn();
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCHA_API } from '../server';
+import { server, RORCA_API } from '../server';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -16,9 +16,9 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
-test('rorcha_list_specs is registered on the McpServer', () => {
+test('rorca_list_specs is registered on the McpServer', () => {
   const tools = (server as any)._registeredTools;
-  expect(tools['rorcha_list_specs']).toBeDefined();
+  expect(tools['rorca_list_specs']).toBeDefined();
 });
 
 test('returns "No specs found" message when API returns empty array', async () => {
@@ -27,7 +27,7 @@ test('returns "No specs found" message when API returns empty array', async () =
     json: async () => [],
   });
 
-  const handler = getToolHandler('rorcha_list_specs');
+  const handler = getToolHandler('rorca_list_specs');
   const result = await handler({ workspaceId: 'ws-123', status: 'all' });
 
   expect(result).toEqual({
@@ -44,7 +44,7 @@ test('formats spec list with status, title, story count, and id', async () => {
     ],
   });
 
-  const handler = getToolHandler('rorcha_list_specs');
+  const handler = getToolHandler('rorca_list_specs');
   const result = await handler({ workspaceId: 'ws-123', status: 'all' });
 
   expect(result).toEqual({
@@ -61,11 +61,11 @@ test('passes status filter to API as query param', async () => {
     json: async () => [],
   });
 
-  const handler = getToolHandler('rorcha_list_specs');
+  const handler = getToolHandler('rorca_list_specs');
   await handler({ workspaceId: 'ws-456', status: 'pending' });
 
   expect(mockFetch).toHaveBeenCalledWith(
-    `${RORCHA_API}/api/specs?workspaceId=ws-456&status=pending`
+    `${RORCA_API}/api/specs?workspaceId=ws-456&status=pending`
   );
 });
 
@@ -75,7 +75,7 @@ test('throws when API returns non-200', async () => {
     status: 502,
   });
 
-  const handler = getToolHandler('rorcha_list_specs');
+  const handler = getToolHandler('rorca_list_specs');
   await expect(handler({ workspaceId: 'ws-123', status: 'all' })).rejects.toThrow(
     'Failed to list specs: 502'
   );

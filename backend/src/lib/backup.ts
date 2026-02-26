@@ -19,7 +19,7 @@ export async function createBackup(): Promise<{ filename: string; path: string; 
   fs.mkdirSync(backupDir, { recursive: true });
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filename = `rorcha-backup-${timestamp}.db`;
+  const filename = `rorca-backup-${timestamp}.db`;
   const backupPath = path.join(backupDir, filename);
 
   await db.backup(backupPath);
@@ -42,7 +42,7 @@ export function listBackups(): BackupInfo[] {
   if (!fs.existsSync(backupDir)) return [];
 
   const files = fs.readdirSync(backupDir)
-    .filter(f => f.startsWith('rorcha-backup-') && f.endsWith('.db'));
+    .filter(f => f.startsWith('rorca-backup-') && f.endsWith('.db'));
 
   return files
     .map(filename => {
@@ -68,7 +68,7 @@ export function pruneOldBackups(): number {
   let deleted = 0;
 
   const files = fs.readdirSync(backupDir)
-    .filter(f => f.startsWith('rorcha-backup-') && f.endsWith('.db'));
+    .filter(f => f.startsWith('rorca-backup-') && f.endsWith('.db'));
 
   for (const filename of files) {
     const filePath = path.join(backupDir, filename);

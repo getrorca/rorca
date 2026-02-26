@@ -388,7 +388,7 @@ export default function ReviewQueuePanel() {
                 <div className="flex items-center gap-2">
                   {spec.assignee && <AssigneeAvatar assignee={spec.assignee} size="sm" />}
                   {spec.readinessPercent != null && (
-                    <ReadinessRing percent={spec.readinessPercent} size={28} showHelp />
+                    <ReadinessRing percent={spec.readinessPercent} size={28} />
                   )}
                   <span className="text-[10px] text-muted flex items-center gap-1">
                     <Clock size={10} />

@@ -11,6 +11,13 @@ const router = Router();
 // Derive a 32-byte AES-256 key from JWT_SECRET (same approach as auth.ts for GitHub tokens)
 const VAULT_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
 
+// Auth is intentionally bypassed globally — fall back to the first registered user
+function getEffectiveUser(req: Request): AuthUser | null {
+  const user = (req as Request & { user: AuthUser }).user;
+  if (user) return user;
+  return db.prepare('SELECT id, email FROM users LIMIT 1').get() as AuthUser | null;
+}
+
 // ─── Crypto helpers ─────────────────────────────────────────────────────────
 
 function encrypt(plaintext: string): string {
@@ -63,7 +70,8 @@ export interface VaultKeyResult {
 // ─── POST /api/vault/keys ───────────────────────────────────────────────────
 
 router.post('/', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(401).json({ error: 'No user found' }); return; }
 
   const { provider, key, label, base_url } = req.body;
 
@@ -104,7 +112,8 @@ router.post('/', (req: Request, res: Response) => {
 // ─── GET /api/vault/keys ────────────────────────────────────────────────────
 
 router.get('/', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.json({ keys: [] }); return; }
 
   const rows = db.prepare(
     'SELECT id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE user_id = ? ORDER BY created_at DESC'
@@ -127,7 +136,8 @@ router.get('/', (req: Request, res: Response) => {
 // ─── DELETE /api/vault/keys/:id ─────────────────────────────────────────────
 
 router.delete('/:id', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(401).json({ error: 'No user found' }); return; }
   const keyId = req.params.id;
 
   // Verify ownership before deleting
@@ -148,7 +158,8 @@ router.delete('/:id', (req: Request, res: Response) => {
 // ─── POST /api/vault/keys/test — Test connection to a provider ───────────────
 
 router.post('/test', async (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(401).json({ error: 'No user found' }); return; }
   const { provider } = req.body as { provider?: string };
 
   if (!provider || typeof provider !== 'string') {
@@ -216,13 +227,15 @@ router.post('/test', async (req: Request, res: Response) => {
 // ─── GET /api/vault/keys/default-provider — Get default provider for workspace ─
 
 router.get('/default-provider', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
   const { workspaceId } = req.query;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
     res.status(400).json({ error: 'workspaceId query param is required' });
     return;
   }
+
+  if (!user) { res.json({ provider: 'claude-cli' }); return; }
 
   const row = db.prepare(
     'SELECT provider FROM provider_defaults WHERE user_id = ? AND workspace_id = ?'
@@ -234,7 +247,8 @@ router.get('/default-provider', (req: Request, res: Response) => {
 // ─── PUT /api/vault/keys/default-provider — Set default provider for workspace ─
 
 router.put('/default-provider', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(401).json({ error: 'No user found' }); return; }
   const { workspaceId, provider } = req.body;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
@@ -271,7 +285,7 @@ router.put('/default-provider', (req: Request, res: Response) => {
 // ─── GET /api/vault/keys/providers — Provider status overview ───────────────
 
 router.get('/providers', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
 
   const providers: Array<{
     id: string;
@@ -287,9 +301,9 @@ router.get('/providers', (req: Request, res: Response) => {
   ];
 
   // Check vault for user's keys
-  const vaultRows = db.prepare(
+  const vaultRows = user ? db.prepare(
     'SELECT provider, base_url FROM api_key_vault WHERE user_id = ? ORDER BY created_at DESC'
-  ).all(user.id) as Array<{ provider: string; base_url: string | null }>;
+  ).all(user.id) as Array<{ provider: string; base_url: string | null }> : [];
 
   for (const row of vaultRows) {
     const p = providers.find(p => p.id === row.provider);

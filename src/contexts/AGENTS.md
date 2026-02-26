@@ -56,9 +56,9 @@ const {
 ```
 
 **Gotchas:**
-- Auth gate is currently bypassed (Rorcha is local single-user tool)
+- Auth gate is currently bypassed (Rorca is local single-user tool)
 - Tokens stored in-memory (not localStorage) for XSS safety
-- 401 responses trigger `rorcha:auth-expired` window event → clears session
+- 401 responses trigger `rorca:auth-expired` window event → clears session
 
 ## ThemeContext.tsx
 Manages dark/light/system theme with localStorage persistence.
@@ -72,7 +72,7 @@ const {
 } = useTheme();
 ```
 
-**Source**: Persists to `localStorage('rorcha_theme')`. Default: `'dark'`.
+**Source**: Persists to `localStorage('rorca_theme')`. Default: `'dark'`.
 Applies `data-theme` attribute to `<html>`.
 
 ## NotificationContext.tsx

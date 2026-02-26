@@ -184,7 +184,7 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
               <Menu size={20} />
             </button>
           )}
-          <span className="font-mono font-bold text-accent text-sm tracking-tight">rorcha</span>
+          <span className="font-mono font-bold text-accent text-sm tracking-tight">rorca</span>
         </div>
         <div className="flex items-center gap-1 sm:gap-2">
           <WorkspaceSelector />

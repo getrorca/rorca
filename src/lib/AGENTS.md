@@ -19,4 +19,4 @@ const result = await apiFetch<ResponseType>('/api/endpoint', {
 
 **Behavior**: Throws on non-2xx responses with the parsed error message from the API. Always wrap in try/catch and set an error state.
 
-**Base URL**: `http://localhost:3030` (hardcoded — Rorcha is always local).
+**Base URL**: `http://localhost:3030` (hardcoded — Rorca is always local).

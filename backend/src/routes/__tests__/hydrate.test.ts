@@ -31,7 +31,7 @@ let authToken: string;
 beforeEach(async () => {
   jest.resetModules();
   jest.clearAllMocks();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-hydrate-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hydrate-test-'));
   dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';

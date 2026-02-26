@@ -414,8 +414,8 @@ async function chatCompleteOpenRouter(messages: ChatMessage[], model: string, ap
     apiKey,
     baseURL: OPENROUTER_BASE_URL,
     defaultHeaders: {
-      'HTTP-Referer': 'https://rorcha.dev',
-      'X-Title': 'Rorcha',
+      'HTTP-Referer': 'https://rorca.dev',
+      'X-Title': 'Rorca',
     },
   });
 
@@ -445,8 +445,8 @@ export async function fetchOpenRouterModels(apiKey: string): Promise<ModelInfo[]
   const res = await fetch(`${OPENROUTER_BASE_URL}/models`, {
     headers: {
       'Authorization': `Bearer ${apiKey}`,
-      'HTTP-Referer': 'https://rorcha.dev',
-      'X-Title': 'Rorcha',
+      'HTTP-Referer': 'https://rorca.dev',
+      'X-Title': 'Rorca',
     },
   });
 

@@ -6,25 +6,25 @@ import * as path from 'path';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-export const RORCHA_API = process.env.RORCHA_API_URL || 'http://localhost:3030';
+export const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
 
 export const server = new McpServer({
-  name: 'rorcha',
+  name: 'rorca',
   version: '1.0.0',
 });
 
 server.registerTool(
-  'rorcha_get_context',
+  'rorca_get_context',
   {
     description: 'Get the synthesized Direction Stack for a workspace. Returns a single string containing all direction layers (L1 global brain, L2 domain profile, L3 project brief, L4 spec brief, L5 story annotations) merged in priority order. Use this to inject full AI context at the start of any spec generation or implementation session.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID (from rorcha_list_workspaces or settings)'),
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces or settings)'),
       specBrief: z.string().optional().describe('L4: one-paragraph description of the specific spec being worked on'),
       storyAnnotations: z.string().optional().describe('L5: story-level context, acceptance criteria notes, or implementation hints'),
     },
   },
   async ({ workspaceId, specBrief, storyAnnotations }) => {
-    const res = await fetch(`${RORCHA_API}/api/direction/synthesize`, {
+    const res = await fetch(`${RORCA_API}/api/direction/synthesize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -40,11 +40,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_generate_spec',
+  'rorca_generate_spec',
   {
-    description: 'Generate a spec JSON (with userStories array) from a spec brief. Calls the Rorcha synthesis engine which injects the full Direction Stack before sending to the LLM. Returns the generated spec as a JSON string ready to save as prd.json or submit for review.',
+    description: 'Generate a spec JSON (with userStories array) from a spec brief. Calls the Rorca synthesis engine which injects the full Direction Stack before sending to the LLM. Returns the generated spec as a JSON string ready to save as prd.json or submit for review.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       specBrief: z.string().describe('One-paragraph description of the feature or system to spec out'),
       title: z.string().describe('Short title for the spec (used as filename slug)'),
       storyCount: z.number().min(1).max(500).optional().default(8).describe('Target number of user stories (default 8)'),
@@ -55,7 +55,7 @@ server.registerTool(
   async ({ workspaceId, specBrief, title, storyCount, includeDiagrams, model }) => {
     const resolvedStoryCount = storyCount ?? 8;
     const resolvedIncludeDiagrams = includeDiagrams ?? true;
-    const res = await fetch(`${RORCHA_API}/api/specs/generate`, {
+    const res = await fetch(`${RORCA_API}/api/specs/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -79,17 +79,17 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_list_specs',
+  'rorca_list_specs',
   {
     description: 'List all specs in a workspace. Returns specs grouped by status: pending (generated, awaiting review), approved (ready to run via Ralph Loop), and running (currently executing in a pipeline). Useful for checking queue state before starting a pipeline.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       status: z.enum(['pending', 'approved', 'all']).optional().default('all').describe('Filter by spec status'),
     },
   },
   async ({ workspaceId, status }) => {
     const resolvedStatus = status ?? 'all';
-    const res = await fetch(`${RORCHA_API}/api/specs?workspaceId=${workspaceId}&status=${resolvedStatus}`);
+    const res = await fetch(`${RORCA_API}/api/specs?workspaceId=${workspaceId}&status=${resolvedStatus}`);
     if (!res.ok) throw new Error(`Failed to list specs: ${res.status}`);
     const specs = await res.json() as Array<{ id: string; title: string; status: string; storyCount: number; createdAt: string }>;
     if (specs.length === 0) {
@@ -103,19 +103,19 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_approve_spec',
+  'rorca_approve_spec',
   {
-    description: 'Approve a pending spec and move it to the approved queue. Once approved, the spec can be executed by Ralph Loop via run-loop.sh. Use rorcha_list_specs to find the spec ID first.',
+    description: 'Approve a pending spec and move it to the approved queue. Once approved, the spec can be executed by Ralph Loop via run-loop.sh. Use rorca_list_specs to find the spec ID first.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
-      specId: z.string().describe('Spec ID (from rorcha_list_specs output)'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec ID (from rorca_list_specs output)'),
       notes: z.string().optional().describe('Optional approval notes to append to the spec'),
     },
   },
   async ({ workspaceId, specId, notes }) => {
     const body: Record<string, string> = { workspaceId };
     if (notes !== undefined) body.notes = notes;
-    const res = await fetch(`${RORCHA_API}/api/specs/${specId}/approve`, {
+    const res = await fetch(`${RORCA_API}/api/specs/${specId}/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -128,25 +128,25 @@ server.registerTool(
     return {
       content: [{
         type: 'text' as const,
-        text: `Spec approved and moved to: ${approvedPath}\n\nRun it with:\n  ~/rorcha/scripts/run-loop.sh --json ${approvedPath}`
+        text: `Spec approved and moved to: ${approvedPath}\n\nRun it with:\n  ~/rorca/forge/run-loop.sh --json ${approvedPath}`
       }]
     };
   }
 );
 
 server.registerTool(
-  'rorcha_pipeline_status',
+  'rorca_pipeline_status',
   {
     description: 'Get the status of the active (or most recent) pipeline run for a workspace. Returns run status (running/paused/done/failed), story-level progress (pass/fail/skip counts), elapsed time, and last log line. Use this to monitor a Ralph Loop session without switching windows.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       runId: z.number().optional().describe('Specific run ID. If omitted, returns the most recent run.'),
     },
   },
   async ({ workspaceId, runId }) => {
     const url = runId
-      ? `${RORCHA_API}/api/pipeline-runs/${runId}`
-      : `${RORCHA_API}/api/pipeline-runs?workspaceId=${workspaceId}&limit=1`;
+      ? `${RORCA_API}/api/pipeline-runs/${runId}`
+      : `${RORCA_API}/api/pipeline-runs?workspaceId=${workspaceId}&limit=1`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Failed to get pipeline status: ${res.status}`);
     const data = await res.json() as {
@@ -175,23 +175,23 @@ server.registerTool(
 // ─── V2-068: Pipeline Control & Analytics MCP Tools ───────────────────────────
 
 server.registerTool(
-  'rorcha_trigger_run',
+  'rorca_trigger_run',
   {
     description: 'Start a pipeline run for an approved spec. Spawns run-loop.sh in the project workspace to execute all user stories sequentially. Optionally runs in dry-run mode (returns cost estimate without executing) or creates an isolated git worktree for the run.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       specId: z.string().describe('Spec ID (filename slug) — must be in approved status'),
       dryRun: z.boolean().optional().default(false).describe('If true, returns a cost estimate without spawning the run'),
       autoWorktree: z.boolean().optional().default(false).describe('If true, creates an isolated git worktree branch for this run'),
     },
   },
   async ({ workspaceId, specId, dryRun, autoWorktree }) => {
-    const res = await fetch(`${RORCHA_API}/api/pipeline/trigger`, {
+    const res = await fetch(`${RORCA_API}/api/pipeline/trigger`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         workspaceId,
-        specPath: `ralph/specs/approved/${specId}.json`,
+        specPath: `forge/specs/approved/${specId}.json`,
         dryRun: dryRun ?? false,
         autoWorktree: autoWorktree ?? false,
       }),
@@ -229,15 +229,15 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_run_status',
+  'rorca_run_status',
   {
-    description: 'Get detailed status of a specific pipeline run including per-story progress. Returns run status, elapsed time, and individual story pass/fail/skip/retry status with token counts. Use rorcha_list_runs to find run IDs.',
+    description: 'Get detailed status of a specific pipeline run including per-story progress. Returns run status, elapsed time, and individual story pass/fail/skip/retry status with token counts. Use rorca_list_runs to find run IDs.',
     inputSchema: {
       runId: z.number().describe('Pipeline run ID'),
     },
   },
   async ({ runId }) => {
-    const res = await fetch(`${RORCHA_API}/api/pipeline/runs/${runId}`);
+    const res = await fetch(`${RORCA_API}/api/pipeline/runs/${runId}`);
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Failed to get run status (${res.status}): ${err}`);
@@ -294,11 +294,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_usage_stats',
+  'rorca_usage_stats',
   {
     description: 'Get token usage and cost summary for a workspace over a date range. Returns aggregated usage grouped by model, with total input/output tokens, cost in USD, and daily time series. Useful for tracking spend and optimizing model selection.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       from: z.string().optional().describe('Start date (ISO-8601, e.g. "2026-01-01"). Defaults to 30 days ago.'),
       to: z.string().optional().describe('End date (ISO-8601, e.g. "2026-02-01"). Defaults to now.'),
       groupBy: z.enum(['model', 'spec', 'story', 'user']).optional().default('model').describe('How to group results (default: model)'),
@@ -311,7 +311,7 @@ server.registerTool(
     if (from) params.set('from', from);
     if (to) params.set('to', to);
 
-    const res = await fetch(`${RORCHA_API}/api/analytics/usage?${params.toString()}`);
+    const res = await fetch(`${RORCA_API}/api/analytics/usage?${params.toString()}`);
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Failed to get usage stats (${res.status}): ${err}`);
@@ -356,7 +356,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_retry_story',
+  'rorca_retry_story',
   {
     description: 'Retry one or more failed stories within a completed pipeline run. The run must be in a terminal state (failed, done, or partial_failure). Creates new story_result rows with incremented retry counts and respawns run-loop.sh for only the specified stories.',
     inputSchema: {
@@ -368,7 +368,7 @@ server.registerTool(
     const body: Record<string, unknown> = {};
     if (storyIds !== undefined) body.storyIds = storyIds;
 
-    const res = await fetch(`${RORCHA_API}/api/pipeline/runs/${runId}/retry`, {
+    const res = await fetch(`${RORCA_API}/api/pipeline/runs/${runId}/retry`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -399,17 +399,17 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_list_runs',
+  'rorca_list_runs',
   {
-    description: 'List recent pipeline runs for a workspace with status, spec, and completion summary. Returns runs ordered by most recent first. Use this to find run IDs for rorcha_run_status or rorcha_retry_story.',
+    description: 'List recent pipeline runs for a workspace with status, spec, and completion summary. Returns runs ordered by most recent first. Use this to find run IDs for rorca_run_status or rorca_retry_story.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       limit: z.number().min(1).max(50).optional().default(10).describe('Maximum number of runs to return (default 10, max 50)'),
     },
   },
   async ({ workspaceId, limit }) => {
     const resolvedLimit = limit ?? 10;
-    const res = await fetch(`${RORCHA_API}/api/pipeline/runs?workspaceId=${encodeURIComponent(workspaceId)}&limit=${resolvedLimit}`);
+    const res = await fetch(`${RORCA_API}/api/pipeline/runs?workspaceId=${encodeURIComponent(workspaceId)}&limit=${resolvedLimit}`);
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Failed to list runs (${res.status}): ${err}`);
@@ -431,7 +431,7 @@ server.registerTool(
       const elapsed = r.finished_at
         ? `${Math.round((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 60000)}m`
         : `${Math.round((Date.now() - new Date(r.started_at).getTime()) / 60000)}m`;
-      const spec = r.spec_path.replace('ralph/specs/approved/', '').replace('.json', '');
+      const spec = r.spec_path.replace('forge/specs/approved/', '').replace('.json', '');
       const branch = r.branch_name ? ` [${r.branch_name}]` : '';
       return `#${r.id}: ${r.status.toUpperCase()} — ${spec} (${elapsed})${branch}`;
     });
@@ -443,11 +443,11 @@ server.registerTool(
 // ─── V2-067: Extended Spec Lifecycle MCP Tools ────────────────────────────────
 
 server.registerTool(
-  'rorcha_edit_story',
+  'rorca_edit_story',
   {
-    description: 'Update a single story in an existing spec. Can modify title, description, and acceptance criteria by spec ID and story ID. The spec can be in pending or approved status. Use rorcha_list_specs to find the spec ID, then rorcha_search_stories or read the spec to find the story ID (e.g. US-001).',
+    description: 'Update a single story in an existing spec. Can modify title, description, and acceptance criteria by spec ID and story ID. The spec can be in pending or approved status. Use rorca_list_specs to find the spec ID, then rorca_search_stories or read the spec to find the story ID (e.g. US-001).',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       specId: z.string().describe('Spec ID (filename slug, e.g. "my-feature-spec")'),
       storyId: z.string().describe('Story ID within the spec (e.g. "US-001")'),
       title: z.string().optional().describe('New title for the story'),
@@ -461,7 +461,7 @@ server.registerTool(
     if (description !== undefined) body.description = description;
     if (acceptanceCriteria !== undefined) body.acceptanceCriteria = acceptanceCriteria;
 
-    const res = await fetch(`${RORCHA_API}/api/specs/${specId}/stories/${storyId}`, {
+    const res = await fetch(`${RORCA_API}/api/specs/${specId}/stories/${storyId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -483,16 +483,16 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_search_stories',
+  'rorca_search_stories',
   {
     description: 'Search across all specs in a workspace for stories matching a query string. Searches story IDs, titles, descriptions, and acceptance criteria. Returns matching stories with their spec context. Useful for finding related stories, checking for duplicates, or locating a specific story when you only know partial text.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       query: z.string().describe('Search query — matches against story ID, title, description, and acceptance criteria'),
     },
   },
   async ({ workspaceId, query }) => {
-    const res = await fetch(`${RORCHA_API}/api/specs/search/stories?workspaceId=${encodeURIComponent(workspaceId)}&q=${encodeURIComponent(query)}`);
+    const res = await fetch(`${RORCA_API}/api/specs/search/stories?workspaceId=${encodeURIComponent(workspaceId)}&q=${encodeURIComponent(query)}`);
 
     if (!res.ok) {
       const err = await res.text();
@@ -528,11 +528,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_add_stories',
+  'rorca_add_stories',
   {
     description: 'Generate and append new stories to an existing spec using the LLM. The new stories are AI-generated based on the existing spec context and an optional brief describing what the new stories should cover. Story IDs are auto-sequenced after existing stories.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       specId: z.string().describe('Spec ID (filename slug) to add stories to'),
       count: z.number().min(1).max(20).optional().default(3).describe('Number of new stories to generate (default 3, max 20)'),
       brief: z.string().optional().describe('Optional guidance for what the new stories should cover. If omitted, the LLM infers from the existing spec.'),
@@ -545,7 +545,7 @@ server.registerTool(
     };
     if (brief !== undefined) body.brief = brief;
 
-    const res = await fetch(`${RORCHA_API}/api/specs/${specId}/add-stories`, {
+    const res = await fetch(`${RORCA_API}/api/specs/${specId}/add-stories`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -573,17 +573,17 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_delete_story',
+  'rorca_delete_story',
   {
     description: 'Remove a single story from a spec by spec ID and story ID. The remaining stories are automatically reindexed to maintain sequential IDs (US-001, US-002, ...). Dependencies referencing the deleted story are cleaned up. A version snapshot is created before deletion for rollback.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       specId: z.string().describe('Spec ID (filename slug)'),
       storyId: z.string().describe('Story ID to delete (e.g. "US-003")'),
     },
   },
   async ({ workspaceId, specId, storyId }) => {
-    const res = await fetch(`${RORCHA_API}/api/specs/${specId}/stories/${storyId}?workspaceId=${encodeURIComponent(workspaceId)}`, {
+    const res = await fetch(`${RORCA_API}/api/specs/${specId}/stories/${storyId}?workspaceId=${encodeURIComponent(workspaceId)}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workspaceId }),
@@ -613,15 +613,15 @@ server.registerTool(
 // ─── V2-071: Direction Stack MCP Tools ─────────────────────────────────────────
 
 server.registerTool(
-  'rorcha_get_direction',
+  'rorca_get_direction',
   {
     description: 'Get the full direction stack for a workspace, returning all layers (L1 global brain, L2 domain profile, L3 project brief) and their raw content. L4 (spec brief) and L5 (story annotations) are per-request and not persisted. Also returns team-level L1/L2 overrides if the workspace belongs to a team.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
     },
   },
   async ({ workspaceId }) => {
-    const res = await fetch(`${RORCHA_API}/api/direction/all?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const res = await fetch(`${RORCA_API}/api/direction/all?workspaceId=${encodeURIComponent(workspaceId)}`);
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Failed to get direction stack (${res.status}): ${err}`);
@@ -679,11 +679,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_update_direction',
+  'rorca_update_direction',
   {
     description: 'Update a specific direction layer (L1, L2, or L3) for a workspace. Content must be valid YAML. L1 is the global brain (engineering principles), L2 is the domain profile (auth patterns, API conventions), L3 is the project brief (stack, architecture, constraints). L4/L5 are per-request and cannot be persisted via this tool. Changes take effect immediately in subsequent spec generations.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID — required for L2 and L3, optional for L1 (global)'),
+      workspaceId: z.string().describe('Rorca workspace ID — required for L2 and L3, optional for L1 (global)'),
       layer: z.number().min(1).max(3).describe('Direction layer number: 1 (global brain), 2 (domain profile), or 3 (project brief)'),
       contentYaml: z.string().describe('YAML content for the layer'),
       domain: z.string().optional().describe('Domain name (only relevant for L2 domain-scoped layers)'),
@@ -702,7 +702,7 @@ server.registerTool(
     if (domain !== undefined) body.domain = domain;
     if (preferredModel !== undefined) body.preferredModel = preferredModel;
 
-    const res = await fetch(`${RORCHA_API}/api/direction`, {
+    const res = await fetch(`${RORCA_API}/api/direction`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -724,17 +724,17 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_synthesize_direction',
+  'rorca_synthesize_direction',
   {
     description: 'Get the fully synthesized direction stack as a single merged string, exactly as it would be sent to the LLM during spec generation. Merges L1 through L5 in priority order with team overrides, auto-hydrated schema/git context, and optional L4/L5 content. Use this to preview what the LLM will see.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
       specBrief: z.string().optional().describe('L4: spec brief text (one-paragraph description). If omitted, shows synthesis without L4.'),
       storyAnnotations: z.string().optional().describe('L5: story-level annotations, edge cases, or implementation hints'),
     },
   },
   async ({ workspaceId, specBrief, storyAnnotations }) => {
-    const res = await fetch(`${RORCHA_API}/api/direction/synthesize`, {
+    const res = await fetch(`${RORCA_API}/api/direction/synthesize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -755,13 +755,13 @@ server.registerTool(
 // ─── V2-072: Workspace & Team Administration MCP Tools ──────────────────────
 
 server.registerTool(
-  'rorcha_list_workspaces',
+  'rorca_list_workspaces',
   {
-    description: 'List all registered workspaces the user has access to. Returns workspace ID, label, filesystem path, and domain tags. Use this to find workspace IDs for other tools (rorcha_generate_spec, rorcha_trigger_run, etc.).',
+    description: 'List all registered workspaces the user has access to. Returns workspace ID, label, filesystem path, and domain tags. Use this to find workspace IDs for other tools (rorca_generate_spec, rorca_trigger_run, etc.).',
     inputSchema: {},
   },
   async () => {
-    const res = await fetch(`${RORCHA_API}/api/workspaces`);
+    const res = await fetch(`${RORCA_API}/api/workspaces`);
     if (!res.ok) throw new Error(`Failed to list workspaces: ${res.status}`);
     const { workspaces } = await res.json() as {
       workspaces: Array<{
@@ -771,7 +771,7 @@ server.registerTool(
     };
 
     if (workspaces.length === 0) {
-      return { content: [{ type: 'text' as const, text: 'No workspaces registered. Use rorcha_create_workspace to register one.' }] };
+      return { content: [{ type: 'text' as const, text: 'No workspaces registered. Use rorca_create_workspace to register one.' }] };
     }
 
     const lines = workspaces.map(w =>
@@ -782,7 +782,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_create_workspace',
+  'rorca_create_workspace',
   {
     description: 'Register a new workspace by its filesystem path. The path must exist and should be a git repository root. Optionally provide a human label and domain tags (e.g. "saas", "fintech") for Direction Stack L2 matching.',
     inputSchema: {
@@ -795,7 +795,7 @@ server.registerTool(
   async ({ id, path: wsPath, label, domains }) => {
     const resolvedLabel = label ?? wsPath.split('/').pop() ?? id;
     const resolvedDomains = domains ?? [];
-    const res = await fetch(`${RORCHA_API}/api/workspaces`, {
+    const res = await fetch(`${RORCA_API}/api/workspaces`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -822,15 +822,15 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_workspace_stats',
+  'rorca_workspace_stats',
   {
     description: 'Get summary statistics for a workspace: spec count (pending/approved), pipeline run count (total/active/completed/failed), story pass rate, and last activity timestamp. Useful for a quick health check or dashboard overview.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID'),
     },
   },
   async ({ workspaceId }) => {
-    const res = await fetch(`${RORCHA_API}/api/workspaces/${encodeURIComponent(workspaceId)}/stats`);
+    const res = await fetch(`${RORCA_API}/api/workspaces/${encodeURIComponent(workspaceId)}/stats`);
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Failed to get workspace stats (${res.status}): ${err}`);
@@ -861,15 +861,15 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorcha_team_members',
+  'rorca_team_members',
   {
     description: 'Get the team member list for a workspace. Looks up the team associated with the workspace via workspace_access and returns all members with their roles (admin/editor/viewer), email, and last activity. Returns an empty list if the workspace is not team-scoped.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorcha workspace ID — must be linked to a team via workspace_access'),
+      workspaceId: z.string().describe('Rorca workspace ID — must be linked to a team via workspace_access'),
     },
   },
   async ({ workspaceId }) => {
-    const res = await fetch(`${RORCHA_API}/api/workspaces/${encodeURIComponent(workspaceId)}/team-members`);
+    const res = await fetch(`${RORCA_API}/api/workspaces/${encodeURIComponent(workspaceId)}/team-members`);
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Failed to get team members (${res.status}): ${err}`);

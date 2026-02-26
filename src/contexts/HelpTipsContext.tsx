@@ -7,7 +7,7 @@ interface HelpTipsContextValue {
 
 const HelpTipsCtx = createContext<HelpTipsContextValue | null>(null);
 
-const LS_KEY = 'rorcha_show_tips';
+const LS_KEY = 'rorca_show_tips';
 
 export function HelpTipsProvider({ children }: { children: ReactNode }) {
   const [showTips, setShowTipsRaw] = useState<boolean>(() => {

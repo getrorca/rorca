@@ -1,9 +1,9 @@
 /**
- * run-loop.ts — TypeScript replacement for scripts/run-loop.sh
+ * run-loop.ts — TypeScript replacement for forge/run-loop.sh
  *
  * Cross-platform execution engine for the Ralph Loop. Reads a spec JSON,
  * iterates user stories, spawns `claude --dangerously-skip-permissions --print`
- * per story, and reports progress via WAL events to the Rorcha backend.
+ * per story, and reports progress via WAL events to the Rorca backend.
  *
  * Usage (standalone — spawned by pipeline.ts):
  *   npx tsx backend/src/lib/run-loop.ts --json /path/to/spec.json --cwd /path/to/workspace --run-id 42
@@ -144,7 +144,7 @@ function getNextStory(stories: UserStory[]): UserStory | null {
   return null;
 }
 
-/** Post a WAL event to the Rorcha backend */
+/** Post a WAL event to the Rorca backend */
 async function emitWalEvent(
   port: number,
   eventType: string,
@@ -250,7 +250,7 @@ function buildPrompt(
   }
 
   // Implementation mode — inject skill file
-  const skillContent = readWorkspaceFile(cwd, '.claude', 'skills', 'rorcha.md')
+  const skillContent = readWorkspaceFile(cwd, '.claude', 'skills', 'rorca.md')
     || readWorkspaceFile(cwd, '.claude', 'skills', 'dimitri.md');
 
   return [
@@ -331,7 +331,7 @@ function markStoryPassed(jsonPath: string, storyId: string): void {
     if (s.id === storyId) {
       if (spec.userStories || s.passes !== undefined) {
         s.passes = true;
-        s.notes = 'Completed by ralph loop';
+        s.notes = 'Completed by Rorca engine';
       } else {
         s.status = 'passed';
       }
@@ -376,7 +376,7 @@ function gitCommitStory(
   try {
     execSync('git add -A', { cwd, env, stdio: 'pipe' });
     execSync(
-      `git commit -m "${prefix}(${storyId}): ${storyTitle.replace(/"/g, '\\"')}\n\nAutomated by ralph loop.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"`,
+      `git commit -m "${prefix}(${storyId}): ${storyTitle.replace(/"/g, '\\"')}\n\nAutomated by Rorca engine.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"`,
       { cwd, env, stdio: 'pipe' },
     );
     try {
@@ -420,7 +420,7 @@ async function main(): Promise<void> {
   if (playbook) console.log(`Playbook: ${playbook}`);
   console.log('');
 
-  // Detect workspace ID from the Rorcha backend (look up by cwd path)
+  // Detect workspace ID from the Rorca backend (look up by cwd path)
   const workspaceId = await resolveWorkspaceId(config.port, config.cwd);
 
   // Track retries per story
@@ -619,7 +619,7 @@ async function main(): Promise<void> {
   }
 }
 
-/** Look up workspace ID from the Rorcha backend by path */
+/** Look up workspace ID from the Rorca backend by path */
 async function resolveWorkspaceId(port: number, cwd: string): Promise<string | null> {
   try {
     const res = await fetch(`http://localhost:${port}/api/workspaces`);

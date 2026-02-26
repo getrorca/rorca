@@ -15,13 +15,14 @@ import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import type { AgentProfileRow } from './agent-profiles';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { getEffectiveUser } from '../lib/get-user';
 
 /** Legacy tmp-based log path (used as fallback for old runs) */
-const tmpLogPath = (runId: number) => path.join(os.tmpdir(), `rorcha-run-${runId}.log`);
+const tmpLogPath = (runId: number) => path.join(os.tmpdir(), `rorca-run-${runId}.log`);
 
-/** Persistent log file path inside workspace/scripts/ralph/logs/ — survives backend restarts */
+/** Persistent log file path inside workspace/forge/logs/ — survives backend restarts */
 function workspaceLogPath(workspacePath: string, runId: number): string {
-  const logDir = path.join(workspacePath, 'scripts', 'ralph', 'logs');
+  const logDir = path.join(workspacePath, 'forge', 'logs');
   fs.mkdirSync(logDir, { recursive: true });
   return path.join(logDir, `run-${runId}.log`);
 }
@@ -104,7 +105,7 @@ interface StoryResultRow {
  *             type: object
  *             required: [specPath, workspaceId]
  *             properties:
- *               specPath: { type: string, example: "ralph/specs/approved/my-spec.json" }
+ *               specPath: { type: string, example: "forge/specs/approved/my-spec.json" }
  *               workspaceId: { type: string }
  *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
  *               dryRun: { type: boolean, default: false }
@@ -147,9 +148,9 @@ router.post('/trigger', async (req: Request, res: Response) => {
     }
 
     // ── Plan enforcement: Free tier cannot execute pipelines ─────
-    const authReq = req as Request & { user?: { id: string } };
-    if (authReq.user?.id) {
-      const userRow = db.prepare('SELECT plan FROM users WHERE id = ?').get(authReq.user.id) as { plan: string } | undefined;
+    const effectiveUser = getEffectiveUser(req);
+    if (effectiveUser?.id) {
+      const userRow = db.prepare('SELECT plan FROM users WHERE id = ?').get(effectiveUser.id) as { plan: string } | undefined;
       const plan = userRow?.plan || 'free';
       if (plan === 'free' && !dryRun) {
         res.status(403).json({ error: 'plan_required', message: 'Pipeline execution requires a paid plan. Upgrade to Solo, Pro, or Team.' });
@@ -159,7 +160,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
 
     // ── Dry-run: return cost estimate without spawning any processes ─────
     if (dryRun) {
-      const absSpecPath = path.join(workspace.path, 'scripts', specPath);
+      const absSpecPath = path.join(workspace.path, specPath);
       if (!fs.existsSync(absSpecPath)) {
         res.status(422).json({ error: `Spec file not found at ${absSpecPath}` });
         return;
@@ -203,7 +204,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
 
     // 3. Verify run-loop engine is available.
     //    Priority: bash run-loop.sh in workspace (backward compat + test stubs) → TS run-loop.ts in backend
-    const runLoopSh = path.join(workspace.path, 'scripts', 'run-loop.sh');
+    const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
     const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
     const hasBashRunLoop = fs.existsSync(runLoopSh);
     const hasTsRunLoop = fs.existsSync(runLoopTs);
@@ -223,8 +224,8 @@ router.post('/trigger', async (req: Request, res: Response) => {
       return;
     }
 
-    // 4. Build absolute spec path: workspace/scripts/<specPath>
-    const absSpecPath = path.join(workspace.path, 'scripts', specPath);
+    // 4. Build absolute spec path: workspace/<specPath>
+    const absSpecPath = path.join(workspace.path, specPath);
 
     // 5. Determine CWD — main workspace or new worktree
     let cwd = workspace.path;
@@ -265,19 +266,19 @@ router.post('/trigger', async (req: Request, res: Response) => {
     }
 
     // 7c. Inject vault API keys for all configured providers
-    const pipelineUser = (req as Request & { user: AuthUser }).user;
-    const anthropicVaultKey = getVaultKey(pipelineUser.id, 'anthropic');
+    const pipelineUser = getEffectiveUser(req);
+    const anthropicVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'anthropic') : null;
     if (anthropicVaultKey) {
       env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
     }
-    const openaiVaultKey = getVaultKey(pipelineUser.id, 'openai-compat');
+    const openaiVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'openai-compat') : null;
     if (openaiVaultKey) {
       env['OPENAI_API_KEY'] = openaiVaultKey.key;
       if (openaiVaultKey.baseUrl) {
         env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
       }
     }
-    const openrouterVaultKey = getVaultKey(pipelineUser.id, 'openrouter');
+    const openrouterVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'openrouter') : null;
     if (openrouterVaultKey) {
       env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
     }
@@ -289,14 +290,14 @@ router.post('/trigger', async (req: Request, res: Response) => {
 
     if (activeProfile) {
       if (activeProfile.system_prompt_override) {
-        env['RORCHA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
+        env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
       }
       const tools = JSON.parse(activeProfile.allowed_tools) as string[];
       if (tools.length > 0) {
-        env['RORCHA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
+        env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
       }
       if (activeProfile.model_override) {
-        env['RORCHA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
+        env['RORCA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
       }
     }
 
@@ -372,7 +373,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
       });
     } else {
       // Legacy bash run-loop (fallback for workspaces that still have run-loop.sh)
-      const scriptInCwd = path.join(cwd, 'scripts', 'run-loop.sh');
+      const scriptInCwd = path.join(cwd, 'forge', 'run-loop.sh');
       child = spawn('bash', [scriptInCwd, '--json', absSpecPath], {
         cwd,
         stdio: ['ignore', logFd, logFd],
@@ -904,7 +905,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
 
     // 5. Verify run-loop engine is available
     const cwd = originalRun.worktree_path || workspace.path;
-    const retryRunLoopSh = path.join(cwd, 'scripts', 'run-loop.sh');
+    const retryRunLoopSh = path.join(cwd, 'forge', 'run-loop.sh');
     const retryRunLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
     const retryHasBash = fs.existsSync(retryRunLoopSh);
     const retryHasTs = fs.existsSync(retryRunLoopTs);
@@ -988,7 +989,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     broadcastAll(runStartEvent);
 
     // 9. Read the original spec and create a filtered version with only retry stories
-    const absSpecPath = path.join(workspace.path, 'scripts', originalRun.spec_path);
+    const absSpecPath = path.join(workspace.path, originalRun.spec_path);
     if (!fs.existsSync(absSpecPath)) {
       res.status(422).json({ error: `Spec file not found at ${absSpecPath}` });
       return;
@@ -1003,7 +1004,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
 
     // Write temporary retry spec
     const retrySpecName = `retry-${newRunId}-${Date.now()}.json`;
-    const retrySpecDir = path.join(workspace.path, 'scripts', 'ralph', 'specs', 'approved');
+    const retrySpecDir = path.join(workspace.path, 'forge', 'specs', 'approved');
     const retrySpecPath = path.join(retrySpecDir, retrySpecName);
     fs.mkdirSync(retrySpecDir, { recursive: true });
     fs.writeFileSync(retrySpecPath, JSON.stringify(retrySpec, null, 2));

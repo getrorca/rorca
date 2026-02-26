@@ -41,7 +41,7 @@ beforeEach(async () => {
   // Reset merge mock default (resolves cleanly)
   mockMerge.mockResolvedValue({});
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-wt-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-wt-test-'));
   dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';
