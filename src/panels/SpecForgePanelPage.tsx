@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
@@ -61,8 +61,33 @@ export default function SpecForgePanelPage() {
   const [diagramType, setDiagramType] = useState<DiagramType>('flowchart');
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('json');
 
-  // Section 4: Spec Brief
-  const [specBrief, setSpecBrief] = useState('');
+  // Section 4: Spec Brief (persisted in localStorage)
+  const [specBrief, setSpecBrief] = useState(() => {
+    try { return localStorage.getItem('rorca:forge:brief') ?? ''; } catch { return ''; }
+  });
+  const briefRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-resize textarea between 6 and 16 rows
+  const autoResizeBrief = useCallback(() => {
+    const el = briefRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
+    const minH = lineHeight * 6;
+    const maxH = lineHeight * 16;
+    el.style.height = `${Math.min(maxH, Math.max(minH, el.scrollHeight))}px`;
+  }, []);
+
+  // Persist brief to localStorage
+  useEffect(() => {
+    try { localStorage.setItem('rorca:forge:brief', specBrief); } catch { /* quota */ }
+  }, [specBrief]);
+
+  // Auto-resize on mount and when brief changes
+  useEffect(() => { autoResizeBrief(); }, [specBrief, autoResizeBrief]);
+
+  // Token estimate: word count × 1.3
+  const estimatedTokens = Math.ceil((specBrief.trim().split(/\s+/).filter(Boolean).length) * 1.3);
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
@@ -411,18 +436,28 @@ export default function SpecForgePanelPage() {
               </h3>
               <Field label="What does this spec build?">
                 <textarea
-                  rows={10}
+                  ref={briefRef}
+                  rows={6}
                   value={specBrief}
                   onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
-                  placeholder="Describe the feature, technical approach, constraints, and definition of done. Be specific — this is your L4 layer for this generation."
-                  className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-y font-mono"
-                  style={{ minHeight: '10rem' }}
+                  placeholder="Describe what you want to build..."
+                  className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
                 />
               </Field>
-              <div className="flex justify-end mt-1">
-                <span className={`text-xs ${specBrief.length >= 3500 ? 'text-warning' : 'text-muted/60'}`}>
-                  {specBrief.length.toLocaleString()} / 4,000
-                </span>
+              <div className="flex items-center justify-between mt-1.5">
+                <div className="flex items-center gap-3">
+                  <span className={`text-xs ${estimatedTokens >= 2000 ? 'text-warning' : 'text-muted/60'}`}>
+                    ~{estimatedTokens.toLocaleString()} tokens
+                  </span>
+                  <span className={`text-xs ${specBrief.length >= 3500 ? 'text-warning' : 'text-muted/60'}`}>
+                    {specBrief.length.toLocaleString()} chars
+                  </span>
+                </div>
+                {estimatedTokens >= 2000 && (
+                  <span className="text-xs text-warning">
+                    Brief is long — consider breaking into smaller specs
+                  </span>
+                )}
               </div>
             </section>
 
