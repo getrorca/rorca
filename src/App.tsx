@@ -41,6 +41,7 @@ import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
 import SettingsPanel from './panels/SettingsPanel';
 import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
 import HubPanel from './panels/HubPanel';
+import RunViewPanel from './panels/RunViewPanel';
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
@@ -126,9 +127,9 @@ function GlobalErrorWiring() {
 }
 
 /** Renders the active panel component */
-function ActivePanel({ id, onNavigate }: { id: PanelId; onNavigate: (p: PanelId) => void }) {
+function ActivePanel({ id, onNavigate, onNavigateToRun }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void }) {
   switch (id) {
-    case 'hub': return <HubPanel onNavigate={onNavigate} />;
+    case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} />;
     case 'forge': return <SpecForgePanelPage />;
     case 'stack': return <DirectionStackPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
@@ -182,10 +183,46 @@ const PANEL_LABELS: Record<PanelId, string> = {
 
 function AppContent() {
   const [activePanel, setActivePanel] = useState<PanelId>('hub');
+  const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const { workspaces } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // Parse run ID from URL hash on mount (e.g. #/run/42)
+  useEffect(() => {
+    const parseHash = () => {
+      const match = window.location.hash.match(/^#\/run\/(\d+)$/);
+      if (match) {
+        setActiveRunId(Number(match[1]));
+        setActivePanel('hub'); // Run View lives under Hub nav
+      }
+    };
+    parseHash();
+    window.addEventListener('hashchange', parseHash);
+    return () => window.removeEventListener('hashchange', parseHash);
+  }, []);
+
+  // Sync hash when navigating to/from run view
+  const navigateToRun = useCallback((runId: number) => {
+    setActiveRunId(runId);
+    setActivePanel('hub');
+    window.location.hash = `/run/${runId}`;
+  }, []);
+
+  const navigateBackFromRun = useCallback(() => {
+    setActiveRunId(null);
+    window.location.hash = '';
+  }, []);
+
+  // Override setActivePanel to clear run view when navigating elsewhere
+  const handleNavigate = useCallback((panel: PanelId) => {
+    setActivePanel(panel);
+    if (activeRunId !== null) {
+      setActiveRunId(null);
+      window.location.hash = '';
+    }
+  }, [activeRunId]);
 
   // Global keyboard shortcuts via useHotkeys
   const hotkeys = useMemo<HotkeyBinding[]>(() => [
@@ -193,16 +230,16 @@ function AppContent() {
     { key: '?', handler: () => setShowShortcuts((prev) => !prev) },
     { key: 'mod+/', handler: () => setShowShortcuts((prev) => !prev) },
     // Navigation: Cmd+1..5 for top panels
-    { key: 'mod+1', handler: () => setActivePanel('forge') },
-    { key: 'mod+2', handler: () => setActivePanel('stack') },
-    { key: 'mod+3', handler: () => setActivePanel('queue') },
-    { key: 'mod+4', handler: () => setActivePanel('pipeline') },
-    { key: 'mod+5', handler: () => setActivePanel('archive') },
+    { key: 'mod+1', handler: () => handleNavigate('forge') },
+    { key: 'mod+2', handler: () => handleNavigate('stack') },
+    { key: 'mod+3', handler: () => handleNavigate('queue') },
+    { key: 'mod+4', handler: () => handleNavigate('pipeline') },
+    { key: 'mod+5', handler: () => handleNavigate('archive') },
     // Spec actions
-    { key: 'mod+n', handler: () => setActivePanel('forge') },
+    { key: 'mod+n', handler: () => handleNavigate('forge') },
     // Pipeline actions
-    { key: 'mod+shift+r', handler: () => setActivePanel('pipeline') },
-  ], []);
+    { key: 'mod+shift+r', handler: () => handleNavigate('pipeline') },
+  ], [handleNavigate]);
 
   useHotkeys(hotkeys);
 
@@ -214,21 +251,36 @@ function AppContent() {
     );
   }
 
+  // Run View replaces the main content area when a run ID is active
+  const showRunView = activeRunId !== null;
+
   return (
     <Shell
-      sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />}
+      sidebar={<Sidebar activePanel={activePanel} onNavigate={handleNavigate} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />}
       showMenuButton
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
-      onNavigate={setActivePanel}
+      onNavigate={handleNavigate}
     >
       <EmailVerificationBanner />
-      {/* key={activePanel} resets ErrorBoundary when switching panels */}
-      <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel]}>
-        <ActivePanel id={activePanel} onNavigate={setActivePanel} />
-      </ErrorBoundary>
+      {showRunView ? (
+        <ErrorBoundary key={`run-${activeRunId}`} label={`Run #${activeRunId}`}>
+          <RunViewPanel
+            runId={activeRunId}
+            onBack={navigateBackFromRun}
+            onNavigate={handleNavigate}
+          />
+        </ErrorBoundary>
+      ) : (
+        <>
+          {/* key={activePanel} resets ErrorBoundary when switching panels */}
+          <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel]}>
+            <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} />
+          </ErrorBoundary>
+        </>
+      )}
       {showCommandPalette && (
         <CommandPalette
-          onNavigate={setActivePanel}
+          onNavigate={handleNavigate}
           onClose={() => setShowCommandPalette(false)}
         />
       )}
