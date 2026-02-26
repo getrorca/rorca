@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Menu, HelpCircle, Settings, Zap, Plus } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Menu, HelpCircle, Settings, Zap, Plus, Check } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import PricingModal from './PricingModal';
@@ -9,6 +9,7 @@ import ThemeToggle from './ThemeToggle';
 import NotificationBell from './NotificationBell';
 import { useNetworkOffline, NetworkIndicator } from './NetworkBanner';
 import { apiFetch } from '../lib/apiFetch';
+import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from './Sidebar';
 
 // ─── Workspace Selector ─────────────────────────────────────────────────────
@@ -73,54 +74,101 @@ function WorkspaceSelector() {
 
 // ─── Run Pill ────────────────────────────────────────────────────────────────
 
-interface StoryProgress {
-  passed: number;
-  total: number;
-}
+type RunPillState = 'idle' | 'running' | 'done';
+
+const AUTO_HIDE_MS = 30_000;
 
 function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
-  const { activeRuns, workspaceId } = useWorkspace();
-  const [progress, setProgress] = useState<StoryProgress | null>(null);
-
+  const { activeRuns, workspaceId, refreshActiveRuns } = useWorkspace();
   const activeRun = activeRuns[0] ?? null;
+  const activeRunId = activeRun?.id ?? null;
 
-  const fetchProgress = useCallback(async (runId: number) => {
-    try {
-      const res = await apiFetch<{
-        run: { id: number; spec_path: string };
-        storyResults: { story_id: string; status: string }[];
-      }>(`/api/pipeline/runs/${runId}`);
-      // Count passed + total from story results
-      const results = res.storyResults ?? [];
-      const passed = results.filter((s) => s.status === 'pass').length;
-      // Read spec to get total story count
-      const specPath = res.run?.spec_path;
-      if (specPath) {
-        try {
-          const specRes = await apiFetch<{ spec: { userStories?: { id: string }[] } }>(
-            `/api/specs/${specPath.split('/').pop()?.replace('.json', '')}?workspaceId=${workspaceId}`,
-          );
-          const total = specRes.spec?.userStories?.length ?? results.length;
-          setProgress({ passed, total });
-          return;
-        } catch {
-          // Fall through — use results count
-        }
-      }
-      setProgress({ passed, total: results.length || 1 });
-    } catch {
-      setProgress(null);
-    }
-  }, [workspaceId]);
+  const [pillState, setPillState] = useState<RunPillState>('idle');
+  const [passed, setPassed] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [visible, setVisible] = useState(false);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastRunId = useRef<number | null>(null);
 
+  // SSE subscription — stream WAL events for the active run
+  const events = usePipelineSSE(activeRunId ? String(activeRunId) : null);
+
+  // Fetch initial total story count when a run starts
   useEffect(() => {
-    if (!activeRun) { setProgress(null); return; }
-    fetchProgress(activeRun.id);
-    const id = setInterval(() => fetchProgress(activeRun.id), 5_000);
-    return () => clearInterval(id);
-  }, [activeRun, fetchProgress]);
+    if (!activeRunId || !workspaceId) return;
+    // Reset on new run
+    if (lastRunId.current !== activeRunId) {
+      lastRunId.current = activeRunId;
+      setPassed(0);
+      setTotal(0);
+      setPillState('running');
+      setVisible(true);
+      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    }
 
-  if (!activeRun) {
+    // Fetch spec to get total story count
+    (async () => {
+      try {
+        const res = await apiFetch<{
+          run: { id: number; spec_path: string };
+          storyResults: { story_id: string; status: string }[];
+        }>(`/api/pipeline/runs/${activeRunId}`);
+        const results = res.storyResults ?? [];
+        const initialPassed = results.filter((s) => s.status === 'pass').length;
+        const specPath = res.run?.spec_path;
+        let storyTotal = results.length || 1;
+        if (specPath) {
+          try {
+            const specRes = await apiFetch<{ spec: { userStories?: { id: string }[] } }>(
+              `/api/specs/${specPath.split('/').pop()?.replace('.json', '')}?workspaceId=${workspaceId}`,
+            );
+            storyTotal = specRes.spec?.userStories?.length ?? storyTotal;
+          } catch { /* use results count */ }
+        }
+        setTotal(storyTotal);
+        setPassed(initialPassed);
+      } catch { /* ignore */ }
+    })();
+  }, [activeRunId, workspaceId]);
+
+  // Process SSE events to update story count and detect completion
+  useEffect(() => {
+    if (events.length === 0) return;
+    const latest = events[events.length - 1];
+
+    if (latest.event_type === 'story_passed') {
+      setPassed((p) => p + 1);
+    }
+
+    if (latest.event_type === 'run_finished' || latest.event_type === 'run_failed') {
+      setPillState('done');
+      // Refresh context so activeRuns clears
+      refreshActiveRuns();
+      // Auto-hide after 30s
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+      hideTimer.current = setTimeout(() => {
+        setVisible(false);
+        setPillState('idle');
+        lastRunId.current = null;
+      }, AUTO_HIDE_MS);
+    }
+  }, [events, refreshActiveRuns]);
+
+  // Sync visibility with activeRun presence
+  useEffect(() => {
+    if (activeRun && pillState === 'idle') {
+      setPillState('running');
+      setVisible(true);
+    }
+  }, [activeRun, pillState]);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => { if (hideTimer.current) clearTimeout(hideTimer.current); };
+  }, []);
+
+  // Nothing to show
+  if (!visible && !activeRun) {
     return (
       <button
         onClick={() => onNavigate?.('forge')}
@@ -132,19 +180,35 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     );
   }
 
-  const label = progress ? `${progress.passed}/${progress.total}` : '…';
+  if (!visible) return null;
+
+  const isDone = pillState === 'done';
+  const label = isDone
+    ? 'done'
+    : total > 0 ? `${passed}/${total}` : '\u2026';
 
   return (
     <button
-      onClick={() => onNavigate?.('pipeline')}
-      className="flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium text-[var(--text)] bg-accent/10 border border-accent/30 hover:bg-accent/20 transition-colors"
-      title="View active run"
+      onClick={() => activeRunId ? onNavigate?.('pipeline') : undefined}
+      className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+        isDone
+          ? 'text-green-600 bg-green-500/10 border border-green-500/30 hover:bg-green-500/20'
+          : 'text-[var(--text)] bg-accent/10 border border-accent/30 hover:bg-accent/20'
+      }`}
+      title={isDone ? 'Run completed' : 'View active run'}
     >
-      <span className="relative flex h-2.5 w-2.5">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
-        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-accent" />
-      </span>
+      {isDone ? (
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500" />
+        </span>
+      ) : (
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-accent" />
+        </span>
+      )}
       <span className="font-mono tabular-nums">{label}</span>
+      {isDone && <Check size={14} className="text-green-500" />}
     </button>
   );
 }
