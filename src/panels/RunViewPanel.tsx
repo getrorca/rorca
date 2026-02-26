@@ -4,6 +4,8 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
+import SplitPane from '../components/SplitPane';
+import RunStoryList from '../components/RunStoryList';
 import type { PanelId } from '../components/Sidebar';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -139,9 +141,10 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     switch (activeTab) {
       case 'terminal':
         return (
-          <div className="flex-1 min-h-0">
-            <RunTerminal runId={run.id} />
-          </div>
+          <SplitPane
+            left={<RunTerminal runId={run.id} />}
+            right={<RunStoryList runId={run.id} walEvents={walEvents} />}
+          />
         );
       case 'stories':
         return <TabPlaceholder label="Stories" />;
