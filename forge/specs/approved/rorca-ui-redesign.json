@@ -34,7 +34,8 @@
       "dependsOn": [
         "UI-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "UI-003",
@@ -515,6 +516,6 @@
       "passes": false
     }
   ],
-  "model": "claude-opus-4-6",
+  "model": "claude-sonnet-4-6",
   "generatedAt": "2026-02-26T00:00:00.000Z"
 }
