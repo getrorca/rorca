@@ -59,13 +59,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    // Normal session check
-    const token = getAccessToken();
-    if (!token) {
-      setLoading(false);
-      return;
-    }
-
+    // Always call /api/auth/me — backend returns the first DB user when
+    // auth is globally bypassed (single-user local mode), so we don't need
+    // a token to get a valid session.
     apiFetch<{ user: AuthUser }>('/api/auth/me')
       .then((res) => setUser(res.user))
       .catch(() => {
@@ -105,11 +101,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       // Store current panel/path as return URL for post-login redirect
       try {
-        sessionStorage.setItem('rorcha:returnUrl', window.location.href);
+        sessionStorage.setItem('rorca:returnUrl', window.location.href);
       } catch { /* sessionStorage unavailable */ }
     };
-    window.addEventListener('rorcha:auth-expired', handler);
-    return () => window.removeEventListener('rorcha:auth-expired', handler);
+    window.addEventListener('rorca:auth-expired', handler);
+    return () => window.removeEventListener('rorca:auth-expired', handler);
   }, []);
 
   const logout = useCallback(async () => {

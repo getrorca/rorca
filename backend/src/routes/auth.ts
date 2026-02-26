@@ -7,7 +7,7 @@ import { db } from '../db';
 
 const router = Router();
 
-export const JWT_SECRET = process.env.JWT_SECRET || 'rorcha-dev-secret-change-in-production';
+export const JWT_SECRET = process.env.JWT_SECRET || 'rorca-dev-secret-change-in-production';
 const JWT_EXPIRES_IN = '15m';
 const REFRESH_TOKEN_EXPIRES_DAYS = 7;
 
@@ -464,11 +464,20 @@ router.post('/logout', (req: Request, res: Response) => {
  *                     githubConnected: { type: boolean }
  *       401: { description: "Not authenticated" }
  */
-router.get('/me', authRequired, (req: Request, res: Response) => {
-  const authReq = req as Request & { user: AuthUser };
+router.get('/me', (req: Request, res: Response) => {
+  const authReq = req as Request & { user?: AuthUser };
+  // When auth is bypassed globally, fall back to the first registered user
+  const userId = authReq.user?.id
+    ?? (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+
+  if (!userId) {
+    res.status(401).json({ error: 'No user configured' });
+    return;
+  }
+
   const user = db.prepare(
     'SELECT id, email, display_name, github_id, email_verified_at, plan FROM users WHERE id = ?'
-  ).get(authReq.user.id) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> & { plan?: string } | undefined;
+  ).get(userId) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> & { plan?: string } | undefined;
 
   if (!user) {
     res.status(401).json({ error: 'User not found' });
@@ -706,7 +715,7 @@ router.post('/forgot-password', (req: Request, res: Response) => {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
   const resetLink = `${frontendUrl}/reset-password?token=${rawToken}`;
 
-  // Log the reset link for local development (Rorcha is a local-first tool)
+  // Log the reset link for local development (Rorca is a local-first tool)
   console.log(`[auth] Password reset link for ${trimmedEmail}: ${resetLink}`);
 
   res.json({
@@ -889,7 +898,7 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   // spec_assignments (assignee)
   db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
 
-  // Log final confirmation (Rorcha is local-first; email would go here in production)
+  // Log final confirmation (Rorca is local-first; email would go here in production)
   console.log(`[auth] Account deleted: ${user.email} (id: ${user.id}). All data permanently removed.`);
 
   res.json({ message: 'Your account and all associated data have been permanently deleted.' });
@@ -1116,12 +1125,12 @@ router.get('/github/callback', async (req: Request, res: Response) => {
 
 // Auth middleware — verifies JWT access token from Authorization header
 /** Internal service token for scheduler→trigger calls (not exposed externally) */
-export const INTERNAL_SERVICE_TOKEN = `rorcha-internal-${process.pid}`;
+export const INTERNAL_SERVICE_TOKEN = `rorca-internal-${process.pid}`;
 
 export function authRequired(req: Request, res: Response, next: NextFunction): void {
   // Allow internal scheduler calls (same-process only, token includes PID)
-  if (req.headers['x-rorcha-internal'] === INTERNAL_SERVICE_TOKEN) {
-    (req as Request & { user: AuthUser }).user = { id: 'system', email: 'scheduler@rorcha.internal', role: 'admin' };
+  if (req.headers['x-rorca-internal'] === INTERNAL_SERVICE_TOKEN) {
+    (req as Request & { user: AuthUser }).user = { id: 'system', email: 'scheduler@rorca.internal', role: 'admin' };
     next();
     return;
   }

@@ -1,16 +1,16 @@
 {
-  "name": "rorcha",
+  "name": "rorca",
   "version": "0.1.0",
   "description": "AI spec orchestration pipeline — turn plain-English briefs into validated, executed code",
   "type": "module",
   "bin": {
-    "rorcha": "./cli.js"
+    "rorca": "./cli.js"
   },
   "scripts": {
     "dev": "concurrently \"vite\" \"cd backend && npx tsx src/server.ts\"",
     "build": "vite build && cd backend && tsc",
     "typecheck": "tsc --noEmit && cd backend && tsc --noEmit",
-    "self-register": "npx tsx scripts/self-register.ts",
+    "self-register": "npx tsx forge/self-register.ts",
     "start": "node cli.js start",
     "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
     "prepublishOnly": "npm run build"
@@ -35,8 +35,8 @@
     "backend/src/db/migrations/",
     "backend/package.json",
     "backend/package-lock.json",
-    "scripts/run-loop.sh",
-    "scripts/self-register.ts",
+    "forge/run-loop.sh",
+    "forge/self-register.ts",
     "package.json"
   ],
   "dependencies": {

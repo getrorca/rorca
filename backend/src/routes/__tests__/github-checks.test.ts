@@ -79,7 +79,7 @@ function createSpecFile(
 
 beforeEach(async () => {
   jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-checks-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-checks-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';
@@ -163,9 +163,9 @@ test('checkCriteriaCoverage: filename matches count as coverage', () => {
 
 // ─── CHECK_NAME constant ─────────────────────────────────────────────────────
 
-test('CHECK_NAME is rorcha/spec-compliance', () => {
+test('CHECK_NAME is rorca/spec-compliance', () => {
   const { CHECK_NAME } = require('../../lib/github-checks');
-  expect(CHECK_NAME).toBe('rorcha/spec-compliance');
+  expect(CHECK_NAME).toBe('rorca/spec-compliance');
 });
 
 // ─── POST /api/github/checks/:sha — manual update ───────────────────────────

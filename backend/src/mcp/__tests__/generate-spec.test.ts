@@ -3,7 +3,7 @@ const mockFetch = jest.fn();
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCHA_API } from '../server';
+import { server, RORCA_API } from '../server';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -30,9 +30,9 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
-test('rorcha_generate_spec is registered on the McpServer', () => {
+test('rorca_generate_spec is registered on the McpServer', () => {
   const tools = (server as any)._registeredTools;
-  expect(tools['rorcha_generate_spec']).toBeDefined();
+  expect(tools['rorca_generate_spec']).toBeDefined();
 });
 
 test('calls POST /api/specs/generate with correct body', async () => {
@@ -41,7 +41,7 @@ test('calls POST /api/specs/generate with correct body', async () => {
     json: async () => MOCK_SPEC,
   });
 
-  const handler = getToolHandler('rorcha_generate_spec');
+  const handler = getToolHandler('rorca_generate_spec');
   await handler({
     workspaceId: 'ws-456',
     specBrief: 'Build an auth system',
@@ -51,7 +51,7 @@ test('calls POST /api/specs/generate with correct body', async () => {
   });
 
   expect(mockFetch).toHaveBeenCalledWith(
-    `${RORCHA_API}/api/specs/generate`,
+    `${RORCA_API}/api/specs/generate`,
     expect.objectContaining({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -74,7 +74,7 @@ test('storyCount defaults to 8 when not provided', async () => {
     json: async () => MOCK_SPEC,
   });
 
-  const handler = getToolHandler('rorcha_generate_spec');
+  const handler = getToolHandler('rorca_generate_spec');
   await handler({
     workspaceId: 'ws-456',
     specBrief: 'Build an auth system',
@@ -91,7 +91,7 @@ test('includeDiagrams defaults to true when not provided', async () => {
     json: async () => MOCK_SPEC,
   });
 
-  const handler = getToolHandler('rorcha_generate_spec');
+  const handler = getToolHandler('rorca_generate_spec');
   await handler({
     workspaceId: 'ws-456',
     specBrief: 'Build an auth system',
@@ -108,7 +108,7 @@ test('returns content with spec title in text', async () => {
     json: async () => MOCK_SPEC,
   });
 
-  const handler = getToolHandler('rorcha_generate_spec');
+  const handler = getToolHandler('rorca_generate_spec');
   const result = await handler({
     workspaceId: 'ws-456',
     specBrief: 'Build an auth system',
@@ -128,7 +128,7 @@ test('throws with error message when API returns non-200', async () => {
     text: async () => 'Invalid workspace ID',
   });
 
-  const handler = getToolHandler('rorcha_generate_spec');
+  const handler = getToolHandler('rorca_generate_spec');
   await expect(
     handler({
       workspaceId: 'bad-id',

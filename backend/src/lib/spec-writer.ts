@@ -32,7 +32,7 @@ export interface WriteResult {
 }
 
 export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResult {
-  const pendingDir = path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending');
+  const pendingDir = path.join(workspacePath, 'forge', 'specs', 'pending');
   const specPath = path.join(pendingDir, `${spec.slug}.json`);
   const diagramsPath = path.join(pendingDir, `${spec.slug}-diagrams.md`);
 

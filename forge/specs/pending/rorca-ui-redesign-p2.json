@@ -1,0 +1,311 @@
+{
+  "title": "rorca-ui-redesign-p2",
+  "userStories": [
+    {
+      "id": "P2-001",
+      "title": "Hub Auto-Refresh Every 30 Seconds",
+      "description": "Hub data refreshes automatically so long-running sessions stay current without requiring a manual reload.",
+      "acceptanceCriteria": [
+        "Pending reviews and recent runs refetch every 30 seconds",
+        "Subtle 'Updated just now' timestamp in section footer",
+        "No full-page reload \u2014 only data refetch",
+        "SSE drives active run card (not polling)",
+        "Auto-refresh pauses when tab is backgrounded (visibilitychange API)"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-002",
+      "title": "Run View Metadata Panel",
+      "description": "Below the story list pane, a metadata section shows detailed run information including token usage, timing, and branch context.",
+      "acceptanceCriteria": [
+        "Tokens: input count / output count formatted with K suffix",
+        "Estimated time remaining (based on average story duration so far)",
+        "Git branch name with copy button",
+        "Worktree path if applicable",
+        "PID display with kill link",
+        "Model used badge",
+        "Cost: '$0.00 (your Claude sub)' for claude --print mode"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-003",
+      "title": "Run View Semantic Log View",
+      "description": "A structured view of terminal output grouped by agent action type, shown as a toggle alternative to the raw terminal. Parse xterm output for [Read]/[Write]/[Planning]/[Executing]/[Commit] prefixes and render grouped collapsible sections.",
+      "acceptanceCriteria": [
+        "Parse xterm output for known prefixes: Read:, Write:, Bash:, Task:, Planning, Committing",
+        "Group consecutive same-type actions into collapsible sections",
+        "Section headers: [Read] [Write] [Executing] [Planning] [Committing]",
+        "Each section shows action count badge when collapsed",
+        "Default view is raw terminal; toggle button switches to semantic view",
+        "Semantic view updates in real time as terminal receives new data",
+        "Unknown output lines shown in [Output] group"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-004",
+      "title": "Forge Template Selector",
+      "description": "Users can start from a saved template instead of a blank brief in the Forge screen.",
+      "acceptanceCriteria": [
+        "'Start from template \u2192' link opens a modal",
+        "Modal shows template cards: name, description, story count, last used date",
+        "Search/filter bar in modal",
+        "Select template: populates brief with template description, sets story count",
+        "'Blank slate' option always at top of list",
+        "Empty state when no templates saved: 'No templates yet \u2014 generate a spec and save it as a template'"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-005",
+      "title": "Spec Review Filter Bar",
+      "description": "Filter and search stories within a spec review screen.",
+      "acceptanceCriteria": [
+        "Search input filters by story title or description (case-insensitive)",
+        "Status filter chips: All / Excluded / Has Dependencies",
+        "Complexity filter: All / Low / Medium / High",
+        "Filter state shown as active chip count badge",
+        "Clear all filters button",
+        "Filter persists while on this screen, resets on navigation"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-006",
+      "title": "Spec Review Dependency Visualization",
+      "description": "Show which stories depend on which in the spec review screen.",
+      "acceptanceCriteria": [
+        "'Depends on: V2-001, V2-002' shown below each story card",
+        "Clicking dependency badge scrolls to and highlights that story",
+        "Stories with no dependsOn show 'No dependencies'",
+        "Circular dependency warning shown in red if detected",
+        "'Dependency chain' button opens a mini DAG modal for the whole spec"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-007",
+      "title": "Settings Account and Billing Tab",
+      "description": "Full Stripe billing information and subscription management in the Settings Account/Billing tab.",
+      "acceptanceCriteria": [
+        "Billing tab: current plan badge (Free / Solo / Pro / Team)",
+        "Active subscription details: plan name, renewal date, seats used",
+        "Upgrade CTA with plan comparison table",
+        "Manage billing link opens Stripe customer portal",
+        "Invoice history: list of past invoices with download link",
+        "Cancel subscription flow with confirmation and grace period explanation"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-008",
+      "title": "Micro-Animation Story Completion",
+      "description": "A subtle animation when a story passes in the Run View story list.",
+      "acceptanceCriteria": [
+        "Row background flashes green for 600ms when status changes to pass",
+        "Checkmark icon animates in with a scale(0\u21921) + opacity transition",
+        "No layout shift during animation",
+        "Animation uses CSS keyframes (no JS animation library required)",
+        "Animation does not replay on re-render \u2014 only on status change event"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-009",
+      "title": "Micro-Animation Run Start and Completion",
+      "description": "Animations marking run lifecycle events in the Hub and top bar.",
+      "acceptanceCriteria": [
+        "Run pill in top bar: dot fades in with pulse animation on run start",
+        "Hub active run card: slides down into Running section on run start",
+        "On run completion: card transitions from blue to green or red border over 1s",
+        "Completion toast shows with slide-in from top-right",
+        "Hub run card moves to Recent Runs list with smooth slide animation"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-010",
+      "title": "Micro-Animation Graph Node Completion Ripple",
+      "description": "Graph nodes animate when their status changes in the Run View graph tab.",
+      "acceptanceCriteria": [
+        "Node status change triggers a ripple ring animation (expand and fade)",
+        "Blue \u2192 green transition for pass (300ms ease-out)",
+        "Ripple color matches new status",
+        "Running node has continuous pulse (CSS animation, not JS)",
+        "No animation for bulk state restore (e.g., page load populating existing run data)"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-011",
+      "title": "Loading Skeleton Screens",
+      "description": "Skeleton placeholder screens shown while data loads to prevent blank flashes.",
+      "acceptanceCriteria": [
+        "Hub shows skeleton: 3 grey card shapes while fetching",
+        "Run View shows skeleton terminal lines (10 grey bars) while connecting",
+        "Forge shows skeleton for direction stack sidebar while fetching",
+        "Skeletons match layout of real content exactly",
+        "Transition from skeleton to content is instant (no flash)",
+        "Skeletons use Tailwind animate-pulse"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-012",
+      "title": "Error State Run Failed",
+      "description": "Prominent error display when a run ends in failure, shown in both Hub and Run View.",
+      "acceptanceCriteria": [
+        "Hub run card switches to red border with \u2717 Failed badge",
+        "Run View shows red banner: 'Run failed \u2014 N stories did not complete'",
+        "Failed stories highlighted red in story list",
+        "'Retry failed stories' button triggers selective retry API",
+        "'View error detail' expands terminal to last failed story's output",
+        "WAL run_finished event with status=failed drives this state"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-013",
+      "title": "Error State Story Failed with Retry",
+      "description": "Individual story failure handling in the Run View story list.",
+      "acceptanceCriteria": [
+        "Failed story row shows \u2717 icon, red background, retry count badge",
+        "Expand row: shows last 20 lines of story output",
+        "'Retry this story' button calls POST /api/pipeline/runs/:id/retry",
+        "Retry resets story status to running in UI immediately",
+        "Max retries (3) shown as '2/3 retries used'",
+        "Story failure writes WAL story_failed event"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-014",
+      "title": "Mobile Responsive Hub and Navigation",
+      "description": "Hub and navigation adapt for screens smaller than 768px.",
+      "acceptanceCriteria": [
+        "Left nav collapses on mobile \u2014 hamburger in top bar opens slide-in drawer",
+        "Hub pending review cards stack to 1 column",
+        "Hub active run card full width",
+        "Top bar workspace switcher truncates to first word",
+        "Touch targets minimum 44\u00d744px on all buttons",
+        "No horizontal scroll on any screen at 375px viewport"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-015",
+      "title": "Mobile Responsive Run View",
+      "description": "Run View adapts for mobile with a stacked layout instead of side-by-side split pane.",
+      "acceptanceCriteria": [
+        "Split pane switches to vertical stack on < 768px",
+        "Terminal on top (60vh), story list below (scroll)",
+        "Bottom tabs become scrollable horizontal strip",
+        "Graph tab hides on mobile (too complex for small screens) with explanation message",
+        "Keyboard shortcuts disabled on mobile (no hardware keyboard assumed)",
+        "Touch scroll works in both terminal and story list panes"
+      ],
+      "dependsOn": [
+        "P2-014"
+      ],
+      "passes": false
+    },
+    {
+      "id": "P2-016",
+      "title": "ARIA Labels and Semantic HTML Throughout",
+      "description": "All interactive elements have proper ARIA labels for screen reader compatibility across Hub, Run View, Forge, and Settings.",
+      "acceptanceCriteria": [
+        "All buttons have aria-label when no visible text",
+        "All icon-only buttons labeled: 'Pause run', 'Kill run', 'Open command palette'",
+        "Nav items have aria-current='page' when active",
+        "Progress bars use role=progressbar with aria-valuenow/min/max",
+        "Status badges use aria-live='polite' for live updates",
+        "Form inputs have associated labels (not placeholder-only)",
+        "axe-core scan reports zero critical violations on Hub and Run View"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-017",
+      "title": "Keyboard Focus Management",
+      "description": "Proper focus management for modals, command palette, and navigation throughout the app.",
+      "acceptanceCriteria": [
+        "Command palette traps focus inside while open",
+        "Modal dialogs trap focus inside while open",
+        "Focus returns to trigger element when palette/modal closes",
+        "Visible focus ring on all focusable elements (not removed by outline:none)",
+        "Tab order matches visual order on all screens",
+        "Skip-to-content link at top of page for keyboard users"
+      ],
+      "dependsOn": [
+        "P2-016"
+      ],
+      "passes": false
+    },
+    {
+      "id": "P2-018",
+      "title": "Virtual Scroll for Large Story Lists",
+      "description": "Story list in Run View uses virtual scroll to handle 100+ story specs without performance degradation.",
+      "acceptanceCriteria": [
+        "React virtual or TanStack Virtual renders only visible rows",
+        "Smooth scroll with no jank for 100+ story spec",
+        "Row height fixed at 48px (no dynamic height required)",
+        "Scroll position preserved on tab switch",
+        "Selected/active story scrolled into view automatically",
+        "Virtual scroll works with keyboard navigation (arrow keys)"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-019",
+      "title": "Code Splitting and Route-Based Lazy Loading",
+      "description": "Each major screen is code-split so initial bundle is small.",
+      "acceptanceCriteria": [
+        "Hub, RunView, Forge, Settings each in separate lazy-loaded chunk",
+        "React.lazy + Suspense wraps each route",
+        "Loading fallback is the skeleton screen (not a spinner)",
+        "Initial JS bundle < 200kb gzipped",
+        "Vite build confirms no single chunk > 500kb",
+        "Lighthouse performance score > 90 on Hub screen"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "P2-020",
+      "title": "First Paint Under 2 Seconds",
+      "description": "App renders meaningful content within 2 seconds on a fast 3G connection.",
+      "acceptanceCriteria": [
+        "LCP < 2.5s on simulated fast 3G in Lighthouse",
+        "FCP < 1.5s",
+        "CLS < 0.1 (no layout shift from skeleton transitions)",
+        "Top bar and left nav render before data loads",
+        "No render-blocking scripts",
+        "Images (if any) have explicit width/height or aspect-ratio"
+      ],
+      "dependsOn": [
+        "P2-019"
+      ],
+      "passes": false
+    }
+  ],
+  "model": "claude-sonnet-4-6",
+  "generatedAt": "2026-02-26T00:00:00.000Z"
+}

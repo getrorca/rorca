@@ -75,8 +75,8 @@ export function extractStoryIds(title: string, branchName: string): string[] {
 // ─── Spec file lookup ────────────────────────────────────────────────────────
 
 function specsDirs(workspacePath: string) {
-  const pendingDir = path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending');
-  const approvedDir = path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved');
+  const pendingDir = path.join(workspacePath, 'forge', 'specs', 'pending');
+  const approvedDir = path.join(workspacePath, 'forge', 'specs', 'approved');
   return { pendingDir, approvedDir };
 }
 

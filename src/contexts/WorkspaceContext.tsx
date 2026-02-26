@@ -48,7 +48,7 @@ interface WorkspaceContextValue {
 
 const WorkspaceCtx = createContext<WorkspaceContextValue | null>(null);
 
-const LS_KEY = 'rorcha_workspaceId';
+const LS_KEY = 'rorca_workspaceId';
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);

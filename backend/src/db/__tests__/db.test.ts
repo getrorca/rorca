@@ -10,7 +10,7 @@ let dbPath: string;
 
 beforeEach(() => {
   jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-test-'));
   dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   const mod = require('../index');

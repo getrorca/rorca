@@ -53,7 +53,7 @@ beforeEach(async () => {
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
   }));
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-tags-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-tags-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';

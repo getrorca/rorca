@@ -30,7 +30,7 @@ beforeEach(() => {
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
   }));
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-hookrunner-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hookrunner-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';

@@ -18,7 +18,7 @@ interface ScheduleRow {
  * worktree creation, hook execution, and output buffering logic.
  */
 async function triggerScheduledRun(schedule: ScheduleRow): Promise<void> {
-  const specPath = `ralph/specs/approved/${schedule.spec_id}.json`;
+  const specPath = `forge/specs/approved/${schedule.spec_id}.json`;
 
   const port = process.env.PORT || 3030;
   try {
@@ -26,7 +26,7 @@ async function triggerScheduledRun(schedule: ScheduleRow): Promise<void> {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Rorcha-Internal': INTERNAL_SERVICE_TOKEN,
+        'X-Rorca-Internal': INTERNAL_SERVICE_TOKEN,
       },
       body: JSON.stringify({
         specPath,

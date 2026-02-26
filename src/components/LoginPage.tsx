@@ -36,7 +36,7 @@ export default function LoginPage({ onSwitchToRegister, onSwitchToForgotPassword
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="text-center mb-8">
-          <h1 className="font-mono font-bold text-accent text-2xl tracking-tight">rorcha</h1>
+          <h1 className="font-mono font-bold text-accent text-2xl tracking-tight">rorca</h1>
           <p className="text-muted text-sm mt-1">AI spec orchestration</p>
         </div>
 

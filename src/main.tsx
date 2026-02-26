@@ -12,7 +12,7 @@ window.addEventListener('unhandledrejection', (event) => {
 
   // Dispatch to toast system if mounted (apiFetch errors already handled — skip duplicates)
   window.dispatchEvent(
-    new CustomEvent('rorcha:unhandled-error', { detail: message }),
+    new CustomEvent('rorca:unhandled-error', { detail: message }),
   );
 });
 

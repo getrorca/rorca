@@ -44,7 +44,7 @@ router.post('/:sha', async (req: Request, res: Response) => {
       return;
     }
 
-    const desc = (description as string) || `Manual ${state} via Rorcha`;
+    const desc = (description as string) || `Manual ${state} via Rorca`;
 
     const posted = await postCommitStatus(
       webhookRow.repo_owner,
