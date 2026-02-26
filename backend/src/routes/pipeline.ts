@@ -1886,4 +1886,101 @@ export function cleanupOldLogs(): number {
   return deleted;
 }
 
+// ─── GET /api/pipeline/runs/:runId/commits — Git log for run's branch ────────
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/commits:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Get git commits for a pipeline run's branch
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: List of commits on the run's branch
+ *       404: { description: "Run not found" }
+ */
+router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(run.workspace_id) as { path: string } | undefined;
+
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const gitCwd = run.worktree_path || workspace.path;
+    const git = simpleGit(gitCwd);
+
+    // If branch_name is set, get commits on that branch since it diverged from main/master
+    // Otherwise get recent commits on whatever branch the workspace is on
+    const branchName = run.branch_name;
+    let commits: Array<{ sha: string; message: string; date: string; author: string }> = [];
+
+    try {
+      if (branchName) {
+        // Find the merge-base to only show commits on the feature branch
+        let baseRef = 'main';
+        try {
+          await git.raw(['rev-parse', '--verify', 'main']);
+        } catch {
+          try {
+            await git.raw(['rev-parse', '--verify', 'master']);
+            baseRef = 'master';
+          } catch {
+            // No main/master — just show last 50 commits on the branch
+            baseRef = '';
+          }
+        }
+
+        const range = baseRef ? `${baseRef}..${branchName}` : branchName;
+        const log = await git.log({ from: baseRef || undefined, to: branchName, maxCount: 100 });
+        commits = log.all.map((c) => ({
+          sha: c.hash,
+          message: c.message,
+          date: c.date,
+          author: c.author_name,
+        }));
+      } else {
+        // No branch — show commits since run started
+        const log = await git.log({ maxCount: 50, '--after': run.started_at });
+        commits = log.all.map((c) => ({
+          sha: c.hash,
+          message: c.message,
+          date: c.date,
+          author: c.author_name,
+        }));
+      }
+    } catch (gitErr: any) {
+      // Branch may not exist yet or repo issues
+      console.warn(`[Pipeline] Git log error for run ${runId}:`, gitErr.message);
+    }
+
+    res.json({ commits, branchName: branchName || null });
+  } catch (error: any) {
+    console.error('[Pipeline] Get run commits error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
