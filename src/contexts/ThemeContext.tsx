@@ -11,7 +11,7 @@ interface ThemeContextValue {
 
 const ThemeCtx = createContext<ThemeContextValue | null>(null);
 
-const LS_KEY = 'rorcha_theme';
+const LS_KEY = 'rorca_theme';
 
 function getSystemPreference(): 'light' | 'dark' {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';

@@ -1,0 +1,400 @@
+{
+  "title": "rorca-opencode-integration",
+  "model": "claude-opus-4-6",
+  "generatedAt": "2026-02-24T00:00:00.000Z",
+  "userStories": [
+    {
+      "id": "OC-001",
+      "title": "RORCA_AGENT Environment Variable and Config Schema",
+      "description": "Introduce RORCA_AGENT env var (values: 'claude' | 'opencode' | 'codex') and RORCA_MODEL (e.g. 'openai/gpt-4o', 'google/gemini-2.0-flash', 'anthropic/claude-opus-4-6') to backend config. Claude subscription remains default. OpenCode path activates when RORCA_AGENT=opencode. Codex CLI path (ChatGPT subscription) activates when RORCA_AGENT=codex.",
+      "acceptanceCriteria": [
+        "backend/.env supports RORCA_AGENT=claude|opencode|codex (default: claude)",
+        "backend/.env supports RORCA_MODEL=<provider>/<model> (used when RORCA_AGENT=opencode)",
+        "backend/src/lib/config.ts exports agentType and agentModel with validation on startup",
+        "Invalid RORCA_AGENT value throws descriptive error on startup",
+        "GET /api/config returns { agentType, agentModel } for frontend display",
+        "CLAUDE.md documents both env vars with examples"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "OC-002",
+      "title": "OpenCode Binary Detection and Version Check",
+      "description": "On backend startup, detect whether the opencode binary is installed and accessible when RORCA_AGENT=opencode. Surface clear errors if missing.",
+      "acceptanceCriteria": [
+        "Backend startup checks for opencode binary via 'which opencode' or equivalent when RORCA_AGENT=opencode",
+        "If opencode not found: log clear error 'OpenCode not installed. Run: npm i -g opencode' and exit with code 1",
+        "GET /api/health returns { opencodeVersion, opencodeInstalled } when agentType=opencode",
+        "Version check runs 'opencode --version' and parses semver output",
+        "Minimum supported version constraint documented in CLAUDE.md"
+      ],
+      "dependsOn": ["OC-001"],
+      "passes": false
+    },
+    {
+      "id": "OC-003",
+      "title": "OpenCode Server Lifecycle Manager",
+      "description": "When RORCA_AGENT=opencode, manage an OpenCode server process that stays warm across stories using the --attach flag. Start the server before the first story, reuse it for all subsequent stories in a run, shut it down after run completes.",
+      "acceptanceCriteria": [
+        "New backend/src/lib/opencode-server.ts manages server lifecycle",
+        "start(): spawns 'opencode server' with detached:true, captures server socket/port",
+        "attach(): returns --attach flag value for use in story execution",
+        "stop(): gracefully terminates server process after run completes or on error",
+        "Server PID stored alongside pipeline_runs.pid in DB",
+        "If server crashes mid-run, backend attempts one restart before marking run failed",
+        "Server startup timeout: 10s before giving up",
+        "Logs server stdout/stderr to os.tmpdir()/rorca-opencode-server.log"
+      ],
+      "dependsOn": ["OC-002"],
+      "passes": false
+    },
+    {
+      "id": "OC-004",
+      "title": "execution-engine.ts Agent Switching Logic",
+      "description": "Update backend/src/lib/execution-engine.ts to detect RORCA_AGENT and switch the per-story subprocess accordingly. When opencode, spawn 'opencode run --format json --attach' instead of 'claude --print'. This is the single TypeScript execution engine — run-loop.sh and run-loop.ts are fully replaced by this file.",
+      "acceptanceCriteria": [
+        "backend/src/lib/execution-engine.ts reads agentType from config (default: claude)",
+        "When agentType=claude: existing 'claude --print' spawn path unchanged",
+        "When agentType=opencode: spawns 'opencode run --model $RORCA_MODEL --format json --attach $ATTACH_ADDR' with prompt via stdin",
+        "When agentType=codex: spawns 'codex --approval-mode auto-edit' with prompt via stdin",
+        "ATTACH_ADDR passed from opencode-server.ts lifecycle manager via function argument, not env var",
+        "Story timeout implemented via AbortController (no gtimeout/bash timeout — TypeScript only)",
+        "Exit code captured from child process 'close' event",
+        "All three paths produce WAL events (story_started, story_passed, story_failed) via the same emitter"
+      ],
+      "dependsOn": ["OC-003"],
+      "passes": false
+    },
+    {
+      "id": "OC-005",
+      "title": "OpenCode JSON Event Stream Parser",
+      "description": "Parse opencode's --format json event stream output into the same format Rorca's SSE pipeline expects. Map JSON events to terminal output and semantic log entries.",
+      "acceptanceCriteria": [
+        "New backend/src/lib/opencode-parser.ts parses JSON event stream from opencode run --format json",
+        "Extracts tool calls (bash, edit, read, write, glob, grep) into semantic log entries",
+        "Converts raw JSON events back to human-readable terminal output for xterm.js display",
+        "Detects story completion signal from event stream",
+        "Handles partial/chunked JSON lines (streaming parser, not bulk parse)",
+        "Error events mapped to story failure detection",
+        "Unit tests cover all event types in backend/src/lib/__tests__/opencode-parser.test.ts"
+      ],
+      "dependsOn": ["OC-004"],
+      "passes": false
+    },
+    {
+      "id": "OC-006",
+      "title": "Pipeline Trigger — OpenCode Run Spawn",
+      "description": "Update POST /api/pipeline/trigger to use the OpenCode server lifecycle and pass correct env vars when RORCA_AGENT=opencode.",
+      "acceptanceCriteria": [
+        "POST /api/pipeline/trigger detects agentType from config",
+        "When opencode: starts OpenCode server via opencode-server.ts before calling execution-engine.ts",
+        "Passes agentType, agentModel, and opencode attachAddr directly to execution-engine.ts as function arguments (not env vars)",
+        "Strips Claude-specific env vars (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, etc.) when using opencode",
+        "Server lifecycle tied to pipeline run: server stops when run finishes/fails",
+        "pipeline_runs table stores agent_type and agent_model columns (migration required)",
+        "GET /api/pipeline/runs/:id returns agentType and agentModel fields"
+      ],
+      "dependsOn": ["OC-005"],
+      "passes": false
+    },
+    {
+      "id": "OC-007",
+      "title": "Database — Agent Type Columns on pipeline_runs",
+      "description": "Add agent_type and agent_model columns to pipeline_runs. Per CLAUDE.md architecture, column additions use the pragma table_info check pattern in backend/src/db/index.ts — NOT a numbered migration SQL file (migrations 001–036 already exist; using a numbered file risks collision).",
+      "acceptanceCriteria": [
+        "backend/src/db/index.ts: add pragma table_info check for agent_type and agent_model on pipeline_runs, same pattern as existing column additions in that file",
+        "agent_type TEXT NOT NULL DEFAULT 'claude' added to pipeline_runs if column not present",
+        "agent_model TEXT (nullable) added to pipeline_runs if column not present",
+        "Column additions are idempotent — safe to run on existing DB with existing rows",
+        "GET /api/pipeline/runs returns agent_type and agent_model per run",
+        "Archive panel shows agent badge: 'Claude' or model name (e.g. 'gpt-4o')"
+      ],
+      "dependsOn": ["OC-006"],
+      "passes": false
+    },
+    {
+      "id": "OC-008",
+      "title": "OpenCode Spec Generation Path",
+      "description": "When RORCA_AGENT=opencode, use 'opencode run' for spec generation (POST /api/specs/generate) instead of the SDK llm-client.ts path. OpenCode autonomously reads CLAUDE.md, existing specs, and package.json before writing the spec JSON.",
+      "acceptanceCriteria": [
+        "POST /api/specs/generate detects agentType and routes accordingly",
+        "OpenCode path: spawns 'opencode run --model $RORCA_MODEL --format json' with spec generation prompt",
+        "Prompt instructs OpenCode to read CLAUDE.md, glob existing specs, read package.json before generating",
+        "OpenCode output parsed to extract spec JSON from event stream",
+        "Fallback to SDK path (llm-client.ts) if opencode run fails or times out",
+        "Spec generation timeout: 120s for opencode path (longer due to codebase exploration)",
+        "Generated spec quality validated: must have title, userStories array, each story has id/title/description/acceptanceCriteria/dependsOn"
+      ],
+      "dependsOn": ["OC-005"],
+      "passes": false
+    },
+    {
+      "id": "OC-009",
+      "title": "Settings UI — Agent Configuration Panel",
+      "description": "Add an 'Execution Engine' section to the Settings panel where users configure RORCA_AGENT, RORCA_MODEL, and provider API keys for the OpenCode path.",
+      "acceptanceCriteria": [
+        "Settings panel has 'Execution Engine' section (below Model section)",
+        "Toggle: Claude subscription | OpenCode (API key)",
+        "When OpenCode selected: model selector dropdown (grouped by provider: OpenAI, Google, Anthropic, OpenRouter, Local)",
+        "Model list fetched from GET /api/config/opencode-models (returns Models.dev compatible list)",
+        "API key input per provider: masked, stored via PUT /api/config/agent (persisted to backend .env or DB)",
+        "Current agent type and model shown as status badge",
+        "Save button POSTs to PUT /api/config/agent, triggers backend config reload without restart",
+        "Validation: OpenCode model requires provider-specific API key to be set"
+      ],
+      "dependsOn": ["OC-001", "OC-007"],
+      "passes": false
+    },
+    {
+      "id": "OC-010",
+      "title": "Pipeline Trigger Modal — Agent and Model Display",
+      "description": "Show the configured execution engine and model in the pipeline trigger modal so users know what will run before triggering.",
+      "acceptanceCriteria": [
+        "Trigger modal shows 'Engine' row: 'Claude (Pro/Max)' or 'OpenCode — gpt-4o' based on config",
+        "If RORCA_AGENT=opencode and no model configured: show warning 'No model configured — go to Settings'",
+        "Trigger button disabled if OpenCode selected but no API key set for chosen provider",
+        "Model name in trigger modal links to Settings > Execution Engine for quick reconfiguration",
+        "After run starts, Run View header shows agent badge (Claude or model name)"
+      ],
+      "dependsOn": ["OC-009"],
+      "passes": false
+    },
+    {
+      "id": "OC-011",
+      "title": "Semantic Log View — OpenCode Structured Events",
+      "description": "When running via OpenCode, the semantic log view receives structured JSON events directly (no brittle xterm parsing needed). Implement the structured event renderer for OpenCode's event format.",
+      "acceptanceCriteria": [
+        "RunTerminal semantic view detects agent_type from run metadata",
+        "When agent_type=opencode: renders structured events from JSON stream directly",
+        "Event types mapped to semantic icons: bash→Terminal, edit→Edit, read→FileText, write→FilePlus, glob→Search, grep→Search, webfetch→Globe",
+        "Each event shows: icon, tool name, file/command argument, duration",
+        "Collapsible output for bash events (stdout/stderr)",
+        "Error events shown in red with full error message",
+        "Toggle between semantic and raw view still works for opencode path",
+        "When agent_type=claude: existing xterm-parsing semantic view unchanged"
+      ],
+      "dependsOn": ["OC-005", "OC-007"],
+      "passes": false
+    },
+    {
+      "id": "OC-012",
+      "title": "Archive Panel — Agent Badge on Run Cards",
+      "description": "Archive and pipeline monitor show which execution engine and model was used for each run.",
+      "acceptanceCriteria": [
+        "Archive spec cards show agent badge: 'Claude' (blue) or model name e.g. 'gpt-4o' (purple)",
+        "Pipeline monitor run list shows agent badge per run",
+        "Run detail page shows full agent info: engine, model, provider",
+        "Filtering in Archive supports filter by agent type",
+        "Existing runs (pre-OC-007 migration) show 'Claude' as default badge"
+      ],
+      "dependsOn": ["OC-007"],
+      "passes": false
+    },
+    {
+      "id": "OC-013",
+      "title": "Local Model Support via Ollama",
+      "description": "Support local model execution via Ollama as a zero-cost option in the OpenCode path. Ollama models require no API key.",
+      "acceptanceCriteria": [
+        "Settings > Execution Engine shows 'Local (Ollama)' provider option",
+        "When Ollama selected: no API key required",
+        "Backend detects Ollama availability via 'ollama list' on settings save",
+        "Available Ollama models fetched and shown in model dropdown",
+        "If Ollama not running: show 'Ollama not detected. Start with: ollama serve'",
+        "opencode run --model ollama/<model-name> spawned via execution-engine.ts for Ollama path",
+        "Free tier badge shown in UI for Ollama: 'Local — Free'"
+      ],
+      "dependsOn": ["OC-009"],
+      "passes": false
+    },
+    {
+      "id": "OC-014",
+      "title": "GitHub Copilot Subscription Auth for OpenCode",
+      "description": "Support GitHub Copilot subscription as an OpenCode provider — users with Copilot pay for model access via their existing subscription rather than per-token API billing.",
+      "acceptanceCriteria": [
+        "Settings > Execution Engine shows 'GitHub Copilot' provider option",
+        "Auth flow: 'Sign in with GitHub' OAuth to obtain Copilot token",
+        "Token stored encrypted in integration_credentials table (same as other integrations)",
+        "opencode run --model github/copilot spawned via execution-engine.ts",
+        "Copilot auth status shown in Settings: Connected/Disconnected with GitHub username",
+        "Disconnect button revokes and removes stored token",
+        "Badge in UI: 'GitHub Copilot — Subscription'"
+      ],
+      "dependsOn": ["OC-009"],
+      "passes": false
+    },
+    {
+      "id": "OC-015",
+      "title": "Error Handling and Fallback for OpenCode Path",
+      "description": "Robust error handling when OpenCode binary fails, crashes mid-story, or returns unexpected output. Graceful degradation without leaving orphan processes.",
+      "acceptanceCriteria": [
+        "If opencode run exits non-zero: story marked failed with OpenCode error message in WAL",
+        "If OpenCode server crashes mid-run: attempt one restart, then mark entire run failed with clear message",
+        "If JSON event stream is malformed: log raw output and attempt story-level recovery",
+        "Orphan process cleanup: on backend restart, kill any opencode server PIDs from crashed runs",
+        "Cleanup runs on startup: scan pipeline_runs WHERE status='running' AND agent_type='opencode', kill PIDs, mark failed",
+        "User-facing error message distinguishes: 'OpenCode not installed', 'Provider API key invalid', 'Model not available', 'Rate limit exceeded'",
+        "Rate limit detection: parse 429 from JSON event stream, surface as 'Rate limited — waiting Ns' in terminal"
+      ],
+      "dependsOn": ["OC-006"],
+      "passes": false
+    },
+    {
+      "id": "OC-016",
+      "title": "SKILL.md Support for OpenCode Direction Stack",
+      "description": "OpenCode reads SKILL.md files (equivalent to CLAUDE.md skills). Ensure Rorca's direction stack context is injected via SKILL.md for the OpenCode execution path.",
+      "acceptanceCriteria": [
+        "Before execution-engine.ts spawns the OpenCode subprocess, backend writes synthesized direction stack to .opencode/skills/rorca.md in workspace",
+        "SKILL.md content mirrors what CLAUDE.md skill injection does for claude --print path",
+        "File written fresh before each run (not cached) to pick up latest direction stack changes",
+        "File cleaned up after run completes",
+        "opencode run prompt includes 'Read .opencode/skills/rorca.md before starting work'",
+        "Verify via OpenCode docs that 'skill' tool reads from .opencode/skills/ directory"
+      ],
+      "dependsOn": ["OC-004"],
+      "passes": false
+    },
+    {
+      "id": "OC-017",
+      "title": "Documentation and Setup Guide",
+      "description": "Comprehensive documentation for the OpenCode execution path in CLAUDE.md, README, and an in-app setup guide.",
+      "acceptanceCriteria": [
+        "CLAUDE.md updated with full OpenCode setup instructions",
+        "backend/.env.example updated with RORCA_AGENT and RORCA_MODEL examples",
+        "In-app: Settings > Execution Engine has a 'Setup Guide' link showing step-by-step: install opencode, set model, set API key, test connection",
+        "Setup guide covers all provider types: OpenAI, Google, Anthropic API, OpenRouter, Ollama, GitHub Copilot",
+        "README.md updated with OpenCode as the multi-model execution path",
+        "CLAUDE.md documents the technical advantages of each path (claude --print vs opencode) for future Claude sessions"
+      ],
+      "dependsOn": ["OC-009", "OC-013", "OC-014"],
+      "passes": false
+    },
+    {
+      "id": "OC-018",
+      "title": "Integration Tests — OpenCode Execution Path",
+      "description": "Backend integration tests verifying the OpenCode execution path end-to-end with a mock opencode binary.",
+      "acceptanceCriteria": [
+        "Test fixture: mock opencode binary (shell script) that outputs valid JSON event stream and exits 0",
+        "Integration test: POST /api/pipeline/trigger with RORCA_AGENT=opencode runs mock opencode per story",
+        "Integration test: verifies story_results written correctly from mock opencode output",
+        "Integration test: verifies opencode server start/stop lifecycle",
+        "Integration test: verifies SKILL.md written to workspace before run, cleaned up after",
+        "Integration test: verifies fallback to SDK on spec generation failure",
+        "All tests in backend/src/__tests__/opencode-integration.test.ts",
+        "Tests run in CI without requiring real opencode installation (mock binary used)"
+      ],
+      "dependsOn": ["OC-015", "OC-016"],
+      "passes": false
+    },
+    {
+      "id": "OC-019",
+      "title": "Story Complexity Scorer — Model Tier Assignment",
+      "description": "Analyze each story before spawning its subprocess and assign a ModelTier (haiku | sonnet | opus) based on story complexity signals. Eliminates blind Opus usage for every story — routes cheap work to cheap models.",
+      "acceptanceCriteria": [
+        "backend/src/lib/complexity-scorer.ts exports score(story) → { tier: 'haiku'|'sonnet'|'opus', score: number, signals: string[] }",
+        "Scoring signals: dependsOn depth (+10 per level), acceptanceCriteria count (+5 each), file path patterns (docs/**→-20, src/core/**→+20), story type tag (docs→haiku, test→sonnet, feat→sonnet/opus, architecture→opus)",
+        "Keyword detection in description: 'rename'/'update import'/'fix typo' → haiku; 'refactor'/'migrate' → sonnet; 'design'/'architect'/'implement from scratch' → opus",
+        "Score thresholds configurable in .rorca/config.json orchestration.thresholds (default: 0-30→haiku, 31-65→sonnet, 66+→opus)",
+        "ModelTier maps to actual model IDs per provider in orchestration.cascades config",
+        "Scorer runs synchronously before subprocess spawn — adds <10ms overhead",
+        "Score + signals logged to WAL event payload for FinOps tracking",
+        "Unit tests cover all scoring signals and threshold boundaries"
+      ],
+      "dependsOn": ["OC-004"],
+      "passes": false
+    },
+    {
+      "id": "OC-020",
+      "title": "Cascading Escalation Engine",
+      "description": "When a story fails on a cheaper model tier, automatically escalate to the next tier and retry. Haiku fails twice → Sonnet. Sonnet fails → Opus. Ensures quality without over-provisioning expensive models upfront.",
+      "acceptanceCriteria": [
+        "Escalation config in .rorca/config.json: orchestration.escalation.maxRetriesOnTier (default: 2), orchestration.escalation.escalateTo mapping",
+        "execution-engine.ts tracks retry count per story per tier via run-state.json",
+        "On story failure: check retry count vs maxRetriesOnTier — if exceeded, escalate model tier and retry",
+        "Escalation chain: haiku → sonnet → opus (stop at opus, no further escalation)",
+        "WAL event written on escalation: { type: 'story_escalated', fromTier, toTier, attemptNumber, storyId }",
+        "Run View shows escalation indicator in story list: 'Escalated: Haiku→Sonnet (attempt 3)'",
+        "Escalation disabled for claude --print subscription path (model fixed at story level, not mid-story)",
+        "Escalation adds actual cost for escalated attempts to FinOps tracking",
+        "Config option: orchestration.escalation.enabled (default: true) — can disable for predictable billing"
+      ],
+      "dependsOn": ["OC-019"],
+      "passes": false
+    },
+    {
+      "id": "OC-021",
+      "title": "Orchestration Config in .rorca/config.json",
+      "description": "Expose the full model routing and cascading configuration in .rorca/config.json so advanced users can customize routing thresholds, model assignments per task type, and escalation behavior.",
+      "acceptanceCriteria": [
+        ".rorca/config.json gains top-level 'orchestration' section",
+        "orchestration.router: 'auto' (complexity scorer) | 'fixed' (use spec model for all stories) | 'manual' (per-story overrides in spec JSON)",
+        "orchestration.cascades: { echolocation, planning, coding, lintFix, testing, documentation } → model IDs per task type",
+        "orchestration.escalation: { enabled, maxRetriesOnTier, chain: ['haiku','sonnet','opus'] }",
+        "orchestration.thresholds: { haiku: [0,30], sonnet: [31,65], opus: [66,100] }",
+        "orchestration.tokenBudgetPerStory: max input tokens before warning (default: 50000)",
+        "Settings > Execution Engine > Model Routing section exposes these fields visually",
+        "Visual: three-tier slider showing haiku/sonnet/opus threshold boundaries with drag handles",
+        "JSON schema updated in .rorca/config.schema.json",
+        "backend/src/lib/config.ts validates orchestration section on load with descriptive errors"
+      ],
+      "dependsOn": ["OC-020"],
+      "passes": false
+    },
+    {
+      "id": "OC-022",
+      "title": "Real-Time Token Telemetry per Story",
+      "description": "Parse token usage from OpenCode's --format json event stream and from Claude CLI output. Track tokens in/out per story, per model tier, per run. Store in story_results table for FinOps aggregation.",
+      "acceptanceCriteria": [
+        "opencode-parser.ts extracts token usage from JSON event stream: { inputTokens, outputTokens, model, cost }",
+        "For claude --print path: parse token usage from stderr/stdout (Claude CLI outputs usage summary)",
+        "backend/src/db/index.ts: pragma table_info checks add input_tokens INT, output_tokens INT, model_used TEXT, cost_usd REAL to story_results if not present (no migration SQL file — use column-addition pattern per CLAUDE.md)",
+        "Token data written to story_results on story completion alongside pass/fail",
+        "backend/src/db/index.ts: pragma table_info checks add total_input_tokens, total_output_tokens, total_cost_usd to pipeline_runs if not present",
+        "Model pricing table in backend/src/lib/model-pricing.ts: { 'claude-opus-4-6': { input: 0.000015, output: 0.000075 }, 'claude-sonnet-4-6': {...}, 'gpt-4o': {...}, etc. }",
+        "Pricing table updatable without code changes via .rorca/config.json orchestration.pricing overrides",
+        "GET /api/pipeline/runs/:id returns full token + cost breakdown per story"
+      ],
+      "dependsOn": ["OC-005", "OC-020"],
+      "passes": false
+    },
+    {
+      "id": "OC-023",
+      "title": "FinOps Dashboard — Cost Analytics UI",
+      "description": "Full cost observability dashboard showing token usage, model distribution, actual cost vs all-Opus baseline, and savings per run and over time. The savings number is a marketing asset.",
+      "acceptanceCriteria": [
+        "New 'FinOps' tab in Run View alongside Terminal and Stories",
+        "Run summary table: Model | Stories | Tokens In | Tokens Out | Cost columns",
+        "Savings row: 'vs All-Opus baseline: $52.80 → Actual: $26.02 → Saved: $26.78 (51%)'",
+        "Per-story cost breakdown: expandable list showing each story, assigned tier, tokens, cost, escalations",
+        "Escalation log: stories that escalated shown with from/to tier and additional cost incurred",
+        "Historical view: Settings > FinOps shows cumulative cost by workspace, by spec, by month",
+        "Cost trend chart (line graph): daily spend over last 30 days",
+        "Model distribution pie chart: % of stories per tier (haiku/sonnet/opus)",
+        "Projected monthly cost based on run frequency",
+        "Export as CSV: per-story cost breakdown for enterprise billing/compliance",
+        "For claude --print subscription path: show token count only (no dollar cost — subscription users pay flat rate)"
+      ],
+      "dependsOn": ["OC-022"],
+      "passes": false
+    },
+    {
+      "id": "OC-024",
+      "title": "Codex CLI Execution Path — ChatGPT Subscription Support",
+      "description": "Add 'codex' as a third RORCA_AGENT value, enabling users with a ChatGPT Plus/Pro subscription to use OpenAI's Codex CLI as the per-story execution engine. Like claude --print, this is subscription-based (flat-rate, no per-token cost), so model cascading and FinOps dollar savings do not apply. Codex CLI runs non-interactively via --approval-mode auto-edit, giving it the same tool set (file edit, bash, read, write, glob, grep) as Claude Code.",
+      "acceptanceCriteria": [
+        "RORCA_AGENT=codex activates Codex CLI path in backend/src/lib/config.ts",
+        "Binary detection: check PATH for 'codex' binary, surface clear error if not found with install instructions (npm i -g @openai/codex)",
+        "backend/src/lib/execution-engine.ts spawns 'codex --approval-mode auto-edit' as a child process per story, with the story prompt passed via stdin — same TypeScript spawn pattern used for the opencode path (OC-003)",
+        "Codex CLI stdout/stderr is captured and streamed to xterm.js the same way claude --print output is — no structured JSON parsing required",
+        "RORCA_MODEL is ignored when RORCA_AGENT=codex (Codex CLI uses the model tied to the user's ChatGPT subscription)",
+        "Settings UI shows 'Codex CLI (ChatGPT subscription)' as a third agent option alongside Claude and OpenCode",
+        "Settings UI shows install check: green tick if 'codex' is in PATH, red warning with install command if not",
+        "FinOps dashboard shows token count only for codex path (no dollar cost — subscription users pay flat rate, same treatment as claude --print)",
+        "Model cascading is disabled when RORCA_AGENT=codex — no tier assignment, no escalation",
+        "CLAUDE.md and Settings docs updated with codex setup instructions"
+      ],
+      "dependsOn": ["OC-001", "OC-003", "OC-015", "OC-023"],
+      "passes": false
+    }
+  ]
+}

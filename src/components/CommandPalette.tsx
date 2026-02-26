@@ -78,7 +78,7 @@ function fuzzyMatch(query: string, text: string): { match: boolean; score: numbe
   return { match: false, score: 0 };
 }
 
-const RECENT_KEY = 'rorcha-cmd-palette-recent';
+const RECENT_KEY = 'rorca-cmd-palette-recent';
 const MAX_RECENT = 5;
 
 function getRecent(): string[] {

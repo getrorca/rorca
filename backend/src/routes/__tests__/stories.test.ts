@@ -69,7 +69,7 @@ beforeEach(async () => {
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
   }));
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-stories-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-stories-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';
@@ -201,7 +201,7 @@ test('pagination works correctly', async () => {
 
 test('search across all workspaces when workspaceId is omitted', async () => {
   // Add a second workspace
-  const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-stories-ws2-'));
+  const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-stories-ws2-'));
   db.prepare(
     "INSERT INTO workspaces (id, label, path) VALUES ('ws-test-2', 'Second Workspace', ?)"
   ).run(tmpDir2);

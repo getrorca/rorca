@@ -254,7 +254,7 @@ export async function fetchUrlContent(url: string): Promise<string> {
 
   try {
     const response = await fetch(fetchUrl, {
-      headers: { 'User-Agent': 'Rorcha/1.0 context-hydrator' },
+      headers: { 'User-Agent': 'Rorca/1.0 context-hydrator' },
       signal: controller.signal,
     });
 
@@ -300,7 +300,7 @@ export async function fetchUrlPreview(url: string): Promise<{
 
   try {
     const response = await fetch(fetchUrl, {
-      headers: { 'User-Agent': 'Rorcha/1.0 context-hydrator' },
+      headers: { 'User-Agent': 'Rorca/1.0 context-hydrator' },
       signal: controller.signal,
     });
 

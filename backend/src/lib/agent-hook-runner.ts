@@ -25,7 +25,7 @@ const WAL_TO_HOOK_EVENT: Record<string, string> = {
 
 /**
  * Fire all matching agent hooks for a WAL event asynchronously.
- * Each hook runs in its own subprocess with RORCHA_EVENT set to the event JSON.
+ * Each hook runs in its own subprocess with RORCA_EVENT set to the event JSON.
  * Results are logged back into wal_events as 'hook_executed'.
  */
 export function fireAgentHooks(walEvent: WalEvent): void {
@@ -56,7 +56,7 @@ export function fireAgentHooks(walEvent: WalEvent): void {
     exec(hook.command, {
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024,
-      env: { ...process.env, RORCHA_EVENT: eventPayload },
+      env: { ...process.env, RORCA_EVENT: eventPayload },
     }, (error, stdout, stderr) => {
       const exitCode = error ? (error as any).code ?? 1 : 0;
       const resultPayload = JSON.stringify({

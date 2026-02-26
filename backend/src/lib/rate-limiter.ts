@@ -150,7 +150,15 @@ export function rateLimiter(req: Request, res: Response, next: NextFunction): vo
     return;
   }
 
-  const user = (req as Request & { user?: AuthUser }).user;
+  let user = (req as Request & { user?: AuthUser }).user;
+  // Auth is globally bypassed in single-user mode — fall back to first DB user
+  // so all requests count as authenticated (100/min vs 20/min unauthenticated).
+  if (!user) {
+    const fallback = db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined;
+    if (fallback) {
+      user = { id: fallback.id, email: '', displayName: '' } as AuthUser;
+    }
+  }
   const tier = user ? 'authenticated' : 'unauthenticated';
 
   // Strip query string for matching

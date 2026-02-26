@@ -355,7 +355,7 @@ export default function OnboardingWizard() {
           {/* Step 0: Welcome */}
           {step === 0 && (
             <div className="text-center">
-              <h1 className="text-2xl font-bold mb-3">Welcome to Rorcha</h1>
+              <h1 className="text-2xl font-bold mb-3">Welcome to Rorca</h1>
               <p className="text-muted mb-2 max-w-md mx-auto">
                 AI spec orchestration for autonomous development. Turn plain-English briefs into structured specs, then execute them with Claude.
               </p>
@@ -378,7 +378,7 @@ export default function OnboardingWizard() {
             <div>
               <h2 className="text-xl font-semibold mb-1">Connect Repository</h2>
               <p className="text-muted text-sm mb-6">
-                Point Rorcha at a git repository. This is where specs and run-loop scripts will live.
+                Point Rorca at a git repository. This is where specs and run-loop scripts will live.
               </p>
               <form onSubmit={handleCreateWorkspace} className="flex flex-col gap-4">
                 <div>

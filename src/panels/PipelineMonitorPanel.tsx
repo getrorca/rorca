@@ -282,7 +282,7 @@ export default function PipelineMonitorPanel() {
       return;
     }
     const specPath = selectedRunDetail.run.spec_path;
-    // Extract specId from path like "ralph/specs/approved/my-slug.json"
+    // Extract specId from path like "forge/specs/approved/my-slug.json"
     const filename = specPath.split('/').pop() || '';
     const specId = filename.replace(/\.json$/, '');
     if (!specId) return;
@@ -515,7 +515,7 @@ export default function PipelineMonitorPanel() {
   }, [selectedRunId, liveRun, workspaceId]);
 
   const handleCopyCommand = () => {
-    const cmd = `./scripts/ralph/run-loop.sh --json specs/approved/<spec>.json`;
+    const cmd = `./forge/run-loop.sh --json forge/specs/approved/<spec>.json`;
     navigator.clipboard.writeText(cmd);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -606,7 +606,7 @@ export default function PipelineMonitorPanel() {
               </p>
               <div className="flex items-center gap-2">
                 <code className="flex-1 text-xs font-mono bg-[var(--bg)] px-2 py-1 rounded text-[var(--text)]">
-                  ./scripts/ralph/run-loop.sh
+                  ./forge/run-loop.sh
                 </code>
                 <button
                   onClick={handleCopyCommand}

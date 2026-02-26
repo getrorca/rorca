@@ -118,7 +118,7 @@ router.post('/checkout', async (req: Request, res: Response) => {
     } else {
       const customer = await stripe.customers.create({
         email: authReq.user.email,
-        metadata: { rorcha_user_id: authReq.user.id },
+        metadata: { rorca_user_id: authReq.user.id },
       });
       customerId = customer.id;
 
@@ -135,7 +135,7 @@ router.post('/checkout', async (req: Request, res: Response) => {
       line_items: [{ price: planConfig.stripePriceId, quantity: 1 }],
       success_url: `${FRONTEND_URL}?billing=success&plan=${plan}`,
       cancel_url: `${FRONTEND_URL}?billing=canceled`,
-      metadata: { rorcha_user_id: authReq.user.id, plan },
+      metadata: { rorca_user_id: authReq.user.id, plan },
     });
 
     res.json({ url: session.url });

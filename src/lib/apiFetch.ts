@@ -1,4 +1,4 @@
-// When served by Express (rorcha start), use same-origin (empty base URL).
+// When served by Express (rorca start), use same-origin (empty base URL).
 // In dev mode (Vite on :5210), use the backend URL on :3030.
 export const BASE_URL = import.meta.env.VITE_API_URL
   || (import.meta.env.DEV ? 'http://localhost:3030' : '');
@@ -32,7 +32,7 @@ function notifyError(message: string) {
 
 // Custom event for 401 auth failures (components listen via window event)
 export function dispatch401() {
-  window.dispatchEvent(new CustomEvent('rorcha:auth-expired'));
+  window.dispatchEvent(new CustomEvent('rorca:auth-expired'));
 }
 
 // ─── Token storage (in-memory — XSS safety) ──────────────────────────────────

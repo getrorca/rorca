@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rorcha Production Health Check Script
+# Rorca Production Health Check Script
 # Usage: ./healthcheck.sh [--json] [--quiet]
 # Exit codes: 0 = healthy, 1 = degraded, 2 = critical
 #
@@ -9,9 +9,9 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-BACKEND_URL="${RORCHA_API_URL:-http://localhost:3030}"
+BACKEND_URL="${RORCA_API_URL:-http://localhost:3030}"
 HEALTH_ENDPOINT="${BACKEND_URL}/api/health/detailed"
-DB_PATH="${DB_PATH:-/data/rorcha.db}"
+DB_PATH="${DB_PATH:-/data/rorca.db}"
 DISK_WARN_PERCENT=85
 DISK_CRIT_PERCENT=95
 CURL_TIMEOUT=5

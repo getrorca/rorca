@@ -17,7 +17,7 @@ beforeEach(() => {
   jest.resetModules();
   mockFetch.mockReset();
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-auth-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-auth-test-'));
   process.env.DB_PATH = path.join(tmpDir, 'test.db');
 
   // Create workspace dir structure for specs (required by some route mounts)

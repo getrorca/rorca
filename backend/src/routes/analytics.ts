@@ -81,7 +81,7 @@ router.get('/usage', (req: Request, res: Response) => {
 
     // Map group_by to SQL column
     const groupColumn: Record<string, string> = {
-      spec: "REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '')",
+      spec: "REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '')",
       story: 'tu.story_id',
       model: 'tu.model',
       user: "COALESCE(tu.user_id, 'system')",
@@ -291,7 +291,7 @@ router.get('/costs', (req: Request, res: Response) => {
 
     // Non-period groupings (spec, run, model)
     const groupColumn: Record<string, string> = {
-      spec: "REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '')",
+      spec: "REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '')",
       run: 'tu.run_id',
       model: 'tu.model',
     };
@@ -599,7 +599,7 @@ router.get('/velocity', (req: Request, res: Response) => {
     }
 
     if (specId) {
-      conditions.push("REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') = ?");
+      conditions.push("REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') = ?");
       params.push(specId);
     }
 
@@ -627,7 +627,7 @@ router.get('/velocity', (req: Request, res: Response) => {
     const specsSql = `
       SELECT
         strftime('%Y-W%W', sr.finished_at) AS week,
-        REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug
+        REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug
       FROM story_results sr
       JOIN pipeline_runs pr ON sr.run_id = pr.id
       ${whereClause}
@@ -662,7 +662,7 @@ router.get('/velocity', (req: Request, res: Response) => {
     // Available specs for the filter dropdown
     const specListSql = `
       SELECT DISTINCT
-        REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug
+        REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug
       FROM pipeline_runs pr
       WHERE pr.spec_path IS NOT NULL
       ${workspaceId ? 'AND pr.workspace_id = ?' : ''}
@@ -742,15 +742,15 @@ router.get('/completion-rates', (req: Request, res: Response) => {
       if (specCache.has(row.spec_path)) continue;
 
       try {
-        const absPath = path.join(row.workspace_path, 'scripts', row.spec_path);
+        const absPath = path.join(row.workspace_path, row.spec_path);
         if (fs.existsSync(absPath)) {
           const raw = JSON.parse(fs.readFileSync(absPath, 'utf8'));
           const stories: any[] = raw.userStories ?? raw.stories ?? [];
 
           // Get tags from spec_tags table
           const specId = row.spec_path
-            .replace('ralph/specs/approved/', '')
-            .replace('ralph/specs/pending/', '')
+            .replace('forge/specs/approved/', '')
+            .replace('forge/specs/pending/', '')
             .replace('.json', '');
           const tagRows = db.prepare(
             'SELECT tag_name FROM spec_tags WHERE spec_id = ? AND workspace_id = ? ORDER BY tag_name'
@@ -951,7 +951,7 @@ function buildCostsExport(from: string, to: string, workspaceId?: string, limit?
   const sql = `
     SELECT
       tu.model,
-      REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug,
+      REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
       tu.story_id,
       tu.input_tokens,
       tu.output_tokens,
@@ -1004,7 +1004,7 @@ function buildVelocityExport(from: string, to: string, workspaceId?: string, lim
       sr.status,
       sr.finished_at,
       sr.elapsed_seconds,
-      REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug,
+      REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
       strftime('%Y-W%W', sr.finished_at) AS week,
       pr.workspace_id
     FROM story_results sr
@@ -1040,7 +1040,7 @@ function buildCompletionExport(from: string, to: string, workspaceId?: string, l
       sr.elapsed_seconds,
       sr.input_tokens,
       sr.output_tokens,
-      REPLACE(REPLACE(pr.spec_path, 'ralph/specs/approved/', ''), '.json', '') AS spec_slug,
+      REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
       pr.workspace_id
     FROM story_results sr
     JOIN pipeline_runs pr ON sr.run_id = pr.id
@@ -1141,7 +1141,7 @@ router.get('/export', (req: Request, res: Response) => {
 
     // Timestamp for filename
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const filename = `rorcha-${dataType}-${ts}`;
+    const filename = `rorca-${dataType}-${ts}`;
 
     // Link header for pagination when truncated
     const totalPages = Math.ceil(total / limit);

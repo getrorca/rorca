@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { db } from '../db';
 import type { AuthUser } from './auth';
+import { getEffectiveUser } from '../lib/get-user';
 
 const router = Router();
 
@@ -25,7 +26,8 @@ interface UserSettingsRow {
 // ─── GET /api/settings/profile ─────────────────────────────────────────────
 
 router.get('/profile', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
   const row = db.prepare(
     'SELECT id, email, display_name, avatar_url FROM users WHERE id = ?'
@@ -47,7 +49,8 @@ router.get('/profile', (req: Request, res: Response) => {
 // ─── PUT /api/settings/profile ─────────────────────────────────────────────
 
 router.put('/profile', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { displayName, avatarUrl } = req.body;
 
   if (displayName !== undefined && (typeof displayName !== 'string' || displayName.trim().length === 0)) {
@@ -88,7 +91,8 @@ router.put('/profile', (req: Request, res: Response) => {
 // ─── PUT /api/settings/password ────────────────────────────────────────────
 
 router.put('/password', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { currentPassword, newPassword } = req.body;
 
   if (!currentPassword || typeof currentPassword !== 'string') {
@@ -120,7 +124,8 @@ router.put('/password', (req: Request, res: Response) => {
 // ─── GET /api/settings/display ─────────────────────────────────────────────
 
 router.get('/display', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
   const row = db.prepare(
     'SELECT * FROM user_settings WHERE user_id = ?'
@@ -135,7 +140,8 @@ router.get('/display', (req: Request, res: Response) => {
 // ─── PUT /api/settings/display ─────────────────────────────────────────────
 
 router.put('/display', (req: Request, res: Response) => {
-  const user = (req as Request & { user: AuthUser }).user;
+  const user = getEffectiveUser(req);
+  if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { defaultModel, itemsPerPage } = req.body;
 
   const model = typeof defaultModel === 'string' ? defaultModel.trim() : 'claude-sonnet-4-5-20250929';

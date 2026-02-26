@@ -59,7 +59,7 @@ beforeEach(async () => {
   jest.resetModules();
   mockFetch.mockReset();
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-gh-import-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-gh-import-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';

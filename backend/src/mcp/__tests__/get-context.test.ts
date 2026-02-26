@@ -3,7 +3,7 @@ const mockFetch = jest.fn();
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCHA_API } from '../server';
+import { server, RORCA_API } from '../server';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -16,9 +16,9 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
-test('rorcha_get_context is registered on the McpServer', () => {
+test('rorca_get_context is registered on the McpServer', () => {
   const tools = (server as any)._registeredTools;
-  expect(tools['rorcha_get_context']).toBeDefined();
+  expect(tools['rorca_get_context']).toBeDefined();
 });
 
 test('calls POST /api/direction/synthesize with workspaceId', async () => {
@@ -27,11 +27,11 @@ test('calls POST /api/direction/synthesize with workspaceId', async () => {
     json: async () => ({ synthesized: 'synthesized context string' }),
   });
 
-  const handler = getToolHandler('rorcha_get_context');
+  const handler = getToolHandler('rorca_get_context');
   await handler({ workspaceId: 'ws-123' });
 
   expect(mockFetch).toHaveBeenCalledWith(
-    `${RORCHA_API}/api/direction/synthesize`,
+    `${RORCA_API}/api/direction/synthesize`,
     expect.objectContaining({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -48,7 +48,7 @@ test('includes specBrief as l4SpecBrief when provided', async () => {
     json: async () => ({ synthesized: 'with L4' }),
   });
 
-  const handler = getToolHandler('rorcha_get_context');
+  const handler = getToolHandler('rorca_get_context');
   await handler({ workspaceId: 'ws-123', specBrief: 'Build auth system' });
 
   const body = JSON.parse(mockFetch.mock.calls[0][1].body);
@@ -61,7 +61,7 @@ test('includes storyAnnotations as l5Annotations when provided', async () => {
     json: async () => ({ synthesized: 'with L5' }),
   });
 
-  const handler = getToolHandler('rorcha_get_context');
+  const handler = getToolHandler('rorca_get_context');
   await handler({
     workspaceId: 'ws-123',
     storyAnnotations: 'Must use JWT tokens',
@@ -77,7 +77,7 @@ test('returns { content: [{ type: "text", text: synthesizedString }] }', async (
     json: async () => ({ synthesized: 'full direction stack output' }),
   });
 
-  const handler = getToolHandler('rorcha_get_context');
+  const handler = getToolHandler('rorca_get_context');
   const result = await handler({ workspaceId: 'ws-123' });
 
   expect(result).toEqual({
@@ -91,7 +91,7 @@ test('throws when API returns non-200', async () => {
     status: 500,
   });
 
-  const handler = getToolHandler('rorcha_get_context');
+  const handler = getToolHandler('rorca_get_context');
   await expect(handler({ workspaceId: 'ws-123' })).rejects.toThrow(
     'Direction Stack synthesis failed: 500'
   );

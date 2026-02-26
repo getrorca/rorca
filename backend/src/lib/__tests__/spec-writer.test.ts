@@ -4,7 +4,7 @@ import * as path from 'path';
 import { writeSpec, GeneratedSpec } from '../spec-writer';
 
 function makeTmpDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-spec-writer-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-spec-writer-'));
 }
 
 function makeSpec(slug = 'test-feature'): GeneratedSpec {

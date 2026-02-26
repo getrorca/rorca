@@ -1,6 +1,6 @@
-# Rorcha Production Deployment Guide
+# Rorca Production Deployment Guide
 
-Step-by-step instructions for deploying Rorcha to a production server.
+Step-by-step instructions for deploying Rorca to a production server.
 
 ## Prerequisites
 
@@ -13,8 +13,8 @@ Step-by-step instructions for deploying Rorcha to a production server.
 ## 1. Clone and Configure
 
 ```bash
-git clone https://github.com/your-org/rorcha.git /opt/rorcha
-cd /opt/rorcha
+git clone https://github.com/your-org/rorca.git /opt/rorca
+cd /opt/rorca
 ```
 
 Copy and fill in environment variables:
@@ -28,8 +28,8 @@ cp deploy/env.production.example .env
 | Variable | Example | Notes |
 |----------|---------|-------|
 | `JWT_SECRET` | (generate below) | Auth token signing key |
-| `CORS_ORIGIN` | `https://app.rorcha.dev` | Exact frontend URL |
-| `RORCHA_BASE_URL` | `https://app.rorcha.dev` | OAuth callbacks |
+| `CORS_ORIGIN` | `https://app.rorca.dev` | Exact frontend URL |
+| `RORCA_BASE_URL` | `https://app.rorca.dev` | OAuth callbacks |
 
 Generate a secure JWT secret:
 
@@ -46,19 +46,19 @@ openssl rand -base64 32
 sudo apt install certbot
 
 # Get certificate (standalone — stop nginx first if running)
-sudo certbot certonly --standalone -d app.rorcha.dev
+sudo certbot certonly --standalone -d app.rorca.dev
 
 # Certificates saved to:
-#   /etc/letsencrypt/live/app.rorcha.dev/fullchain.pem
-#   /etc/letsencrypt/live/app.rorcha.dev/privkey.pem
+#   /etc/letsencrypt/live/app.rorca.dev/fullchain.pem
+#   /etc/letsencrypt/live/app.rorca.dev/privkey.pem
 ```
 
 Copy or symlink certificates for nginx:
 
 ```bash
 sudo mkdir -p /etc/nginx/ssl
-sudo ln -sf /etc/letsencrypt/live/app.rorcha.dev/fullchain.pem /etc/nginx/ssl/fullchain.pem
-sudo ln -sf /etc/letsencrypt/live/app.rorcha.dev/privkey.pem /etc/nginx/ssl/privkey.pem
+sudo ln -sf /etc/letsencrypt/live/app.rorca.dev/fullchain.pem /etc/nginx/ssl/fullchain.pem
+sudo ln -sf /etc/letsencrypt/live/app.rorca.dev/privkey.pem /etc/nginx/ssl/privkey.pem
 ```
 
 Set up auto-renewal:
@@ -83,9 +83,9 @@ Install the production nginx config:
 
 ```bash
 # Replace $DOMAIN with your actual domain
-sed 's/\$DOMAIN/app.rorcha.dev/g' deploy/nginx.conf > /tmp/rorcha-nginx.conf
-sudo cp /tmp/rorcha-nginx.conf /etc/nginx/sites-available/rorcha
-sudo ln -sf /etc/nginx/sites-available/rorcha /etc/nginx/sites-enabled/rorcha
+sed 's/\$DOMAIN/app.rorca.dev/g' deploy/nginx.conf > /tmp/rorca-nginx.conf
+sudo cp /tmp/rorca-nginx.conf /etc/nginx/sites-available/rorca
+sudo ln -sf /etc/nginx/sites-available/rorca /etc/nginx/sites-enabled/rorca
 sudo rm -f /etc/nginx/sites-enabled/default
 
 # Test and reload
@@ -104,14 +104,14 @@ The production config (`deploy/nginx.conf`) includes:
 
 ## 4. Database Migration
 
-Database migrations run automatically on first backend startup. The SQLite database is created at `DB_PATH` (default: `/data/rorcha.db`).
+Database migrations run automatically on first backend startup. The SQLite database is created at `DB_PATH` (default: `/data/rorca.db`).
 
-For Docker deployments, the `rorcha-data` volume persists the database across container restarts.
+For Docker deployments, the `rorca-data` volume persists the database across container restarts.
 
 ### Manual migration (non-Docker)
 
 ```bash
-cd /opt/rorcha/backend
+cd /opt/rorca/backend
 NODE_ENV=production npx tsx src/server.ts
 # Server starts, runs migrations, then Ctrl+C
 ```
@@ -119,7 +119,7 @@ NODE_ENV=production npx tsx src/server.ts
 Verify:
 
 ```bash
-sqlite3 /data/rorcha.db ".tables"
+sqlite3 /data/rorca.db ".tables"
 # Should list: workspaces direction_layers pipeline_runs story_results wal_events ...
 ```
 
@@ -128,7 +128,7 @@ sqlite3 /data/rorcha.db ".tables"
 ### Option A: Docker Compose (recommended)
 
 ```bash
-cd /opt/rorcha
+cd /opt/rorca
 
 # Build images
 docker compose build
@@ -138,25 +138,25 @@ docker compose up -d
 
 # Verify
 docker compose ps
-docker compose logs -f rorcha-backend
+docker compose logs -f rorca-backend
 ```
 
 ### Option B: Direct (no Docker)
 
 ```bash
 # Install dependencies
-cd /opt/rorcha && npm ci
-cd /opt/rorcha/backend && npm ci
+cd /opt/rorca && npm ci
+cd /opt/rorca/backend && npm ci
 
 # Build
-cd /opt/rorcha && npm run build
+cd /opt/rorca && npm run build
 
 # Start backend
-cd /opt/rorcha/backend
+cd /opt/rorca/backend
 NODE_ENV=production node dist/server.js &
 
 # Serve frontend via nginx (copy build output)
-sudo cp -r /opt/rorcha/dist/* /usr/share/nginx/html/
+sudo cp -r /opt/rorca/dist/* /usr/share/nginx/html/
 sudo systemctl reload nginx
 ```
 
@@ -164,7 +164,7 @@ sudo systemctl reload nginx
 
 ### Automated SQLite Backups
 
-Rorcha has a built-in backup system. Configure the backup directory:
+Rorca has a built-in backup system. Configure the backup directory:
 
 ```bash
 # .env
@@ -175,27 +175,27 @@ Set up a cron job for regular backups:
 
 ```bash
 # Daily backup at 2 AM
-echo "0 2 * * * cd /opt/rorcha/backend && sqlite3 /data/rorcha.db '.backup /data/backups/rorcha-$(date +\%Y\%m\%d).db'" | sudo crontab -
+echo "0 2 * * * cd /opt/rorca/backend && sqlite3 /data/rorca.db '.backup /data/backups/rorca-$(date +\%Y\%m\%d).db'" | sudo crontab -
 ```
 
 ### Off-site Backup
 
 ```bash
 # Sync backups to S3 (daily, after local backup)
-# 15 2 * * * aws s3 sync /data/backups/ s3://your-bucket/rorcha-backups/ --delete
+# 15 2 * * * aws s3 sync /data/backups/ s3://your-bucket/rorca-backups/ --delete
 ```
 
 ### Restore from Backup
 
 ```bash
 # Stop the backend
-docker compose stop rorcha-backend
+docker compose stop rorca-backend
 
 # Replace database
-cp /data/backups/rorcha-20260224.db /data/rorcha.db
+cp /data/backups/rorca-20260224.db /data/rorca.db
 
 # Restart
-docker compose start rorcha-backend
+docker compose start rorca-backend
 ```
 
 ## 7. Log Rotation
@@ -203,7 +203,7 @@ docker compose start rorcha-backend
 Install the logrotate configuration:
 
 ```bash
-sudo cp deploy/logrotate.conf /etc/logrotate.d/rorcha
+sudo cp deploy/logrotate.conf /etc/logrotate.d/rorca
 ```
 
 This rotates:
@@ -214,7 +214,7 @@ This rotates:
 Test with dry run:
 
 ```bash
-sudo logrotate -d /etc/logrotate.d/rorcha
+sudo logrotate -d /etc/logrotate.d/rorca
 ```
 
 For Docker deployments, container logs are managed by Docker's logging driver. Configure in `daemon.json`:
@@ -257,10 +257,10 @@ The script checks:
 
 ```bash
 # Cron-based alerting (every 5 minutes)
-*/5 * * * * /opt/rorcha/deploy/healthcheck.sh --quiet || echo "Rorcha unhealthy" | mail -s "ALERT" ops@example.com
+*/5 * * * * /opt/rorca/deploy/healthcheck.sh --quiet || echo "Rorca unhealthy" | mail -s "ALERT" ops@example.com
 
 # Datadog/Nagios custom check
-*/1 * * * * /opt/rorcha/deploy/healthcheck.sh --json >> /var/log/rorcha/healthcheck.json
+*/1 * * * * /opt/rorca/deploy/healthcheck.sh --json >> /var/log/rorca/healthcheck.json
 ```
 
 ### API Health Endpoints
@@ -289,7 +289,7 @@ The script checks:
 
 ```bash
 # Check logs
-docker compose logs rorcha-backend
+docker compose logs rorca-backend
 
 # Common: port already in use
 lsof -ti:3030 | xargs kill -9
@@ -301,10 +301,10 @@ SQLite WAL mode handles concurrent reads, but only one writer at a time. If you 
 
 ```bash
 # Check for stale processes
-fuser /data/rorcha.db
+fuser /data/rorca.db
 
 # Force checkpoint WAL
-sqlite3 /data/rorcha.db "PRAGMA wal_checkpoint(TRUNCATE);"
+sqlite3 /data/rorca.db "PRAGMA wal_checkpoint(TRUNCATE);"
 ```
 
 ### Stale pipeline runs
@@ -312,7 +312,7 @@ sqlite3 /data/rorcha.db "PRAGMA wal_checkpoint(TRUNCATE);"
 After a server restart, running pipelines are orphaned:
 
 ```bash
-sqlite3 /data/rorcha.db "UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE status='running';"
+sqlite3 /data/rorca.db "UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE status='running';"
 ```
 
 ### SSE streams disconnecting

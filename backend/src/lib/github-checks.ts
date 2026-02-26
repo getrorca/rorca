@@ -35,7 +35,7 @@ interface GitHubConnectionRow {
 
 export type CheckState = 'pending' | 'success' | 'failure' | 'error';
 
-export const CHECK_NAME = 'rorcha/spec-compliance';
+export const CHECK_NAME = 'rorca/spec-compliance';
 
 // ─── GitHub token resolution ─────────────────────────────────────────────────
 
@@ -259,7 +259,7 @@ export async function evaluatePrAndPostCheck(
   const storyIdSet = new Set(storyIds);
 
   for (const subdir of ['approved', 'pending']) {
-    const dir = path.join(workspace.path, 'scripts', 'ralph', 'specs', subdir);
+    const dir = path.join(workspace.path, 'forge', 'specs', subdir);
     let files: string[];
     try {
       files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
@@ -343,7 +343,7 @@ function buildTargetUrl(
   specId: string | null,
   storyId?: string,
 ): string {
-  const baseUrl = process.env.RORCHA_BASE_URL || 'http://localhost:5210';
+  const baseUrl = process.env.RORCA_BASE_URL || 'http://localhost:5210';
   if (specId && storyId) {
     return `${baseUrl}/specs/${specId}?story=${storyId}&workspace=${workspaceId}`;
   }

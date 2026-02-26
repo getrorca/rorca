@@ -1,14 +1,18 @@
-# AGENTS.md — Rorcha Root
+# AGENTS.md — Rorca Root
 
 ## Project Overview
-Rorcha is an AI spec orchestration dashboard. Frontend: React 18 + Vite + Tailwind on :5210. Backend: Express.js + SQLite on :3030. LLM via `claude --print` (subscription, no API key).
+Rorca is an AI spec orchestration dashboard. 
+- **Landing Page** (`/landing-page`): Next.js 14 + Tailwind v4 + Framer Motion on :3002
+- **Dashboard** (`/src`): React 18 + Vite + Tailwind on :5210
+- **Backend** (`/backend`): Express.js + SQLite on :3030
+- **LLM Engine**: `claude --print` and OpenCode (V2-capable)
 
 ## Key Architecture Decisions
 - **No hot-reload on backend**: Every backend change requires `lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev`
 - **better-sqlite3 is synchronous**: Never use async/await for DB operations. `.get()` → T|undefined, `.all()` → T[], `.run()` → RunResult
 - **WAL events are the event bus**: Every state change (spec approved, run started, story passed) must emit a `wal_events` row — this drives the SSE pipeline monitor
-- **Workspaces store filesystem paths**: `workspaces.path` is an absolute path to the project repo (e.g. `/Users/dimitriteravanessian/rorcha`). Backend uses this to find run-loop.sh and spec files
-- **run-loop.sh lives in the PROJECT workspace**: Rorcha finds it at `workspace.path/scripts/run-loop.sh` — NOT in Rorcha's own repo
+- **Workspaces store filesystem paths**: `workspaces.path` is an absolute path to the project repo (e.g. `/Users/dimitriteravanessian/rorca`). Backend uses this to find spec files and pass as working directory to `execution-engine.ts`
+- **execution-engine.ts is the canonical execution engine**: `backend/src/lib/execution-engine.ts` — TypeScript, handles claude / opencode / codex agent paths. Replaces the bash `run-loop.sh` / `run-loop.ts` entirely.
 
 ## Critical Gotchas
 
@@ -23,8 +27,8 @@ specPath: `ralph/specs/approved/${spec.id}.json`
 ```
 
 ### spec.id vs spec.specName
-- `spec.id` = filename slug (e.g. `rorcha-feature-enhancements`) — use for API calls and path construction
-- `spec.specName` = human-readable title (e.g. "Rorcha Feature Enhancements") — display only
+- `spec.id` = filename slug (e.g. `rorca-feature-enhancements`) — use for API calls and path construction
+- `spec.specName` = human-readable title (e.g. "Rorca Feature Enhancements") — display only
 
 ### chatComplete Return Type
 `chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }`. **Always use `.text`** — never treat the result as a string directly.
@@ -52,10 +56,10 @@ Use `@xterm/xterm` and `@xterm/addon-fit` (the new scoped packages), NOT the old
 npm run dev                           # Start frontend + backend
 lsof -ti:3030 | xargs kill -9        # Kill backend
 cd backend && npm run dev             # Restart backend
-bash -c "cd /Users/dimitriteravanessian/rorcha && npx tsc --noEmit" && bash -c "cd /Users/dimitriteravanessian/rorcha/backend && npx tsc --noEmit"
+bash -c "cd /Users/dimitriteravanessian/rorca && npx tsc --noEmit" && bash -c "cd /Users/dimitriteravanessian/rorca/backend && npx tsc --noEmit"
 ```
 
-## Database (SQLite at backend/rorcha.db)
+## Database (SQLite at backend/rorca.db)
 Tables: `workspaces` | `direction_layers` | `pipeline_runs` | `story_results` | `wal_events` | `workspace_context` | `spec_versions` | `templates`
 
 WAL mode + FK constraints enabled on every connection (see `backend/src/db/index.ts`).
@@ -66,7 +70,7 @@ WAL mode + FK constraints enabled on every connection (see `backend/src/db/index
 - Spec Versions: `spec_versions` table, diff endpoint, auto-version on regenerate
 - Template Library: workspace-agnostic reusable spec structures
 - LLM Model Selection: ChatResult type, SUPPORTED_MODELS, model resolution chain
-- Pipeline Trigger UI: "Run in Pipeline" button in Archive → actually spawns run-loop.sh
+- Pipeline Trigger UI: "Run in Pipeline" button in Archive → invokes `execution-engine.ts` via `POST /api/pipeline/trigger`
 - Conflict Detection: active run → prompt for worktree → autoWorktree option
 - Worktree Merge: "Merge to main" button in Worktrees panel
 - xterm.js Terminal: live subprocess stdout/stderr in Pipeline Monitor Terminal tab

@@ -55,7 +55,7 @@ POST   /api/specs/:id/add-stories                       — Generate N more stor
 
 ### pipeline.ts
 ```
-POST   /api/pipeline/trigger                   — Spawn run-loop.sh, return runId
+POST   /api/pipeline/trigger                   — Invoke execution-engine.ts, return runId
 GET    /api/pipeline                           — List pipeline runs
 GET    /api/pipeline/runs/:runId/output        — SSE: stream stdout/stderr (base64 chunks)
 POST   /api/pipeline/runs/:runId/cancel        — Kill process, set status='failed'
