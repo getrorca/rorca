@@ -802,7 +802,29 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
     ).all(runId) as StoryResultRow[];
 
-    res.json({ run, stories });
+    // Read spec JSON to return full userStories list (including pending ones)
+    let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean }[] = [];
+    try {
+      const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(run.workspace_id) as { path: string } | undefined;
+      if (workspace) {
+        const absSpecPath = path.join(workspace.path, run.spec_path);
+        if (fs.existsSync(absSpecPath)) {
+          const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
+          if (Array.isArray(specJson.userStories)) {
+            specStories = specJson.userStories.map((s: any) => ({
+              id: s.id,
+              title: s.title,
+              dependsOn: s.dependsOn,
+              passes: s.passes,
+            }));
+          }
+        }
+      }
+    } catch {
+      // Spec file missing or malformed — specStories stays empty
+    }
+
+    res.json({ run, stories, specStories });
   } catch (error: any) {
     console.error('[Pipeline] Get run error:', error);
     res.status(500).json({ error: error.message });
