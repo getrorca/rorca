@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
-import { pauseRun, resumeRun, cancelRun } from '../api/pipeline';
+import { pauseRun, resumeRun, cancelRun, injectContext } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
 import SplitPane from '../components/SplitPane';
@@ -18,7 +18,7 @@ interface PipelineRun {
   id: number;
   spec_path: string;
   workspace_id: string;
-  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
+  status: 'running' | 'paused' | 'blocked' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
   pid: number | null;
   branch_name: string | null;
   worktree_path: string | null;
@@ -62,6 +62,7 @@ function getTabFromHash(): RunViewTab {
 const STATUS_BADGE_STYLES: Record<string, string> = {
   running: 'bg-blue-500/10 text-blue-500',
   paused: 'bg-yellow-500/10 text-yellow-500',
+  blocked: 'bg-amber-500/10 text-amber-500',
   done: 'bg-emerald-500/10 text-emerald-500',
   failed: 'bg-red-500/10 text-red-500',
   partial_failure: 'bg-orange-500/10 text-orange-500',
@@ -71,6 +72,7 @@ const STATUS_BADGE_STYLES: Record<string, string> = {
 const STATUS_BADGE_LABELS: Record<string, string> = {
   running: 'Running',
   paused: 'Paused',
+  blocked: 'Blocked',
   done: 'Passed',
   failed: 'Failed',
   partial_failure: 'Partial',
@@ -294,6 +296,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [pauseLoading, setPauseLoading] = useState(false);
   const [killLoading, setKillLoading] = useState(false);
   const [showKillConfirm, setShowKillConfirm] = useState(false);
+  const [hitlContext, setHitlContext] = useState('');
+  const [hitlSending, setHitlSending] = useState(false);
 
   // Sync tab selection to URL hash
   const handleTabChange = useCallback((tab: RunViewTab) => {
@@ -322,6 +326,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       if (evt.event_type === 'run_finished') status = 'done';
       else if (evt.event_type === 'run_failed') status = 'failed';
       else if (evt.event_type === 'run_paused') status = 'paused';
+      else if (evt.event_type === 'run_blocked') status = 'blocked';
       else if (evt.event_type === 'run_resumed') status = 'running';
       else if (evt.event_type === 'run_cancelled') status = 'cancelled';
     }
@@ -343,7 +348,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     fetchRun();
   }, [fetchRun]);
 
-  const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused';
+  const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused' || effectiveStatus === 'blocked';
 
   const handlePauseResume = useCallback(async () => {
     if (!isActive) return;
@@ -374,6 +379,20 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       setKillLoading(false);
     }
   }, [runId, fetchRun]);
+
+  const handleSendContext = useCallback(async () => {
+    if (!hitlContext.trim()) return;
+    setHitlSending(true);
+    try {
+      await injectContext(runId, hitlContext.trim());
+      setHitlContext('');
+      await fetchRun();
+    } catch (err) {
+      console.error('[RunView] Context injection failed:', err);
+    } finally {
+      setHitlSending(false);
+    }
+  }, [runId, hitlContext, fetchRun]);
 
   if (loading) {
     return (
@@ -520,6 +539,44 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
           );
         })}
       </div>
+
+      {/* HITL blocked banner */}
+      {effectiveStatus === 'blocked' && (
+        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10">
+          <div className="px-4 py-2.5 flex items-center gap-2">
+            <AlertTriangle size={16} className="text-amber-500 shrink-0" />
+            <span className="text-sm font-medium text-amber-500">
+              Run paused — agent is waiting for input
+            </span>
+          </div>
+          <div className="px-4 pb-3 flex gap-2">
+            <textarea
+              value={hitlContext}
+              onChange={(e) => setHitlContext(e.target.value)}
+              placeholder="Type instructions or context for the agent..."
+              className="flex-1 min-h-[60px] max-h-[120px] px-3 py-2 text-sm rounded-lg border border-amber-500/30 bg-bg text-[var(--text)] placeholder:text-muted resize-y focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+              disabled={hitlSending}
+            />
+            <button
+              onClick={handleSendContext}
+              disabled={!hitlContext.trim() || hitlSending}
+              title="Send context and resume"
+              className={`self-end px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors ${
+                hitlContext.trim() && !hitlSending
+                  ? 'bg-amber-500 text-white hover:bg-amber-600'
+                  : 'bg-amber-500/20 text-amber-500/40 cursor-not-allowed'
+              }`}
+            >
+              {hitlSending ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Send size={14} />
+              )}
+              Send
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Tab content — fills remaining space */}
       {renderTabContent()}
