@@ -11,7 +11,7 @@ import OnboardingWizard from './components/OnboardingWizard';
 import CommandPalette from './components/CommandPalette';
 import KeyboardShortcutsPanel from './components/KeyboardShortcutsPanel';
 import ErrorBoundary from './components/ErrorBoundary';
-import NetworkBanner from './components/NetworkBanner';
+// NetworkBanner is now inline in Shell.tsx top bar (useNetworkOffline + NetworkIndicator)
 import LoginPage from './components/LoginPage';
 import RegisterPage from './components/RegisterPage';
 import ForgotPasswordPage from './components/ForgotPasswordPage';
@@ -242,7 +242,6 @@ function App() {
       <HelpTipsProvider>
         <ToastProvider>
           <AuthProvider>
-            <NetworkBanner />
             <GlobalErrorWiring />
             <AuthGate />
           </AuthProvider>
