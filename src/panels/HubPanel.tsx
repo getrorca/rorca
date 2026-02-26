@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -24,6 +24,7 @@ interface SpecSummary {
   storyCount: number;
   status: 'pending' | 'approved';
   generatedAt: string;
+  storyTitles?: string[];
 }
 
 interface StoryResult {
@@ -77,11 +78,16 @@ const STATUS_DOTS: Record<string, string> = {
 
 // ─── Section Header ─────────────────────────────────────────────────────────
 
-function SectionHeader({ icon: Icon, label }: { icon: typeof Play; label: string }) {
+function SectionHeader({ icon: Icon, label, badge }: { icon: typeof Play; label: string; badge?: number }) {
   return (
     <h2 className="flex items-center gap-2 text-sm font-bold text-[var(--text)] mb-3">
       <Icon size={16} className="text-muted" />
       {label}
+      {badge != null && badge > 0 && (
+        <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded-full bg-accent text-white">
+          {badge}
+        </span>
+      )}
     </h2>
   );
 }
@@ -259,25 +265,82 @@ function ActiveRunCard({ run, totalStories, onNavigate }: {
 
 // ─── Pending Reviews Section ────────────────────────────────────────────────
 
-function PendingReviewCard({ spec, onNavigate }: {
+function PendingReviewCard({ spec, workspaceId, onNavigate, onAction }: {
   spec: SpecSummary;
+  workspaceId: string;
   onNavigate: (panel: PanelId) => void;
+  onAction: (specId: string, action: 'approve' | 'reject') => void;
 }) {
+  const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
+
+  const handleAction = async (e: React.MouseEvent, action: 'approve' | 'reject') => {
+    e.stopPropagation();
+    setActionLoading(action);
+    try {
+      await apiFetch(`/api/specs/${spec.id}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      onAction(spec.id, action);
+    } catch {
+      // silently fail — next poll will reflect state
+    }
+    setActionLoading(null);
+  };
+
   return (
     <button
       onClick={() => onNavigate('queue')}
-      className="w-full text-left p-3 bg-panel border border-border rounded-lg hover:border-accent/50 transition-colors group"
+      className="w-full text-left p-4 bg-panel border border-border rounded-lg hover:border-accent/50 transition-colors group flex flex-col gap-2"
     >
-      <div className="flex items-center justify-between">
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-[var(--text)] truncate">{spec.specName}</p>
-          <div className="flex items-center gap-2 text-xs text-muted mt-0.5">
-            <span>{spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}</span>
-            <span>·</span>
-            <span>{relativeTime(spec.generatedAt)}</span>
-          </div>
-        </div>
-        <ChevronRight size={16} className="text-muted group-hover:text-accent transition-colors shrink-0" />
+      {/* Title + chevron */}
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-sm font-semibold text-[var(--text)] truncate flex-1">{spec.specName}</p>
+        <ChevronRight size={16} className="text-muted group-hover:text-accent transition-colors shrink-0 mt-0.5" />
+      </div>
+
+      {/* Meta: story count + timestamp */}
+      <div className="flex items-center gap-2 text-xs text-muted">
+        <span>{spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}</span>
+        <span>·</span>
+        <span>{relativeTime(spec.generatedAt)}</span>
+      </div>
+
+      {/* Story title previews */}
+      {spec.storyTitles && spec.storyTitles.length > 0 && (
+        <ul className="text-xs text-muted space-y-0.5 pl-2 border-l-2 border-border">
+          {spec.storyTitles.map((title, i) => (
+            <li key={i} className="truncate">{title}</li>
+          ))}
+          {spec.storyCount > 2 && (
+            <li className="text-muted/60">+{spec.storyCount - 2} more</li>
+          )}
+        </ul>
+      )}
+
+      {/* Approve / Reject actions */}
+      <div className="flex items-center gap-2 pt-1">
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={(e) => handleAction(e, 'approve')}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleAction(e as unknown as React.MouseEvent, 'approve'); }}
+          className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors ${actionLoading === 'approve' ? 'opacity-50 pointer-events-none' : ''}`}
+        >
+          <CheckCircle size={12} />
+          Approve
+        </span>
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={(e) => handleAction(e, 'reject')}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleAction(e as unknown as React.MouseEvent, 'reject'); }}
+          className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors ${actionLoading === 'reject' ? 'opacity-50 pointer-events-none' : ''}`}
+        >
+          <XCircle size={12} />
+          Reject
+        </span>
       </div>
     </button>
   );
@@ -425,10 +488,18 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
         {/* Pending Reviews */}
         {hasPending && (
           <section>
-            <SectionHeader icon={ListChecks} label="Pending Reviews" />
-            <div className="space-y-2">
+            <SectionHeader icon={ListChecks} label="Pending Reviews" badge={pendingSpecs.length} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {pendingSpecs.map((spec) => (
-                <PendingReviewCard key={spec.id} spec={spec} onNavigate={onNavigate} />
+                <PendingReviewCard
+                  key={spec.id}
+                  spec={spec}
+                  workspaceId={workspaceId!}
+                  onNavigate={onNavigate}
+                  onAction={(specId) => {
+                    setPendingSpecs((prev) => prev.filter((s) => s.id !== specId));
+                  }}
+                />
               ))}
             </div>
           </section>

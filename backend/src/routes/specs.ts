@@ -95,6 +95,7 @@ interface SpecSummary {
   forkedFrom?: string;
   reviewStatus: ReviewStatus;
   assignee?: AssigneeInfo;
+  storyTitles?: string[];
 }
 
 interface SpecVersionRow {
@@ -205,6 +206,7 @@ function buildSummary(
     ...(content.forkedFrom ? { forkedFrom: content.forkedFrom } : {}),
     reviewStatus: content.reviewStatus ?? 'draft',
     ...(assignee ? { assignee } : {}),
+    storyTitles: stories.slice(0, 2).map((s: any) => s.title || s.id || 'Untitled'),
   };
 }
 
