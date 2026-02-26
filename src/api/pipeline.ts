@@ -91,6 +91,16 @@ export function retryRun(
   });
 }
 
+export function cancelRun(
+  runId: number,
+  opts?: ApiOptions,
+): Promise<{ ok: true; runId: number; status: 'cancelled' }> {
+  return apiFetch(`/api/pipeline/runs/${runId}/cancel`, {
+    method: 'POST',
+    signal: opts?.signal,
+  });
+}
+
 // ─── Compare runs ─────────────────────────────────────────────────────────────
 
 export interface CompareRunsParams extends ApiOptions {
