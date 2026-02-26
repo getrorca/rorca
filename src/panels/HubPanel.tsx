@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import AddWorkspaceModal from '../components/AddWorkspaceModal';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from '../components/Sidebar';
@@ -431,7 +432,8 @@ function RecentRunRow({ run, onNavigate }: {
 // ─── HubPanel ───────────────────────────────────────────────────────────────
 
 export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) => void }) {
-  const { workspaceId } = useWorkspace();
+  const { workspaceId, workspaces, addWorkspace } = useWorkspace();
+  const [showAddWorkspace, setShowAddWorkspace] = useState(false);
   const [activeRun, setActiveRun] = useState<PipelineRun | null>(null);
   const [totalStories, setTotalStories] = useState(0);
   const [pendingSpecs, setPendingSpecs] = useState<SpecSummary[]>([]);
@@ -511,6 +513,38 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
     return () => es.close();
   }, []);
 
+  // ── Empty state: No workspace registered ──
+  if (workspaces.length === 0) {
+    return (
+      <div className="h-full flex items-center justify-center px-6">
+        <div className="flex flex-col items-center text-center max-w-sm">
+          <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+            <FolderGit2 size={28} className="text-accent" />
+          </div>
+          <h2 className="text-lg font-semibold text-[var(--text)] mb-2">Connect your first repository</h2>
+          <p className="text-sm text-muted mb-6">
+            Rorca turns plain-English briefs into structured specs and ships them autonomously — story by story.
+          </p>
+          <button
+            onClick={() => setShowAddWorkspace(true)}
+            className="px-4 py-2 text-sm font-medium rounded-lg bg-accent text-white hover:bg-accent/90 transition-colors"
+          >
+            Add Workspace
+          </button>
+        </div>
+        {showAddWorkspace && (
+          <AddWorkspaceModal
+            onClose={() => setShowAddWorkspace(false)}
+            onSuccess={(ws) => {
+              addWorkspace(ws);
+              setShowAddWorkspace(false);
+            }}
+          />
+        )}
+      </div>
+    );
+  }
+
   if (!loaded) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -524,19 +558,35 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
   const hasRecent = recentRuns.length > 0;
   const isEmpty = !hasActiveRun && !hasPending && !hasRecent;
 
+  // ── Empty state: Workspace exists but no specs or runs ──
   if (isEmpty) {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-3 text-center px-6">
-        <div className="w-12 h-12 rounded-full bg-accent/10 flex items-center justify-center">
-          <Play size={20} className="text-accent" />
+      <div className="h-full flex items-center justify-center px-6">
+        <div className="flex flex-col items-center text-center max-w-sm">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 flex items-center justify-center mb-4">
+            <Compass size={28} className="text-emerald-500" />
+          </div>
+          <h2 className="text-lg font-semibold text-[var(--text)] mb-2">Ready to build</h2>
+          <p className="text-sm text-muted mb-6">
+            Write a brief to generate your first spec, or set direction to guide how stories are written.
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => onNavigate('forge')}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-accent text-white hover:bg-accent/90 transition-colors"
+            >
+              <PenLine size={16} />
+              Write a brief
+            </button>
+            <button
+              onClick={() => onNavigate('settings')}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border border-border text-[var(--text)] hover:bg-bg transition-colors"
+            >
+              <Settings size={16} />
+              Set direction
+            </button>
+          </div>
         </div>
-        <p className="text-sm text-muted">No activity yet. Create a spec to get started.</p>
-        <button
-          onClick={() => onNavigate('forge')}
-          className="text-sm text-accent hover:underline"
-        >
-          Go to Forge
-        </button>
       </div>
     );
   }
