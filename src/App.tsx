@@ -40,6 +40,7 @@ import AuditLogPanel from './panels/AuditLogPanel';
 import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
 import SettingsPanel from './panels/SettingsPanel';
 import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
+import HubPanel from './panels/HubPanel';
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
@@ -127,6 +128,7 @@ function GlobalErrorWiring() {
 /** Renders the active panel component */
 function ActivePanel({ id, onNavigate }: { id: PanelId; onNavigate: (p: PanelId) => void }) {
   switch (id) {
+    case 'hub': return <HubPanel onNavigate={onNavigate} />;
     case 'forge': return <SpecForgePanelPage />;
     case 'stack': return <DirectionStackPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
@@ -154,6 +156,7 @@ function ActivePanel({ id, onNavigate }: { id: PanelId; onNavigate: (p: PanelId)
 
 /** Panel label for ErrorBoundary fallback */
 const PANEL_LABELS: Record<PanelId, string> = {
+  hub: 'Hub',
   forge: 'Spec Forge',
   stack: 'Direction Stack',
   'team-direction': 'Team Direction',
@@ -178,7 +181,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
 };
 
 function AppContent() {
-  const [activePanel, setActivePanel] = useState<PanelId>('forge');
+  const [activePanel, setActivePanel] = useState<PanelId>('hub');
   const { workspaces } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
