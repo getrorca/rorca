@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Play, Clock, ListChecks, ChevronRight } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from '../components/Sidebar';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -42,6 +43,12 @@ function specLabel(specPath: string): string {
   return file.replace(/\.json$/, '').replace(/-/g, ' ');
 }
 
+function specSlug(specPath: string): string {
+  const parts = specPath.split('/');
+  const file = parts[parts.length - 1] || specPath;
+  return file.replace(/\.json$/, '');
+}
+
 function relativeTime(iso: string): string {
   try {
     return formatDistanceToNow(parseUtc(iso), { addSuffix: true });
@@ -79,39 +86,172 @@ function SectionHeader({ icon: Icon, label }: { icon: typeof Play; label: string
   );
 }
 
+// ─── Border colors by run status ────────────────────────────────────────────
+
+const BORDER_LEFT: Record<string, string> = {
+  running: 'border-l-blue-500',
+  paused: 'border-l-yellow-500',
+  done: 'border-l-emerald-500',
+  failed: 'border-l-red-500',
+  partial_failure: 'border-l-orange-500',
+  cancelled: 'border-l-gray-500',
+};
+
 // ─── Active Run Section ─────────────────────────────────────────────────────
 
-function ActiveRunCard({ run, storyResults, onNavigate }: {
+function ActiveRunCard({ run, totalStories, onNavigate }: {
   run: PipelineRun;
-  storyResults: StoryResult[];
+  totalStories: number;
   onNavigate: (panel: PanelId) => void;
 }) {
-  const passed = storyResults.filter((s) => s.status === 'pass').length;
-  const failed = storyResults.filter((s) => s.status === 'fail').length;
-  const total = storyResults.length;
+  const walEvents = usePipelineSSE(String(run.id));
+  const [actionLoading, setActionLoading] = useState<'pause' | 'kill' | null>(null);
+
+  // Derive live story progress from SSE events + initial story_results
+  const { passed, failed, currentStoryTitle, currentRunStatus } = useMemo(() => {
+    let p = 0;
+    let f = 0;
+    let currentTitle: string | null = null;
+    let latestStatus = run.status;
+
+    for (const evt of walEvents) {
+      const payload = evt.payload ? JSON.parse(evt.payload) : {};
+      if (evt.event_type === 'story_started') {
+        currentTitle = payload.story_title || evt.story_id || null;
+      } else if (evt.event_type === 'story_passed') {
+        p++;
+        if (currentTitle === (payload.story_title || evt.story_id)) {
+          currentTitle = null;
+        }
+      } else if (evt.event_type === 'story_failed') {
+        f++;
+        if (currentTitle === (payload.story_title || evt.story_id)) {
+          currentTitle = null;
+        }
+      } else if (evt.event_type === 'run_finished') {
+        latestStatus = 'done';
+      } else if (evt.event_type === 'run_failed') {
+        latestStatus = 'failed';
+      } else if (evt.event_type === 'run_paused') {
+        latestStatus = 'paused';
+      } else if (evt.event_type === 'run_resumed') {
+        latestStatus = 'running';
+      } else if (evt.event_type === 'run_cancelled') {
+        latestStatus = 'cancelled';
+      }
+    }
+    return {
+      passed: p,
+      failed: f,
+      currentStoryTitle: currentTitle,
+      currentRunStatus: latestStatus,
+    };
+  }, [walEvents, run.status]);
+
+  // Use SSE-derived status if events have come in, otherwise fall back to polled status
+  const effectiveStatus = walEvents.length > 0 ? currentRunStatus : run.status;
+  const completed = passed + failed;
+  const total = totalStories || Math.max(completed, 1);
+  const progressPct = total > 0 ? Math.round((passed / total) * 100) : 0;
+  const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused';
+
+  const handlePause = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setActionLoading('pause');
+    try {
+      if (effectiveStatus === 'paused') {
+        await apiFetch(`/api/pipeline/runs/${run.id}/resume`, { method: 'POST' });
+      } else {
+        await apiFetch(`/api/pipeline/runs/${run.id}/pause`, { method: 'POST' });
+      }
+    } catch { /* SSE will reflect the change */ }
+    setActionLoading(null);
+  };
+
+  const handleKill = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setActionLoading('kill');
+    try {
+      await apiFetch(`/api/pipeline/runs/${run.id}/cancel`, { method: 'POST' });
+    } catch { /* SSE will reflect the change */ }
+    setActionLoading(null);
+  };
 
   return (
     <button
       onClick={() => onNavigate('pipeline')}
-      className="w-full text-left p-4 bg-panel border border-border rounded-lg hover:border-accent/50 transition-colors group"
+      className={`w-full text-left p-4 bg-panel border border-border border-l-4 ${BORDER_LEFT[effectiveStatus] || 'border-l-gray-500'} rounded-lg hover:border-accent/50 transition-colors group`}
     >
+      {/* Header row: status + run ID + actions */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${STATUS_DOTS[run.status] || 'bg-gray-500'}`} />
-          <span className="text-sm font-semibold text-[var(--text)] capitalize">{run.status}</span>
+          <span className={`w-2 h-2 rounded-full ${STATUS_DOTS[effectiveStatus] || 'bg-gray-500'}`} />
+          <span className="text-sm font-semibold text-[var(--text)] capitalize">{effectiveStatus}</span>
+          <span className="text-xs text-muted font-mono">#{run.id}</span>
         </div>
-        <ChevronRight size={16} className="text-muted group-hover:text-accent transition-colors" />
+        <div className="flex items-center gap-1">
+          {isActive && (
+            <>
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={handlePause}
+                onKeyDown={(e) => { if (e.key === 'Enter') handlePause(e as unknown as React.MouseEvent); }}
+                className={`p-1 rounded hover:bg-bg transition-colors ${actionLoading === 'pause' ? 'opacity-50' : ''}`}
+                title={effectiveStatus === 'paused' ? 'Resume' : 'Pause'}
+              >
+                {effectiveStatus === 'paused' ? (
+                  <Play size={14} className="text-yellow-500" />
+                ) : (
+                  <Pause size={14} className="text-yellow-500" />
+                )}
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={handleKill}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleKill(e as unknown as React.MouseEvent); }}
+                className={`p-1 rounded hover:bg-bg transition-colors ${actionLoading === 'kill' ? 'opacity-50' : ''}`}
+                title="Kill"
+              >
+                <Square size={14} className="text-red-500" />
+              </span>
+            </>
+          )}
+          <ChevronRight size={16} className="text-muted group-hover:text-accent transition-colors" />
+        </div>
       </div>
-      <p className="text-sm text-[var(--text)] truncate capitalize mb-1">
+
+      {/* Spec name */}
+      <p className="text-sm font-medium text-[var(--text)] truncate capitalize mb-1">
         {specLabel(run.spec_path)}
       </p>
-      <div className="flex items-center gap-3 text-xs text-muted">
+
+      {/* Current story */}
+      {currentStoryTitle && (
+        <p className="text-xs text-muted truncate mb-2">
+          Running: <span className="text-[var(--text)]">{currentStoryTitle}</span>
+        </p>
+      )}
+
+      {/* Progress bar */}
+      <div className="w-full h-1.5 bg-border rounded-full overflow-hidden mb-2">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${
+            effectiveStatus === 'failed' ? 'bg-red-500' :
+            effectiveStatus === 'done' ? 'bg-emerald-500' :
+            'bg-blue-500'
+          }`}
+          style={{ width: `${progressPct}%` }}
+        />
+      </div>
+
+      {/* Footer: time + progress counts */}
+      <div className="flex items-center justify-between text-xs text-muted">
         <span>Started {relativeTime(run.started_at)}</span>
-        {total > 0 && (
-          <span className="font-mono tabular-nums">
-            {passed}/{total} passed{failed > 0 ? ` · ${failed} failed` : ''}
-          </span>
-        )}
+        <span className="font-mono tabular-nums">
+          {passed}/{total} passed{failed > 0 ? ` · ${failed} failed` : ''}
+        </span>
       </div>
     </button>
   );
@@ -179,7 +319,7 @@ function RecentRunRow({ run, onNavigate }: {
 export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) => void }) {
   const { workspaceId } = useWorkspace();
   const [activeRun, setActiveRun] = useState<PipelineRun | null>(null);
-  const [activeRunStories, setActiveRunStories] = useState<StoryResult[]>([]);
+  const [totalStories, setTotalStories] = useState(0);
   const [pendingSpecs, setPendingSpecs] = useState<SpecSummary[]>([]);
   const [recentRuns, setRecentRuns] = useState<PipelineRun[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -197,24 +337,35 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
     ]);
 
     const runs = runsRes.items;
-    const active = runs.find((r) => r.status === 'running') ?? null;
+    const active = runs.find((r) => r.status === 'running' || r.status === 'paused') ?? null;
     setActiveRun(active);
     setPendingSpecs(specsRes.items);
-    // Recent = completed runs (not running), most recent first
-    setRecentRuns(runs.filter((r) => r.status !== 'running').slice(0, 10));
+    // Recent = completed runs (not active), most recent first
+    setRecentRuns(runs.filter((r) => r.status !== 'running' && r.status !== 'paused').slice(0, 10));
 
-    // Fetch story results for active run
+    // Fetch total story count from spec for the active run
     if (active) {
-      try {
-        const detail = await apiFetch<{ storyResults: StoryResult[] }>(
-          `/api/pipeline/runs/${active.id}`,
-        );
-        setActiveRunStories(detail.storyResults ?? []);
-      } catch {
-        setActiveRunStories([]);
+      const slug = specSlug(active.spec_path);
+      if (slug) {
+        try {
+          const spec = await apiFetch<{ userStories?: { id: string }[]; storyCount?: number }>(
+            `/api/specs/${slug}?workspaceId=${workspaceId}`,
+          );
+          setTotalStories(spec.userStories?.length ?? spec.storyCount ?? 0);
+        } catch {
+          // Fallback: count story_results from run detail
+          try {
+            const detail = await apiFetch<{ stories: StoryResult[] }>(
+              `/api/pipeline/runs/${active.id}`,
+            );
+            setTotalStories(detail.stories?.length ?? 0);
+          } catch {
+            setTotalStories(0);
+          }
+        }
       }
     } else {
-      setActiveRunStories([]);
+      setTotalStories(0);
     }
 
     setLoaded(true);
@@ -265,7 +416,7 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
             <SectionHeader icon={Play} label="Active Run" />
             <ActiveRunCard
               run={activeRun}
-              storyResults={activeRunStories}
+              totalStories={totalStories}
               onNavigate={onNavigate}
             />
           </section>
