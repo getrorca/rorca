@@ -4,6 +4,7 @@ import { apiFetch } from '../lib/apiFetch';
 import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
 import BatchForge from './BatchForge';
 import DirectionPreviewSidebar from '../components/DirectionPreviewSidebar';
+import SpecForgeProgress from '../components/SpecForgeProgress';
 
 import type { PanelId } from '../components/Sidebar';
 
@@ -118,6 +119,8 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedSpec, setGeneratedSpec] = useState<GeneratedSpec | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [apiDone, setApiDone] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   const validateSpecName = useCallback((value: string) => {
     if (!value) {
@@ -168,15 +171,27 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
 
   const canGenerate = specName.length > 0 && !specNameError && specBrief.length > 0;
 
+  const handleCancel = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsGenerating(false);
+    setApiDone(false);
+    setGenerateError(null);
+  }, []);
+
   const handleGenerate = async () => {
     if (!canGenerate || isGenerating) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setIsGenerating(true);
     setGenerateError(null);
+    setApiDone(false);
     const modelUsed = selectedModel || defaultModelId || 'claude-sonnet-4-5-20250929';
     try {
       const result = await apiFetch<GeneratedSpec>('/api/specs/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           workspaceId,
           specName,
@@ -192,8 +207,13 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
           model: selectedModel || undefined,
         }),
       });
+      setApiDone(true);
       setGeneratedSpec(result);
+      // Brief delay so user sees the validating stage complete
+      setTimeout(() => setIsGenerating(false), 800);
     } catch (err: unknown) {
+      if (controller.signal.aborted) return;
+      setApiDone(true);
       const message = err instanceof Error ? err.message : String(err);
       const alternatives = availableModels
         .filter(m => m.id !== modelUsed)
@@ -202,7 +222,6 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
         ? ` Try an alternative model: ${alternatives.join(', ')}.`
         : '';
       setGenerateError(`Generation failed with ${availableModels.find(m => m.id === modelUsed)?.label || modelUsed}: ${message}.${suggestion}`);
-    } finally {
       setIsGenerating(false);
     }
   };
@@ -496,33 +515,27 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
               </div>
             </section>
 
-            {/* Generate Button */}
+            {/* Generate Button / Progress Indicator */}
             <div className="space-y-2">
-              <button
-                onClick={handleGenerate}
-                disabled={!canGenerate || isGenerating}
-                className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${
-                  canGenerate && !isGenerating
-                    ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
-                    : 'bg-accent/30 text-white/40 cursor-not-allowed'
-                }`}
-              >
-                {isGenerating ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    Generating...
-                  </span>
-                ) : (
-                  'Generate Spec'
-                )}
-              </button>
-              {generateError && (
-                <div className="px-3 py-2 rounded border border-error/30 bg-error/5 text-xs text-error">
-                  {generateError}
-                </div>
+              {isGenerating || (generateError && !generatedSpec) ? (
+                <SpecForgeProgress
+                  isActive={isGenerating}
+                  onCancel={handleCancel}
+                  error={generateError}
+                  apiDone={apiDone}
+                />
+              ) : (
+                <button
+                  onClick={handleGenerate}
+                  disabled={!canGenerate || isGenerating}
+                  className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${
+                    canGenerate && !isGenerating
+                      ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
+                      : 'bg-accent/30 text-white/40 cursor-not-allowed'
+                  }`}
+                >
+                  Generate Spec
+                </button>
               )}
             </div>
           </div>
