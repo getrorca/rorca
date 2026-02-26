@@ -32,9 +32,11 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
   const [specNameError, setSpecNameError] = useState('');
   const [domain, setDomain] = useState('');
 
-  // Model selection
+  // Model selection (persisted in localStorage)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
-  const [selectedModel, setSelectedModel] = useState('');
+  const [selectedModel, setSelectedModel] = useState(() => {
+    try { return localStorage.getItem('rorca:forge:model') ?? ''; } catch { return ''; }
+  });
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
   const [activeProvider, setActiveProvider] = useState<string>('claude-cli');
 
@@ -51,14 +53,34 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
     }).catch(() => {});
   }, [workspaceId]);
 
+  // Persist model selection to localStorage
+  useEffect(() => {
+    try {
+      if (selectedModel) {
+        localStorage.setItem('rorca:forge:model', selectedModel);
+      } else {
+        localStorage.removeItem('rorca:forge:model');
+      }
+    } catch { /* quota */ }
+  }, [selectedModel]);
+
   // Section 2: Direction Stack Overrides
   const [overridesOpen, setOverridesOpen] = useState(false);
   const [l4Override, setL4Override] = useState('');
   const [l5Override, setL5Override] = useState('');
 
   // Section 3: Spec Parameters
-  const [storyCount, setStoryCount] = useState(8);
-  const [storyCountRaw, setStoryCountRaw] = useState('8');
+  const STORY_COUNT_PRESETS = [3, 5, 8, 10, 15, 20] as const;
+  const [storyCount, setStoryCount] = useState(() => {
+    try {
+      const saved = localStorage.getItem('rorca:forge:storyCount');
+      if (saved) { const n = parseInt(saved, 10); if (!isNaN(n) && n >= 1) return n; }
+    } catch { /* ignore */ }
+    return 8;
+  });
+  const isCustomCount = !STORY_COUNT_PRESETS.includes(storyCount as typeof STORY_COUNT_PRESETS[number]);
+  const [showCustomInput, setShowCustomInput] = useState(isCustomCount);
+  const [storyCountRaw, setStoryCountRaw] = useState(String(storyCount));
   const [storyPrefix, setStoryPrefix] = useState('US');
   const [includeDiagram, setIncludeDiagram] = useState(true);
   const [diagramType, setDiagramType] = useState<DiagramType>('flowchart');
@@ -109,13 +131,32 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
     }
   }, []);
 
-  const handleStoryCountChange = (value: string) => {
-    setStoryCountRaw(value);
-    const n = parseInt(value, 10);
-    if (!isNaN(n)) setStoryCount(n);
+  // Persist story count to localStorage
+  useEffect(() => {
+    try { localStorage.setItem('rorca:forge:storyCount', String(storyCount)); } catch { /* quota */ }
+  }, [storyCount]);
+
+  const handleStoryCountSelect = (value: string) => {
+    if (value === 'custom') {
+      setShowCustomInput(true);
+      setStoryCountRaw(String(storyCount));
+    } else {
+      setShowCustomInput(false);
+      const n = parseInt(value, 10);
+      if (!isNaN(n)) {
+        setStoryCount(n);
+        setStoryCountRaw(value);
+      }
+    }
   };
 
-  const handleStoryCountBlur = () => {
+  const handleCustomCountChange = (value: string) => {
+    setStoryCountRaw(value);
+    const n = parseInt(value, 10);
+    if (!isNaN(n) && n >= 1) setStoryCount(n);
+  };
+
+  const handleCustomCountBlur = () => {
     const clamped = Math.min(500, Math.max(1, storyCount || 1));
     setStoryCount(clamped);
     setStoryCountRaw(String(clamped));
@@ -303,56 +344,47 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
                     </span>
                   </span>
                 }>
-                  <div className="space-y-1.5">
+                  <select
+                    value={selectedModel || defaultModelId || ''}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center]"
+                    aria-label="Select LLM model"
+                  >
                     {availableModels.map((m) => (
-                      <label
-                        key={m.id}
-                        className={`flex items-center gap-3 px-3 py-2 rounded border cursor-pointer transition-colors ${
-                          (selectedModel || defaultModelId) === m.id
-                            ? 'border-accent bg-accent/5'
-                            : 'border-border bg-panel hover:border-accent/40'
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="modelSelect"
-                          value={m.id}
-                          checked={(selectedModel || defaultModelId) === m.id}
-                          onChange={() => setSelectedModel(m.id)}
-                          className="w-4 h-4 accent-accent"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium text-text">{m.label}</span>
-                            {m.recommended && (
-                              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-accent/15 text-accent">
-                                Recommended
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2 mt-0.5">
-                            <span className="text-xs text-muted">{m.provider}</span>
-                            <span className="text-xs text-muted/60">|</span>
-                            <span className="text-xs text-muted">
-                              ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
-                            </span>
-                          </div>
-                        </div>
-                      </label>
+                      <option key={m.id} value={m.id}>
+                        {m.label} — {m.provider}{m.recommended ? ' (Recommended)' : ''} · ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
+                      </option>
                     ))}
-                  </div>
+                  </select>
                 </Field>
 
                 <div className="flex gap-4">
-                  <Field label="Story Count" className="w-28">
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={storyCountRaw}
-                      onChange={(e) => handleStoryCountChange(e.target.value)}
-                      onBlur={handleStoryCountBlur}
-                      className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors"
-                    />
+                  <Field label="Story Count" className="w-40">
+                    <div className="flex gap-2">
+                      <select
+                        value={showCustomInput ? 'custom' : String(storyCount)}
+                        onChange={(e) => handleStoryCountSelect(e.target.value)}
+                        className="flex-1 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center]"
+                        aria-label="Select story count"
+                      >
+                        {STORY_COUNT_PRESETS.map((n) => (
+                          <option key={n} value={n}>{n} stories</option>
+                        ))}
+                        <option value="custom">Custom</option>
+                      </select>
+                      {showCustomInput && (
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={storyCountRaw}
+                          onChange={(e) => handleCustomCountChange(e.target.value)}
+                          onBlur={handleCustomCountBlur}
+                          className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center"
+                          aria-label="Custom story count"
+                          autoFocus
+                        />
+                      )}
+                    </div>
                   </Field>
                   <Field label="Story Prefix" className="w-28">
                     <input
