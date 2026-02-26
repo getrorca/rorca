@@ -75,7 +75,7 @@ function AuthGate() {
     );
   }
 
-  // Auth gate bypassed — Rorcha is a local single-user tool, login wall not needed yet
+  // Auth gate bypassed — Rorca is a local single-user tool, login wall not needed yet
   void isAuthenticated; void authPage; void setAuthPage;
 
   return (
@@ -117,8 +117,8 @@ function GlobalErrorWiring() {
         showDeduped(detail.slice(0, 200));
       }
     };
-    window.addEventListener('rorcha:unhandled-error', handler);
-    return () => window.removeEventListener('rorcha:unhandled-error', handler);
+    window.addEventListener('rorca:unhandled-error', handler);
+    return () => window.removeEventListener('rorca:unhandled-error', handler);
   }, [showDeduped]);
 
   return null;
@@ -213,7 +213,7 @@ function AppContent() {
 
   return (
     <Shell
-      sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} onCommandPalette={() => setShowCommandPalette((v) => !v)} />}
+      sidebar={<Sidebar activePanel={activePanel} onNavigate={setActivePanel} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />}
       showMenuButton
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
       onNavigate={setActivePanel}

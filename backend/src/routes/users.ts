@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db';
 import type { AuthUser } from './auth';
+import { getEffectiveUser } from '../lib/get-user';
 
 const router = Router();
 
@@ -25,7 +26,8 @@ interface AssignmentDbRow {
 
 router.get('/me/assigned', (req: Request, res: Response) => {
   try {
-    const user = (req as Request & { user: AuthUser }).user;
+    const user = getEffectiveUser(req);
+    if (!user) { res.json({ assignments: [] }); return; }
 
     const rows = db.prepare(`
       SELECT sa.spec_id, sa.story_id, sa.workspace_id, sa.assigned_at,
@@ -52,8 +54,8 @@ router.get('/me/assigned', (req: Request, res: Response) => {
       if (!specMap.has(key)) {
         // Try to read spec title from file
         let specName = row.spec_id;
-        const pendingFile = path.join(row.workspace_path, 'scripts', 'ralph', 'specs', 'pending', `${row.spec_id}.json`);
-        const approvedFile = path.join(row.workspace_path, 'scripts', 'ralph', 'specs', 'approved', `${row.spec_id}.json`);
+        const pendingFile = path.join(row.workspace_path, 'forge', 'specs', 'pending', `${row.spec_id}.json`);
+        const approvedFile = path.join(row.workspace_path, 'forge', 'specs', 'approved', `${row.spec_id}.json`);
         try {
           const filePath = fs.existsSync(pendingFile) ? pendingFile : approvedFile;
           if (fs.existsSync(filePath)) {
@@ -79,8 +81,8 @@ router.get('/me/assigned', (req: Request, res: Response) => {
       if (row.story_id && row.story_id !== '') {
         // Resolve story title
         let storyTitle = row.story_id;
-        const pendingFile = path.join(row.workspace_path, 'scripts', 'ralph', 'specs', 'pending', `${row.spec_id}.json`);
-        const approvedFile = path.join(row.workspace_path, 'scripts', 'ralph', 'specs', 'approved', `${row.spec_id}.json`);
+        const pendingFile = path.join(row.workspace_path, 'forge', 'specs', 'pending', `${row.spec_id}.json`);
+        const approvedFile = path.join(row.workspace_path, 'forge', 'specs', 'approved', `${row.spec_id}.json`);
         try {
           const filePath = fs.existsSync(pendingFile) ? pendingFile : approvedFile;
           if (fs.existsSync(filePath)) {

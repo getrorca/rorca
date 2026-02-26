@@ -37,7 +37,7 @@ beforeEach(async () => {
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
   }));
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-export-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-export-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
   process.env.DB_PATH = dbPath;
   process.env.NODE_ENV = 'test';
@@ -207,8 +207,8 @@ describe('GET /api/analytics/export (V2-050)', () => {
     expect(res.status).toBe(200);
 
     const disposition = res.headers['content-disposition'];
-    // Should match: rorcha-usage-YYYY-MM-DDTHH-MM-SS.csv
-    expect(disposition).toMatch(/rorcha-usage-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.csv/);
+    // Should match: rorca-usage-YYYY-MM-DDTHH-MM-SS.csv
+    expect(disposition).toMatch(/rorca-usage-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.csv/);
   });
 
   // ─── Pagination ────────────────────────────────────────────────────

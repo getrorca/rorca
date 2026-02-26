@@ -79,7 +79,9 @@ router.get('/', (req, res) => {
 
 // GET /api/notifications/unread-count — lightweight poll for badge
 router.get('/unread-count', (req, res) => {
-  const user = (req as any).user as AuthUser;
+  const user = (req as any).user as AuthUser | undefined;
+  // Auth bypassed in local mode — return 0 when no user session
+  if (!user?.id) { res.json({ count: 0 }); return; }
   const row = db.prepare(
     'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND read_at IS NULL'
   ).get(user.id) as { count: number };

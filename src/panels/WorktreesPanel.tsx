@@ -104,10 +104,10 @@ export default function WorktreesPanel() {
   const fetchWorktrees = useCallback(async () => {
     if (!workspaceId) return;
     try {
-      const data = await apiFetch<{ worktrees: GitWorktree[] }>(
+      const data = await apiFetch<{ items?: GitWorktree[]; worktrees?: GitWorktree[] }>(
         `/api/worktrees?workspaceId=${workspaceId}`,
       );
-      setWorktrees(data.worktrees);
+      setWorktrees(data.items ?? data.worktrees ?? []);
     } catch (err) {
       console.error('[WorktreesPanel] fetch error:', err);
     } finally {
@@ -497,7 +497,7 @@ export default function WorktreesPanel() {
               <button
                 onClick={() =>
                   copyToClipboard(
-                    `cd ${selectedWorktree.path} && ./scripts/ralph/run-loop.sh`,
+                    `cd ${selectedWorktree.path} && ./forge/run-loop.sh`,
                     setCopiedRalph,
                   )
                 }

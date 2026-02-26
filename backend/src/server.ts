@@ -50,8 +50,8 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3030;
 
-// When serving static frontend (rorcha start), allow same-origin; otherwise allow Vite dev server
-const corsOrigin = process.env.RORCHA_SERVE_STATIC === '1'
+// When serving static frontend (rorca start), allow same-origin; otherwise allow Vite dev server
+const corsOrigin = process.env.RORCA_SERVE_STATIC === '1'
   ? true  // reflect request origin (same-origin when served by Express)
   : (process.env.CORS_ORIGIN || 'http://localhost:5210');
 app.use(cors({ origin: corsOrigin }));
@@ -78,7 +78,7 @@ app.get('/api/docs/openapi.json', (_req, res) => {
 });
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   explorer: true,
-  customSiteTitle: 'Rorcha API Docs',
+  customSiteTitle: 'Rorca API Docs',
 }));
 
 // Rate limit public routes by IP (unauthenticated tier)
@@ -89,7 +89,8 @@ app.use('/api/invites', rateLimiter, invitesRouter);
 registerWebhookHandlers();
 
 // ─── Auth middleware (all routes below require authentication) ───
-app.use(authRequired);
+// Auth gate bypassed — Rorca is a local single-user tool (see CLAUDE.md)
+// app.use(authRequired);
 
 // ─── Rate limiting (after auth so req.user is available) ───
 app.use(rateLimiter);
@@ -123,9 +124,9 @@ app.use('/api/notifications', notificationsRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/billing', billingRouter);
 
-// V2-108: Serve frontend static files when running via `rorcha start`
-if (process.env.RORCHA_SERVE_STATIC === '1' && process.env.RORCHA_STATIC_DIR) {
-  const staticDir = process.env.RORCHA_STATIC_DIR;
+// V2-108: Serve frontend static files when running via `rorca start`
+if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
+  const staticDir = process.env.RORCA_STATIC_DIR;
   app.use(express.static(staticDir));
   // SPA fallback: serve index.html for non-API routes
   app.get('*', (req, res, next) => {
@@ -146,7 +147,7 @@ startNotificationDispatcher();
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
-    console.log(`Rorcha backend listening on port ${PORT}`);
+    console.log(`Rorca backend listening on port ${PORT}`);
     startScheduler();
     cleanupOldLogs();
     // V2-099: Run EXPLAIN QUERY PLAN audit at startup

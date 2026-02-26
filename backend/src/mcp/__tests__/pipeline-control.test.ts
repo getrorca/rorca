@@ -3,7 +3,7 @@ const mockFetch = jest.fn();
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCHA_API } from '../server';
+import { server, RORCA_API } from '../server';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -16,12 +16,12 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
-// ─── rorcha_trigger_run ──────────────────────────────────────────────────────
+// ─── rorca_trigger_run ──────────────────────────────────────────────────────
 
-describe('rorcha_trigger_run', () => {
+describe('rorca_trigger_run', () => {
   test('is registered on the McpServer', () => {
     const tools = (server as any)._registeredTools;
-    expect(tools['rorcha_trigger_run']).toBeDefined();
+    expect(tools['rorca_trigger_run']).toBeDefined();
   });
 
   test('triggers a pipeline run with correct spec path', async () => {
@@ -30,10 +30,10 @@ describe('rorcha_trigger_run', () => {
       json: async () => ({ ok: true, runId: 42 }),
     });
 
-    const handler = getToolHandler('rorcha_trigger_run');
+    const handler = getToolHandler('rorca_trigger_run');
     const result = await handler({ workspaceId: 'ws-1', specId: 'my-feature' });
 
-    expect(mockFetch).toHaveBeenCalledWith(`${RORCHA_API}/api/pipeline/trigger`, {
+    expect(mockFetch).toHaveBeenCalledWith(`${RORCA_API}/api/pipeline/trigger`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -52,7 +52,7 @@ describe('rorcha_trigger_run', () => {
       json: async () => ({ conflict: true, activeRunId: 10 }),
     });
 
-    const handler = getToolHandler('rorcha_trigger_run');
+    const handler = getToolHandler('rorca_trigger_run');
     const result = await handler({ workspaceId: 'ws-1', specId: 'auth' });
 
     expect(result.content[0].text).toContain('Conflict');
@@ -68,7 +68,7 @@ describe('rorcha_trigger_run', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_trigger_run');
+    const handler = getToolHandler('rorca_trigger_run');
     const result = await handler({ workspaceId: 'ws-1', specId: 'auth', dryRun: true });
 
     expect(result.content[0].text).toContain('Dry run estimate');
@@ -86,7 +86,7 @@ describe('rorcha_trigger_run', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_trigger_run');
+    const handler = getToolHandler('rorca_trigger_run');
     const result = await handler({ workspaceId: 'ws-1', specId: 'auth', autoWorktree: true });
 
     expect(result.content[0].text).toContain('feat/auth-1708700000');
@@ -100,17 +100,17 @@ describe('rorcha_trigger_run', () => {
       json: async () => ({ error: 'Workspace not found' }),
     });
 
-    const handler = getToolHandler('rorcha_trigger_run');
+    const handler = getToolHandler('rorca_trigger_run');
     await expect(handler({ workspaceId: 'bad', specId: 'x' })).rejects.toThrow('Pipeline trigger failed');
   });
 });
 
-// ─── rorcha_run_status ───────────────────────────────────────────────────────
+// ─── rorca_run_status ───────────────────────────────────────────────────────
 
-describe('rorcha_run_status', () => {
+describe('rorca_run_status', () => {
   test('is registered on the McpServer', () => {
     const tools = (server as any)._registeredTools;
-    expect(tools['rorcha_run_status']).toBeDefined();
+    expect(tools['rorca_run_status']).toBeDefined();
   });
 
   test('returns detailed run status with per-story progress', async () => {
@@ -130,7 +130,7 @@ describe('rorcha_run_status', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_run_status');
+    const handler = getToolHandler('rorca_run_status');
     const result = await handler({ runId: 10 });
 
     const text = result.content[0].text;
@@ -155,7 +155,7 @@ describe('rorcha_run_status', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_run_status');
+    const handler = getToolHandler('rorca_run_status');
     const result = await handler({ runId: 20 });
 
     expect(result.content[0].text).toContain('Branch: feat/my-branch');
@@ -168,17 +168,17 @@ describe('rorcha_run_status', () => {
       text: async () => 'Run not found',
     });
 
-    const handler = getToolHandler('rorcha_run_status');
+    const handler = getToolHandler('rorca_run_status');
     await expect(handler({ runId: 999 })).rejects.toThrow('Failed to get run status');
   });
 });
 
-// ─── rorcha_usage_stats ──────────────────────────────────────────────────────
+// ─── rorca_usage_stats ──────────────────────────────────────────────────────
 
-describe('rorcha_usage_stats', () => {
+describe('rorca_usage_stats', () => {
   test('is registered on the McpServer', () => {
     const tools = (server as any)._registeredTools;
-    expect(tools['rorcha_usage_stats']).toBeDefined();
+    expect(tools['rorca_usage_stats']).toBeDefined();
   });
 
   test('returns formatted usage summary grouped by model', async () => {
@@ -194,7 +194,7 @@ describe('rorcha_usage_stats', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_usage_stats');
+    const handler = getToolHandler('rorca_usage_stats');
     const result = await handler({ workspaceId: 'ws-1' });
 
     const text = result.content[0].text;
@@ -214,7 +214,7 @@ describe('rorcha_usage_stats', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_usage_stats');
+    const handler = getToolHandler('rorca_usage_stats');
     await handler({
       workspaceId: 'ws-1',
       from: '2026-01-01',
@@ -239,19 +239,19 @@ describe('rorcha_usage_stats', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_usage_stats');
+    const handler = getToolHandler('rorca_usage_stats');
     const result = await handler({ workspaceId: 'ws-1' });
 
     expect(result.content[0].text).toContain('No usage data found');
   });
 });
 
-// ─── rorcha_retry_story ──────────────────────────────────────────────────────
+// ─── rorca_retry_story ──────────────────────────────────────────────────────
 
-describe('rorcha_retry_story', () => {
+describe('rorca_retry_story', () => {
   test('is registered on the McpServer', () => {
     const tools = (server as any)._registeredTools;
-    expect(tools['rorcha_retry_story']).toBeDefined();
+    expect(tools['rorca_retry_story']).toBeDefined();
   });
 
   test('retries specific story IDs', async () => {
@@ -266,10 +266,10 @@ describe('rorcha_retry_story', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_retry_story');
+    const handler = getToolHandler('rorca_retry_story');
     const result = await handler({ runId: 15, storyIds: ['US-003'] });
 
-    expect(mockFetch).toHaveBeenCalledWith(`${RORCHA_API}/api/pipeline/runs/15/retry`, {
+    expect(mockFetch).toHaveBeenCalledWith(`${RORCA_API}/api/pipeline/runs/15/retry`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ storyIds: ['US-003'] }),
@@ -290,7 +290,7 @@ describe('rorcha_retry_story', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_retry_story');
+    const handler = getToolHandler('rorca_retry_story');
     const result = await handler({ runId: 15 });
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
@@ -306,17 +306,17 @@ describe('rorcha_retry_story', () => {
       text: async () => JSON.stringify({ error: "Cannot retry run with status 'running'" }),
     });
 
-    const handler = getToolHandler('rorcha_retry_story');
+    const handler = getToolHandler('rorca_retry_story');
     await expect(handler({ runId: 5 })).rejects.toThrow('Retry failed');
   });
 });
 
-// ─── rorcha_list_runs ────────────────────────────────────────────────────────
+// ─── rorca_list_runs ────────────────────────────────────────────────────────
 
-describe('rorcha_list_runs', () => {
+describe('rorca_list_runs', () => {
   test('is registered on the McpServer', () => {
     const tools = (server as any)._registeredTools;
-    expect(tools['rorcha_list_runs']).toBeDefined();
+    expect(tools['rorca_list_runs']).toBeDefined();
   });
 
   test('returns formatted list of recent runs', async () => {
@@ -330,7 +330,7 @@ describe('rorcha_list_runs', () => {
       }),
     });
 
-    const handler = getToolHandler('rorcha_list_runs');
+    const handler = getToolHandler('rorca_list_runs');
     const result = await handler({ workspaceId: 'ws-1' });
 
     const text = result.content[0].text;
@@ -345,7 +345,7 @@ describe('rorcha_list_runs', () => {
       json: async () => ({ runs: [] }),
     });
 
-    const handler = getToolHandler('rorcha_list_runs');
+    const handler = getToolHandler('rorca_list_runs');
     await handler({ workspaceId: 'ws-1' });
 
     const url = mockFetch.mock.calls[0][0] as string;
@@ -358,7 +358,7 @@ describe('rorcha_list_runs', () => {
       json: async () => ({ runs: [] }),
     });
 
-    const handler = getToolHandler('rorcha_list_runs');
+    const handler = getToolHandler('rorca_list_runs');
     const result = await handler({ workspaceId: 'ws-empty' });
 
     expect(result.content[0].text).toContain('No pipeline runs found');
@@ -371,7 +371,7 @@ describe('rorcha_list_runs', () => {
       text: async () => 'Internal error',
     });
 
-    const handler = getToolHandler('rorcha_list_runs');
+    const handler = getToolHandler('rorca_list_runs');
     await expect(handler({ workspaceId: 'ws-1' })).rejects.toThrow('Failed to list runs');
   });
 });

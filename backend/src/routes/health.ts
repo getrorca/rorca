@@ -8,7 +8,7 @@ const router = Router();
 
 const startTime = Date.now();
 const VERSION = '0.0.1';
-const DB_PATH = process.env.DB_PATH || './rorcha.db';
+const DB_PATH = process.env.DB_PATH || './rorca.db';
 const NO_CACHE_HEADERS = {
   'Cache-Control': 'no-cache, no-store, must-revalidate',
   'Pragma': 'no-cache',
@@ -81,7 +81,7 @@ router.get('/detailed', (_req: Request, res: Response) => {
   try {
     const workspaces = db.prepare('SELECT path FROM workspaces').all() as { path: string }[];
     for (const ws of workspaces) {
-      const pendingDir = path.join(ws.path, 'scripts', 'ralph', 'specs', 'pending');
+      const pendingDir = path.join(ws.path, 'forge', 'specs', 'pending');
       if (fs.existsSync(pendingDir)) {
         const files = fs.readdirSync(pendingDir).filter(f => f.endsWith('.json'));
         pendingSpecsCount += files.length;

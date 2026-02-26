@@ -3,7 +3,7 @@ const mockFetch = jest.fn();
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCHA_API } from '../server';
+import { server, RORCA_API } from '../server';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -16,9 +16,9 @@ beforeEach(() => {
   mockFetch.mockReset();
 });
 
-test('rorcha_pipeline_status is registered on the McpServer', () => {
+test('rorca_pipeline_status is registered on the McpServer', () => {
   const tools = (server as any)._registeredTools;
-  expect(tools['rorcha_pipeline_status']).toBeDefined();
+  expect(tools['rorca_pipeline_status']).toBeDefined();
 });
 
 test('fetches most recent run when runId not provided (uses ?limit=1 param)', async () => {
@@ -34,11 +34,11 @@ test('fetches most recent run when runId not provided (uses ?limit=1 param)', as
     }],
   });
 
-  const handler = getToolHandler('rorcha_pipeline_status');
+  const handler = getToolHandler('rorca_pipeline_status');
   await handler({ workspaceId: 'ws-123' });
 
   expect(mockFetch).toHaveBeenCalledWith(
-    `${RORCHA_API}/api/pipeline-runs?workspaceId=ws-123&limit=1`
+    `${RORCA_API}/api/pipeline-runs?workspaceId=ws-123&limit=1`
   );
 });
 
@@ -54,11 +54,11 @@ test('fetches specific run by ID when runId provided', async () => {
     }),
   });
 
-  const handler = getToolHandler('rorcha_pipeline_status');
+  const handler = getToolHandler('rorca_pipeline_status');
   await handler({ workspaceId: 'ws-123', runId: 7 });
 
   expect(mockFetch).toHaveBeenCalledWith(
-    `${RORCHA_API}/api/pipeline-runs/7`
+    `${RORCA_API}/api/pipeline-runs/7`
   );
 });
 
@@ -78,7 +78,7 @@ test('correctly counts pass/fail/skip from stories array', async () => {
     }),
   });
 
-  const handler = getToolHandler('rorcha_pipeline_status');
+  const handler = getToolHandler('rorca_pipeline_status');
   const result = await handler({ workspaceId: 'ws-123', runId: 10 });
 
   expect(result).toEqual({
@@ -103,7 +103,7 @@ test('shows elapsed time as "running" for active runs (no finishedAt)', async ()
     }],
   });
 
-  const handler = getToolHandler('rorcha_pipeline_status');
+  const handler = getToolHandler('rorca_pipeline_status');
   const result = await handler({ workspaceId: 'ws-123' });
 
   const text = result.content[0].text;
@@ -118,7 +118,7 @@ test('returns "No pipeline runs found" when API returns empty array', async () =
     json: async () => [],
   });
 
-  const handler = getToolHandler('rorcha_pipeline_status');
+  const handler = getToolHandler('rorca_pipeline_status');
   const result = await handler({ workspaceId: 'ws-empty' });
 
   expect(result).toEqual({
@@ -132,7 +132,7 @@ test('throws when API returns non-200', async () => {
     status: 500,
   });
 
-  const handler = getToolHandler('rorcha_pipeline_status');
+  const handler = getToolHandler('rorca_pipeline_status');
   await expect(handler({ workspaceId: 'ws-123' })).rejects.toThrow(
     'Failed to get pipeline status: 500'
   );

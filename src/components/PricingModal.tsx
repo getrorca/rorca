@@ -149,7 +149,7 @@ export default function PricingModal({ onClose }: PricingModalProps) {
 
         <div className="px-6 pb-6 text-center">
           <p className="text-xs text-muted">
-            You bring your own Claude subscription or API key. Rorcha never pays for inference.
+            You bring your own Claude subscription or API key. Rorca never pays for inference.
           </p>
         </div>
       </div>

@@ -13,7 +13,7 @@ let authToken: string;
 
 beforeEach(async () => {
   jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-ratelimit-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-ratelimit-test-'));
   process.env.DB_PATH = path.join(tmpDir, 'test.db');
   process.env.NODE_ENV = 'test';
   process.env.RATE_LIMIT_ENABLED = 'true';

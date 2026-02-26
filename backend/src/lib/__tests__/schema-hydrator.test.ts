@@ -6,7 +6,7 @@ import { hydrateSchema } from '../schema-hydrator';
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-hydrator-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hydrator-'));
 });
 
 afterEach(() => {
@@ -82,7 +82,7 @@ CREATE TABLE users (
 });
 
 test('returns empty result when no migrations directory found', () => {
-  const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-empty-'));
+  const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-empty-'));
   try {
     const result = hydrateSchema(emptyDir);
 

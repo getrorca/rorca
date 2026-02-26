@@ -5,13 +5,13 @@ const options: swaggerJsdoc.Options = {
   definition: {
     openapi: '3.0.3',
     info: {
-      title: 'Rorcha API',
+      title: 'Rorca API',
       version: '2.0.0',
       description:
         'AI spec orchestration and pipeline management for autonomous Claude Code development. ' +
-        'Rorcha turns plain-English briefs into validated, structured specs via Claude, ' +
+        'Rorca turns plain-English briefs into validated, structured specs via Claude, ' +
         'tracks approval/execution, and provides live pipeline monitoring.',
-      contact: { name: 'Rorcha', url: 'https://rorcha.dev' },
+      contact: { name: 'Rorca', url: 'https://rorca.dev' },
       license: { name: 'MIT' },
     },
     servers: [{ url: 'http://localhost:3030', description: 'Local dev server' }],

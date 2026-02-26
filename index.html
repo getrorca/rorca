@@ -3,11 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Rorcha</title>
+    <title>Rorca</title>
     <script>
       // Prevent flash: apply saved theme before React hydrates
       (function() {
-        var t = localStorage.getItem('rorcha_theme') || 'dark';
+        var t = localStorage.getItem('rorca_theme') || 'dark';
         if (t === 'system') t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         document.documentElement.setAttribute('data-theme', t);
       })();

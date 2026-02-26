@@ -160,6 +160,11 @@ router.get('/', async (req: Request, res: Response) => {
     res.json({ worktrees });
   } catch (error: any) {
     console.error('[Worktrees] List error:', error);
+    // Xcode license not accepted (common after macOS/Xcode updates) — return empty list
+    if (error.message?.includes('Xcode') || error.message?.includes('xcodebuild')) {
+      res.json({ worktrees: [], warning: 'Git unavailable: run `sudo xcodebuild -license accept` in your terminal to fix.' });
+      return;
+    }
     res.status(500).json({ error: error.message });
   }
 });

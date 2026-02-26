@@ -243,7 +243,7 @@ export default function RoiCalculatorPanel() {
                 data.net_savings > 0 ? 'bg-emerald-500/10 border border-emerald-500/30' : 'bg-amber-500/10 border border-amber-500/30'
               }`}>
                 <div>
-                  <span className="text-sm text-muted">For every $1 spent on LLM inference, Rorcha saves</span>
+                  <span className="text-sm text-muted">For every $1 spent on LLM inference, Rorca saves</span>
                   <span className={`text-2xl font-bold ml-2 ${data.net_savings > 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
                     {data.roi_multiplier != null ? `$${data.roi_multiplier.toFixed(1)}` : '\u221E'}
                   </span>

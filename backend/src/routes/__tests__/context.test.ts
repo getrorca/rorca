@@ -47,7 +47,7 @@ beforeEach(async () => {
   }));
   (global as any).fetch = mockFetch;
 
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorcha-context-test-'));
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-context-test-'));
   process.env.DB_PATH = path.join(tmpDir, 'test.db');
   process.env.NODE_ENV = 'test';
 
