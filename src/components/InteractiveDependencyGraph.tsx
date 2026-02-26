@@ -48,7 +48,7 @@ interface PopoverData {
   screenY: number;
 }
 
-interface DerivedStatus {
+export interface DerivedStatus {
   storyId: string;
   status: GraphNode['status'];
   startedAt: string | null;
