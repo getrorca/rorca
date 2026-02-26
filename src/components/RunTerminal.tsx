@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Copy, Check } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
 import '@xterm/xterm/css/xterm.css';
@@ -64,6 +65,32 @@ export default function RunTerminal({ runId }: RunTerminalProps) {
   const fitRef = useRef<FitAddon | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const { resolved } = useTheme();
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    const term = termRef.current;
+    if (!term) return;
+    // Select all lines from the terminal buffer
+    const buffer = term.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < buffer.length; i++) {
+      const line = buffer.getLine(i);
+      if (line) lines.push(line.translateToString(true));
+    }
+    // Trim trailing empty lines
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+      lines.pop();
+    }
+    const text = lines.join('\n');
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard not available
+    }
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -132,10 +159,19 @@ export default function RunTerminal({ runId }: RunTerminalProps) {
   }, [runId, resolved]);
 
   return (
-    <div
-      ref={containerRef}
-      className="h-full w-full overflow-x-auto"
-      style={{ background: resolved === 'light' ? lightTheme.background : darkTheme.background, padding: '8px 4px', WebkitOverflowScrolling: 'touch' }}
-    />
+    <div className="h-full w-full relative group">
+      <div
+        ref={containerRef}
+        className="h-full w-full overflow-x-auto"
+        style={{ background: resolved === 'light' ? lightTheme.background : darkTheme.background, padding: '8px 4px', WebkitOverflowScrolling: 'touch' }}
+      />
+      <button
+        onClick={handleCopy}
+        className="absolute top-2 right-2 p-1.5 rounded-md bg-black/40 backdrop-blur-sm text-white/70 hover:text-white hover:bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+        title="Copy terminal output"
+      >
+        {copied ? <Check size={14} /> : <Copy size={14} />}
+      </button>
+    </div>
   );
 }
