@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
+import type { RunTerminalHandle } from '../components/RunTerminal';
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
 import type { PanelId } from '../components/Sidebar';
@@ -82,6 +83,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<RunViewTab>('terminal');
+  const terminalRef = useRef<RunTerminalHandle>(null);
 
   // SSE for live status updates
   const walEvents = usePipelineSSE(String(runId));
@@ -142,8 +144,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       case 'terminal':
         return (
           <SplitPane
-            left={<RunTerminal runId={run.id} />}
-            right={<RunStoryList runId={run.id} walEvents={walEvents} />}
+            left={<RunTerminal ref={terminalRef} runId={run.id} />}
+            right={
+              <RunStoryList
+                runId={run.id}
+                walEvents={walEvents}
+                onStoryClick={(storyId) => terminalRef.current?.scrollToStory(storyId)}
+              />
+            }
           />
         );
       case 'stories':

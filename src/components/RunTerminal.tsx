@@ -1,10 +1,14 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Copy, Check } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
 import '@xterm/xterm/css/xterm.css';
+
+export interface RunTerminalHandle {
+  scrollToStory: (storyId: string) => void;
+}
 
 interface RunTerminalProps {
   runId: number;
@@ -59,13 +63,32 @@ const lightTheme = {
  * Renders ANSI escape codes exactly as iTerm2 would — colors, bold, cursor, etc.
  * Late-joiners receive a full replay of buffered output from process start.
  */
-export default function RunTerminal({ runId }: RunTerminalProps) {
+const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const { resolved } = useTheme();
   const [copied, setCopied] = useState(false);
+
+  // Expose scrollToStory via ref
+  useImperativeHandle(ref, () => ({
+    scrollToStory(storyId: string) {
+      const term = termRef.current;
+      if (!term) return;
+      const buffer = term.buffer.active;
+      // Search buffer for a line containing the story ID
+      for (let i = 0; i < buffer.length; i++) {
+        const line = buffer.getLine(i);
+        if (!line) continue;
+        const text = line.translateToString(true);
+        if (text.includes(storyId)) {
+          term.scrollToLine(i);
+          return;
+        }
+      }
+    },
+  }), []);
 
   const handleCopy = useCallback(async () => {
     const term = termRef.current;
@@ -174,4 +197,6 @@ export default function RunTerminal({ runId }: RunTerminalProps) {
       </button>
     </div>
   );
-}
+});
+
+export default RunTerminal;
