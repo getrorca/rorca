@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Menu, HelpCircle, Settings, Zap } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Menu, HelpCircle, Settings, Zap, Plus } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import PricingModal from './PricingModal';
@@ -7,7 +7,11 @@ import { useHelpTips } from '../contexts/HelpTipsContext';
 import AddWorkspaceModal from './AddWorkspaceModal';
 import ThemeToggle from './ThemeToggle';
 import NotificationBell from './NotificationBell';
+import { useNetworkOffline, NetworkIndicator } from './NetworkBanner';
+import { apiFetch } from '../lib/apiFetch';
 import type { PanelId } from './Sidebar';
+
+// ─── Workspace Selector ─────────────────────────────────────────────────────
 
 function WorkspaceSelector() {
   const { workspaceId, setWorkspaceId, workspaces, addWorkspace } = useWorkspace();
@@ -31,7 +35,7 @@ function WorkspaceSelector() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 mt-1 w-56 bg-panel border border-border rounded shadow-lg z-50">
+          <div className="absolute left-0 mt-1 w-56 bg-panel border border-border rounded shadow-lg z-50">
             {workspaces.map((w) => (
               <button
                 key={w.id}
@@ -66,6 +70,86 @@ function WorkspaceSelector() {
     </div>
   );
 }
+
+// ─── Run Pill ────────────────────────────────────────────────────────────────
+
+interface StoryProgress {
+  passed: number;
+  total: number;
+}
+
+function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
+  const { activeRuns, workspaceId } = useWorkspace();
+  const [progress, setProgress] = useState<StoryProgress | null>(null);
+
+  const activeRun = activeRuns[0] ?? null;
+
+  const fetchProgress = useCallback(async (runId: number) => {
+    try {
+      const res = await apiFetch<{
+        run: { id: number; spec_path: string };
+        storyResults: { story_id: string; status: string }[];
+      }>(`/api/pipeline/runs/${runId}`);
+      // Count passed + total from story results
+      const results = res.storyResults ?? [];
+      const passed = results.filter((s) => s.status === 'pass').length;
+      // Read spec to get total story count
+      const specPath = res.run?.spec_path;
+      if (specPath) {
+        try {
+          const specRes = await apiFetch<{ spec: { userStories?: { id: string }[] } }>(
+            `/api/specs/${specPath.split('/').pop()?.replace('.json', '')}?workspaceId=${workspaceId}`,
+          );
+          const total = specRes.spec?.userStories?.length ?? results.length;
+          setProgress({ passed, total });
+          return;
+        } catch {
+          // Fall through — use results count
+        }
+      }
+      setProgress({ passed, total: results.length || 1 });
+    } catch {
+      setProgress(null);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!activeRun) { setProgress(null); return; }
+    fetchProgress(activeRun.id);
+    const id = setInterval(() => fetchProgress(activeRun.id), 5_000);
+    return () => clearInterval(id);
+  }, [activeRun, fetchProgress]);
+
+  if (!activeRun) {
+    return (
+      <button
+        onClick={() => onNavigate?.('forge')}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium text-accent bg-accent/10 border border-accent/30 hover:bg-accent/20 transition-colors"
+      >
+        <Plus size={14} />
+        New Spec
+      </button>
+    );
+  }
+
+  const label = progress ? `${progress.passed}/${progress.total}` : '…';
+
+  return (
+    <button
+      onClick={() => onNavigate?.('pipeline')}
+      className="flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium text-[var(--text)] bg-accent/10 border border-accent/30 hover:bg-accent/20 transition-colors"
+      title="View active run"
+    >
+      <span className="relative flex h-2.5 w-2.5">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
+        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-accent" />
+      </span>
+      <span className="font-mono tabular-nums">{label}</span>
+    </button>
+  );
+}
+
+// ─── User Menu ───────────────────────────────────────────────────────────────
 
 function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
   const { user, logout } = useAuth();
@@ -112,6 +196,8 @@ function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     </div>
   );
 }
+
+// ─── Minor Controls ──────────────────────────────────────────────────────────
 
 function ShowTipsToggle() {
   const { showTips, setShowTips } = useHelpTips();
@@ -160,6 +246,8 @@ function PlanBadge() {
   );
 }
 
+// ─── Shell ───────────────────────────────────────────────────────────────────
+
 interface ShellProps {
   sidebar?: React.ReactNode;
   children?: React.ReactNode;
@@ -169,29 +257,35 @@ interface ShellProps {
 }
 
 export default function Shell({ sidebar, children, onMenuToggle, showMenuButton, onNavigate }: ShellProps) {
+  const offline = useNetworkOffline();
+
   return (
     <div className="h-screen flex flex-col bg-bg">
-      {/* Top Nav — 48px */}
+      {/* Top Bar — 48px */}
       <header className="h-12 flex items-center justify-between px-3 sm:px-4 bg-panel border-b border-border shrink-0">
-        <div className="flex items-center gap-2">
-          {/* Hamburger — mobile only, when sidebar exists */}
+        {/* Left: hamburger + wordmark + workspace */}
+        <div className="flex items-center gap-3">
           {showMenuButton && (
             <button
               onClick={onMenuToggle}
-              className="md:hidden w-11 h-11 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors"
+              className="md:hidden w-8 h-8 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors"
               aria-label="Open navigation menu"
             >
               <Menu size={20} />
             </button>
           )}
-          <span className="font-mono font-bold text-accent text-sm tracking-tight">rorca</span>
-        </div>
-        <div className="flex items-center gap-1 sm:gap-2">
+          <span className="font-mono font-bold text-accent text-sm tracking-tight select-none">rorca</span>
           <WorkspaceSelector />
+        </div>
+
+        {/* Right: network + plan + tips + notifications + theme + run pill + user */}
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          <NetworkIndicator offline={offline} />
           <PlanBadge />
           <ShowTipsToggle />
           <NotificationBell onNavigate={onNavigate} />
           <ThemeToggle />
+          <RunPill onNavigate={onNavigate} />
           <UserMenu onNavigate={onNavigate} />
         </div>
       </header>
@@ -199,8 +293,6 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
       {/* Body */}
       <div className="flex flex-1 min-h-0">
         {sidebar}
-
-        {/* Content Area */}
         <main className="flex-1 overflow-hidden">
           {children}
         </main>
