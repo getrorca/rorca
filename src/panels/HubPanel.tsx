@@ -150,10 +150,10 @@ const BORDER_LEFT: Record<string, string> = {
 
 // ─── Active Run Section ─────────────────────────────────────────────────────
 
-function ActiveRunCard({ run, totalStories, onNavigate }: {
+function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
   run: PipelineRun;
   totalStories: number;
-  onNavigate: (panel: PanelId) => void;
+  onNavigateToRun?: (runId: number) => void;
 }) {
   const walEvents = usePipelineSSE(String(run.id));
   const [actionLoading, setActionLoading] = useState<'pause' | 'kill' | null>(null);
@@ -230,7 +230,7 @@ function ActiveRunCard({ run, totalStories, onNavigate }: {
 
   return (
     <button
-      onClick={() => onNavigate('pipeline')}
+      onClick={() => onNavigateToRun?.(run.id)}
       className={`w-full text-left p-4 bg-panel border border-border border-l-4 ${BORDER_LEFT[effectiveStatus] || 'border-l-gray-500'} rounded-lg hover:border-accent/50 transition-colors group`}
     >
       {/* Header row: status + run ID + actions */}
@@ -393,13 +393,13 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction }: {
 
 // ─── Recent Runs Section ────────────────────────────────────────────────────
 
-function RecentRunRow({ run, onNavigate }: {
+function RecentRunRow({ run, onNavigateToRun }: {
   run: PipelineRun;
-  onNavigate: (panel: PanelId) => void;
+  onNavigateToRun?: (runId: number) => void;
 }) {
   return (
     <button
-      onClick={() => onNavigate('pipeline')}
+      onClick={() => onNavigateToRun?.(run.id)}
       className="w-full text-left px-3 py-2.5 hover:bg-bg transition-colors group"
     >
       <div className="flex items-center justify-between gap-3">
@@ -431,7 +431,7 @@ function RecentRunRow({ run, onNavigate }: {
 
 // ─── HubPanel ───────────────────────────────────────────────────────────────
 
-export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) => void }) {
+export default function HubPanel({ onNavigate, onNavigateToRun }: { onNavigate: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void }) {
   const { workspaceId, workspaces, addWorkspace } = useWorkspace();
   const [showAddWorkspace, setShowAddWorkspace] = useState(false);
   const [activeRun, setActiveRun] = useState<PipelineRun | null>(null);
@@ -601,7 +601,7 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
             <ActiveRunCard
               run={activeRun}
               totalStories={totalStories}
-              onNavigate={onNavigate}
+              onNavigateToRun={onNavigateToRun}
             />
           </section>
         )}
@@ -640,7 +640,7 @@ export default function HubPanel({ onNavigate }: { onNavigate: (panel: PanelId) 
             </div>
             <div className="bg-panel border border-border rounded-lg divide-y divide-border">
               {recentRuns.map((run) => (
-                <RecentRunRow key={run.id} run={run} onNavigate={onNavigate} />
+                <RecentRunRow key={run.id} run={run} onNavigateToRun={onNavigateToRun} />
               ))}
             </div>
           </section>
