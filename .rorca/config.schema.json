@@ -1,0 +1,138 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rorca.app/schemas/config.schema.json",
+  "title": "Rorca Project Configuration",
+  "description": "Configuration for .rorca/config.json — orchestration, routing, and model cascading settings.",
+  "type": "object",
+  "properties": {
+    "orchestration": {
+      "type": "object",
+      "description": "Model routing, tier assignment, escalation, and task-type cascade configuration.",
+      "properties": {
+        "router": {
+          "type": "string",
+          "enum": ["auto", "fixed", "manual"],
+          "default": "auto",
+          "description": "Router mode. 'auto': complexity scorer assigns tier. 'fixed': use spec model for all stories. 'manual': per-story modelTier overrides in spec JSON."
+        },
+        "thresholds": {
+          "type": "object",
+          "description": "Complexity score boundaries for model tier assignment. Scores 0–100.",
+          "properties": {
+            "haiku": {
+              "oneOf": [
+                { "type": "number", "minimum": 0, "maximum": 100 },
+                {
+                  "type": "array",
+                  "items": { "type": "number", "minimum": 0, "maximum": 100 },
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "description": "[min, max] range"
+                }
+              ],
+              "default": [0, 30],
+              "description": "Score range for Haiku tier. Default: [0, 30]"
+            },
+            "sonnet": {
+              "oneOf": [
+                { "type": "number", "minimum": 0, "maximum": 100 },
+                {
+                  "type": "array",
+                  "items": { "type": "number", "minimum": 0, "maximum": 100 },
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "description": "[min, max] range"
+                }
+              ],
+              "default": [31, 65],
+              "description": "Score range for Sonnet tier. Default: [31, 65]"
+            },
+            "opus": {
+              "oneOf": [
+                { "type": "number", "minimum": 0, "maximum": 100 },
+                {
+                  "type": "array",
+                  "items": { "type": "number", "minimum": 0, "maximum": 100 },
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "description": "[min, max] range"
+                }
+              ],
+              "default": [66, 100],
+              "description": "Score range for Opus tier. Default: [66, 100]"
+            }
+          },
+          "additionalProperties": false
+        },
+        "cascades": {
+          "type": "object",
+          "description": "Provider-specific model IDs for each tier. Keys are provider names (anthropic, openai, google, openrouter, ollama, github).",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "haiku": { "type": "string", "description": "Model ID for Haiku tier" },
+              "sonnet": { "type": "string", "description": "Model ID for Sonnet tier" },
+              "opus": { "type": "string", "description": "Model ID for Opus tier" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "taskCascades": {
+          "type": "object",
+          "description": "Default model ID per task type. Overrides tier assignment for specific task types.",
+          "properties": {
+            "echolocation": { "type": "string", "description": "Model for codebase exploration / context gathering" },
+            "planning": { "type": "string", "description": "Model for implementation planning" },
+            "coding": { "type": "string", "description": "Model for code implementation" },
+            "lintFix": { "type": "string", "description": "Model for lint/typecheck error fixes" },
+            "testing": { "type": "string", "description": "Model for test writing" },
+            "documentation": { "type": "string", "description": "Model for documentation generation" }
+          },
+          "additionalProperties": false
+        },
+        "escalation": {
+          "type": "object",
+          "description": "Cascading escalation behavior when a story fails on its assigned tier.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable automatic tier escalation on failure"
+            },
+            "maxRetriesOnTier": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 2,
+              "description": "Number of retries on the current tier before escalating"
+            },
+            "chain": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["haiku", "sonnet", "opus"] },
+              "default": ["haiku", "sonnet", "opus"],
+              "description": "Escalation chain order. Stories escalate through this sequence."
+            },
+            "escalateTo": {
+              "type": "object",
+              "description": "Explicit tier mapping. e.g. { haiku: 'sonnet', sonnet: 'opus', opus: null }",
+              "additionalProperties": {
+                "oneOf": [
+                  { "type": "string", "enum": ["haiku", "sonnet", "opus"] },
+                  { "type": "null" }
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "tokenBudgetPerStory": {
+          "type": "number",
+          "minimum": 1000,
+          "default": 50000,
+          "description": "Maximum input tokens per story before warning. Default: 50000"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}
