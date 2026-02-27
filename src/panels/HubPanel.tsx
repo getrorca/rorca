@@ -310,11 +310,12 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
 
 // ─── Pending Reviews Section ────────────────────────────────────────────────
 
-function PendingReviewCard({ spec, workspaceId, onNavigate, onAction }: {
+function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigateToSpecReview }: {
   spec: SpecSummary;
   workspaceId: string;
   onNavigate: (panel: PanelId) => void;
   onAction: (specId: string, action: 'approve' | 'reject') => void;
+  onNavigateToSpecReview?: (specId: string) => void;
 }) {
   const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
 
@@ -336,7 +337,7 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction }: {
 
   return (
     <button
-      onClick={() => onNavigate('queue')}
+      onClick={() => onNavigateToSpecReview ? onNavigateToSpecReview(spec.id) : onNavigate('queue')}
       className="w-full text-left p-4 bg-panel border border-border rounded-lg hover:border-accent/50 transition-colors group flex flex-col gap-2"
     >
       {/* Title + chevron */}
@@ -431,7 +432,7 @@ function RecentRunRow({ run, onNavigateToRun }: {
 
 // ─── HubPanel ───────────────────────────────────────────────────────────────
 
-export default function HubPanel({ onNavigate, onNavigateToRun }: { onNavigate: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void }) {
+export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview }: { onNavigate: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; onNavigateToSpecReview?: (specId: string) => void }) {
   const { workspaceId, workspaces, addWorkspace } = useWorkspace();
   const [showAddWorkspace, setShowAddWorkspace] = useState(false);
   const [activeRun, setActiveRun] = useState<PipelineRun | null>(null);
@@ -617,6 +618,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun }: { onNavigate: 
                   spec={spec}
                   workspaceId={workspaceId!}
                   onNavigate={onNavigate}
+                  onNavigateToSpecReview={onNavigateToSpecReview}
                   onAction={(specId) => {
                     setPendingSpecs((prev) => prev.filter((s) => s.id !== specId));
                   }}
