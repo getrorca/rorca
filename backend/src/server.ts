@@ -37,6 +37,7 @@ import settingsRouter from './routes/settings';
 import billingRouter, { webhookRouter as billingWebhookRouter } from './routes/billing';
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
+import { startQueueConsumer } from './lib/queue-consumer';
 import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
@@ -150,6 +151,9 @@ subscribe(fireAgentHooks);
 
 // V2-073: Subscribe notification dispatcher to WAL broadcasts
 startNotificationDispatcher();
+
+// RQ-002: Subscribe queue consumer to auto-trigger next run on completion
+startQueueConsumer();
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
