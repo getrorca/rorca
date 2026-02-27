@@ -2225,6 +2225,120 @@ router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response
   }
 });
 
+// ─── GET /api/pipeline/runs/:runId/stories/:storyId/output — Last N lines of story output ─
+// Extracts the story's log section from the run log file or returns WAL failure info.
+
+router.get('/runs/:runId/stories/:storyId/output', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    const storyId = String(req.params.storyId);
+    const lines = Math.min(parseInt(String(req.query.lines ?? '20'), 10) || 20, 100);
+
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    // 1. Check story_result exists
+    const storyResult = db.prepare(
+      `SELECT * FROM story_results WHERE run_id = ? AND story_id = ? ORDER BY id DESC LIMIT 1`
+    ).get(runId, storyId) as StoryResultRow | undefined;
+
+    if (!storyResult) {
+      res.status(404).json({ error: 'Story result not found' });
+      return;
+    }
+
+    // 2. Try to get failure details from WAL events
+    const walEvent = db.prepare(
+      `SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = ? AND payload LIKE ? ORDER BY id DESC LIMIT 1`
+    ).get(storyId, `%"run_id":${runId}%`) as { payload: string } | undefined;
+
+    let failureReason: string | null = null;
+    let failureAttempts: number | null = null;
+    if (walEvent?.payload) {
+      try {
+        const payload = JSON.parse(walEvent.payload);
+        failureReason = payload.reason ?? null;
+        failureAttempts = payload.attempts ?? null;
+      } catch { /* ignore */ }
+    }
+
+    // 3. Try to extract story output from the run log file
+    let outputLines: string[] = [];
+    const logPath = resolveLogPath(runId);
+    if (logPath) {
+      try {
+        const content = fs.readFileSync(logPath, 'utf-8');
+        const allLines = content.split('\n');
+
+        // Find the section for this story by searching for story start/end markers
+        const storyStartPattern = new RegExp(`(^|\\s)${storyId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$|:)`);
+        let startIdx = -1;
+        let endIdx = allLines.length;
+
+        for (let i = 0; i < allLines.length; i++) {
+          if (storyStartPattern.test(allLines[i])) {
+            startIdx = i;
+          }
+        }
+
+        if (startIdx >= 0) {
+          // Find next story start after this one
+          for (let i = startIdx + 1; i < allLines.length; i++) {
+            // Next story starts with a different US-XXX or story ID pattern
+            if (/^(US-\d+|[A-Z]+-\d+)\s/.test(allLines[i]) && !storyStartPattern.test(allLines[i])) {
+              endIdx = i;
+              break;
+            }
+          }
+          const storySection = allLines.slice(startIdx, endIdx);
+          outputLines = storySection.slice(-lines);
+        } else {
+          // Fallback: return last N lines of the entire log
+          outputLines = allLines.slice(-lines);
+        }
+      } catch { /* log read error */ }
+    }
+
+    // 4. If no log output, try in-memory buffer
+    if (outputLines.length === 0) {
+      const buf = outputBuffers.get(runId);
+      if (buf) {
+        const fullText = buf.chunks.join('');
+        const allLines = fullText.split('\n');
+        // Try to find story section in buffer too
+        const storyStartPattern = new RegExp(`(^|\\s)${storyId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$|:)`);
+        let startIdx = -1;
+        for (let i = 0; i < allLines.length; i++) {
+          if (storyStartPattern.test(allLines[i])) {
+            startIdx = i;
+          }
+        }
+        if (startIdx >= 0) {
+          outputLines = allLines.slice(startIdx).slice(-lines);
+        } else {
+          outputLines = allLines.slice(-lines);
+        }
+      }
+    }
+
+    res.json({
+      storyId,
+      runId,
+      status: storyResult.status,
+      retries: storyResult.retries,
+      failureReason,
+      failureAttempts,
+      output: outputLines,
+      lineCount: outputLines.length,
+    });
+  } catch (error: any) {
+    console.error('[Pipeline] Story output error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET /api/pipeline/stream — SSE event stream ─────────────────────────────
 
 const HEARTBEAT_INTERVAL_MS = 15_000;

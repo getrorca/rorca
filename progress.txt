@@ -679,3 +679,24 @@ Key decisions:
 - View error detail uses setTimeout(100ms) to allow tab switch to complete before scrollToStory
 - Banner shows for both 'failed' and 'partial_failure' statuses (both have failed stories)
 - Hub card red border already existed via BORDER_LEFT mapping — only badge label needed the ✗ prefix
+
+## Story P2-013: Individual Story Failure Handling — DONE
+Files touched:
+- backend/src/routes/pipeline.ts (modified — added GET /runs/:runId/stories/:storyId/output endpoint)
+- src/api/pipeline.ts (modified — added fetchStoryOutput function + StoryOutput interface)
+- src/components/RunStoryList.tsx (modified — expandable failed rows, retry button, output preview, retry count badge)
+
+What was built:
+- **Backend story output endpoint**: GET /api/pipeline/runs/:runId/stories/:storyId/output returns last N lines (default 20, max 100) of story output extracted from run log file, plus failure reason/attempts from WAL events
+- **Expandable failed story rows**: Failed stories show chevron toggle; clicking expands to reveal last 20 lines of output in a dark-themed `<pre>` block, failure reason badge, and retry controls
+- **"Retry this story" button**: Calls existing POST /api/pipeline/runs/:id/retry with `storyIds: [storyId]`, immediately sets story status to running in UI via local state override
+- **Retry count badge**: Failed stories show "N/3 retries used" badge in red; expanded detail shows "N/3 retries used" and "Max retries (3) reached" when exhausted
+- **Optimistic UI**: `retryingStories` Set in RunStoryList overrides story status to 'running' immediately on retry click, before API response
+- **onRetryStory callback**: New prop on RunStoryList allows parent (RunViewPanel) to handle navigation to new retry run
+
+Key decisions:
+- Story output extracted from run log file by regex-matching story ID patterns (not per-story log files, which aren't reliably tracked in DB)
+- Falls back to in-memory output buffer for active runs, then to WAL event payload for failure metadata
+- Individual story retry reuses existing bulk retry endpoint with `storyIds: [storyId]` — no new backend endpoint needed
+- MAX_RETRIES constant (3) defined in frontend to match backend run-loop.ts MAX_RETRIES
+- Expand/collapse state is per-row, output fetched lazily on first expand only
