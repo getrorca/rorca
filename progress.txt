@@ -724,3 +724,25 @@ Key decisions:
 - Dropdowns switch from absolute to fixed positioning on mobile for viewport containment
 - RunPill hides "New Spec" text on mobile (plus icon only) to save horizontal space
 - Touch target enlargement uses sm: breakpoint to revert to compact sizes on desktop
+
+## Story P2-018: Virtual Scroll for Story List — DONE
+Files touched:
+- package.json (modified — added @tanstack/react-virtual)
+- src/components/RunStoryList.tsx (rewritten — virtual scroll with @tanstack/react-virtual)
+
+What was built:
+- **Virtual scroll**: `useVirtualizer` from `@tanstack/react-virtual` renders only visible rows in both sequential and wave-grouped layouts
+- **Fixed 48px row height**: All rows (stories, wave headers, excluded headers) use `ROW_HEIGHT = 48` constant via `estimateSize`
+- **Unified virtual item model**: Both sequential and wave layouts flatten into a single `VirtualItem[]` array (`story | wave-header | excluded-header` discriminated union) for the virtualizer
+- **Auto-scroll active story**: When a story transitions to `running` (detected via `runningStoryIds` diff against `prevRunningRef`), `scrollToIndex` with `align: 'auto'` + smooth behavior scrolls it into view
+- **Keyboard navigation**: Container has `tabIndex={0}` + `onKeyDown` handler — ArrowUp/Down moves `focusedIndex`, Enter activates (story click or wave toggle), Home/End jump to first/last item. Focused row gets `ring-2 ring-accent/50 bg-accent/5` highlight
+- **Scroll position preserved**: `scrollOffsetRef` captures scroll position on every scroll event and feeds `initialOffset` to virtualizer — persists across tab switches since the ref survives React re-renders
+- **10-item overscan**: Renders 10 extra items above/below viewport for smooth scrolling without visible blank areas
+- **ARIA**: Container has `role="listbox"`, each virtual row has `role="option"` with `aria-selected` for focus state
+
+Key decisions:
+- Used `@tanstack/react-virtual` (TanStack Virtual) over `react-window` — more modern, better React 18 support, smaller bundle
+- Wave mode flattens waves + stories into single virtual list — collapsed waves exclude their story items from the array, making the virtualizer's item count automatically correct
+- `estimateSize` returns fixed 48px — no `measureElement` needed since AC explicitly says "no dynamic height required"
+- Failed story expansion renders inline below the 48px row (outside virtualizer measurement) — works naturally since expansion is a rare interaction
+- Keyboard focus ring uses `ring-inset` to avoid layout shift from outline width
