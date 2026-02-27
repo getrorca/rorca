@@ -8,7 +8,7 @@ import { db } from '../db/index';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
-import { DEFAULT_MODEL } from '../lib/llm-client';
+import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
 import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
@@ -515,6 +515,379 @@ router.post('/trigger', async (req: Request, res: Response) => {
     res.status(201).json({ ok: true, runId, worktreePath, branchName });
   } catch (error: any) {
     console.error('[Pipeline] Trigger error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/pipeline/quick-run — Brief → single-story spec → immediate run ─
+// Accepts a plain-English brief, generates a 1-story spec, writes it directly
+// to approved/ (no review queue), emits spec_approved WAL, triggers execution.
+
+/**
+ * @swagger
+ * /api/pipeline/quick-run:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Quick-run — generate a 1-story spec from a brief and execute immediately
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, brief]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               brief: { type: string, description: "Plain-English description of what to build" }
+ *               model: { type: string, description: "LLM model to use for spec generation" }
+ *     responses:
+ *       202:
+ *         description: Quick-run started
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 runId: { type: integer }
+ *                 specId: { type: string }
+ *       400: { description: "Missing required fields" }
+ *       404: { description: "Workspace not found" }
+ *       409: { description: "Active run conflict or budget cap exceeded" }
+ */
+router.post('/quick-run', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, brief, model: requestedModel } = req.body;
+
+    if (!workspaceId || !brief) {
+      res.status(400).json({ error: 'Missing required fields: workspaceId, brief' });
+      return;
+    }
+
+    // 1. Look up workspace
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+      { id: string; label: string; path: string; domain?: string } | undefined;
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // 2. Plan enforcement
+    const effectiveUser = getEffectiveUser(req);
+    if (effectiveUser?.id) {
+      const userRow = db.prepare('SELECT plan FROM users WHERE id = ?').get(effectiveUser.id) as { plan: string } | undefined;
+      const plan = userRow?.plan || 'free';
+      if (plan === 'free') {
+        res.status(403).json({ error: 'plan_required', message: 'Pipeline execution requires a paid plan.' });
+        return;
+      }
+    }
+
+    // 3. Budget cap guard
+    const budgetStatus = checkBudgetThresholds(workspaceId);
+    if (budgetStatus.capExceeded) {
+      res.status(409).json({
+        error: 'Budget cap exceeded for this period',
+        spending_usd: Math.round(budgetStatus.spending * 1_000_000) / 1_000_000,
+        hard_cap_usd: budgetStatus.config!.hard_cap_usd,
+        period: budgetStatus.config!.period,
+      });
+      return;
+    }
+
+    // 4. Conflict detection
+    const activeRun = db.prepare(
+      `SELECT * FROM pipeline_runs WHERE workspace_id = ? AND status IN ('running', 'paused') LIMIT 1`
+    ).get(workspaceId) as PipelineRunRow | undefined;
+    if (activeRun) {
+      res.json({ conflict: true, activeRunId: activeRun.id });
+      return;
+    }
+
+    // 5. Resolve model
+    let resolvedModel: string = DEFAULT_MODEL;
+    if (requestedModel) {
+      resolvedModel = requestedModel;
+    } else {
+      const l3Pref = db.prepare(
+        `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+      ).get(workspaceId) as { preferred_model: string | null } | undefined;
+      if (l3Pref?.preferred_model) {
+        resolvedModel = l3Pref.preferred_model;
+      }
+    }
+
+    // 6. Resolve vault creds for LLM call
+    const user = getEffectiveUser(req);
+    let vaultCreds: { apiKey?: string; baseUrl?: string } = {};
+    if (user?.id) {
+      const vaultProvider = resolveVaultProvider(resolvedModel);
+      if (vaultProvider) {
+        const result = getVaultKey(user.id, vaultProvider);
+        if (result) vaultCreds = { apiKey: result.key, baseUrl: result.baseUrl ?? undefined };
+      }
+      if (!vaultCreds.apiKey) {
+        const compat = getVaultKey(user.id, 'openai-compat');
+        if (compat) vaultCreds = { apiKey: compat.key, baseUrl: compat.baseUrl ?? undefined };
+      }
+      if (!vaultCreds.apiKey) {
+        const anthropic = getVaultKey(user.id, 'anthropic');
+        if (anthropic) vaultCreds = { apiKey: anthropic.key };
+      }
+    }
+
+    // 7. Generate 1-story spec via LLM
+    const quickRunPrompt = [
+      '=== INSTRUCTIONS: READ THIS FIRST ===',
+      'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+      'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+      'If you output anything other than raw JSON, the system will fail.',
+      '=== END INSTRUCTIONS ===',
+      '',
+      `TASK: Generate a software specification JSON with exactly 1 user story.`,
+      `Brief: ${brief}`,
+      '',
+      'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
+      '',
+      'JSON schema:',
+      '{"stories":[{"id":"QR-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":[]}]}',
+      '',
+      'Rules:',
+      '- Generate exactly 1 story with id "QR-001"',
+      '- The story must have at most 5 acceptance criteria',
+      '- acceptanceCriteria must be specific and testable',
+      '- dependsOn must be an empty array (single story has no deps)',
+      '- The description should be detailed enough for an engineer to implement',
+      '- Your entire response must be valid JSON parseable by JSON.parse()',
+    ].join('\n');
+
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: quickRunPrompt }],
+      { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+    );
+    const rawResponse = llmResult.text;
+
+    // 8. Parse JSON
+    let parsed: { stories: Array<{ id: string; title: string; description: string; acceptanceCriteria: string[]; dependsOn: string[] }> };
+    try {
+      const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
+      const jsonStart = jsonStr.indexOf('{');
+      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+    } catch {
+      res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
+      return;
+    }
+
+    if (!Array.isArray(parsed.stories) || parsed.stories.length === 0) {
+      res.status(500).json({ error: 'Invalid spec structure from LLM' });
+      return;
+    }
+
+    // Enforce single story + max 5 AC
+    const story = parsed.stories[0];
+    if (story.acceptanceCriteria && story.acceptanceCriteria.length > 5) {
+      story.acceptanceCriteria = story.acceptanceCriteria.slice(0, 5);
+    }
+
+    // 9. Build slug and write spec directly to approved/
+    const slug = `qr-${brief.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50)}-${Date.now()}`;
+    const approvedDir = path.join(workspace.path, 'forge', 'specs', 'approved');
+    fs.mkdirSync(approvedDir, { recursive: true });
+
+    const specJson = {
+      title: brief.slice(0, 120),
+      generatedAt: new Date().toISOString(),
+      model: resolvedModel,
+      source: 'quick-run',
+      userStories: [{
+        id: story.id || 'QR-001',
+        title: story.title,
+        description: story.description,
+        acceptanceCriteria: story.acceptanceCriteria || [],
+        dependsOn: [],
+        passes: false,
+      }],
+    };
+
+    const specPath = path.join(approvedDir, `${slug}.json`);
+    fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2), 'utf8');
+    const relativeSpecPath = `forge/specs/approved/${slug}.json`;
+
+    // 10. Emit spec_approved WAL event with actor: 'quick-run'
+    const walApproveResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_approved', ?, ?, ?)`
+    ).run(slug, workspaceId, JSON.stringify({ actor: 'quick-run', brief: brief.slice(0, 200), model: resolvedModel }));
+    const walApproveEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walApproveResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walApproveEvent);
+
+    // 11. Trigger pipeline execution (same logic as /trigger)
+    const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
+    const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
+    const hasBashRunLoop = fs.existsSync(runLoopSh);
+    const hasTsRunLoop = fs.existsSync(runLoopTs);
+    if (!hasBashRunLoop && !hasTsRunLoop) {
+      res.status(422).json({ error: `No run-loop engine found for workspace` });
+      return;
+    }
+    const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
+
+    const runResult = db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES (?, ?, 'running', 'quick-run')`
+    ).run(relativeSpecPath, workspaceId);
+    const runId = runResult.lastInsertRowid as number;
+
+    // Build clean env
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
+        env[k] = v;
+      }
+    }
+    const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
+    for (const [k, v] of Object.entries(workspaceEnvVars)) {
+      env[k] = v;
+    }
+
+    // Inject vault API keys
+    if (user?.id) {
+      const anthropicVaultKey = getVaultKey(user.id, 'anthropic');
+      if (anthropicVaultKey) env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
+      const openaiVaultKey = getVaultKey(user.id, 'openai-compat');
+      if (openaiVaultKey) {
+        env['OPENAI_API_KEY'] = openaiVaultKey.key;
+        if (openaiVaultKey.baseUrl) env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
+      }
+      const openrouterVaultKey = getVaultKey(user.id, 'openrouter');
+      if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
+    }
+
+    // Inject agent profile
+    const activeProfile = db.prepare(
+      'SELECT * FROM agent_profiles WHERE workspace_id = ? AND is_active = 1 LIMIT 1'
+    ).get(workspaceId) as AgentProfileRow | undefined;
+    if (activeProfile) {
+      if (activeProfile.system_prompt_override) env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
+      const tools = JSON.parse(activeProfile.allowed_tools) as string[];
+      if (tools.length > 0) env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
+      if (activeProfile.model_override) env['RORCA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
+    }
+
+    // Spawn run-loop
+    const logPath = workspaceLogPath(workspace.path, runId);
+    db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(logPath, runId);
+    const logFd = fs.openSync(logPath, 'a');
+    let child: ReturnType<typeof spawn>;
+
+    if (useTypescriptRunLoop) {
+      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
+      const backendPort = process.env.PORT || '3030';
+      child = spawn(tsxBin, [
+        runLoopTs,
+        '--json', specPath,
+        '--cwd', workspace.path,
+        '--run-id', String(runId),
+        '--port', backendPort,
+      ], {
+        cwd: workspace.path,
+        stdio: ['ignore', logFd, logFd],
+        detached: true,
+        env,
+      });
+    } else {
+      const scriptInCwd = path.join(workspace.path, 'forge', 'run-loop.sh');
+      child = spawn('bash', [scriptInCwd, '--json', specPath], {
+        cwd: workspace.path,
+        stdio: ['ignore', logFd, logFd],
+        detached: true,
+        env,
+      });
+    }
+    fs.closeSync(logFd);
+    child.unref();
+
+    if (child.pid) {
+      db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, runId);
+    }
+
+    // Set up output buffer
+    const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
+    outputBuffers.set(runId, buf);
+
+    let tailPos = 0;
+    const tailInterval = setInterval(() => {
+      try {
+        const stat = fs.statSync(logPath);
+        if (stat.size > tailPos) {
+          const fd = fs.openSync(logPath, 'r');
+          const newBytes = Buffer.alloc(stat.size - tailPos);
+          fs.readSync(fd, newBytes, 0, newBytes.length, tailPos);
+          fs.closeSync(fd);
+          tailPos = stat.size;
+          const text = newBytes.toString('utf8');
+          buf.chunks.push(text);
+          buf.subscribers.forEach(cb => cb(text));
+        }
+      } catch { /* transient read error */ }
+    }, 200);
+
+    // Handle process exit
+    child.on('exit', (code) => {
+      clearInterval(tailInterval);
+      try {
+        const stat = fs.statSync(logPath);
+        if (stat.size > tailPos) {
+          const fd = fs.openSync(logPath, 'r');
+          const remaining = Buffer.alloc(stat.size - tailPos);
+          fs.readSync(fd, remaining, 0, remaining.length, tailPos);
+          fs.closeSync(fd);
+          buf.chunks.push(remaining.toString('utf8'));
+          buf.subscribers.forEach(cb => cb(remaining.toString('utf8')));
+        }
+      } catch { /* ignore */ }
+
+      if (!db.open) {
+        buf.done = true;
+        buf.subscribers.clear();
+        return;
+      }
+
+      const status = code === 0 ? 'done' : 'failed';
+      db.prepare(
+        `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
+      ).run(status, runId);
+
+      const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
+      const postRunResults = runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
+      if (postRunResults.length > 0) {
+        const hookOutput = postRunResults.map(r =>
+          `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +
+          (r.exitCode !== 0 ? `\r\n\x1b[31m[Hook exited with code ${r.exitCode}]\x1b[0m\r\n` : '\r\n')
+        ).join('');
+        buf.chunks.push(hookOutput);
+        buf.subscribers.forEach(cb => cb(hookOutput));
+        fs.appendFileSync(logPath, hookOutput);
+      }
+
+      const walFinishResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+      ).run(workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code, source: 'quick-run' }));
+      const walFinishEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walFinishResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walFinishEvent);
+
+      buf.done = true;
+      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
+      buf.subscribers.clear();
+      setTimeout(() => { outputBuffers.delete(runId); }, 30 * 60 * 1000);
+    });
+
+    res.status(202).json({ runId, specId: slug });
+  } catch (error: any) {
+    console.error('[Pipeline] Quick-run error:', error);
     res.status(500).json({ error: error.message });
   }
 });
