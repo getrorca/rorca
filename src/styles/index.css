@@ -51,3 +51,11 @@
     transform: translateY(0);
   }
 }
+
+@keyframes wave-pulse {
+  0% { background-color: transparent; }
+  25% { background-color: rgba(59, 130, 246, 0.08); }
+  50% { background-color: transparent; }
+  75% { background-color: rgba(59, 130, 246, 0.05); }
+  100% { background-color: transparent; }
+}
