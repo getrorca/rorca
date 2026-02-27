@@ -47,6 +47,7 @@ import { errorHandler } from './lib/error-handler';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { db } from './db/index';
 import runQueueRouter from './routes/run-queue';
+import configRouter from './routes/config';
 
 dotenv.config();
 
@@ -131,6 +132,7 @@ app.use('/api/notifications', notificationsRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/billing', billingRouter);
 app.use('/api/run-queue', runQueueRouter);
+app.use('/api/config', configRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
