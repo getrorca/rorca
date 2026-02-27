@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
 import BatchForge from './BatchForge';
@@ -180,7 +181,12 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     setStoryPrefix(value.toUpperCase().slice(0, 4));
   };
 
+  // Quick Run state
+  const [isQuickRunning, setIsQuickRunning] = useState(false);
+  const { show: showToast } = useGlobalToast();
+
   const canGenerate = specName.length > 0 && !specNameError && specBrief.length > 0;
+  const canQuickRun = specBrief.trim().length > 0 && !!workspaceId;
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
@@ -234,6 +240,38 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
         : '';
       setGenerateError(`Generation failed with ${availableModels.find(m => m.id === modelUsed)?.label || modelUsed}: ${message}.${suggestion}`);
       setIsGenerating(false);
+    }
+  };
+
+  const handleQuickRun = async () => {
+    if (!canQuickRun || isQuickRunning) return;
+    setIsQuickRunning(true);
+    try {
+      const res = await apiFetch<{ runId?: number; specId?: string; conflict?: boolean; activeRunId?: number }>(
+        '/api/pipeline/quick-run',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workspaceId,
+            brief: specBrief.trim(),
+            model: selectedModel || undefined,
+          }),
+        },
+      );
+      if (res.conflict) {
+        showToast('Another run is active in this workspace', 'error');
+        if (res.activeRunId && onNavigateToRun) {
+          onNavigateToRun(res.activeRunId);
+        }
+      } else if (res.runId) {
+        showToast('Quick run started', 'success');
+        if (onNavigateToRun) onNavigateToRun(res.runId);
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Quick run failed', 'error');
+    } finally {
+      setIsQuickRunning(false);
     }
   };
 
@@ -544,17 +582,42 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                   apiDone={apiDone}
                 />
               ) : !generatedSpec ? (
-                <button
-                  onClick={handleGenerate}
-                  disabled={!canGenerate || isGenerating}
-                  className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${
-                    canGenerate && !isGenerating
-                      ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
-                      : 'bg-accent/30 text-white/40 cursor-not-allowed'
-                  }`}
-                >
-                  Generate Spec
-                </button>
+                <>
+                  <button
+                    onClick={handleGenerate}
+                    disabled={!canGenerate || isGenerating}
+                    className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${
+                      canGenerate && !isGenerating
+                        ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
+                        : 'bg-accent/30 text-white/40 cursor-not-allowed'
+                    }`}
+                  >
+                    Generate Spec
+                  </button>
+                  {canQuickRun && (
+                    <button
+                      onClick={handleQuickRun}
+                      disabled={isQuickRunning || isGenerating}
+                      className={`w-full py-2 rounded text-sm font-medium transition-colors border ${
+                        isQuickRunning || isGenerating
+                          ? 'bg-panel/50 border-border/50 text-muted/40 cursor-not-allowed'
+                          : 'bg-panel border-border text-text hover:bg-accent/10 hover:border-accent/30 cursor-pointer'
+                      }`}
+                    >
+                      {isQuickRunning ? (
+                        <span className="flex items-center justify-center gap-2">
+                          <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                          Generating & running...
+                        </span>
+                      ) : (
+                        'Quick Run'
+                      )}
+                    </button>
+                  )}
+                </>
               ) : null}
             </div>
 
