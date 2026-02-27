@@ -496,6 +496,109 @@ router.get('/me', (req: Request, res: Response) => {
   });
 });
 
+// ─── PATCH /api/auth/me — Update profile + password ───
+
+/**
+ * @swagger
+ * /api/auth/me:
+ *   patch:
+ *     tags: [Auth]
+ *     summary: Update current user profile (display name, password)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               displayName: { type: string }
+ *               currentPassword: { type: string }
+ *               newPassword: { type: string, minLength: 6 }
+ *     responses:
+ *       200: { description: "Profile updated" }
+ *       400: { description: "Validation error" }
+ *       401: { description: "Not authenticated" }
+ *       403: { description: "Current password incorrect" }
+ */
+router.patch('/me', (req: Request, res: Response) => {
+  const authReq = req as Request & { user?: AuthUser };
+  const userId = authReq.user?.id
+    ?? (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+
+  if (!userId) {
+    res.status(401).json({ error: 'No user configured' });
+    return;
+  }
+
+  const { displayName, currentPassword, newPassword } = req.body;
+
+  const updates: string[] = [];
+  const params: (string | null)[] = [];
+
+  // Display name update
+  if (displayName !== undefined) {
+    if (typeof displayName !== 'string' || displayName.trim().length === 0) {
+      res.status(400).json({ error: 'displayName must be a non-empty string' });
+      return;
+    }
+    updates.push('display_name = ?');
+    params.push(displayName.trim());
+  }
+
+  // Password change (requires currentPassword)
+  if (newPassword !== undefined) {
+    if (!currentPassword || typeof currentPassword !== 'string') {
+      res.status(400).json({ error: 'currentPassword is required to change password' });
+      return;
+    }
+    if (typeof newPassword !== 'string' || newPassword.length < 6) {
+      res.status(400).json({ error: 'newPassword must be at least 6 characters' });
+      return;
+    }
+
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId) as Pick<UserRow, 'password_hash'> | undefined;
+    if (!row) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    if (!bcrypt.compareSync(currentPassword, row.password_hash)) {
+      res.status(403).json({ error: 'Current password is incorrect' });
+      return;
+    }
+
+    updates.push('password_hash = ?');
+    params.push(bcrypt.hashSync(newPassword, BCRYPT_COST));
+  }
+
+  if (updates.length === 0) {
+    res.status(400).json({ error: 'No fields to update' });
+    return;
+  }
+
+  updates.push("updated_at = datetime('now')");
+  params.push(userId);
+
+  db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+
+  // Return updated user
+  const user = db.prepare(
+    'SELECT id, email, display_name, github_id, email_verified_at, plan FROM users WHERE id = ?'
+  ).get(userId) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> & { plan?: string } | undefined;
+
+  res.json({
+    ok: true,
+    user: user ? {
+      id: user.id,
+      email: user.email,
+      displayName: user.display_name,
+      githubConnected: !!user.github_id,
+      emailVerified: !!user.email_verified_at,
+      plan: user.plan || 'free',
+    } : undefined,
+  });
+});
+
 // ─── Email verification endpoints ───
 
 /**

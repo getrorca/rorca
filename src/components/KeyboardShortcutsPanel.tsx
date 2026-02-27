@@ -16,37 +16,36 @@ const mod = modLabel();
 
 const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
-    category: 'Global',
-    shortcuts: [
-      { keys: [`${mod}`, 'K'], description: 'Open command palette' },
-      { keys: ['?'], description: 'Show keyboard shortcuts' },
-      { keys: [`${mod}`, '/'], description: 'Show keyboard shortcuts' },
-      { keys: ['Esc'], description: 'Close panel / modal' },
-    ],
-  },
-  {
     category: 'Navigation',
     shortcuts: [
-      { keys: [`${mod}`, '1'], description: 'Go to Spec Forge' },
-      { keys: [`${mod}`, '2'], description: 'Go to Direction Stack' },
-      { keys: [`${mod}`, '3'], description: 'Go to Review Queue' },
-      { keys: [`${mod}`, '4'], description: 'Go to Pipeline Monitor' },
-      { keys: [`${mod}`, '5'], description: 'Go to Archive' },
+      { keys: [`${mod}`, '1'], description: 'Go to Hub' },
+      { keys: [`${mod}`, '2'], description: 'Go to Forge' },
+      { keys: [`${mod}`, '3'], description: 'Go to Run View' },
+      { keys: [`${mod}`, '4'], description: 'Go to Settings' },
     ],
   },
   {
-    category: 'Spec Actions',
+    category: 'Specs',
     shortcuts: [
+      { keys: [`${mod}`, 'N'], description: 'New spec in Spec Forge' },
       { keys: [`${mod}`, 'Enter'], description: 'Approve selected spec' },
       { keys: [`${mod}`, 'Backspace'], description: 'Reject selected spec' },
-      { keys: [`${mod}`, 'N'], description: 'New spec in Spec Forge' },
     ],
   },
   {
-    category: 'Pipeline Actions',
+    category: 'Pipeline',
     shortcuts: [
       { keys: [`${mod}`, 'Shift', 'R'], description: 'Trigger pipeline run' },
       { keys: [`${mod}`, '.'], description: 'Cancel active run' },
+    ],
+  },
+  {
+    category: 'General',
+    shortcuts: [
+      { keys: [`${mod}`, 'K'], description: 'Open command palette' },
+      { keys: ['?'], description: 'Open shortcuts' },
+      { keys: [`${mod}`, '/'], description: 'Open shortcuts' },
+      { keys: ['Esc'], description: 'Close panel / modal' },
     ],
   },
 ];
