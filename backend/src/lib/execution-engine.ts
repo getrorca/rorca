@@ -523,12 +523,141 @@ function spawnCodex(
   });
 }
 
+// ─── OpenCode Error Classification ──────────────────────────────────────────
+
+type OpenCodeErrorCategory =
+  | 'not_installed'
+  | 'api_key_invalid'
+  | 'model_not_available'
+  | 'rate_limited'
+  | 'server_crashed'
+  | 'malformed_output'
+  | 'timeout'
+  | 'unknown';
+
+interface ClassifiedError {
+  category: OpenCodeErrorCategory;
+  message: string;
+  retryable: boolean;
+}
+
+/**
+ * Classify an OpenCode failure into a user-facing error category.
+ * Parses stderr and exit code to distinguish provider-level errors
+ * from infrastructure errors.
+ */
+function classifyOpenCodeError(result: AgentResult): ClassifiedError {
+  const lower = result.stderrTail.toLowerCase();
+  const raw = result.stderrTail;
+
+  // Binary not found (ENOENT from spawn)
+  if (lower.includes('enoent') || lower.includes('not found') || lower.includes('no such file')) {
+    return {
+      category: 'not_installed',
+      message: 'OpenCode binary not found. Install with: npm i -g opencode',
+      retryable: false,
+    };
+  }
+
+  // API key invalid (401/403 from provider)
+  if (lower.includes('401') || lower.includes('unauthorized') || lower.includes('invalid api key')
+      || lower.includes('invalid_api_key') || lower.includes('authentication failed')
+      || lower.includes('incorrect api key') || lower.includes('api key not valid')) {
+    return {
+      category: 'api_key_invalid',
+      message: `Provider API key invalid or expired. Check your API key in Settings. ${extractProviderHint(raw)}`,
+      retryable: false,
+    };
+  }
+
+  // Model not available (404 or specific error messages)
+  if (lower.includes('model not found') || lower.includes('model_not_found')
+      || lower.includes('does not exist') || lower.includes('not available')
+      || lower.includes('invalid model') || lower.includes('unknown model')
+      || (lower.includes('404') && (lower.includes('model') || lower.includes('deployment')))) {
+    return {
+      category: 'model_not_available',
+      message: `Model not available. Check that the model name is correct and you have access. ${extractModelHint(raw)}`,
+      retryable: false,
+    };
+  }
+
+  // Rate limiting (429 or explicit rate limit messages)
+  if (lower.includes('429') || lower.includes('rate limit') || lower.includes('rate_limit')
+      || lower.includes('too many requests') || lower.includes('overloaded')
+      || lower.includes('quota exceeded') || lower.includes('tokens per min')) {
+    const waitSeconds = extractRateLimitWait(raw);
+    return {
+      category: 'rate_limited',
+      message: waitSeconds
+        ? `Rate limited — waiting ${waitSeconds}s before retry`
+        : 'Rate limited by provider — will retry with backoff',
+      retryable: true,
+    };
+  }
+
+  // Server/connection crash
+  if (lower.includes('econnrefused') || lower.includes('econnreset')
+      || lower.includes('socket hang up') || lower.includes('broken pipe')
+      || lower.includes('server') && (lower.includes('crash') || lower.includes('died') || lower.includes('exited'))) {
+    return {
+      category: 'server_crashed',
+      message: 'OpenCode server connection lost. The warm server may have crashed.',
+      retryable: true,
+    };
+  }
+
+  // Timeout (exit code 124 handled separately, but stderr may mention it)
+  if (result.exitCode === 124) {
+    return {
+      category: 'timeout',
+      message: 'Story execution timed out',
+      retryable: false,
+    };
+  }
+
+  // Default unknown error
+  const snippet = raw.trim().slice(0, 200);
+  return {
+    category: 'unknown',
+    message: snippet ? `OpenCode error: ${snippet}` : `OpenCode exited with code ${result.exitCode}`,
+    retryable: result.exitCode !== 0,
+  };
+}
+
+/** Extract provider name hint from error output */
+function extractProviderHint(stderr: string): string {
+  if (stderr.includes('openai') || stderr.includes('OpenAI')) return '(OpenAI)';
+  if (stderr.includes('anthropic') || stderr.includes('Anthropic')) return '(Anthropic)';
+  if (stderr.includes('google') || stderr.includes('Google') || stderr.includes('gemini')) return '(Google)';
+  if (stderr.includes('openrouter') || stderr.includes('OpenRouter')) return '(OpenRouter)';
+  return '';
+}
+
+/** Extract model name hint from error output */
+function extractModelHint(stderr: string): string {
+  const modelMatch = stderr.match(/model[:\s]+["']?([a-zA-Z0-9\-_./]+)["']?/i);
+  return modelMatch ? `(requested: ${modelMatch[1]})` : '';
+}
+
+/** Extract retry-after seconds from rate limit response */
+function extractRateLimitWait(stderr: string): number | null {
+  // Match "retry-after: N" header or "retry after N seconds" message
+  const retryAfterMatch = stderr.match(/retry[- ]after[:\s]+(\d+)/i);
+  if (retryAfterMatch) return parseInt(retryAfterMatch[1], 10);
+  // Match "wait N seconds" or "try again in N seconds"
+  const waitMatch = stderr.match(/(?:wait|try again in|reset in)\s+(\d+)\s*(?:s|sec|second)/i);
+  if (waitMatch) return parseInt(waitMatch[1], 10);
+  return null;
+}
+
 // ─── Rate Limit Detection ───────────────────────────────────────────────────
 
 function isRateLimited(result: AgentResult): boolean {
   if (result.exitCode === 0) return false;
   const lower = result.stderrTail.toLowerCase();
-  if (lower.includes('rate limit') || lower.includes('overloaded')) return true;
+  if (lower.includes('rate limit') || lower.includes('overloaded') || lower.includes('429')
+      || lower.includes('too many requests') || lower.includes('quota exceeded')) return true;
   if (result.exitCode === 1 && result.elapsedMs < RATE_LIMIT_FAST_EXIT_THRESHOLD_MS) return true;
   return false;
 }
@@ -1053,19 +1182,22 @@ async function executeStory(
       return 'failed';
     }
 
-    // ── Non-zero exit: retry ──────────────────────────────────────────
-    const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
-    retryCounts.set(story.id, currentRetries);
+    // ── Non-zero exit: classify error and retry ────────────────────────
+    const classified = config.agentType === 'opencode'
+      ? classifyOpenCodeError(result)
+      : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
 
-    if (currentRetries >= MAX_RETRIES) {
-      console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
+    // Non-retryable errors (wrong API key, model not found, not installed) — fail immediately
+    if (!classified.retryable) {
+      console.log(`${story.id} failed (non-retryable): ${classified.category} — ${classified.message}`);
       console.log(`   Log: ${storyLogFile}`);
       markStorySkipped(config.jsonPath, story.id);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
-          reason: 'max_retries', attempts: currentRetries,
+          reason: classified.category, error_message: classified.message,
+          agent_type: config.agentType, exit_code: result.exitCode,
         }, story.id);
         try {
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
@@ -1077,8 +1209,35 @@ async function executeStory(
       return 'failed';
     }
 
-    console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES})`);
+    const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+    retryCounts.set(story.id, currentRetries);
+
+    if (currentRetries >= MAX_RETRIES) {
+      console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
+      console.log(`   Log: ${storyLogFile}`);
+      console.log(`   Error: ${classified.message}`);
+      markStorySkipped(config.jsonPath, story.id);
+
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          run_id: config.runId, story_id: story.id,
+          reason: 'max_retries', attempts: currentRetries,
+          error_category: classified.category, error_message: classified.message,
+          agent_type: config.agentType,
+        }, story.id);
+        try {
+          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+          });
+        } catch { /* backend may be down */ }
+      }
+      return 'failed';
+    }
+
+    console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES}): ${classified.category}`);
     console.log(`   Log: ${storyLogFile}`);
+    console.log(`   Error: ${classified.message}`);
     return 'failed';
   }
 }
@@ -1376,19 +1535,22 @@ async function main(): Promise<void> {
         } catch { /* backend may be down */ }
       }
     } else {
-      const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
-      retryCounts.set(story.id, currentRetries);
+      // Classify OpenCode errors for user-facing messages
+      const classified = config.agentType === 'opencode'
+        ? classifyOpenCodeError(result)
+        : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
 
-      if (currentRetries >= MAX_RETRIES) {
-        console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
+      // Non-retryable errors — fail immediately, no retry
+      if (!classified.retryable) {
+        console.log(`${story.id} failed (non-retryable): ${classified.category} — ${classified.message}`);
         console.log(`   Log: ${storyLogFile}`);
-        console.log(`   Fix manually, then re-run with: --story ${story.id}`);
         markStorySkipped(config.jsonPath, story.id);
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: story.id,
-            reason: 'max_retries', attempts: currentRetries,
+            reason: classified.category, error_message: classified.message,
+            agent_type: config.agentType, exit_code: result.exitCode,
           }, story.id);
           try {
             await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
@@ -1398,9 +1560,36 @@ async function main(): Promise<void> {
           } catch { /* backend may be down */ }
         }
       } else {
-        console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES})`);
-        console.log(`   Log: ${storyLogFile}`);
-        console.log('   Will retry...');
+        const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+        retryCounts.set(story.id, currentRetries);
+
+        if (currentRetries >= MAX_RETRIES) {
+          console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
+          console.log(`   Log: ${storyLogFile}`);
+          console.log(`   Error: ${classified.message}`);
+          console.log(`   Fix manually, then re-run with: --story ${story.id}`);
+          markStorySkipped(config.jsonPath, story.id);
+
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId, story_id: story.id,
+              reason: 'max_retries', attempts: currentRetries,
+              error_category: classified.category, error_message: classified.message,
+              agent_type: config.agentType,
+            }, story.id);
+            try {
+              await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+              });
+            } catch { /* backend may be down */ }
+          }
+        } else {
+          console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES}): ${classified.category}`);
+          console.log(`   Log: ${storyLogFile}`);
+          console.log(`   Error: ${classified.message}`);
+          console.log('   Will retry...');
+        }
       }
     }
 
