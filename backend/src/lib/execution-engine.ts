@@ -44,6 +44,12 @@ import {
 import { parseClaudeLogTokens } from './claude-token-parser';
 import { parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
 import { calculateCost } from './model-pricing';
+import {
+  check as checkToolCapability,
+  detectRequiredTools,
+  findCapableEngine,
+  type CapabilityStory,
+} from './tool-capability-checker';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1164,7 +1170,51 @@ async function executeStory(
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
   // Per-story agent resolution: explicit override > story.agent field > run-level config
-  const effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);
+  let effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);
+
+  // ── OC-031: Tool capability reroute ────────────────────────────────
+  const orchConfigForCap = loadOrchestrationConfig(config.cwd);
+  if (orchConfigForCap.capabilityMismatch === 'reroute') {
+    const capStory: CapabilityStory = {
+      id: story.id,
+      title: story.title,
+      description: story.description,
+      acceptanceCriteria: story.acceptanceCriteria,
+    };
+    const capResult = checkToolCapability(capStory, effectiveAgent);
+    if (!capResult.compatible) {
+      const requiredTools = detectRequiredTools(capStory);
+      const betterEngine = findCapableEngine(requiredTools, effectiveAgent);
+      if (betterEngine) {
+        console.log(`  [capability] Rerouting ${story.id} from ${effectiveAgent} → ${betterEngine} (missing: ${capResult.missingTools.join(', ')})`);
+
+        // Emit WAL event for capability reroute
+        const wsId = workspaceId;
+        if (wsId) {
+          await emitWalEvent(config.port, 'story_rerouted', wsId, {
+            run_id: config.runId,
+            story_id: story.id,
+            story_title: story.title,
+            reason: 'capability_mismatch',
+            missingTools: capResult.missingTools,
+            fromEngine: effectiveAgent,
+            toEngine: betterEngine,
+          }, story.id);
+        }
+
+        // Track the reroute
+        reroutedStories.set(story.id, {
+          storyId: story.id,
+          fromEngine: effectiveAgent,
+          toEngine: betterEngine,
+          reason: `capability_mismatch: missing ${capResult.missingTools.join(', ')}`,
+        });
+
+        effectiveAgent = betterEngine;
+      }
+    }
+  }
+
   const effectiveAttach = effectiveAgent === 'opencode' ? (storyAttachAddr ?? config.attachAddr) : null;
 
   // ── Escalation: determine current model tier ────────────────────────

@@ -501,6 +501,8 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate, onQ
             onAddToQueue={handleAddToQueue}
             onClose={() => setShowPopover(false)}
             onNavigate={onNavigate}
+            specPath={`forge/specs/approved/${spec.id}.json`}
+            workspaceId={workspaceId}
           />
         )}
         {triggerState === 'success' ? (

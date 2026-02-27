@@ -989,6 +989,8 @@ function SpecPreviewDrawer({
                         onTrigger={handleRun}
                         onClose={() => setShowTriggerPopover(false)}
                         onNavigate={onNavigate}
+                        specPath={summary ? `forge/specs/approved/${summary.id}.json` : undefined}
+                        workspaceId={workspaceId ?? undefined}
                       />
                     )}
                     <button
