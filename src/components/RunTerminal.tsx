@@ -5,6 +5,7 @@ import {
   Copy, Check, Terminal as TerminalIcon, Layers,
   ChevronDown, ChevronRight,
   FileText, Pencil, Brain, GitCommitHorizontal, Search, Hash, AlertCircle,
+  FilePlus, Globe, Clock,
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
@@ -25,9 +26,24 @@ interface SemanticStep {
   label: string;
   detail?: string;
   ts: string;
+  toolName?: string;
+  durationMs?: number;
+  isError?: boolean;
+  output?: string;
 }
 
-const STEP_CONFIG: Record<SemanticStep['type'], { icon: typeof FileText; label: string; color: string }> = {
+// ─── Icon configs ────────────────────────────────────────────────────────────
+
+type IconComponent = typeof FileText;
+
+interface StepVisual {
+  icon: IconComponent;
+  label: string;
+  color: string;
+}
+
+/** Default step config (used for Claude path and fallback) */
+const STEP_CONFIG: Record<SemanticStep['type'], StepVisual> = {
   read:    { icon: FileText,            label: 'Read',    color: 'text-blue-400' },
   write:   { icon: Pencil,              label: 'Write',   color: 'text-emerald-400' },
   edit:    { icon: Pencil,              label: 'Edit',    color: 'text-emerald-400' },
@@ -38,6 +54,26 @@ const STEP_CONFIG: Record<SemanticStep['type'], { icon: typeof FileText; label: 
   search:  { icon: Search,              label: 'Search',  color: 'text-orange-400' },
   unknown: { icon: AlertCircle,         label: 'Unknown', color: 'text-gray-400' },
 };
+
+/** OpenCode-specific icon overrides keyed by toolName */
+const OPENCODE_TOOL_ICONS: Record<string, StepVisual> = {
+  bash:      { icon: TerminalIcon, label: 'Bash',      color: 'text-amber-400' },
+  edit:      { icon: Pencil,       label: 'Edit',      color: 'text-yellow-400' },
+  read:      { icon: FileText,     label: 'Read',      color: 'text-blue-400' },
+  write:     { icon: FilePlus,     label: 'Write',     color: 'text-emerald-400' },
+  glob:      { icon: Search,       label: 'Glob',      color: 'text-orange-400' },
+  grep:      { icon: Search,       label: 'Grep',      color: 'text-orange-400' },
+  webfetch:  { icon: Globe,        label: 'WebFetch',  color: 'text-sky-400' },
+  websearch: { icon: Globe,        label: 'WebSearch', color: 'text-sky-400' },
+};
+
+/** Resolve visual config for a step, with OpenCode tool-specific overrides */
+function resolveStepVisual(step: SemanticStep, isOpenCode: boolean): StepVisual {
+  if (isOpenCode && step.toolName && OPENCODE_TOOL_ICONS[step.toolName]) {
+    return OPENCODE_TOOL_ICONS[step.toolName];
+  }
+  return STEP_CONFIG[step.type];
+}
 
 // ─── xterm themes ─────────────────────────────────────────────────────────────
 
@@ -161,10 +197,181 @@ function formatRelativeTime(isoTs: string, baseTs: string | null): string {
   return `+${min}m${sec.toString().padStart(2, '0')}s`;
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = Math.floor(sec % 60);
+  return `${min}m${remSec}s`;
+}
+
+// ─── OpenCode Semantic Step Renderer ──────────────────────────────────────────
+
+function OpenCodeStepRow({
+  step, index, firstTs, isExpanded, onToggle,
+}: {
+  step: SemanticStep;
+  index: number;
+  firstTs: string | null;
+  isExpanded: boolean;
+  onToggle: (i: number) => void;
+}) {
+  const visual = resolveStepVisual(step, true);
+  const Icon = visual.icon;
+  const hasExpandable = !!(step.detail || step.output);
+  const isError = step.isError || step.type === 'unknown';
+
+  return (
+    <div className={`border-b border-border/30 ${isError ? 'bg-red-500/5' : ''}`}>
+      <div
+        className={`px-3 py-1.5 flex items-center gap-2 ${hasExpandable ? 'cursor-pointer hover:bg-panel/50' : ''} transition-colors`}
+        onClick={hasExpandable ? () => onToggle(index) : undefined}
+      >
+        {/* Expand/collapse chevron */}
+        {hasExpandable ? (
+          isExpanded
+            ? <ChevronDown size={12} className="text-muted shrink-0" />
+            : <ChevronRight size={12} className="text-muted shrink-0" />
+        ) : (
+          <span className="w-3 shrink-0" />
+        )}
+
+        {/* Tool icon */}
+        <Icon size={13} className={`shrink-0 ${isError ? 'text-red-400' : visual.color}`} />
+
+        {/* Tool name badge */}
+        {step.toolName && (
+          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${
+            isError
+              ? 'bg-red-500/15 text-red-400'
+              : 'bg-accent/10 text-accent'
+          }`}>
+            {visual.label}
+          </span>
+        )}
+
+        {/* Label (file path / command argument) */}
+        <span className={`text-xs truncate flex-1 font-mono ${
+          isError ? 'text-red-400' : 'text-[var(--text)]'
+        }`}>
+          {step.label}
+        </span>
+
+        {/* Duration badge */}
+        {step.durationMs != null && (
+          <span className="flex items-center gap-0.5 text-[10px] text-muted font-mono shrink-0">
+            <Clock size={9} className="text-muted" />
+            {formatDuration(step.durationMs)}
+          </span>
+        )}
+
+        {/* Relative timestamp */}
+        <span className="text-[10px] text-muted font-mono shrink-0 ml-1">
+          {formatRelativeTime(step.ts, firstTs)}
+        </span>
+      </div>
+
+      {/* Collapsible output section */}
+      {hasExpandable && isExpanded && (
+        <div className="px-3 pb-2 pl-10">
+          {/* Command detail (for bash: the full command) */}
+          {step.detail && step.type === 'bash' && (
+            <div className="mb-1">
+              <span className="text-[10px] text-muted font-medium">$ </span>
+              <code className="text-[11px] font-mono text-amber-400/80">{step.detail}</code>
+            </div>
+          )}
+          {step.detail && step.type !== 'bash' && (
+            <pre className="text-[11px] leading-[1.4] font-mono text-muted whitespace-pre-wrap break-all mb-1">
+              {step.detail}
+            </pre>
+          )}
+
+          {/* Tool output (collapsible stdout/stderr for bash, result text for others) */}
+          {step.output && (
+            <pre className={`text-[11px] leading-[1.4] font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto rounded p-2 ${
+              isError
+                ? 'bg-red-500/10 text-red-300 border border-red-500/20'
+                : 'bg-black/20 text-muted border border-border/20'
+            }`}>
+              {step.output}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Claude Semantic Step Renderer (existing, unchanged) ──────────────────────
+
+function ClaudeStepRow({
+  step, index, firstTs, isExpanded, onToggle,
+}: {
+  step: SemanticStep;
+  index: number;
+  firstTs: string | null;
+  isExpanded: boolean;
+  onToggle: (i: number) => void;
+}) {
+  const cfg = STEP_CONFIG[step.type];
+  const Icon = cfg.icon;
+  const hasDetail = !!step.detail;
+
+  return (
+    <div className="border-b border-border/30">
+      <div
+        className={`px-3 py-1.5 flex items-center gap-2 ${hasDetail ? 'cursor-pointer hover:bg-panel/50' : ''} transition-colors`}
+        onClick={hasDetail ? () => onToggle(index) : undefined}
+      >
+        {/* Expand/collapse chevron */}
+        {hasDetail ? (
+          isExpanded
+            ? <ChevronDown size={12} className="text-muted shrink-0" />
+            : <ChevronRight size={12} className="text-muted shrink-0" />
+        ) : (
+          <span className="w-3 shrink-0" />
+        )}
+
+        {/* Step icon */}
+        <Icon size={13} className={`shrink-0 ${cfg.color}`} />
+
+        {/* Label */}
+        <span className="text-xs text-[var(--text)] truncate flex-1 font-mono">
+          {step.label}
+        </span>
+
+        {/* Relative timestamp */}
+        <span className="text-[10px] text-muted font-mono shrink-0 ml-2">
+          {formatRelativeTime(step.ts, firstTs)}
+        </span>
+      </div>
+
+      {/* Collapsible detail */}
+      {hasDetail && isExpanded && (
+        <pre className="px-3 pb-2 pl-10 text-[11px] leading-[1.4] font-mono text-muted whitespace-pre-wrap break-all">
+          {step.detail}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
 /**
  * Embeds an xterm.js terminal that streams live stdout/stderr from a pipeline run.
  * Includes a Raw/Semantic toggle. In Semantic mode, structured `semantic_step` SSE
  * events are rendered as a step list instead of the raw terminal.
+ *
+ * When agent_type=opencode, the semantic view uses a richer renderer with:
+ * - Tool-specific icons (Globe for webfetch, FilePlus for write, etc.)
+ * - Duration badges per event
+ * - Collapsible stdout/stderr for bash events
+ * - Error events highlighted in red
+ *
+ * When agent_type=claude (default), the existing xterm-parsing semantic view is unchanged.
  */
 const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -173,6 +380,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const esRef = useRef<EventSource | null>(null);
   const { resolved } = useTheme();
   const [copied, setCopied] = useState(false);
+
+  // Agent type detected from backend run_meta SSE event
+  const [agentType, setAgentType] = useState<'claude' | 'opencode' | 'codex'>('claude');
 
   // Toggle state — persisted per run in localStorage
   const [mode, setMode] = useState<'raw' | 'semantic'>(() => loadMode(runId));
@@ -263,8 +473,15 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/output`);
     esRef.current = es;
 
-    // Line buffer for semantic parsing across chunk boundaries
-    let lineBuffer = '';
+    // Listen for run metadata (agent type detection)
+    es.addEventListener('run_meta', (e: MessageEvent) => {
+      try {
+        const meta = JSON.parse(e.data) as { agentType?: string };
+        if (meta.agentType === 'opencode' || meta.agentType === 'codex') {
+          setAgentType(meta.agentType);
+        }
+      } catch { /* ignore */ }
+    });
 
     es.addEventListener('chunk', (e: MessageEvent) => {
       try {
@@ -347,6 +564,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   }, []);
 
   const firstTs = steps.length > 0 ? steps[0].ts : null;
+  const isOpenCode = agentType === 'opencode' || agentType === 'codex';
 
   return (
     <div className="h-full w-full flex flex-col">
@@ -378,6 +596,13 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
             Semantic
           </span>
         </button>
+
+        {/* Agent type badge (shown when not claude) */}
+        {isOpenCode && (
+          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-400 font-medium">
+            OpenCode
+          </span>
+        )}
 
         {/* Copy button (raw mode only) */}
         {mode === 'raw' && (
@@ -420,50 +645,27 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
                 onScroll={handleStepListScroll}
                 className="flex-1 overflow-y-auto overflow-x-hidden"
               >
-                {steps.map((step, i) => {
-                  const cfg = STEP_CONFIG[step.type];
-                  const Icon = cfg.icon;
-                  const hasDetail = !!step.detail;
-                  const isExpanded = expandedSet.has(i);
-
-                  return (
-                    <div key={i} className="border-b border-border/30">
-                      <div
-                        className={`px-3 py-1.5 flex items-center gap-2 ${hasDetail ? 'cursor-pointer hover:bg-panel/50' : ''} transition-colors`}
-                        onClick={hasDetail ? () => toggleExpand(i) : undefined}
-                      >
-                        {/* Expand/collapse chevron */}
-                        {hasDetail ? (
-                          isExpanded
-                            ? <ChevronDown size={12} className="text-muted shrink-0" />
-                            : <ChevronRight size={12} className="text-muted shrink-0" />
-                        ) : (
-                          <span className="w-3 shrink-0" />
-                        )}
-
-                        {/* Step icon */}
-                        <Icon size={13} className={`shrink-0 ${cfg.color}`} />
-
-                        {/* Label */}
-                        <span className="text-xs text-[var(--text)] truncate flex-1 font-mono">
-                          {step.label}
-                        </span>
-
-                        {/* Relative timestamp */}
-                        <span className="text-[10px] text-muted font-mono shrink-0 ml-2">
-                          {formatRelativeTime(step.ts, firstTs)}
-                        </span>
-                      </div>
-
-                      {/* Collapsible detail */}
-                      {hasDetail && isExpanded && (
-                        <pre className="px-3 pb-2 pl-10 text-[11px] leading-[1.4] font-mono text-muted whitespace-pre-wrap break-all">
-                          {step.detail}
-                        </pre>
-                      )}
-                    </div>
-                  );
-                })}
+                {steps.map((step, i) => (
+                  isOpenCode ? (
+                    <OpenCodeStepRow
+                      key={i}
+                      step={step}
+                      index={i}
+                      firstTs={firstTs}
+                      isExpanded={expandedSet.has(i)}
+                      onToggle={toggleExpand}
+                    />
+                  ) : (
+                    <ClaudeStepRow
+                      key={i}
+                      step={step}
+                      index={i}
+                      firstTs={firstTs}
+                      isExpanded={expandedSet.has(i)}
+                      onToggle={toggleExpand}
+                    />
+                  )
+                ))}
                 <div ref={stepBottomRef} />
               </div>
             )}

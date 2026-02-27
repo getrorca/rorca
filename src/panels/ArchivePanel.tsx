@@ -62,6 +62,8 @@ interface ArchiveSpec {
   forkedFrom?: string;
   reviewStatus?: ReviewStatus;
   source?: string;
+  agentType?: string;
+  agentModel?: string | null;
 }
 
 interface ArchiveResponse {
@@ -157,6 +159,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
   const [searchText, setSearchText] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [agentFilter, setAgentFilter] = useState<'all' | 'claude' | 'opencode'>('all');
   const [tagFilter, setTagFilter] = useState<string[]>([]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -190,6 +193,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
       });
       if (debouncedSearch) params.set('q', debouncedSearch);
       if (tagFilter.length > 0) params.set('tags', tagFilter.join(','));
+      if (agentFilter !== 'all') params.set('agentType', agentFilter);
 
       const res = await apiFetch<ArchiveResponse>(`/api/specs/archive?${params}`);
       if (append) {
@@ -205,7 +209,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [workspaceId, statusFilter, debouncedSearch, tagFilter]);
+  }, [workspaceId, statusFilter, debouncedSearch, tagFilter, agentFilter]);
 
   useEffect(() => {
     setSelectedId(null);
@@ -308,6 +312,26 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                 className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
                   statusFilter === f.id
                     ? 'bg-accent text-white'
+                    : 'bg-panel border border-border text-muted hover:text-text'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+            <span className="w-px bg-border mx-1" />
+            {([
+              { id: 'all' as const, label: 'All Agents' },
+              { id: 'claude' as const, label: 'Claude' },
+              { id: 'opencode' as const, label: 'OpenCode' },
+            ]).map(f => (
+              <button
+                key={f.id}
+                onClick={() => setAgentFilter(f.id)}
+                className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
+                  agentFilter === f.id
+                    ? f.id === 'claude' ? 'bg-blue-500 text-white'
+                      : f.id === 'opencode' ? 'bg-purple-500 text-white'
+                      : 'bg-accent text-white'
                     : 'bg-panel border border-border text-muted hover:text-text'
                 }`}
               >
@@ -450,6 +474,15 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                           {spec.forkedFrom}
                         </span>
                       )}
+                      <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${
+                        spec.agentType === 'opencode'
+                          ? 'bg-purple-500/15 text-purple-400 border-purple-500/30'
+                          : 'bg-blue-500/15 text-blue-400 border-blue-500/30'
+                      }`}>
+                        {spec.agentType === 'opencode'
+                          ? (spec.agentModel?.split('/').pop() ?? 'OpenCode')
+                          : 'Claude'}
+                      </span>
                     </div>
 
                     {/* Tags */}
@@ -955,6 +988,9 @@ function SpecPreviewDrawer({
                         loading={runState === 'triggering'}
                         onTrigger={handleRun}
                         onClose={() => setShowTriggerPopover(false)}
+                        onNavigate={onNavigate}
+                        specPath={summary ? `forge/specs/approved/${summary.id}.json` : undefined}
+                        workspaceId={workspaceId ?? undefined}
                       />
                     )}
                     <button

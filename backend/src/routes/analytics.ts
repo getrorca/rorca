@@ -1457,4 +1457,468 @@ router.put('/roi/config', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/analytics/finops/run/:runId — Per-run FinOps dashboard data ───
+// Returns: run summary table, savings vs all-opus, per-story cost breakdown,
+// escalation log, and subscription detection.
+
+interface FinOpsStoryRow {
+  story_id: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+}
+
+interface EscalationWalRow {
+  story_id: string;
+  payload: string;
+  ts: string;
+}
+
+// Default Opus pricing (per 1M tokens) — used for baseline comparison
+const OPUS_INPUT_PER_1M = 15.0;
+const OPUS_OUTPUT_PER_1M = 75.0;
+
+function tierFromModel(model: string): string {
+  const lower = model.toLowerCase();
+  if (lower.includes('haiku') || lower.includes('mini') || lower.includes('flash')) return 'haiku';
+  if (lower.includes('opus') || lower.includes('o3') || lower.includes('pro')) return 'opus';
+  return 'sonnet';
+}
+
+router.get('/finops/run/:runId', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(req.params.runId as string, 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    // Check run exists and get agent info
+    const run = db.prepare(
+      'SELECT id, agent, agent_model, workspace_id, spec_path FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as { id: number; agent: string | null; agent_model: string | null; workspace_id: string; spec_path: string } | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    const agentType = run.agent || 'claude';
+    const isSubscription = agentType === 'claude' || agentType === 'codex';
+
+    // Per-story token usage
+    const stories = db.prepare(`
+      SELECT story_id, model, input_tokens, output_tokens, cost_usd
+      FROM token_usage
+      WHERE run_id = ?
+      ORDER BY recorded_at ASC
+    `).all(runId) as FinOpsStoryRow[];
+
+    // Get model pricing for calculating costs from tokens
+    const pricingRows = db.prepare(
+      'SELECT model_id, input_cost_per_1m, output_cost_per_1m, input_cost_per_1k, output_cost_per_1k FROM model_pricing'
+    ).all() as { model_id: string; input_cost_per_1m: number | null; output_cost_per_1m: number | null; input_cost_per_1k: number; output_cost_per_1k: number }[];
+
+    const pricingMap = new Map<string, { input: number; output: number }>();
+    for (const p of pricingRows) {
+      pricingMap.set(p.model_id, {
+        input: p.input_cost_per_1m ?? p.input_cost_per_1k * 1000,
+        output: p.output_cost_per_1m ?? p.output_cost_per_1k * 1000,
+      });
+    }
+
+    // Build per-story breakdown
+    const perStory = stories.map(s => {
+      const pricing = pricingMap.get(s.model);
+      const actualCost = pricing
+        ? (s.input_tokens / 1_000_000) * pricing.input + (s.output_tokens / 1_000_000) * pricing.output
+        : s.cost_usd;
+      const opusBaseline = (s.input_tokens / 1_000_000) * OPUS_INPUT_PER_1M + (s.output_tokens / 1_000_000) * OPUS_OUTPUT_PER_1M;
+      return {
+        storyId: s.story_id,
+        model: s.model,
+        tier: tierFromModel(s.model),
+        inputTokens: s.input_tokens,
+        outputTokens: s.output_tokens,
+        actualCost: Math.round(actualCost * 10000) / 10000,
+        opusBaseline: Math.round(opusBaseline * 10000) / 10000,
+      };
+    });
+
+    // Run summary: aggregate by model
+    const modelSummary = new Map<string, { stories: number; inputTokens: number; outputTokens: number; cost: number }>();
+    for (const s of perStory) {
+      const existing = modelSummary.get(s.model) || { stories: 0, inputTokens: 0, outputTokens: 0, cost: 0 };
+      existing.stories++;
+      existing.inputTokens += s.inputTokens;
+      existing.outputTokens += s.outputTokens;
+      existing.cost += s.actualCost;
+      modelSummary.set(s.model, existing);
+    }
+
+    const runSummary = Array.from(modelSummary.entries()).map(([model, data]) => ({
+      model,
+      tier: tierFromModel(model),
+      stories: data.stories,
+      inputTokens: data.inputTokens,
+      outputTokens: data.outputTokens,
+      cost: Math.round(data.cost * 10000) / 10000,
+    }));
+
+    // Totals
+    const totalActual = perStory.reduce((sum, s) => sum + s.actualCost, 0);
+    const totalOpusBaseline = perStory.reduce((sum, s) => sum + s.opusBaseline, 0);
+    const totalSaved = totalOpusBaseline - totalActual;
+    const savingsPct = totalOpusBaseline > 0 ? (totalSaved / totalOpusBaseline) * 100 : 0;
+
+    // Model distribution (for pie chart)
+    const tierCounts: Record<string, number> = { haiku: 0, sonnet: 0, opus: 0 };
+    for (const s of perStory) {
+      const tier = s.tier;
+      tierCounts[tier] = (tierCounts[tier] || 0) + 1;
+    }
+    const totalStories = perStory.length;
+    const modelDistribution = Object.entries(tierCounts)
+      .filter(([, count]) => count > 0)
+      .map(([tier, count]) => ({
+        tier,
+        count,
+        percentage: totalStories > 0 ? Math.round((count / totalStories) * 1000) / 10 : 0,
+      }));
+
+    // Escalation log from WAL events
+    const escalationEvents = db.prepare(`
+      SELECT story_id, payload, ts
+      FROM wal_events
+      WHERE event_type = 'story_escalated'
+        AND payload LIKE '%"run_id":${runId}%'
+      ORDER BY ts ASC
+    `).all() as EscalationWalRow[];
+
+    const escalationLog = escalationEvents.map(e => {
+      const payload = JSON.parse(e.payload || '{}');
+      return {
+        storyId: e.story_id,
+        fromTier: payload.fromTier || '?',
+        toTier: payload.toTier || '?',
+        attemptNumber: payload.attemptNumber ?? 0,
+        errorCategory: payload.error_category || null,
+        errorMessage: payload.error_message || null,
+        ts: e.ts,
+        additionalCost: 0, // will be computed below
+      };
+    });
+
+    // Compute additional cost per escalation (cost of subsequent attempts)
+    for (const esc of escalationLog) {
+      const storyRows = perStory.filter(s => s.storyId === esc.storyId);
+      if (storyRows.length > 1) {
+        // The additional cost is the sum of all rows after the first for this story
+        esc.additionalCost = Math.round(storyRows.slice(1).reduce((sum, s) => sum + s.actualCost, 0) * 10000) / 10000;
+      }
+    }
+
+    res.json({
+      runId,
+      agentType,
+      isSubscription,
+      runSummary,
+      savings: isSubscription ? null : {
+        opusBaseline: Math.round(totalOpusBaseline * 100) / 100,
+        actual: Math.round(totalActual * 100) / 100,
+        saved: Math.round(totalSaved * 100) / 100,
+        percentage: Math.round(savingsPct * 10) / 10,
+      },
+      totals: {
+        stories: totalStories,
+        inputTokens: perStory.reduce((sum, s) => sum + s.inputTokens, 0),
+        outputTokens: perStory.reduce((sum, s) => sum + s.outputTokens, 0),
+        cost: isSubscription ? null : Math.round(totalActual * 100) / 100,
+      },
+      modelDistribution,
+      perStory,
+      escalationLog,
+    });
+  } catch (error: any) {
+    console.error('[Analytics] FinOps run query error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/analytics/finops/historical — Historical FinOps data ───────────
+// Cumulative cost by workspace, spec, month; trend chart; projections.
+// Query params:
+//   workspace_id — optional filter
+//   from         — ISO date (inclusive), default 90 days ago
+//   to           — ISO date (inclusive), default now
+
+router.get('/finops/historical', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspace_id as string | undefined;
+    const now = new Date();
+    const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const from = (req.query.from as string) || ninetyDaysAgo.toISOString();
+    const to = (req.query.to as string) || now.toISOString();
+
+    const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
+    const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
+
+    // Daily cost trend (last 30 days for chart)
+    const dailySql = `
+      SELECT
+        DATE(tu.recorded_at) AS date,
+        SUM(tu.input_tokens) AS input_tokens,
+        SUM(tu.output_tokens) AS output_tokens,
+        SUM(tu.cost_usd) AS cost_usd,
+        COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count
+      FROM token_usage tu
+      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      GROUP BY DATE(tu.recorded_at)
+      ORDER BY date ASC
+    `;
+    const dailyTrend = db.prepare(dailySql).all(...params) as {
+      date: string; input_tokens: number; output_tokens: number; cost_usd: number; story_count: number;
+    }[];
+
+    // By workspace
+    const byWorkspaceSql = `
+      SELECT
+        tu.workspace_id,
+        COALESCE(w.label, tu.workspace_id) AS workspace_label,
+        SUM(tu.cost_usd) AS total_cost,
+        SUM(tu.input_tokens) AS input_tokens,
+        SUM(tu.output_tokens) AS output_tokens,
+        COUNT(DISTINCT tu.run_id) AS run_count
+      FROM token_usage tu
+      LEFT JOIN workspaces w ON tu.workspace_id = w.id
+      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      GROUP BY tu.workspace_id
+      ORDER BY total_cost DESC
+    `;
+    const byWorkspace = db.prepare(byWorkspaceSql).all(...params) as {
+      workspace_id: string; workspace_label: string; total_cost: number;
+      input_tokens: number; output_tokens: number; run_count: number;
+    }[];
+
+    // By spec
+    const bySpecSql = `
+      SELECT
+        REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
+        SUM(tu.cost_usd) AS total_cost,
+        SUM(tu.input_tokens) AS input_tokens,
+        SUM(tu.output_tokens) AS output_tokens,
+        COUNT(DISTINCT tu.run_id) AS run_count
+      FROM token_usage tu
+      JOIN pipeline_runs pr ON tu.run_id = pr.id
+      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      GROUP BY spec_slug
+      ORDER BY total_cost DESC
+      LIMIT 20
+    `;
+    const bySpec = db.prepare(bySpecSql).all(...params) as {
+      spec_slug: string; total_cost: number; input_tokens: number;
+      output_tokens: number; run_count: number;
+    }[];
+
+    // By month
+    const byMonthSql = `
+      SELECT
+        strftime('%Y-%m', tu.recorded_at) AS month,
+        SUM(tu.cost_usd) AS total_cost,
+        SUM(tu.input_tokens) AS input_tokens,
+        SUM(tu.output_tokens) AS output_tokens,
+        COUNT(DISTINCT tu.run_id) AS run_count,
+        COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count
+      FROM token_usage tu
+      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      GROUP BY month
+      ORDER BY month ASC
+    `;
+    const byMonth = db.prepare(byMonthSql).all(...params) as {
+      month: string; total_cost: number; input_tokens: number;
+      output_tokens: number; run_count: number; story_count: number;
+    }[];
+
+    // Model distribution across all runs
+    const modelDistSql = `
+      SELECT
+        tu.model,
+        COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count,
+        SUM(tu.cost_usd) AS total_cost
+      FROM token_usage tu
+      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      GROUP BY tu.model
+      ORDER BY story_count DESC
+    `;
+    const modelDist = db.prepare(modelDistSql).all(...params) as {
+      model: string; story_count: number; total_cost: number;
+    }[];
+
+    const totalStories = modelDist.reduce((sum, m) => sum + m.story_count, 0);
+    const modelDistribution = modelDist.map(m => ({
+      model: m.model,
+      tier: tierFromModel(m.model),
+      storyCount: m.story_count,
+      totalCost: Math.round(m.total_cost * 100) / 100,
+      percentage: totalStories > 0 ? Math.round((m.story_count / totalStories) * 1000) / 10 : 0,
+    }));
+
+    // Projected monthly cost: avg daily cost * 30
+    const totalCostInRange = dailyTrend.reduce((sum, d) => sum + d.cost_usd, 0);
+    const daysWithData = dailyTrend.length;
+    const avgDailyCost = daysWithData > 0 ? totalCostInRange / daysWithData : 0;
+    const projectedMonthlyCost = Math.round(avgDailyCost * 30 * 100) / 100;
+
+    // Total savings vs all-opus baseline
+    const opusBaselineSql = `
+      SELECT
+        SUM((tu.input_tokens * 1.0 / 1000000) * ${OPUS_INPUT_PER_1M} + (tu.output_tokens * 1.0 / 1000000) * ${OPUS_OUTPUT_PER_1M}) AS opus_baseline,
+        SUM(tu.cost_usd) AS actual_cost
+      FROM token_usage tu
+      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+    `;
+    const baselineResult = db.prepare(opusBaselineSql).get(...params) as {
+      opus_baseline: number | null; actual_cost: number | null;
+    };
+
+    const opusBaseline = baselineResult.opus_baseline || 0;
+    const actualCost = baselineResult.actual_cost || 0;
+
+    // Detect if all runs are subscription (claude)
+    const agentCheckSql = `
+      SELECT DISTINCT pr.agent
+      FROM pipeline_runs pr
+      JOIN token_usage tu ON tu.run_id = pr.id
+      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+    `;
+    const agents = db.prepare(agentCheckSql).all(...params) as { agent: string | null }[];
+    const allSubscription = agents.length > 0 && agents.every(a => !a.agent || a.agent === 'claude' || a.agent === 'codex');
+
+    res.json({
+      dailyTrend: dailyTrend.map(d => ({
+        date: d.date,
+        cost: Math.round(d.cost_usd * 100) / 100,
+        inputTokens: d.input_tokens,
+        outputTokens: d.output_tokens,
+        storyCount: d.story_count,
+      })),
+      byWorkspace: byWorkspace.map(w => ({
+        workspaceId: w.workspace_id,
+        label: w.workspace_label,
+        totalCost: Math.round(w.total_cost * 100) / 100,
+        inputTokens: w.input_tokens,
+        outputTokens: w.output_tokens,
+        runCount: w.run_count,
+      })),
+      bySpec: bySpec.map(s => ({
+        specSlug: s.spec_slug,
+        totalCost: Math.round(s.total_cost * 100) / 100,
+        inputTokens: s.input_tokens,
+        outputTokens: s.output_tokens,
+        runCount: s.run_count,
+      })),
+      byMonth: byMonth.map(m => ({
+        month: m.month,
+        totalCost: Math.round(m.total_cost * 100) / 100,
+        inputTokens: m.input_tokens,
+        outputTokens: m.output_tokens,
+        runCount: m.run_count,
+        storyCount: m.story_count,
+      })),
+      modelDistribution,
+      projectedMonthlyCost,
+      savings: allSubscription ? null : {
+        opusBaseline: Math.round(opusBaseline * 100) / 100,
+        actual: Math.round(actualCost * 100) / 100,
+        saved: Math.round((opusBaseline - actualCost) * 100) / 100,
+        percentage: opusBaseline > 0 ? Math.round(((opusBaseline - actualCost) / opusBaseline) * 1000) / 10 : 0,
+      },
+      allSubscription,
+      dateRange: { from, to },
+    });
+  } catch (error: any) {
+    console.error('[Analytics] FinOps historical query error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/analytics/finops/export — CSV export of per-story cost data ────
+
+router.get('/finops/export', (req: Request, res: Response) => {
+  try {
+    const runId = req.query.run_id ? parseInt(req.query.run_id as string, 10) : undefined;
+    const workspaceId = req.query.workspace_id as string | undefined;
+
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const from = (req.query.from as string) || thirtyDaysAgo.toISOString();
+    const to = (req.query.to as string) || now.toISOString();
+
+    const conditions: string[] = ['tu.recorded_at >= ?', 'tu.recorded_at <= ?'];
+    const sqlParams: (string | number)[] = [from, to];
+
+    if (runId) {
+      conditions.push('tu.run_id = ?');
+      sqlParams.push(runId);
+    }
+    if (workspaceId) {
+      conditions.push('tu.workspace_id = ?');
+      sqlParams.push(workspaceId);
+    }
+
+    const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+    const sql = `
+      SELECT
+        tu.run_id,
+        tu.story_id,
+        tu.model,
+        tu.input_tokens,
+        tu.output_tokens,
+        tu.cost_usd,
+        tu.recorded_at,
+        tu.workspace_id,
+        REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
+        pr.agent AS agent_type
+      FROM token_usage tu
+      JOIN pipeline_runs pr ON tu.run_id = pr.id
+      ${whereClause}
+      ORDER BY tu.run_id ASC, tu.recorded_at ASC
+    `;
+
+    const rows = db.prepare(sql).all(...sqlParams) as ExportRow[];
+
+    // Add computed columns
+    const enrichedRows = rows.map(row => {
+      const model = String(row.model || '');
+      const inputTokens = Number(row.input_tokens || 0);
+      const outputTokens = Number(row.output_tokens || 0);
+      const opusBaseline = (inputTokens / 1_000_000) * OPUS_INPUT_PER_1M + (outputTokens / 1_000_000) * OPUS_OUTPUT_PER_1M;
+      return {
+        ...row,
+        tier: tierFromModel(model),
+        opus_baseline_usd: Math.round(opusBaseline * 10000) / 10000,
+        savings_usd: Math.round((opusBaseline - Number(row.cost_usd || 0)) * 10000) / 10000,
+      };
+    });
+
+    const headers = [
+      'run_id', 'story_id', 'spec_slug', 'model', 'tier', 'agent_type',
+      'input_tokens', 'output_tokens', 'cost_usd', 'opus_baseline_usd', 'savings_usd',
+      'recorded_at', 'workspace_id',
+    ];
+
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = runId ? `rorca-finops-run-${runId}-${ts}` : `rorca-finops-${ts}`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
+    res.send(toCsvRows(headers, enrichedRows));
+  } catch (error: any) {
+    console.error('[Analytics] FinOps export error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
