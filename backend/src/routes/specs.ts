@@ -1952,8 +1952,9 @@ router.post('/:specId/versions/:version/restore', (req: Request, res: Response) 
 
 router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
-    const { specId, storyId } = req.params;
-    const { workspaceId, excluded } = req.body;
+    const specId = req.params.specId as string;
+    const storyId = req.params.storyId as string;
+    const { workspaceId, excluded, title, description, acceptanceCriteria } = req.body;
 
     if (!workspaceId) {
       res.status(400).json({ error: 'Missing required field: workspaceId' });
@@ -1970,6 +1971,65 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
     const approvedFile = path.join(approvedDir, `${specId}.json`);
     const pendingFile = path.join(pendingDir, `${specId}.json`);
 
+    // Determine if this is a field edit (title/description/acceptanceCriteria) vs exclude toggle
+    const isFieldEdit = title !== undefined || description !== undefined || acceptanceCriteria !== undefined;
+
+    if (isFieldEdit) {
+      // EQ-006: Field edits only allowed on pending specs
+      if (fs.existsSync(approvedFile)) {
+        res.status(403).json({ error: 'Cannot edit stories in an approved spec. Only pending specs may be edited.' });
+        return;
+      }
+      if (!fs.existsSync(pendingFile)) {
+        res.status(404).json({ error: 'Spec not found' });
+        return;
+      }
+
+      const raw = fs.readFileSync(pendingFile, 'utf8');
+      const content = JSON.parse(raw);
+      const stories: UserStory[] = content.userStories ?? [];
+      const storyIndex = stories.findIndex((s: UserStory) => s.id === storyId);
+
+      if (storyIndex === -1) {
+        res.status(404).json({ error: 'Story not found' });
+        return;
+      }
+
+      // Snapshot pre-edit state as a new version
+      const version = snapshotVersion(specId, raw, 'pending');
+
+      // Apply only provided fields
+      if (title !== undefined) stories[storyIndex].title = title;
+      if (description !== undefined) stories[storyIndex].description = description;
+      if (acceptanceCriteria !== undefined) stories[storyIndex].acceptanceCriteria = acceptanceCriteria;
+
+      content.userStories = stories;
+      fs.writeFileSync(pendingFile, JSON.stringify(content, null, 2) + '\n');
+
+      // WAL event
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
+      ).run('story_edited', workspaceId, specId, storyId, JSON.stringify({
+        title: stories[storyIndex].title,
+        version,
+      }));
+
+      broadcastAll({
+        id: walResult.lastInsertRowid as number,
+        ts: new Date().toISOString(),
+        event_type: 'story_edited',
+        workspace_id: workspaceId as string,
+        spec_id: specId as string,
+        story_id: storyId as string,
+        actor: 'api',
+        payload: JSON.stringify({ title: stories[storyIndex].title, version }),
+      });
+
+      res.json({ ok: true, story: stories[storyIndex], version });
+      return;
+    }
+
+    // Original exclude toggle behavior
     let specPath: string;
     if (fs.existsSync(approvedFile)) {
       specPath = approvedFile;
