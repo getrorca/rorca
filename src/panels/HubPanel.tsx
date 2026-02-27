@@ -294,13 +294,13 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
                 tabIndex={0}
                 onClick={handlePause}
                 onKeyDown={(e) => { if (e.key === 'Enter') handlePause(e as unknown as React.MouseEvent); }}
-                className={`p-1 rounded hover:bg-bg transition-colors ${actionLoading === 'pause' ? 'opacity-50' : ''}`}
+                className={`w-11 h-11 sm:w-8 sm:h-8 flex items-center justify-center rounded hover:bg-bg transition-colors ${actionLoading === 'pause' ? 'opacity-50' : ''}`}
                 title={effectiveStatus === 'paused' ? 'Resume' : 'Pause'}
               >
                 {effectiveStatus === 'paused' ? (
-                  <Play size={14} className="text-yellow-500" />
+                  <Play size={16} className="text-yellow-500" />
                 ) : (
-                  <Pause size={14} className="text-yellow-500" />
+                  <Pause size={16} className="text-yellow-500" />
                 )}
               </span>
               <span
@@ -308,10 +308,10 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
                 tabIndex={0}
                 onClick={handleKill}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleKill(e as unknown as React.MouseEvent); }}
-                className={`p-1 rounded hover:bg-bg transition-colors ${actionLoading === 'kill' ? 'opacity-50' : ''}`}
+                className={`w-11 h-11 sm:w-8 sm:h-8 flex items-center justify-center rounded hover:bg-bg transition-colors ${actionLoading === 'kill' ? 'opacity-50' : ''}`}
                 title="Kill"
               >
-                <Square size={14} className="text-red-500" />
+                <Square size={16} className="text-red-500" />
               </span>
             </>
           )}
@@ -418,9 +418,9 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
           tabIndex={0}
           onClick={(e) => handleAction(e, 'approve')}
           onKeyDown={(e) => { if (e.key === 'Enter') handleAction(e as unknown as React.MouseEvent, 'approve'); }}
-          className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors ${actionLoading === 'approve' ? 'opacity-50 pointer-events-none' : ''}`}
+          className={`inline-flex items-center gap-1 px-3 py-2 min-h-[44px] text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors ${actionLoading === 'approve' ? 'opacity-50 pointer-events-none' : ''}`}
         >
-          <CheckCircle size={12} />
+          <CheckCircle size={14} />
           Approve
         </span>
         <span
@@ -428,9 +428,9 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
           tabIndex={0}
           onClick={(e) => handleAction(e, 'reject')}
           onKeyDown={(e) => { if (e.key === 'Enter') handleAction(e as unknown as React.MouseEvent, 'reject'); }}
-          className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors ${actionLoading === 'reject' ? 'opacity-50 pointer-events-none' : ''}`}
+          className={`inline-flex items-center gap-1 px-3 py-2 min-h-[44px] text-xs font-medium rounded-md bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors ${actionLoading === 'reject' ? 'opacity-50 pointer-events-none' : ''}`}
         >
-          <XCircle size={12} />
+          <XCircle size={14} />
           Reject
         </span>
       </div>
@@ -488,20 +488,20 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate }: {
           />
         )}
         {triggerState === 'success' ? (
-          <div className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
-            <CheckCircle size={12} />
+          <div className="flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+            <CheckCircle size={14} />
             Launching...
           </div>
         ) : (
           <button
             onClick={() => setShowPopover(true)}
             disabled={triggerState === 'triggering'}
-            className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
+            className="flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
           >
             {triggerState === 'triggering' ? (
-              <><Loader2 size={12} className="animate-spin" /> Starting...</>
+              <><Loader2 size={14} className="animate-spin" /> Starting...</>
             ) : (
-              <><Rocket size={12} /> Run</>
+              <><Rocket size={14} /> Run</>
             )}
           </button>
         )}
@@ -520,7 +520,7 @@ function RecentRunRow({ run, onNavigateToRun, justCompleted }: {
   return (
     <button
       onClick={() => onNavigateToRun?.(run.id)}
-      className={`w-full text-left px-3 py-2.5 hover:bg-bg transition-colors group${justCompleted ? ' animate-slide-to-recent' : ''}`}
+      className={`w-full text-left px-3 py-2.5 min-h-[44px] hover:bg-bg transition-colors group${justCompleted ? ' animate-slide-to-recent' : ''}`}
     >
       <div className="flex items-center justify-between gap-3">
         {/* Left: spec name + run ID */}
@@ -537,7 +537,7 @@ function RecentRunRow({ run, onNavigateToRun, justCompleted }: {
           <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${STATUS_BADGE_STYLES[run.status] || 'bg-gray-500/10 text-gray-400'}`}>
             {STATUS_BADGE_LABELS[run.status] || run.status}
           </span>
-          <span className="text-xs text-muted whitespace-nowrap">
+          <span className="hidden sm:inline text-xs text-muted whitespace-nowrap">
             {formatTimestamp(run.started_at)}
           </span>
           <span className="text-xs text-muted font-mono tabular-nums whitespace-nowrap">

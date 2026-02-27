@@ -700,3 +700,27 @@ Key decisions:
 - Individual story retry reuses existing bulk retry endpoint with `storyIds: [storyId]` — no new backend endpoint needed
 - MAX_RETRIES constant (3) defined in frontend to match backend run-loop.ts MAX_RETRIES
 - Expand/collapse state is per-row, output fetched lazily on first expand only
+
+## Story P2-014: Mobile Responsive Design (<768px) — DONE
+Files touched:
+- src/components/Sidebar.tsx (modified — mobile drawer widened to w-48, text labels added, 44px touch targets)
+- src/components/Shell.tsx (modified — hamburger 44px, workspace truncates to first word on mobile, PlanBadge/Tips/ThemeToggle hidden below sm:, RunPill/UserMenu 44px, dropdowns use fixed positioning on mobile)
+- src/panels/HubPanel.tsx (modified — approve/reject buttons 44px min-height, run button 44px, pause/kill 44px on mobile, recent run rows 44px, timestamp hidden on mobile)
+- src/components/NotificationBell.tsx (modified — bell button 44px on mobile, dropdown uses fixed positioning to avoid overflow)
+
+What was built:
+- **Sidebar mobile drawer**: Widened from 56px (icon-only) to 192px (w-48) with text labels next to icons, all nav buttons 44px height
+- **Top bar priority hiding**: PlanBadge, ShowTipsToggle, and ThemeToggle hidden below 640px (sm:) breakpoint; only essential items (hamburger, logo, workspace, notification, run pill, user) remain
+- **Workspace selector truncation**: On mobile, workspace name shows first word only (split on space/hyphen); full name on sm:+
+- **Touch targets**: All interactive elements (hamburger, nav buttons, approve/reject, run, pause/kill, notification bell, user menu, recent run rows) have minimum 44×44px on mobile
+- **Dropdown overflow prevention**: WorkspaceSelector, NotificationBell, and UserMenu dropdowns use `fixed` positioning on mobile (inset-x-3 or right-3 + top-14) to prevent horizontal overflow at 375px
+- **No horizontal scroll**: Shell root has overflow-x-hidden, all dropdowns constrained within viewport
+- **Hub cards**: Already had grid-cols-1 sm:grid-cols-2 (no change needed), active run card already full-width
+- **Recent runs**: Timestamp (formatted date) hidden on mobile, duration always visible
+
+Key decisions:
+- Used sm: (640px) breakpoint for hiding top bar items rather than md: (768px) — gives more breathing room
+- Mobile sidebar shows rorca wordmark + close button in header row for brand recognition
+- Dropdowns switch from absolute to fixed positioning on mobile for viewport containment
+- RunPill hides "New Spec" text on mobile (plus icon only) to save horizontal space
+- Touch target enlargement uses sm: breakpoint to revert to compact sizes on desktop
