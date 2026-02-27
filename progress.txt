@@ -1043,3 +1043,25 @@ Key decisions:
 - Tier colors: haiku=emerald, sonnet=blue, opus=purple (consistent with complexity scorer UI)
 - Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged
 - Pre-existing test infrastructure issue (db.close() TypeError in afterEach across all route tests) unchanged — not caused by OC-023
+
+## Story OC-026: Codex CLI Auth Detection and ChatGPT Login — DONE
+Files touched:
+- backend/src/lib/codex-auth.ts (new — 258 lines)
+- backend/src/routes/config.ts (modified — import + 3 route handlers)
+- backend/src/routes/pipeline.ts (modified — codex auth gate block)
+- src/panels/SettingsPanel.tsx (modified — CodexAuthStatus component + render slot)
+
+What was built:
+- `getCodexAuthState()` reads `~/.codex/auth.json` JWT tokens, extracts email + chatgpt_plan_type from OpenAI JWT claims. Fallback: `codex login status` CLI command
+- `triggerCodexLogin()` spawns `codex login` detached, polls auth.json every 2s for 5 min, fires `codex_auth_connected` SSE event when authenticated
+- `triggerCodexLogout()` spawns `codex logout`, fires `codex_auth_disconnected` SSE event on success
+- 3 API routes: `GET /api/config/codex-auth`, `POST /api/config/codex-auth/login`, `POST /api/config/codex-auth/logout`
+- Pipeline trigger gate: if `RORCA_AGENT=codex` and codex is disconnected, returns 403 `codex_not_authenticated` with settings deep link
+- `CodexAuthStatus` React component in SettingsPanel: green/amber status, email + plan display, Connect/Disconnect buttons, SSE live update (replaces old simple installation badge)
+
+Key decisions:
+- Credential file: `~/.codex/auth.json` — contains `tokens.id_token` (JWT with email, chatgpt_plan_type under `https://api.openai.com/auth` claim)
+- CLI commands: `codex login` (not `codex auth login`), `codex logout`, `codex login status`
+- Plan types from JWT: "plus", "pro", "free" — displayed capitalized (e.g., "ChatGPT Plus")
+- Same polling pattern as OC-025 Claude auth: 2s interval, 5 min max, SSE broadcast on detection
+- Replaced the simple Codex CLI installation status badge with full auth component matching Claude pattern

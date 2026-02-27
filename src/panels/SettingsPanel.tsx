@@ -476,6 +476,160 @@ function ClaudeAuthStatus() {
   );
 }
 
+// ─── Codex Auth Status (OC-026) ─────────────────────────────────────────────
+
+interface CodexAuthState {
+  connected: boolean;
+  username?: string;
+  plan?: string;
+  cliInstalled: boolean;
+  cliVersion?: string;
+}
+
+function CodexAuthStatus() {
+  const [auth, setAuth] = useState<CodexAuthState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchAuth = useCallback(async () => {
+    try {
+      const state = await apiFetch<CodexAuthState>('/api/config/codex-auth');
+      setAuth(state);
+    } catch { /* silent */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchAuth();
+  }, [fetchAuth]);
+
+  // Listen for SSE events for auth changes
+  useEffect(() => {
+    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
+    const handler = (e: MessageEvent) => {
+      try {
+        const event = JSON.parse(e.data);
+        if (event.event_type === 'codex_auth_connected' || event.event_type === 'codex_auth_disconnected') {
+          fetchAuth();
+        }
+      } catch { /* ignore parse errors */ }
+    };
+    es.addEventListener('wal_event', handler);
+    return () => { es.close(); };
+  }, [fetchAuth]);
+
+  const handleLogin = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await apiFetch('/api/config/codex-auth/login', { method: 'POST' });
+    } catch (err: any) {
+      setError(err.message || 'Failed to trigger Codex login');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await apiFetch('/api/config/codex-auth/logout', { method: 'POST' });
+      setAuth(prev => prev ? { ...prev, connected: false, username: undefined, plan: undefined } : prev);
+    } catch (err: any) {
+      setError(err.message || 'Failed to disconnect ChatGPT');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-muted text-xs">
+        <Loader2 size={12} className="animate-spin" /> Checking Codex auth...
+      </div>
+    );
+  }
+
+  if (!auth) return null;
+
+  // Capitalize plan name for display
+  const planDisplay = auth.plan ? auth.plan.charAt(0).toUpperCase() + auth.plan.slice(1) : null;
+
+  return (
+    <div className={`border rounded-lg p-4 transition-colors ${
+      auth.connected
+        ? 'border-green-500/30 bg-green-500/5'
+        : 'border-amber-500/30 bg-amber-500/5'
+    }`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={`w-2.5 h-2.5 rounded-full ${
+            auth.connected ? 'bg-green-400' : 'bg-amber-400'
+          }`} />
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-[var(--text)]">ChatGPT Account</span>
+              {auth.cliVersion && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent border border-accent/20">
+                  CLI v{auth.cliVersion}
+                </span>
+              )}
+              {!auth.cliInstalled && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-red-500/15 text-red-400 border border-red-500/20">
+                  CLI not found
+                </span>
+              )}
+            </div>
+            {auth.connected ? (
+              <p className="text-xs text-green-400 mt-0.5 flex items-center gap-1">
+                <CheckCircle2 size={12} />
+                {auth.username
+                  ? <>Connected as <span className="font-medium">{auth.username}</span>{planDisplay ? ` (ChatGPT ${planDisplay})` : ''}</>
+                  : 'Connected via Codex CLI'
+                }
+              </p>
+            ) : (
+              <p className="text-xs text-amber-400 mt-0.5 flex items-center gap-1">
+                <AlertTriangle size={12} />
+                Not connected — sign in to enable Codex pipeline execution
+              </p>
+            )}
+          </div>
+        </div>
+        <div>
+          {auth.connected ? (
+            <button
+              onClick={handleLogout}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-red-500/30 rounded text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />}
+              Disconnect
+            </button>
+          ) : (
+            <button
+              onClick={handleLogin}
+              disabled={actionLoading || !auth.cliInstalled}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+              Connect ChatGPT Account
+            </button>
+          )}
+        </div>
+      </div>
+      {error && (
+        <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+          <XCircle size={14} />
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ExecutionEngineSection() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [models, setModels] = useState<OpenCodeModelEntry[]>([]);
@@ -733,26 +887,8 @@ function ExecutionEngineSection() {
       {/* Claude auth status (OC-025) */}
       {selectedType === 'claude' && <ClaudeAuthStatus />}
 
-      {/* Codex CLI installation status */}
-      {selectedType === 'codex' && config && (
-        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${
-          config.codexInstalled
-            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
-            : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
-        }`}>
-          {config.codexInstalled ? (
-            <>
-              <CheckCircle2 size={14} />
-              Codex CLI installed{config.codexVersion ? ` (v${config.codexVersion})` : ''}
-            </>
-          ) : (
-            <>
-              <AlertTriangle size={14} />
-              Codex CLI not found. Install: <code className="bg-panel px-1 rounded">npm i -g @openai/codex</code>
-            </>
-          )}
-        </div>
-      )}
+      {/* Codex auth status (OC-026) */}
+      {selectedType === 'codex' && <CodexAuthStatus />}
 
       {/* OpenCode installation status */}
       {selectedType === 'opencode' && config && (

@@ -4,6 +4,7 @@ import { loadOrchestrationConfig, clearConfigCache } from '../lib/complexity-sco
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
 import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../lib/claude-auth';
+import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
 import { db } from '../db';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -574,6 +575,65 @@ router.post('/claude-auth/logout', async (_req: Request, res: Response) => {
     return;
   }
   res.json({ ok: true, message: 'Claude account disconnected.' });
+});
+
+// ─── Codex Auth Detection (OC-026) ───────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/config/codex-auth:
+ *   get:
+ *     summary: Get Codex CLI (ChatGPT) auth state
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Codex auth state (connected, username, plan)
+ */
+router.get('/codex-auth', (_req: Request, res: Response) => {
+  const state = getCodexAuthState();
+  res.json(state);
+});
+
+/**
+ * @swagger
+ * /api/config/codex-auth/login:
+ *   post:
+ *     summary: Trigger Codex CLI login (opens browser for ChatGPT OAuth)
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Login spawned, polling for credential changes
+ *       400:
+ *         description: CLI not found
+ */
+router.post('/codex-auth/login', (_req: Request, res: Response) => {
+  const result = triggerCodexLogin();
+  if (!result.spawned) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, message: 'Codex login triggered. Complete sign-in in your browser.' });
+});
+
+/**
+ * @swagger
+ * /api/config/codex-auth/logout:
+ *   post:
+ *     summary: Trigger Codex CLI logout (remove stored credentials)
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Logout completed
+ *       400:
+ *         description: Logout failed
+ */
+router.post('/codex-auth/logout', async (_req: Request, res: Response) => {
+  const result = await triggerCodexLogout();
+  if (!result.success) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, message: 'ChatGPT account disconnected.' });
 });
 
 export default router;

@@ -363,6 +363,20 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }
     }
 
+    // OC-026: Block pipeline trigger if Codex is selected but not authenticated
+    if (resolvedAgentType === 'codex') {
+      const { getCodexAuthState } = await import('../lib/codex-auth');
+      const authState = getCodexAuthState();
+      if (!authState.connected) {
+        res.status(403).json({
+          error: 'codex_not_authenticated',
+          message: 'Codex is not authenticated. Connect your ChatGPT account in Settings > Execution Engine.',
+          settingsDeepLink: '/settings?tab=providers&focus=codex-auth',
+        });
+        return;
+      }
+    }
+
     const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
     const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
