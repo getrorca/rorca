@@ -742,16 +742,17 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body.agentType).toBe('claude');
     expect(res.body.agentModel).toBeNull();
 
-    const run = db.prepare('SELECT agent, agent_model FROM pipeline_runs WHERE id = ?').get(res.body.runId) as any;
+    const run = db.prepare('SELECT agent, agent_type, agent_model FROM pipeline_runs WHERE id = ?').get(res.body.runId) as any;
     expect(run.agent).toBe('claude');
+    expect(run.agent_type).toBe('claude');
     expect(run.agent_model).toBeNull();
   });
 
   test('GET /runs/:runId returns agentType and agentModel fields', async () => {
     // Seed a run with explicit agent info
     db.prepare(
-      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_model)
-       VALUES ('ralph/specs/approved/test.json', 'ws-pipe', 'done', 'opencode', 'openai/gpt-4o')`
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model)
+       VALUES ('ralph/specs/approved/test.json', 'ws-pipe', 'done', 'opencode', 'opencode', 'openai/gpt-4o')`
     ).run();
     const runId = (db.prepare('SELECT last_insert_rowid() AS id').get() as any).id;
 
@@ -787,8 +788,9 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body.agentModel).toBeNull();
   });
 
-  test('pipeline_runs table has agent_model column', () => {
+  test('pipeline_runs table has agent_type and agent_model columns', () => {
     const cols = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+    expect(cols.some(c => c.name === 'agent_type')).toBe(true);
     expect(cols.some(c => c.name === 'agent_model')).toBe(true);
     expect(cols.some(c => c.name === 'agent')).toBe(true);
     expect(cols.some(c => c.name === 'opencode_server_pid')).toBe(true);

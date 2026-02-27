@@ -90,6 +90,7 @@ interface PipelineRunRow {
   retried_from_run_id: number | null;
   log_path: string | null;
   agent: string;
+  agent_type: string;
   agent_model: string | null;
   parallelism: number;
   opencode_server_pid: number | null;
@@ -289,8 +290,8 @@ router.post('/trigger', async (req: Request, res: Response) => {
     // 6. Create pipeline_runs record (with agent_type and agent_model)
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     const runResult = db.prepare(
-      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_model) VALUES (?, ?, 'running', ?, ?, ?, ?)`
-    ).run(specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentModel);
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model) VALUES (?, ?, 'running', ?, ?, ?, ?, ?)`
+    ).run(specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel);
     const runId = runResult.lastInsertRowid as number;
 
     // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
@@ -1319,7 +1320,7 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       stories,
       specStories,
       specModel,
-      agentType: run.agent || 'claude',
+      agentType: run.agent_type || run.agent || 'claude',
       agentModel: run.agent_model || null,
       tokenSummary: { inputTokens: tokenRow.total_input, outputTokens: tokenRow.total_output },
     });
@@ -2100,9 +2101,9 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
   // Resolve agent type for semantic parsing (defaults to 'claude')
-  const runRow = db.prepare('SELECT agent FROM pipeline_runs WHERE id = ?')
-    .get(runId) as { agent: string } | undefined;
-  const agent = runRow?.agent ?? 'claude';
+  const runRow = db.prepare('SELECT agent_type, agent FROM pipeline_runs WHERE id = ?')
+    .get(runId) as { agent_type: string; agent: string } | undefined;
+  const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
 
   if (buf) {
     // ── Hot path: in-memory buffer exists ──────────────────────────────────
