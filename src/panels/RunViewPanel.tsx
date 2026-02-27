@@ -15,6 +15,7 @@ import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
 import WorktreesPanel from './WorktreesPanel';
 import type { PanelId } from '../components/Sidebar';
+import { RunViewTerminalSkeleton } from '../components/Skeleton';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -443,11 +444,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   }, [runId, hitlContext, fetchRun]);
 
   if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <span className="text-sm text-muted">Loading run #{runId}...</span>
-      </div>
-    );
+    return <RunViewTerminalSkeleton />;
   }
 
   if (!run) {
