@@ -10,7 +10,7 @@ import { modLabel } from '../hooks/useHotkeys';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account';
+export type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account';
 
 interface ProfileData {
   id: string;
@@ -99,9 +99,14 @@ const LAYER_INFO: Record<1 | 2 | 3, { title: string; description: string; placeh
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function SettingsPanel() {
+export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab } = {}) {
   const { workspaceId } = useWorkspace();
-  const [activeTab, setActiveTab] = useState<SettingsTab>('direction');
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab ?? 'direction');
+
+  // Sync tab when initialTab prop changes (e.g. navigating from ? hotkey)
+  useEffect(() => {
+    if (initialTab) setActiveTab(initialTab);
+  }, [initialTab]);
 
   // Direction layer hooks — always call (hooks can't be conditional)
   const l1 = useDirectionLayer(workspaceId, 1, { skipValidation: true });
@@ -989,7 +994,6 @@ function ProfileSection() {
   const [error, setError] = useState<string | null>(null);
 
   const [displayName, setDisplayName] = useState('');
-  const [avatarUrl, setAvatarUrl] = useState('');
 
   // Password change
   const [currentPassword, setCurrentPassword] = useState('');
@@ -1005,11 +1009,10 @@ function ProfileSection() {
   const [verificationError, setVerificationError] = useState<string | null>(null);
 
   useEffect(() => {
-    apiFetch<ProfileData>('/api/settings/profile')
+    apiFetch<{ user: { id: string; email: string; displayName: string } }>('/api/auth/me')
       .then(data => {
-        setProfile(data);
-        setDisplayName(data.displayName);
-        setAvatarUrl(data.avatarUrl ?? '');
+        setProfile({ id: data.user.id, email: data.user.email, displayName: data.user.displayName, avatarUrl: null });
+        setDisplayName(data.user.displayName);
       })
       .catch(() => setError('Failed to load profile'))
       .finally(() => setLoading(false));
@@ -1020,10 +1023,10 @@ function ProfileSection() {
     setError(null);
     setSaved(false);
     try {
-      await apiFetch('/api/settings/profile', {
-        method: 'PUT',
+      await apiFetch('/api/auth/me', {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ displayName, avatarUrl: avatarUrl || null }),
+        body: JSON.stringify({ displayName }),
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -1039,8 +1042,8 @@ function ProfileSection() {
     setPasswordError(null);
     setPasswordSaved(false);
     try {
-      await apiFetch('/api/settings/password', {
-        method: 'PUT',
+      await apiFetch('/api/auth/me', {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ currentPassword, newPassword }),
       });
@@ -1059,7 +1062,7 @@ function ProfileSection() {
     return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading profile...</div>;
   }
 
-  const hasProfileChanges = profile && (displayName !== profile.displayName || (avatarUrl || '') !== (profile.avatarUrl ?? ''));
+  const hasProfileChanges = profile && displayName !== profile.displayName;
 
   return (
     <div className="space-y-6">
@@ -1121,22 +1124,6 @@ function ProfileSection() {
               onChange={e => setDisplayName(e.target.value)}
               className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
             />
-          </div>
-
-          <div>
-            <label className="block text-xs text-muted mb-1">Avatar URL</label>
-            <input
-              type="url"
-              value={avatarUrl}
-              onChange={e => setAvatarUrl(e.target.value)}
-              placeholder="https://example.com/avatar.png"
-              className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-            />
-            {avatarUrl && (
-              <div className="mt-2">
-                <img src={avatarUrl} alt="Avatar preview" className="w-10 h-10 rounded-full object-cover border border-border" onError={e => (e.currentTarget.style.display = 'none')} />
-              </div>
-            )}
           </div>
 
           {error && <p className="text-xs text-red-500">{error}</p>}
@@ -1410,37 +1397,36 @@ const SHORTCUT_GROUPS = (() => {
   const mod = modLabel();
   return [
     {
-      category: 'Global',
-      shortcuts: [
-        { keys: [`${mod}`, 'K'], description: 'Open command palette' },
-        { keys: ['?'], description: 'Show keyboard shortcuts' },
-        { keys: [`${mod}`, '/'], description: 'Show keyboard shortcuts' },
-        { keys: ['Esc'], description: 'Close panel / modal' },
-      ],
-    },
-    {
       category: 'Navigation',
       shortcuts: [
-        { keys: [`${mod}`, '1'], description: 'Go to Spec Forge' },
-        { keys: [`${mod}`, '2'], description: 'Go to Direction Stack' },
-        { keys: [`${mod}`, '3'], description: 'Go to Review Queue' },
-        { keys: [`${mod}`, '4'], description: 'Go to Pipeline Monitor' },
-        { keys: [`${mod}`, '5'], description: 'Go to Archive' },
+        { keys: [`${mod}`, '1'], description: 'Go to Hub' },
+        { keys: [`${mod}`, '2'], description: 'Go to Forge' },
+        { keys: [`${mod}`, '3'], description: 'Go to Run View' },
+        { keys: [`${mod}`, '4'], description: 'Go to Settings' },
       ],
     },
     {
-      category: 'Spec Actions',
+      category: 'Specs',
       shortcuts: [
+        { keys: [`${mod}`, 'N'], description: 'New spec in Spec Forge' },
         { keys: [`${mod}`, 'Enter'], description: 'Approve selected spec' },
         { keys: [`${mod}`, 'Backspace'], description: 'Reject selected spec' },
-        { keys: [`${mod}`, 'N'], description: 'New spec in Spec Forge' },
       ],
     },
     {
-      category: 'Pipeline Actions',
+      category: 'Pipeline',
       shortcuts: [
         { keys: [`${mod}`, 'Shift', 'R'], description: 'Trigger pipeline run' },
         { keys: [`${mod}`, '.'], description: 'Cancel active run' },
+      ],
+    },
+    {
+      category: 'General',
+      shortcuts: [
+        { keys: [`${mod}`, 'K'], description: 'Open command palette' },
+        { keys: ['?'], description: 'Open shortcuts' },
+        { keys: [`${mod}`, '/'], description: 'Open shortcuts' },
+        { keys: ['Esc'], description: 'Close panel / modal' },
       ],
     },
   ];
