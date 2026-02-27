@@ -245,6 +245,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE pipeline_runs ADD COLUMN log_path TEXT');
   }
 
+  // EQ-004: Add agent column to pipeline_runs (idempotent) — 'claude' | 'opencode'
+  const runColsEQ004 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsEQ004.some(c => c.name === 'agent')) {
+    db.exec("ALTER TABLE pipeline_runs ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'");
+  }
+
   // V2-031: Add pr_template column to workspaces (idempotent)
   const wsCols = db.pragma('table_info(workspaces)') as { name: string }[];
   if (!wsCols.some(c => c.name === 'pr_template')) {

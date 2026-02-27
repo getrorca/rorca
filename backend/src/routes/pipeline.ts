@@ -16,6 +16,18 @@ import type { AuthUser } from './auth';
 import type { AgentProfileRow } from './agent-profiles';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
+import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
+
+/** Extract semantic steps from a raw text chunk (may contain multiple lines). */
+function emitSemanticSteps(text: string, agent: string, res: Response): void {
+  const lines = text.split('\n');
+  for (const line of lines) {
+    const step = parseLine(line, agent);
+    if (step) {
+      res.write(`event: semantic_step\ndata: ${JSON.stringify(step)}\n\n`);
+    }
+  }
+}
 
 /** Legacy tmp-based log path (used as fallback for old runs) */
 const tmpLogPath = (runId: number) => path.join(os.tmpdir(), `rorca-run-${runId}.log`);
@@ -75,6 +87,7 @@ interface PipelineRunRow {
   finished_at: string | null;
   retried_from_run_id: number | null;
   log_path: string | null;
+  agent: string;
 }
 
 interface StoryResultRow {
@@ -1987,12 +2000,18 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
   const buf = outputBuffers.get(runId);
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
+  // Resolve agent type for semantic parsing (defaults to 'claude')
+  const runRow = db.prepare('SELECT agent FROM pipeline_runs WHERE id = ?')
+    .get(runId) as { agent: string } | undefined;
+  const agent = runRow?.agent ?? 'claude';
+
   if (buf) {
     // ── Hot path: in-memory buffer exists ──────────────────────────────────
-    // Replay buffered output
+    // Replay buffered output + semantic steps
     for (const chunk of buf.chunks) {
       const encoded = Buffer.from(chunk).toString('base64');
       res.write(`event: chunk\ndata: ${encoded}\n\n`);
+      emitSemanticSteps(chunk, agent, res);
     }
 
     if (buf.done) {
@@ -2006,6 +2025,7 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
     const onChunk = (chunk: string) => {
       const encoded = Buffer.from(chunk).toString('base64');
       res.write(`event: chunk\ndata: ${encoded}\n\n`);
+      emitSemanticSteps(chunk, agent, res);
     };
     buf.subscribers.add(onChunk);
 
@@ -2027,10 +2047,11 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
     return;
   }
 
-  // Replay everything written so far
+  // Replay everything written so far + semantic steps
   const existing = fs.readFileSync(logPath);
   if (existing.length > 0) {
     res.write(`event: chunk\ndata: ${existing.toString('base64')}\n\n`);
+    emitSemanticSteps(existing.toString('utf8'), agent, res);
   }
 
   // Check if the original process is still alive
@@ -2056,7 +2077,9 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
         fs.readSync(fd, newBytes, 0, newBytes.length, offset);
         fs.closeSync(fd);
         offset = stat.size;
+        const text = newBytes.toString('utf8');
         res.write(`event: chunk\ndata: ${newBytes.toString('base64')}\n\n`);
+        emitSemanticSteps(text, agent, res);
       }
 
       // Stop tailing once the process exits
