@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
@@ -28,6 +28,7 @@ interface PipelineRun {
   worktree_path: string | null;
   started_at: string;
   finished_at: string | null;
+  parallelism?: number;
 }
 
 interface RunApiResponse {
@@ -534,6 +535,12 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
           <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`}>
             {STATUS_BADGE_LABELS[effectiveStatus] || effectiveStatus}
           </span>
+          {run.parallelism != null && run.parallelism > 1 && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 bg-purple-500/10 text-purple-500">
+              <Layers size={10} />
+              Parallelism: {run.parallelism}
+            </span>
+          )}
         </div>
 
         {/* Pipeline controls */}
