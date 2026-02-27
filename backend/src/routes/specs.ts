@@ -14,6 +14,8 @@ import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
+import { agentType as configuredAgentType } from '../lib/config';
+import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
 
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
 function resolveVaultCreds(userId: string, model: string): { apiKey?: string; baseUrl?: string } {
@@ -520,63 +522,119 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ].join('\n');
 
-    // 8. Call LLM with selected model (use vault key if available)
-    const user = getEffectiveUser(req);
-    if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-    const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
-    const llmResult = await chatComplete(
-      [{ role: 'user', content: fullPrompt }],
-      { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
-    );
-    const rawResponse = llmResult.text;
-    const tokenUsage = llmResult.usage;
-
-    // 9. Parse JSON — strip markdown fences and preamble text if present
+    // 8. Route by agent type: OpenCode path vs SDK (llm-client) path
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
-    try {
-      // Extract JSON from ```json ... ``` code block if present
-      const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-      const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-      // If there's still leading text before the JSON object, strip it
-      const jsonStart = jsonStr.indexOf('{');
-      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
-    } catch {
-      res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
-      return;
+    let tokenUsage = { inputTokens: 0, outputTokens: 0 };
+    let usedProvider: string;
+
+    if (configuredAgentType === 'opencode') {
+      // ── OpenCode path: spawn `opencode run` with codebase exploration ──
+      console.log(`[Specs] Generating via OpenCode (model: ${resolvedModel})`);
+      usedProvider = 'opencode';
+
+      const ocResult = await generateSpecViaOpenCode({
+        workspacePath: workspace.path as string,
+        title,
+        brief,
+        storyCount,
+        storyPrefix,
+        directionContext: synthesized,
+        templateContext: templateContext || undefined,
+        diagramTypes: diagramTypes as string[] | undefined,
+        model: resolvedModel,
+      });
+
+      if (isSpecError(ocResult)) {
+        // Fallback to SDK path on OpenCode failure
+        console.warn(`[Specs] OpenCode spec gen failed (${ocResult.error}), falling back to SDK path`);
+
+        const user = getEffectiveUser(req);
+        if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
+        const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+        const llmResult = await chatComplete(
+          [{ role: 'user', content: fullPrompt }],
+          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        );
+        const rawResponse = llmResult.text;
+        tokenUsage = llmResult.usage;
+        usedProvider = getActiveProvider();
+
+        try {
+          const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+          const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
+          const jsonStart = jsonStr.indexOf('{');
+          parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+        } catch {
+          res.status(500).json({ error: 'LLM returned non-JSON (fallback after OpenCode failure)', raw: rawResponse });
+          return;
+        }
+
+        if (!Array.isArray(parsed.stories)) {
+          res.status(500).json({ error: 'Invalid spec structure from LLM (fallback)' });
+          return;
+        }
+      } else {
+        parsed = {
+          stories: ocResult.stories,
+          diagrams: ocResult.diagrams,
+          mermaidDiagram: ocResult.mermaidDiagram,
+        };
+        tokenUsage = ocResult.usage;
+      }
+    } else {
+      // ── SDK path: direct LLM call via chatComplete ──
+      const user = getEffectiveUser(req);
+      if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
+      const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+      const llmResult = await chatComplete(
+        [{ role: 'user', content: fullPrompt }],
+        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+      );
+      const rawResponse = llmResult.text;
+      tokenUsage = llmResult.usage;
+      usedProvider = getActiveProvider();
+
+      try {
+        const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+        const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
+        const jsonStart = jsonStr.indexOf('{');
+        parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+      } catch {
+        res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
+        return;
+      }
+
+      if (!Array.isArray(parsed.stories)) {
+        res.status(500).json({ error: 'Invalid spec structure from LLM' });
+        return;
+      }
     }
 
-    // 10. Validate structure
-    if (!Array.isArray(parsed.stories)) {
-      res.status(500).json({ error: 'Invalid spec structure from LLM' });
-      return;
-    }
-
-    // 11. Generate algorithmic diagrams
+    // 9. Generate algorithmic diagrams
     const algorithmicDiagrams = generateDiagramBundle(parsed.stories as any, diagramTypes || []);
 
-    // 11b. Resolve mermaidDiagram: prefer LLM-generated, fall back to algorithmic storyDeps
+    // 9b. Resolve mermaidDiagram: prefer LLM-generated, fall back to algorithmic storyDeps
     const mermaidDiagram = (typeof parsed.mermaidDiagram === 'string' && parsed.mermaidDiagram.trim())
       ? parsed.mermaidDiagram
       : algorithmicDiagrams.storyDeps?.mermaid || '';
 
-    // 12. Merge diagrams (algorithmic overwrites LLM for storyDeps)
+    // 10. Merge diagrams (algorithmic overwrites LLM for storyDeps)
     const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
 
-    // 13. Build slug
+    // 11. Build slug
     const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-    // 14. WAL event
-    const provider = getActiveProvider();
+    // 12. WAL event
     const model = resolvedModel;
     db.prepare(
       `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', ?, ?)`
     ).run(slug, JSON.stringify({
-      title, domain, storyCount: parsed.stories.length, provider, model,
+      title, domain, storyCount: parsed.stories.length, provider: usedProvider, model,
       hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
       inputTokens: tokenUsage.inputTokens, outputTokens: tokenUsage.outputTokens,
     }));
 
-    // 15. Snapshot existing spec as a version if regenerating same slug
+    // 13. Snapshot existing spec as a version if regenerating same slug
     const { pendingDir: genPendingDir, approvedDir: genApprovedDir } = specsDirs(workspace.path as string);
     const existingPending = path.join(genPendingDir, `${slug}.json`);
     const existingApproved = path.join(genApprovedDir, `${slug}.json`);
@@ -591,7 +649,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       fs.unlinkSync(existingApproved);
     }
 
-    // 16. Write spec to workspace directory
+    // 14. Write spec to workspace directory
     let specPath: string;
     let diagramsPath: string;
     try {
@@ -610,14 +668,14 @@ router.post('/generate', async (req: Request, res: Response) => {
       return;
     }
 
-    // 17. Return response
+    // 15. Return response
     res.json({
       slug,
       title,
       stories: parsed.stories,
       diagrams: allDiagrams,
       mermaidDiagram,
-      provider,
+      provider: usedProvider,
       model,
       usage: tokenUsage,
       specPath,
