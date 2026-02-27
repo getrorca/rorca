@@ -24,7 +24,7 @@ interface ModelOption {
 
 const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
-export default function SpecForgePanelPage({ onNavigate, onNavigateToRun }: { onNavigate?: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void }) {
+export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initialBrief }: { onNavigate?: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; initialBrief?: string | null }) {
   const { workspaceId, workspaces } = useWorkspace();
   const workspace = workspaces.find((w) => w.id === workspaceId);
   const [forgeMode, setForgeMode] = useState<ForgeMode>('single');
@@ -112,6 +112,14 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun }: { on
 
   // Auto-resize on mount and when brief changes
   useEffect(() => { autoResizeBrief(); }, [specBrief, autoResizeBrief]);
+
+  // Apply initialBrief from command palette
+  useEffect(() => {
+    if (initialBrief != null && initialBrief.length > 0) {
+      setSpecBrief(initialBrief);
+      setTimeout(() => briefRef.current?.focus(), 100);
+    }
+  }, [initialBrief]);
 
   // Token estimate: word count × 1.3
   const estimatedTokens = Math.ceil((specBrief.trim().split(/\s+/).filter(Boolean).length) * 1.3);

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Search, ArrowRight, Clock, Command } from 'lucide-react';
+import { Search, ArrowRight, Clock, Command, Hammer, Trash2 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { NAV_ITEMS, type PanelId } from './Sidebar';
@@ -38,6 +38,9 @@ interface ArchiveSpec {
 interface CommandPaletteProps {
   onNavigate: (panel: PanelId) => void;
   onClose: () => void;
+  activePanel: PanelId;
+  activeRunId?: number | null;
+  onSendToForge?: (brief: string) => void;
 }
 
 /* ─── Fuzzy match ─────────────────────────────────────────────────── */
@@ -107,9 +110,32 @@ const CATEGORY_LABELS: Record<CommandItem['category'], string> = {
 
 const CATEGORY_ORDER: CommandItem['category'][] = ['action', 'panel', 'spec', 'run'];
 
+/** Score threshold — below this, Forge fallback appears */
+const FORGE_FALLBACK_THRESHOLD = 80;
+
+/** Context-aware boost: maps active panel/context to command IDs that should rank higher */
+const CONTEXT_BOOSTS: Record<string, string[]> = {
+  // Run View: run commands first
+  'run-view': [
+    'panel:pipeline', 'action:worktrees', 'panel:compare', 'panel:worktrees',
+  ],
+  // Forge: template/brief commands first
+  forge: [
+    'action:new-spec', 'action:direction', 'panel:marketplace', 'panel:stack',
+  ],
+  // Hub: pending review actions first
+  hub: [
+    'action:review', 'panel:queue', 'action:new-spec', 'panel:forge',
+  ],
+};
+
+function clearRecent() {
+  localStorage.removeItem(RECENT_KEY);
+}
+
 /* ─── Component ───────────────────────────────────────────────────── */
 
-export default function CommandPalette({ onNavigate, onClose }: CommandPaletteProps) {
+export default function CommandPalette({ onNavigate, onClose, activePanel, activeRunId, onSendToForge }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -252,45 +278,105 @@ export default function CommandPalette({ onNavigate, onClose }: CommandPalettePr
     return items;
   }, [specs, archiveSpecs, runs, onNavigate, onClose]);
 
+  // Determine context key for boosting
+  const contextKey = activeRunId != null ? 'run-view' : activePanel;
+  const boostIds = CONTEXT_BOOSTS[contextKey] ?? [];
+
   // Filter and rank results
-  const results = useMemo(() => {
+  const { items: results, topScore } = useMemo(() => {
     if (!query.trim()) {
-      // Show recents first, then actions
+      // Show recents first, then context-boosted, then remaining actions/panels
       const recent = getRecent();
       const recentItems = recent
         .map((id) => allItems.find((item) => item.id === id))
         .filter((item): item is CommandItem => !!item);
 
       const recentIds = new Set(recent);
-      const otherItems = allItems
-        .filter((item) => !recentIds.has(item.id) && (item.category === 'action' || item.category === 'panel'))
-        .slice(0, 10);
+      const boostedItems = boostIds
+        .map((id) => allItems.find((item) => item.id === id))
+        .filter((item): item is CommandItem => !!item && !recentIds.has(item.id));
 
-      return [...recentItems, ...otherItems];
+      const usedIds = new Set([...recent, ...boostIds]);
+      const otherItems = allItems
+        .filter((item) => !usedIds.has(item.id) && (item.category === 'action' || item.category === 'panel'))
+        .slice(0, 10 - boostedItems.length);
+
+      return { items: [...recentItems, ...boostedItems, ...otherItems], topScore: Infinity };
     }
 
-    return allItems
+    const scored = allItems
       .map((item) => {
         const labelMatch = fuzzyMatch(query, item.label);
         const descMatch = item.description ? fuzzyMatch(query, item.description) : { match: false, score: 0 };
         const idMatch = fuzzyMatch(query, item.id);
-        const bestScore = Math.max(labelMatch.score, descMatch.score * 0.7, idMatch.score * 0.5);
+        let bestScore = Math.max(labelMatch.score, descMatch.score * 0.7, idMatch.score * 0.5);
+        // Context boost: +30 for items relevant to current screen
+        if (boostIds.includes(item.id)) bestScore += 30;
         return { item, match: labelMatch.match || descMatch.match || idMatch.match, score: bestScore };
       })
       .filter((r) => r.match)
       .sort((a, b) => b.score - a.score)
-      .slice(0, 20)
-      .map((r) => r.item);
-  }, [query, allItems]);
+      .slice(0, 20);
+
+    return {
+      items: scored.map((r) => r.item),
+      topScore: scored.length > 0 ? scored[0].score : 0,
+    };
+  }, [query, allItems, boostIds]);
+
+  // Forge fallback: appears when query has 2+ words and no strong match
+  const trimmedQuery = query.trim();
+  const wordCount = trimmedQuery ? trimmedQuery.split(/\s+/).length : 0;
+  const showForgeFallback = trimmedQuery.length > 0 && wordCount >= 2 && topScore < FORGE_FALLBACK_THRESHOLD;
+
+  const forgeFallbackItem: CommandItem | null = showForgeFallback ? {
+    id: 'forge-fallback',
+    label: `Send to Forge as brief`,
+    category: 'action',
+    description: trimmedQuery,
+    action: () => {
+      onSendToForge?.(trimmedQuery);
+      onNavigate('forge');
+      onClose();
+    },
+  } : null;
+
+  // Clear history item: shown at bottom when input is empty and recents exist
+  const showClearHistory = !trimmedQuery && getRecent().length > 0;
+  const clearHistoryItem: CommandItem | null = showClearHistory ? {
+    id: 'clear-history',
+    label: 'Clear history',
+    category: 'action',
+    description: 'Remove all recent commands',
+    action: () => {
+      clearRecent();
+      // Force re-render by toggling query
+      setQuery(' ');
+      setTimeout(() => setQuery(''), 0);
+    },
+  } : null;
+
+  // Final display list
+  const displayResults = useMemo(() => {
+    const items: CommandItem[] = [];
+    if (forgeFallbackItem) items.push(forgeFallbackItem);
+    items.push(...results);
+    if (clearHistoryItem) items.push(clearHistoryItem);
+    return items;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [results, showForgeFallback, trimmedQuery, showClearHistory]);
 
   // Reset selection when results change
   useEffect(() => {
-    setSelectedIdx(0);
-  }, [results.length, query]);
+    setSelectedIdx(showForgeFallback ? 0 : 0);
+  }, [displayResults.length, query, showForgeFallback]);
 
   // Execute selected item
   const executeItem = useCallback((item: CommandItem) => {
-    addRecent(item.id);
+    // Don't track meta-items in recents
+    if (item.id !== 'forge-fallback' && item.id !== 'clear-history') {
+      addRecent(item.id);
+    }
     item.action();
   }, []);
 
@@ -304,7 +390,7 @@ export default function CommandPalette({ onNavigate, onClose }: CommandPalettePr
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setSelectedIdx((i) => Math.min(i + 1, results.length - 1));
+        setSelectedIdx((i) => Math.min(i + 1, displayResults.length - 1));
         return;
       }
       if (e.key === 'ArrowUp') {
@@ -312,29 +398,54 @@ export default function CommandPalette({ onNavigate, onClose }: CommandPalettePr
         setSelectedIdx((i) => Math.max(i - 1, 0));
         return;
       }
-      if (e.key === 'Enter' && results.length > 0) {
+      if (e.key === 'Enter' && displayResults.length > 0) {
         e.preventDefault();
-        executeItem(results[selectedIdx]);
+        executeItem(displayResults[selectedIdx]);
         return;
       }
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [results, selectedIdx, executeItem, onClose]);
+  }, [displayResults, selectedIdx, executeItem, onClose]);
 
   // Scroll selected item into view
   useEffect(() => {
     const list = listRef.current;
     if (!list) return;
-    const selected = list.children[selectedIdx] as HTMLElement | undefined;
+    const buttons = list.querySelectorAll('button');
+    const selected = buttons[selectedIdx] as HTMLElement | undefined;
     selected?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
   // Group results by category for display
   const grouped = useMemo(() => {
-    const groups: { category: CommandItem['category']; items: CommandItem[] }[] = [];
-    const byCategory = new Map<CommandItem['category'], CommandItem[]>();
+    type GroupLabel = 'Recent' | 'Suggestions' | 'Forge' | 'Clear' | string;
+    const groups: { label: GroupLabel; items: CommandItem[] }[] = [];
 
+    // If no query, show as flat list (recents + suggestions + clear)
+    if (!query.trim()) {
+      const recentIds = new Set(getRecent());
+      const recentItems = results.filter((r) => recentIds.has(r.id));
+      const otherItems = results.filter((r) => !recentIds.has(r.id));
+
+      if (recentItems.length > 0) {
+        groups.push({ label: 'Recent', items: recentItems });
+      }
+      if (otherItems.length > 0) {
+        groups.push({ label: 'Suggestions', items: otherItems });
+      }
+      if (clearHistoryItem) {
+        groups.push({ label: 'Clear', items: [clearHistoryItem] });
+      }
+      return groups;
+    }
+
+    // With query: forge fallback first, then grouped by category
+    if (forgeFallbackItem) {
+      groups.push({ label: 'Forge', items: [forgeFallbackItem] });
+    }
+
+    const byCategory = new Map<CommandItem['category'], CommandItem[]>();
     for (const item of results) {
       let arr = byCategory.get(item.category);
       if (!arr) {
@@ -344,36 +455,22 @@ export default function CommandPalette({ onNavigate, onClose }: CommandPalettePr
       arr.push(item);
     }
 
-    // If no query, show as flat list (recents + suggestions)
-    if (!query.trim()) {
-      const recentIds = new Set(getRecent());
-      const recentItems = results.filter((r) => recentIds.has(r.id));
-      const otherItems = results.filter((r) => !recentIds.has(r.id));
-
-      if (recentItems.length > 0) {
-        groups.push({ category: 'action', items: recentItems }); // labeled "Recent" below
-      }
-      if (otherItems.length > 0) {
-        groups.push({ category: 'panel', items: otherItems }); // labeled "Suggestions"
-      }
-      return { groups, isRecentsMode: recentItems.length > 0 };
-    }
-
     for (const cat of CATEGORY_ORDER) {
       const items = byCategory.get(cat);
       if (items && items.length > 0) {
-        groups.push({ category: cat, items });
+        groups.push({ label: CATEGORY_LABELS[cat], items });
       }
     }
-    return { groups, isRecentsMode: false };
-  }, [results, query]);
+    return groups;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayResults, query]);
 
   // Flat index counter for keyboard navigation
   let flatIdx = 0;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
@@ -398,59 +495,67 @@ export default function CommandPalette({ onNavigate, onClose }: CommandPalettePr
 
         {/* Results */}
         <div ref={listRef} className="max-h-[50vh] overflow-y-auto py-1">
-          {results.length === 0 && (
+          {displayResults.length === 0 && (
             <div className="px-4 py-8 text-center text-muted text-sm">
               No results for &ldquo;{query}&rdquo;
             </div>
           )}
 
-          {grouped.groups.map((group) => {
-            const groupLabel = !query.trim()
-              ? (grouped.isRecentsMode && group === grouped.groups[0] ? 'Recent' : 'Suggestions')
-              : CATEGORY_LABELS[group.category];
-
-            return (
-              <div key={group.category + groupLabel}>
+          {grouped.map((group) => (
+            <div key={group.label}>
+              {group.label !== 'Clear' && (
                 <div className="px-4 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
-                  {groupLabel}
+                  {group.label}
                 </div>
-                {group.items.map((item) => {
-                  const currentIdx = flatIdx++;
-                  const isSelected = currentIdx === selectedIdx;
-                  const recentIds = getRecent();
-                  const isRecent = recentIds.includes(item.id);
+              )}
+              {group.items.map((item) => {
+                const currentIdx = flatIdx++;
+                const isSelected = currentIdx === selectedIdx;
+                const recentIds = getRecent();
+                const isRecent = recentIds.includes(item.id);
+                const isForgeFallback = item.id === 'forge-fallback';
+                const isClearHistory = item.id === 'clear-history';
 
-                  return (
-                    <button
-                      key={item.id}
-                      className={`w-full flex items-center gap-3 px-4 py-2 text-left transition-colors ${
-                        isSelected ? 'bg-accent/10 text-text' : 'text-text hover:bg-bg'
-                      }`}
-                      onClick={() => executeItem(item)}
-                      onMouseEnter={() => setSelectedIdx(currentIdx)}
-                    >
-                      {isRecent && !query.trim() ? (
-                        <Clock size={14} className="text-muted shrink-0" />
-                      ) : (
-                        <ArrowRight size={14} className="text-muted shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm truncate">{item.label}</div>
-                        {item.description && (
-                          <div className="text-xs text-muted truncate">{item.description}</div>
-                        )}
+                return (
+                  <button
+                    key={item.id}
+                    className={`w-full flex items-center gap-3 px-4 py-2 text-left transition-colors ${
+                      isClearHistory ? 'border-t border-border' : ''
+                    } ${
+                      isSelected ? 'bg-accent/10 text-text' : 'text-text hover:bg-bg'
+                    }`}
+                    onClick={() => executeItem(item)}
+                    onMouseEnter={() => setSelectedIdx(currentIdx)}
+                  >
+                    {isForgeFallback ? (
+                      <Hammer size={14} className="text-accent shrink-0" />
+                    ) : isClearHistory ? (
+                      <Trash2 size={14} className="text-muted shrink-0" />
+                    ) : isRecent && !query.trim() ? (
+                      <Clock size={14} className="text-muted shrink-0" />
+                    ) : (
+                      <ArrowRight size={14} className="text-muted shrink-0" />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className={`text-sm truncate ${isForgeFallback ? 'text-accent' : ''}`}>
+                        {isForgeFallback ? `\u2192 ${item.label}` : item.label}
                       </div>
-                      {isSelected && (
-                        <kbd className="text-[10px] text-muted bg-bg border border-border rounded px-1.5 py-0.5 font-mono shrink-0">
-                          Enter
-                        </kbd>
+                      {item.description && (
+                        <div className={`text-xs truncate ${isForgeFallback ? 'text-muted/70 italic' : 'text-muted'}`}>
+                          {item.description}
+                        </div>
                       )}
-                    </button>
-                  );
-                })}
-              </div>
-            );
-          })}
+                    </div>
+                    {isSelected && (
+                      <kbd className="text-[10px] text-muted bg-bg border border-border rounded px-1.5 py-0.5 font-mono shrink-0">
+                        Enter
+                      </kbd>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
 
         {/* Footer */}
