@@ -7,6 +7,7 @@ import {
   type ScorerStory,
   type ModelTier,
 } from '../complexity-scorer';
+import { validateOrchestrationConfig } from '../config';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -604,5 +605,243 @@ describe('complexity-scorer', () => {
       });
       expect(getNextEscalationTier('haiku', cwd)).toBe('opus');
     });
+  });
+
+  // ── OC-021: Router modes ──────────────────────────────────────────
+
+  describe('router modes (OC-021)', () => {
+    it('router=fixed always returns sonnet with router:fixed signal', () => {
+      const cwd = makeConfigDir({
+        orchestration: { router: 'fixed' },
+      });
+      const story = makeStory({
+        title: 'Design authentication architecture',
+        description: 'Architect new security layer',
+        acceptanceCriteria: ['AC1', 'AC2', 'AC3', 'AC4', 'AC5', 'AC6', 'AC7'],
+      });
+      const result = score(story, [], cwd);
+      expect(result.tier).toBe('sonnet');
+      expect(result.signals).toContain('router:fixed');
+    });
+
+    it('router=manual respects story-level modelTier', () => {
+      const cwd = makeConfigDir({
+        orchestration: { router: 'manual' },
+      });
+      const story = { ...makeStory(), modelTier: 'opus' } as ScorerStory & { modelTier: string };
+      const result = score(story, [], cwd);
+      expect(result.tier).toBe('opus');
+      expect(result.signals).toContain('router:manual(opus)');
+    });
+
+    it('router=manual falls through to auto when no modelTier set', () => {
+      const cwd = makeConfigDir({
+        orchestration: { router: 'manual' },
+      });
+      const story = makeStory({
+        title: 'Fix typo in README',
+        description: 'Fix typo in docs readme',
+      });
+      const result = score(story, [], cwd);
+      // Should use auto scoring (haiku for this simple story)
+      expect(result.tier).toBe('haiku');
+      expect(result.signals.some(s => s.startsWith('router:'))).toBe(false);
+    });
+
+    it('router=auto uses standard complexity scoring', () => {
+      const cwd = makeConfigDir({
+        orchestration: { router: 'auto' },
+      });
+      const story = makeStory({
+        title: 'Fix typo',
+        description: 'Fix typo in docs readme',
+      });
+      const result = score(story, [], cwd);
+      expect(result.tier).toBe('haiku');
+    });
+  });
+
+  // ── OC-021: Threshold ranges ──────────────────────────────────────
+
+  describe('threshold ranges (OC-021)', () => {
+    it('parses [min, max] range format for thresholds', () => {
+      const cwd = makeConfigDir({
+        orchestration: {
+          thresholds: { haiku: [0, 20], sonnet: [21, 50] },
+        },
+      });
+      const config = loadOrchestrationConfig(cwd);
+      expect(config.thresholds.haiku).toBe(20);
+      expect(config.thresholds.sonnet).toBe(50);
+    });
+
+    it('handles legacy number format alongside range format', () => {
+      const cwd = makeConfigDir({
+        orchestration: {
+          thresholds: { haiku: 25, sonnet: [26, 60] },
+        },
+      });
+      const config = loadOrchestrationConfig(cwd);
+      expect(config.thresholds.haiku).toBe(25);
+      expect(config.thresholds.sonnet).toBe(60);
+    });
+  });
+
+  // ── OC-021: Task cascades ─────────────────────────────────────────
+
+  describe('task cascades (OC-021)', () => {
+    it('returns default task cascades when no config', () => {
+      const config = loadOrchestrationConfig();
+      expect(config.taskCascades.echolocation).toBe('claude-haiku-4-5-20251001');
+      expect(config.taskCascades.coding).toBe('claude-sonnet-4-5-20250929');
+      expect(config.taskCascades.documentation).toBe('claude-haiku-4-5-20251001');
+    });
+
+    it('reads custom task cascades from config', () => {
+      const cwd = makeConfigDir({
+        orchestration: {
+          taskCascades: { coding: 'gpt-4o', testing: 'gpt-4o-mini' },
+        },
+      });
+      const config = loadOrchestrationConfig(cwd);
+      expect(config.taskCascades.coding).toBe('gpt-4o');
+      expect(config.taskCascades.testing).toBe('gpt-4o-mini');
+      // Unspecified task types keep defaults
+      expect(config.taskCascades.echolocation).toBe('claude-haiku-4-5-20251001');
+    });
+  });
+
+  // ── OC-021: Token budget ──────────────────────────────────────────
+
+  describe('tokenBudgetPerStory (OC-021)', () => {
+    it('defaults to 50000', () => {
+      const config = loadOrchestrationConfig();
+      expect(config.tokenBudgetPerStory).toBe(50000);
+    });
+
+    it('reads custom token budget from config', () => {
+      const cwd = makeConfigDir({
+        orchestration: { tokenBudgetPerStory: 100000 },
+      });
+      const config = loadOrchestrationConfig(cwd);
+      expect(config.tokenBudgetPerStory).toBe(100000);
+    });
+
+    it('falls back to default for invalid values', () => {
+      const cwd = makeConfigDir({
+        orchestration: { tokenBudgetPerStory: -1 },
+      });
+      const config = loadOrchestrationConfig(cwd);
+      expect(config.tokenBudgetPerStory).toBe(50000);
+    });
+  });
+});
+
+// ─── OC-021: Orchestration Validation Tests ─────────────────────────────────
+
+describe('validateOrchestrationConfig (OC-021)', () => {
+  it('returns empty array for valid config', () => {
+    const errors = validateOrchestrationConfig({
+      router: 'auto',
+      thresholds: { haiku: [0, 30], sonnet: [31, 65], opus: [66, 100] },
+      taskCascades: { coding: 'gpt-4o' },
+      escalation: { enabled: true, maxRetriesOnTier: 2 },
+      tokenBudgetPerStory: 50000,
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it('returns empty array for empty object (all defaults)', () => {
+    const errors = validateOrchestrationConfig({});
+    expect(errors).toEqual([]);
+  });
+
+  it('rejects non-object input', () => {
+    expect(validateOrchestrationConfig('string')).toHaveLength(1);
+    expect(validateOrchestrationConfig(null)).toHaveLength(1);
+    expect(validateOrchestrationConfig(42)).toHaveLength(1);
+  });
+
+  it('rejects invalid router mode', () => {
+    const errors = validateOrchestrationConfig({ router: 'turbo' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0].field).toBe('orchestration.router');
+  });
+
+  it('rejects thresholds outside 0-100', () => {
+    const errors = validateOrchestrationConfig({
+      thresholds: { haiku: 150 },
+    });
+    expect(errors.some(e => e.field.includes('haiku'))).toBe(true);
+  });
+
+  it('rejects threshold ranges with min > max', () => {
+    const errors = validateOrchestrationConfig({
+      thresholds: { haiku: [40, 20] },
+    });
+    expect(errors.some(e => e.field.includes('haiku'))).toBe(true);
+  });
+
+  it('rejects haiku >= sonnet threshold', () => {
+    const errors = validateOrchestrationConfig({
+      thresholds: { haiku: 60, sonnet: 50 },
+    });
+    expect(errors.some(e => e.message.includes('less than'))).toBe(true);
+  });
+
+  it('rejects unknown task type', () => {
+    const errors = validateOrchestrationConfig({
+      taskCascades: { invalidTask: 'gpt-4o' },
+    });
+    expect(errors.some(e => e.field.includes('invalidTask'))).toBe(true);
+  });
+
+  it('rejects empty model ID in task cascades', () => {
+    const errors = validateOrchestrationConfig({
+      taskCascades: { coding: '' },
+    });
+    expect(errors.some(e => e.field.includes('coding'))).toBe(true);
+  });
+
+  it('rejects non-boolean escalation.enabled', () => {
+    const errors = validateOrchestrationConfig({
+      escalation: { enabled: 'yes' },
+    });
+    expect(errors.some(e => e.field.includes('enabled'))).toBe(true);
+  });
+
+  it('rejects negative maxRetriesOnTier', () => {
+    const errors = validateOrchestrationConfig({
+      escalation: { maxRetriesOnTier: -1 },
+    });
+    expect(errors.some(e => e.field.includes('maxRetriesOnTier'))).toBe(true);
+  });
+
+  it('rejects non-positive tokenBudgetPerStory', () => {
+    const errors = validateOrchestrationConfig({
+      tokenBudgetPerStory: 0,
+    });
+    expect(errors.some(e => e.field.includes('tokenBudget'))).toBe(true);
+  });
+
+  it('accepts legacy number format for thresholds', () => {
+    const errors = validateOrchestrationConfig({
+      thresholds: { haiku: 30, sonnet: 65 },
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it('rejects invalid escalateTo values', () => {
+    const errors = validateOrchestrationConfig({
+      escalation: { escalateTo: { haiku: 'ultra' } },
+    });
+    expect(errors.some(e => e.field.includes('escalateTo.haiku'))).toBe(true);
+  });
+
+  it('accepts null escalateTo values', () => {
+    const errors = validateOrchestrationConfig({
+      escalation: { escalateTo: { opus: null } },
+    });
+    expect(errors).toEqual([]);
   });
 });
