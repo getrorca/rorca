@@ -30,7 +30,8 @@
         "Cost: '$0.00 (your Claude sub)' for claude --print mode"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-003",
