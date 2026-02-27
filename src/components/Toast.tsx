@@ -29,18 +29,23 @@ export function useToast() {
 export function ToastContainer({
   toasts,
   onDismiss,
+  position = 'bottom-right',
 }: {
   toasts: Toast[];
   onDismiss: (id: number) => void;
+  position?: 'bottom-right' | 'top-right';
 }) {
   if (toasts.length === 0) return null;
 
+  const posClass = position === 'top-right' ? 'fixed top-4 right-4' : 'fixed bottom-4 right-4';
+  const animClass = position === 'top-right' ? 'animate-slide-in-top-right' : 'animate-[slideUp_200ms_ease-out]';
+
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
+    <div className={`${posClass} z-50 flex flex-col gap-2`}>
       {toasts.map((toast) => (
         <div
           key={toast.id}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-lg shadow-lg border text-sm font-medium animate-[slideUp_200ms_ease-out] ${
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-lg shadow-lg border text-sm font-medium ${animClass} ${
             toast.type === 'success'
               ? 'bg-success/15 border-success/30 text-success'
               : 'bg-error/15 border-error/30 text-error'

@@ -78,3 +78,60 @@
 .animate-checkmark-pop {
   animation: checkmark-pop 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
+
+/* ─── P2-009: Run lifecycle animations ──────────────────────────────────────── */
+
+@keyframes dotFadeInPulse {
+  0% { opacity: 0; transform: scale(0.5); }
+  50% { opacity: 1; transform: scale(1.15); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slideDownIn {
+  from {
+    opacity: 0;
+    transform: translateY(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideInFromTopRight {
+  from {
+    opacity: 0;
+    transform: translateX(100%) translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) translateY(0);
+  }
+}
+
+@keyframes slideToRecent {
+  from {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-dot-fade-pulse {
+  animation: dotFadeInPulse 500ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.animate-slide-down-in {
+  animation: slideDownIn 400ms ease-out forwards;
+}
+
+.animate-slide-in-top-right {
+  animation: slideInFromTopRight 350ms ease-out forwards;
+}
+
+.animate-slide-to-recent {
+  animation: slideToRecent 400ms ease-out forwards;
+}
