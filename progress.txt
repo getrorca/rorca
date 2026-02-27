@@ -594,3 +594,250 @@ Key decisions:
 - Used useGlobalToast context instead of local useToast hook for consistency with rest of app
 - Edit Brief clears generatedSpec and auto-focuses the textarea after 50ms RAF delay
 - Story cards use line-clamp-1 for description truncation in collapsed state
+
+## Story P2-007: Settings Billing Tab — DONE
+Files touched:
+- backend/src/routes/billing.ts (modified — enhanced /status with seats+features+stripeConfigured, added GET /invoices endpoint)
+- src/panels/SettingsPanel.tsx (modified — added 'billing' tab type, CreditCard icon, full BillingSection component)
+
+What was built:
+- **Current Plan Badge**: Colored card showing plan name (Free/Solo/Pro/Team) with icon, price, status badge (Active/Past Due/Canceled), renewal date, and seats used/limit
+- **Subscription Details**: Period dates and seat counts from DB, displayed in a 2-column grid
+- **Plan Comparison Table**: 4-column grid showing all plans with features list, prices, and upgrade/switch buttons
+- **Manage Billing**: Opens Stripe customer portal (new tab) for payment method, address, etc.
+- **Invoice History**: Table showing invoice number, amount, date, status, with PDF download links from Stripe API. Collapsible to 5 items with "Show all" toggle
+- **Cancel Subscription**: Two-step confirmation with grace period explanation (access until billing period end), routes to Stripe portal for actual cancellation
+- **Stripe-not-configured fallback**: Warning message when STRIPE_SECRET_KEY is absent, all checkout/portal buttons hidden
+- **GET /api/billing/invoices**: Fetches up to 24 invoices from Stripe API, returns normalized invoice data with hosted_invoice_url and invoice_pdf
+- **GET /api/billing/status** enriched: now returns seats (used + limit), full plan features array, stripeConfigured boolean, period start date
+- **Seat counting**: Counts team_members where user is team owner, applies plan-based limits (free/solo=1, pro=5, team=unlimited)
+
+Key decisions:
+- Cancel flow redirects to Stripe portal (not direct API cancellation) — Stripe handles proration, reactivation, and grace period logic
+- Invoice amounts divided by 100 (Stripe stores in cents)
+- Seats derived from teams + team_members tables (existing schema, no new tables)
+- BillingSection is a sibling section to AccountSection, not nested within it — billing is its own tab for discoverability
+
+## Story P2-009: Run Lifecycle Animations — DONE
+Files touched:
+- src/styles/index.css (modified — 4 new keyframes + 4 utility classes)
+- src/components/Shell.tsx (modified — RunPill dot fade-in pulse animation on run start)
+- src/components/Toast.tsx (modified — position prop for top-right slide-in)
+- src/panels/HubPanel.tsx (modified — ActiveRunCard slide-down, border transition, completion toast, RecentRunRow slide)
+
+What was built:
+- **Run pill dot**: Fades in with scale-pulse animation (`dotFadeInPulse`) when a new run starts, using `animate-dot-fade-pulse` class with 500ms bounce easing
+- **ActiveRunCard slide-down**: Card uses `animate-slide-down-in` (400ms ease-out from -16px) when appearing in the Running section
+- **Border transition on completion**: Card border transitions from blue to emerald (success) or red (failure) over 1s using `transition-[border-color] duration-1000`, driven by SSE `run_finished`/`run_failed` events
+- **Completion toast**: Top-right slide-in toast (`animate-slide-in-top-right`, 350ms) shows "Run completed: <spec>" or "Run failed: <spec>" on run end, auto-dismisses after 5s
+- **Recent Runs slide**: When a run moves to Recent Runs list, the row plays `animate-slide-to-recent` (400ms ease-out from -12px with scale 0.98→1)
+
+Key decisions:
+- All animations use CSS keyframes (no JS animation libraries) — consistent with existing P2-008 animation system
+- Completion detection via SSE events in ActiveRunCard useMemo → useEffect, fires `onRunCompleted` callback once per run
+- Top-right toast uses separate `ToastContainer` with `position="top-right"` prop rather than modifying global toast position
+- `justCompletedRunIds` Set tracks which runs just finished so slide animation only plays on new arrivals, not existing items
+- RunPill dot animation resets via `dotJustAppeared` state with 600ms timeout to avoid replaying on re-renders
+
+## Story P2-011: Skeleton Placeholder Screens — DONE
+Files touched:
+- src/components/Skeleton.tsx (new — shared skeleton primitives + composite skeletons)
+- src/panels/HubPanel.tsx (modified — replaced "Loading..." text with HubSkeleton)
+- src/panels/RunViewPanel.tsx (modified — replaced "Loading run #X..." text with RunViewTerminalSkeleton)
+- src/components/DirectionPreviewSidebar.tsx (modified — replaced "Loading..." text with DirectionSidebarSkeleton)
+
+What was built:
+- **Skeleton primitives**: SkeletonBlock, SkeletonLine, SkeletonBadge, SkeletonCircle — all use Tailwind `animate-pulse` with `bg-border/50`
+- **HubSkeleton**: 3 sections matching real Hub layout — active run card skeleton (status dot, spec name, progress bar, footer), pending review card skeleton (title, meta, story previews, action buttons), recent runs list skeleton (3 rows with dot, name, badge, timestamps)
+- **RunViewTerminalSkeleton**: Header skeleton + tab bar skeleton + 10 grey bars on dark background (`bg-[#1e1e1e]`) with varying widths via `Math.sin` for natural look
+- **DirectionSidebarSkeleton**: 3 layer rows with status dots, labels, and description lines — rendered inside existing sidebar container (no duplicate wrapper)
+- All transitions from skeleton to content are instant (no flash) since skeletons match exact layout dimensions
+
+Key decisions:
+- Created shared Skeleton.tsx with both primitives and composites (no separate files — all are small)
+- DirectionSidebarSkeleton renders only content rows (not full container) since it's placed inside the existing sidebar `overflow-y-auto` div
+- Terminal skeleton bars use `bg-[#333]` on `bg-[#1e1e1e]` to match the real xterm.js dark theme
+- Skeleton widths match real content widths exactly to prevent layout shift on load
+
+## Story P2-012: Prominent Error Display for Failed Runs — DONE
+Files touched:
+- src/panels/RunViewPanel.tsx (modified — failure banner, retry button, view error detail, XCircle/RotateCcw/ExternalLink icons, retryRun import, failedStoryIds derivation)
+- src/panels/HubPanel.tsx (modified — STATUS_BADGE_LABELS.failed updated to '✗ Failed')
+- src/components/RunStoryList.tsx (modified — added rowClass to fail status config for red highlight)
+
+What was built:
+- **Run View failure banner**: Red banner appears below tab bar when `effectiveStatus === 'failed' || 'partial_failure'` with XCircle icon and message "Run failed — N stories did not complete"
+- **Retry failed stories button**: In the failure banner, calls `retryRun()` API with the specific failed story IDs, navigates to new retry run on success
+- **View error detail button**: In the failure banner, switches to terminal tab and calls `scrollToStory()` on the last failed story ID from WAL events
+- **Hub ✗ Failed badge**: STATUS_BADGE_LABELS updated to show "✗ Failed" (Unicode ✗ prefix) for both HubPanel and RunViewPanel
+- **Failed story row highlighting**: RunStoryList fail status now includes `rowClass: 'border-l-2 border-l-red-500 bg-red-500/5'` for red left border + subtle red background
+- **WAL-driven**: All failure state derived from `run_failed` WAL event via existing `usePipelineSSE` hook + `effectiveStatus` useMemo
+
+Key decisions:
+- Failed story IDs derived from WAL events (not API call) — already available via SSE, no extra round trip
+- Retry navigates via page reload to the new run (simplest approach since runId is in the URL)
+- View error detail uses setTimeout(100ms) to allow tab switch to complete before scrollToStory
+- Banner shows for both 'failed' and 'partial_failure' statuses (both have failed stories)
+- Hub card red border already existed via BORDER_LEFT mapping — only badge label needed the ✗ prefix
+
+## Story P2-013: Individual Story Failure Handling — DONE
+Files touched:
+- backend/src/routes/pipeline.ts (modified — added GET /runs/:runId/stories/:storyId/output endpoint)
+- src/api/pipeline.ts (modified — added fetchStoryOutput function + StoryOutput interface)
+- src/components/RunStoryList.tsx (modified — expandable failed rows, retry button, output preview, retry count badge)
+
+What was built:
+- **Backend story output endpoint**: GET /api/pipeline/runs/:runId/stories/:storyId/output returns last N lines (default 20, max 100) of story output extracted from run log file, plus failure reason/attempts from WAL events
+- **Expandable failed story rows**: Failed stories show chevron toggle; clicking expands to reveal last 20 lines of output in a dark-themed `<pre>` block, failure reason badge, and retry controls
+- **"Retry this story" button**: Calls existing POST /api/pipeline/runs/:id/retry with `storyIds: [storyId]`, immediately sets story status to running in UI via local state override
+- **Retry count badge**: Failed stories show "N/3 retries used" badge in red; expanded detail shows "N/3 retries used" and "Max retries (3) reached" when exhausted
+- **Optimistic UI**: `retryingStories` Set in RunStoryList overrides story status to 'running' immediately on retry click, before API response
+- **onRetryStory callback**: New prop on RunStoryList allows parent (RunViewPanel) to handle navigation to new retry run
+
+Key decisions:
+- Story output extracted from run log file by regex-matching story ID patterns (not per-story log files, which aren't reliably tracked in DB)
+- Falls back to in-memory output buffer for active runs, then to WAL event payload for failure metadata
+- Individual story retry reuses existing bulk retry endpoint with `storyIds: [storyId]` — no new backend endpoint needed
+- MAX_RETRIES constant (3) defined in frontend to match backend run-loop.ts MAX_RETRIES
+- Expand/collapse state is per-row, output fetched lazily on first expand only
+
+## Story P2-014: Mobile Responsive Design (<768px) — DONE
+Files touched:
+- src/components/Sidebar.tsx (modified — mobile drawer widened to w-48, text labels added, 44px touch targets)
+- src/components/Shell.tsx (modified — hamburger 44px, workspace truncates to first word on mobile, PlanBadge/Tips/ThemeToggle hidden below sm:, RunPill/UserMenu 44px, dropdowns use fixed positioning on mobile)
+- src/panels/HubPanel.tsx (modified — approve/reject buttons 44px min-height, run button 44px, pause/kill 44px on mobile, recent run rows 44px, timestamp hidden on mobile)
+- src/components/NotificationBell.tsx (modified — bell button 44px on mobile, dropdown uses fixed positioning to avoid overflow)
+
+What was built:
+- **Sidebar mobile drawer**: Widened from 56px (icon-only) to 192px (w-48) with text labels next to icons, all nav buttons 44px height
+- **Top bar priority hiding**: PlanBadge, ShowTipsToggle, and ThemeToggle hidden below 640px (sm:) breakpoint; only essential items (hamburger, logo, workspace, notification, run pill, user) remain
+- **Workspace selector truncation**: On mobile, workspace name shows first word only (split on space/hyphen); full name on sm:+
+- **Touch targets**: All interactive elements (hamburger, nav buttons, approve/reject, run, pause/kill, notification bell, user menu, recent run rows) have minimum 44×44px on mobile
+- **Dropdown overflow prevention**: WorkspaceSelector, NotificationBell, and UserMenu dropdowns use `fixed` positioning on mobile (inset-x-3 or right-3 + top-14) to prevent horizontal overflow at 375px
+- **No horizontal scroll**: Shell root has overflow-x-hidden, all dropdowns constrained within viewport
+- **Hub cards**: Already had grid-cols-1 sm:grid-cols-2 (no change needed), active run card already full-width
+- **Recent runs**: Timestamp (formatted date) hidden on mobile, duration always visible
+
+Key decisions:
+- Used sm: (640px) breakpoint for hiding top bar items rather than md: (768px) — gives more breathing room
+- Mobile sidebar shows rorca wordmark + close button in header row for brand recognition
+- Dropdowns switch from absolute to fixed positioning on mobile for viewport containment
+- RunPill hides "New Spec" text on mobile (plus icon only) to save horizontal space
+- Touch target enlargement uses sm: breakpoint to revert to compact sizes on desktop
+
+## Story P2-018: Virtual Scroll for Story List — DONE
+Files touched:
+- package.json (modified — added @tanstack/react-virtual)
+- src/components/RunStoryList.tsx (rewritten — virtual scroll with @tanstack/react-virtual)
+
+What was built:
+- **Virtual scroll**: `useVirtualizer` from `@tanstack/react-virtual` renders only visible rows in both sequential and wave-grouped layouts
+- **Fixed 48px row height**: All rows (stories, wave headers, excluded headers) use `ROW_HEIGHT = 48` constant via `estimateSize`
+- **Unified virtual item model**: Both sequential and wave layouts flatten into a single `VirtualItem[]` array (`story | wave-header | excluded-header` discriminated union) for the virtualizer
+- **Auto-scroll active story**: When a story transitions to `running` (detected via `runningStoryIds` diff against `prevRunningRef`), `scrollToIndex` with `align: 'auto'` + smooth behavior scrolls it into view
+- **Keyboard navigation**: Container has `tabIndex={0}` + `onKeyDown` handler — ArrowUp/Down moves `focusedIndex`, Enter activates (story click or wave toggle), Home/End jump to first/last item. Focused row gets `ring-2 ring-accent/50 bg-accent/5` highlight
+- **Scroll position preserved**: `scrollOffsetRef` captures scroll position on every scroll event and feeds `initialOffset` to virtualizer — persists across tab switches since the ref survives React re-renders
+- **10-item overscan**: Renders 10 extra items above/below viewport for smooth scrolling without visible blank areas
+- **ARIA**: Container has `role="listbox"`, each virtual row has `role="option"` with `aria-selected` for focus state
+
+Key decisions:
+- Used `@tanstack/react-virtual` (TanStack Virtual) over `react-window` — more modern, better React 18 support, smaller bundle
+- Wave mode flattens waves + stories into single virtual list — collapsed waves exclude their story items from the array, making the virtualizer's item count automatically correct
+- `estimateSize` returns fixed 48px — no `measureElement` needed since AC explicitly says "no dynamic height required"
+- Failed story expansion renders inline below the 48px row (outside virtualizer measurement) — works naturally since expansion is a rare interaction
+- Keyboard focus ring uses `ring-inset` to avoid layout shift from outline width
+
+## Story P2-019: Code Splitting for Lazy-Loaded Panels — DONE
+Files touched:
+- src/App.tsx (modified — React.lazy + Suspense for all 23 panels)
+- src/components/Skeleton.tsx (modified — added ForgeSkeleton, SettingsSkeleton, GenericPanelSkeleton)
+- vite.config.ts (modified — manualChunks for react, charts, xterm, cmdk)
+
+What was built:
+- All 23 panel imports converted from static `import` to `React.lazy(() => import(...))` — each panel is now a separate Vite chunk
+- `Suspense` wrapper in `ActivePanel` with panel-specific skeleton fallbacks: HubSkeleton, ForgeSkeleton, SettingsSkeleton, RunViewTerminalSkeleton, GenericPanelSkeleton
+- RunViewPanel also wrapped in its own `Suspense` boundary with `RunViewTerminalSkeleton`
+- Vite `manualChunks` splits vendor libs: `react` (45kb gz), `charts/recharts+d3` (127kb gz), `xterm` (84kb gz), `cmdk`
+- Initial JS bundle: index (32kb gz) + react (45kb gz) = ~78kb gzipped (target: <200kb)
+- No single chunk exceeds 500kb raw (largest: treemap 452kb, cytoscape 442kb, mermaid 442kb)
+- `SettingsTab` type imported separately via `import type` to avoid pulling SettingsPanel into initial bundle
+
+Key decisions:
+- Used skeleton screens (not spinners) as Suspense fallback — matches AC requirement
+- Kept `SettingsTab` as type-only import since lazy-loading SettingsPanel means its module isn't available at import time
+- manualChunks only for heavy vendor deps — let Vite auto-chunk panel components (produces cleaner per-panel chunks)
+
+## Story P2-020: App Renders Meaningful Content Within 2s on Fast 3G — DONE
+Files touched:
+- index.html (replaced: inline critical CSS + shell skeleton inside #root)
+- src/App.tsx (modified: lazy-load CommandPalette, auth pages, OnboardingWizard, PublicReviewPage; show shell+skeleton during auth loading instead of blank "Loading...")
+- src/components/StoryComments.tsx (modified: added width/height/loading="lazy" to avatar img)
+- src/components/Shell.tsx (modified: added contain-layout class to main content area)
+- src/styles/index.css (modified: added .contain-layout utility)
+- vite.config.ts (modified: added modulePreload polyfill, es2020 target, lucide-react icon chunk split)
+
+What was built:
+- Shell skeleton renders instantly from inlined HTML+CSS in index.html (no JS needed) — top bar with "rorca" wordmark + 4-icon sidebar rail + content placeholders with pulse animation
+- Critical CSS variables (tokens) duplicated inline so theme applies before Tailwind loads
+- 7 components moved from eager import to React.lazy: CommandPalette, LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage, OnboardingWizard, PublicReviewPage
+- Auth loading state now renders full Shell+HubSkeleton instead of blank "Loading..." div — nav renders before data loads
+- modulepreload hints auto-injected by Vite for react and icons chunks
+- lucide-react split into its own "icons" chunk for better caching
+- Build target set to es2020 to avoid legacy polyfills
+- Avatar images have explicit width=24 height=24 + loading="lazy" to prevent CLS
+- CSS contain: layout style on main content area prevents skeleton→content layout shifts
+
+Key decisions:
+- Inlined critical CSS rather than using a separate file — avoids render-blocking CSS request entirely
+- Shell skeleton uses aria-hidden="true" since it's replaced by React immediately
+- Used simple CSS animations (not JS) for skeleton pulse — zero JS overhead for FCP
+- Auth loading shows Shell+skeleton (not blank page) so LCP is the skeleton itself, well under 2.5s
+- CLS prevention via CSS containment on main area + explicit img dimensions
+
+## Story P2-021: Ready to Run Section in HubPanel — DONE
+Files touched:
+- src/panels/HubPanel.tsx (modified — ReadyToRunCard rewritten, fetchData updated)
+
+What was built:
+- "Ready to Run" section between Pending Reviews and Recent Runs showing approved specs without active/recent pipeline runs
+- Each card shows: spec title, story count badge, "Generated N ago" timestamp, workspace name badge
+- Direct "Trigger →" button that calls POST /api/pipeline/trigger (no popover intermediary)
+- On trigger: spinner shown, card removed from Ready to Run; SSE refetch populates Active Run section
+- Conflict detection: when workspace has an active run, button shows "Workspace busy" (disabled, yellow)
+- Tooltip on trigger button shows full spec path for power users
+- Section hidden entirely when no approved specs are ready (no empty header)
+- Cross-references pipeline_runs to filter out specs that already have runs
+- Respects 30s auto-refresh cadence + SSE-driven immediate refetch on run state changes
+
+Key decisions:
+- Removed TriggerPopover dependency — Hub cards use direct trigger for speed (popover still exists for other panels)
+- Removed defaultParallelism state/fetch since it's no longer used after removing popover
+- Filtering uses specSlug matching between approved specs and pipeline_runs spec_paths
+- Card removal is optimistic (immediate on trigger success), with SSE providing eventual consistency
+- Pre-existing backend test infrastructure broken (jest config parse error) — not introduced by this change
+
+## Story P2-022: Multi-Pane Terminal Grid for Parallel Runs — DONE
+Files touched:
+- backend/src/lib/run-loop.ts (modified — added wave_index and log_file to story_started WAL events)
+- backend/src/routes/pipeline.ts (modified — added GET /api/pipeline/runs/:runId/stories/:storyId/log SSE route + startTailing helper)
+- src/components/MiniTerminalPane.tsx (new — mini xterm.js pane with story badge, Raw/Semantic toggle, status banner)
+- src/components/MultiPaneTerminal.tsx (new — responsive grid of MiniTerminalPanes grouped by wave)
+- src/panels/RunViewPanel.tsx (modified — conditional multi-pane vs single-pane rendering in terminal tab)
+- src/panels/PipelineMonitorPanel.tsx (modified — added parallelism to PipelineRun type, multi-pane detection + rendering)
+
+What was built:
+- Backend SSE route streams per-story log files with same chunk/semantic_step/done protocol as the main run output stream
+- Story log file discovery: checks story_started WAL payload for log_file path, falls back to forge/logs/ directory scan
+- Graceful waiting: if story log file doesn't exist yet, SSE sends "status: waiting" and polls every 500ms until file appears
+- MiniTerminalPane: compact xterm.js terminal per story with story ID badge, truncated title, Raw/Semantic toggle, status banners (green PASSED / red FAILED)
+- MultiPaneTerminal: groups stories by wave_index, renders wave labels ("Wave 0", "Wave 1"), responsive grid (2 cols on ≥900px, 1 col on narrow screens)
+- Both RunViewPanel and PipelineMonitorPanel conditionally switch to multi-pane when parallelism > 1 AND 2+ stories have started
+- Sequential (parallelism=1) runs continue to render the existing single-pane RunTerminal — zero regression
+- run-loop.ts now emits wave_index in story_started WAL events during parallel execution, and log_file path in all story_started events
+
+Key decisions:
+- Multi-pane detection is sticky: once 2+ stories have started (even if some finish), stays in multi-pane mode for that run
+- Per-story SSE route uses file tailing (200ms poll) rather than in-memory buffers — story logs are written by separate subprocesses
+- Mini-terminal panes have smaller font (10px) and reduced scrollback (10k) for better performance with multiple concurrent terminals
+- Wave grouping derived from WAL events on the client side (not a separate API call)
+- Status banner overlays at pane bottom rather than replacing content — user can still see last few log lines

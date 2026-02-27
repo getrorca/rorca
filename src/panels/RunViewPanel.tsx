@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, XCircle, RotateCcw, ExternalLink, Smartphone } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
+import { useIsMobile } from '../hooks/useIsMobile';
 import { apiFetch } from '../lib/apiFetch';
-import { pauseRun, resumeRun, cancelRun, injectContext } from '../api/pipeline';
+import { pauseRun, resumeRun, cancelRun, injectContext, retryRun } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
+import MultiPaneTerminal from '../components/MultiPaneTerminal';
 
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
@@ -15,6 +17,7 @@ import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
 import WorktreesPanel from './WorktreesPanel';
 import type { PanelId } from '../components/Sidebar';
+import { RunViewTerminalSkeleton } from '../components/Skeleton';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -89,7 +92,7 @@ const STATUS_BADGE_LABELS: Record<string, string> = {
   paused: 'Paused',
   blocked: 'Blocked',
   done: 'Passed',
-  failed: 'Failed',
+  failed: '\u2717 Failed',
   partial_failure: 'Partial',
   cancelled: 'Cancelled',
 };
@@ -208,6 +211,7 @@ function CommitsTab({ runId }: { runId: number }) {
           onClick={fetchCommits}
           className="p-1 rounded hover:bg-bg transition-colors text-muted hover:text-[var(--text)]"
           title="Refresh commits"
+          aria-label="Refresh commits"
         >
           <RefreshCw size={13} />
         </button>
@@ -311,6 +315,7 @@ interface RunViewPanelProps {
 
 export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanelProps) {
   const { workspaceId } = useWorkspace();
+  const isMobile = useIsMobile();
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<RunViewTab>(getTabFromHash);
@@ -320,12 +325,19 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [showKillConfirm, setShowKillConfirm] = useState(false);
   const [hitlContext, setHitlContext] = useState('');
   const [hitlSending, setHitlSending] = useState(false);
+  const [retryLoading, setRetryLoading] = useState(false);
 
   const [specModel, setSpecModel] = useState<string | null>(null);
   const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
   const [totalStories, setTotalStories] = useState(0);
   // Seed from story_results on initial load so graph colors are correct for in-progress/historical runs
   const [seedStatuses, setSeedStatuses] = useState<Map<string, DerivedStatus>>(new Map());
+
+  // Filter tabs for mobile — hide Graph (too complex for small screens)
+  const visibleTabs = useMemo(() => {
+    if (isMobile) return TABS.filter((t) => t.id !== 'graph');
+    return TABS;
+  }, [isMobile]);
 
   // Sync tab selection to URL hash
   const handleTabChange = useCallback((tab: RunViewTab) => {
@@ -422,6 +434,24 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
 
   const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused' || effectiveStatus === 'blocked';
 
+  // Detect if we should show multi-pane terminal (parallelism > 1 with 2+ concurrent stories)
+  const useMultiPane = useMemo(() => {
+    if (!run || (run.parallelism ?? 1) <= 1) return false;
+    // Count stories that have started but not finished
+    const started = new Set<string>();
+    const finished = new Set<string>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_started') started.add(evt.story_id);
+      if (evt.event_type === 'story_passed' || evt.event_type === 'story_failed' || evt.event_type === 'story_skipped') {
+        finished.add(evt.story_id);
+      }
+    }
+    // Check if at any point 2+ stories were concurrently running
+    // (once we detect multi-pane mode, we stay in it for the duration of the run)
+    return started.size >= 2;
+  }, [run, walEvents]);
+
   const handlePauseResume = useCallback(async () => {
     if (!isActive) return;
     setPauseLoading(true);
@@ -466,12 +496,62 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     }
   }, [runId, hitlContext, fetchRun]);
 
+  // Derive failed story IDs from WAL events
+  const failedStoryIds = useMemo(() => {
+    const failed = new Set<string>();
+    const passed = new Set<string>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_failed') {
+        failed.add(evt.story_id);
+        passed.delete(evt.story_id);
+      } else if (evt.event_type === 'story_passed') {
+        passed.add(evt.story_id);
+        failed.delete(evt.story_id);
+      }
+    }
+    return failed;
+  }, [walEvents]);
+
+  const failedStoryCount = failedStoryIds.size;
+
+  const handleRetryFailed = useCallback(async () => {
+    if (failedStoryCount === 0) return;
+    setRetryLoading(true);
+    try {
+      const result = await retryRun(runId, {
+        storyIds: [...failedStoryIds],
+        workspaceId: workspaceId ?? undefined,
+      });
+      // Navigate to the new retry run
+      if (result.runId) {
+        window.location.hash = 'terminal';
+        window.location.reload();
+      }
+    } catch (err) {
+      console.error('[RunView] Retry failed:', err);
+    } finally {
+      setRetryLoading(false);
+    }
+  }, [runId, failedStoryIds, failedStoryCount, workspaceId]);
+
+  const handleViewErrorDetail = useCallback(() => {
+    // Switch to terminal tab and scroll to the last failed story
+    handleTabChange('terminal');
+    // Find last failed story ID from WAL events
+    let lastFailedId: string | null = null;
+    for (const evt of walEvents) {
+      if (evt.event_type === 'story_failed' && evt.story_id) {
+        lastFailedId = evt.story_id;
+      }
+    }
+    if (lastFailedId && terminalRef.current) {
+      setTimeout(() => terminalRef.current?.scrollToStory(lastFailedId!), 100);
+    }
+  }, [walEvents, handleTabChange]);
+
   if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <span className="text-sm text-muted">Loading run #{runId}...</span>
-      </div>
-    );
+    return <RunViewTerminalSkeleton />;
   }
 
   if (!run) {
@@ -494,7 +574,9 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
         return (
           <SplitPane
             left={
-              <RunTerminal ref={terminalRef} runId={run.id} />
+              useMultiPane
+                ? <MultiPaneTerminal runId={run.id} walEvents={walEvents} />
+                : <RunTerminal ref={terminalRef} runId={run.id} />
             }
             right={
               <div className="h-full flex flex-col min-h-0">
@@ -502,7 +584,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
                   <RunStoryList
                     runId={run.id}
                     walEvents={walEvents}
-                    onStoryClick={(storyId) => terminalRef.current?.scrollToStory(storyId)}
+                    onStoryClick={useMultiPane ? undefined : (storyId) => terminalRef.current?.scrollToStory(storyId)}
                     parallelism={run.parallelism}
                   />
                 </div>
@@ -521,6 +603,23 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       case 'stories':
         return <TabPlaceholder label="Stories" />;
       case 'graph':
+        if (isMobile) {
+          return (
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center">
+              <Smartphone size={32} className="text-muted opacity-40" />
+              <span className="text-sm font-medium text-muted">Graph view unavailable on mobile</span>
+              <span className="text-xs text-muted/70">
+                The dependency graph requires a larger screen to display interactive node connections. Open Rorca on a desktop browser to use this view.
+              </span>
+              <button
+                onClick={() => handleTabChange('terminal')}
+                className="mt-2 px-3 py-1.5 text-xs font-medium rounded border border-border text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
+              >
+                Switch to Terminal
+              </button>
+            </div>
+          );
+        }
         return (
           <InteractiveDependencyGraph
             specId={extractSpecId(run.spec_path)}
@@ -543,24 +642,25 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   return (
     <div className="h-full flex flex-col">
       {/* Header bar */}
-      <div className="shrink-0 px-4 py-3 border-b border-border bg-panel flex items-center gap-3">
+      <div className="shrink-0 px-3 md:px-4 py-2.5 md:py-3 border-b border-border bg-panel flex items-center gap-2 md:gap-3">
         <button
           onClick={onBack}
-          className="p-1.5 rounded-lg hover:bg-bg transition-colors text-muted hover:text-[var(--text)]"
+          className="p-1.5 rounded-lg hover:bg-bg transition-colors text-muted hover:text-[var(--text)] min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center"
           title="Back to Hub"
+          aria-label="Back to Hub"
         >
           <ArrowLeft size={18} />
         </button>
 
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <h1 className="text-sm font-semibold text-[var(--text)] truncate capitalize">
+        <div className="flex items-center gap-1.5 md:gap-2 min-w-0 flex-1">
+          <h1 className="text-xs md:text-sm font-semibold text-[var(--text)] truncate capitalize">
             {specLabel(run.spec_path)}
           </h1>
-          <span className="text-xs text-muted font-mono shrink-0">#{run.id}</span>
-          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`}>
+          <span className="text-[10px] md:text-xs text-muted font-mono shrink-0">#{run.id}</span>
+          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`} aria-live="polite">
             {STATUS_BADGE_LABELS[effectiveStatus] || effectiveStatus}
           </span>
-          {run.parallelism != null && run.parallelism > 1 && (
+          {run.parallelism != null && run.parallelism > 1 && !isMobile && (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 bg-purple-500/10 text-purple-500">
               <Layers size={10} />
               Parallelism: {run.parallelism}
@@ -569,13 +669,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
         </div>
 
         {/* Pipeline controls */}
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 md:gap-1.5 shrink-0">
           {/* Pause / Resume */}
           <button
             onClick={handlePauseResume}
             disabled={!isActive || pauseLoading}
             title={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
-            className={`p-1.5 rounded-lg transition-colors ${
+            aria-label={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
+            className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${
               isActive && !pauseLoading
                 ? 'hover:bg-bg text-muted hover:text-[var(--text)]'
                 : 'text-muted/30 cursor-not-allowed'
@@ -595,7 +696,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             onClick={() => setShowKillConfirm(true)}
             disabled={!isActive || killLoading}
             title="Kill run"
-            className={`p-1.5 rounded-lg transition-colors ${
+            aria-label="Kill run"
+            className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${
               isActive && !killLoading
                 ? 'hover:bg-red-500/10 text-muted hover:text-red-400'
                 : 'text-muted/30 cursor-not-allowed'
@@ -618,17 +720,18 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
         />
       )}
 
-      {/* Tab bar */}
-      <div className="shrink-0 px-4 border-b border-border bg-panel flex items-center gap-0.5 overflow-x-auto">
-        {TABS.map((tab) => {
+      {/* Tab bar — scrollable horizontal strip on mobile */}
+      <div className="shrink-0 px-2 md:px-4 border-b border-border bg-panel flex items-center gap-0.5 overflow-x-auto scrollbar-none [-webkit-overflow-scrolling:touch]">
+        {visibleTabs.map((tab) => {
           const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
+          const isActiveTab = activeTab === tab.id;
           return (
             <button
               key={tab.id}
               onClick={() => handleTabChange(tab.id)}
-              className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium whitespace-nowrap border-b-2 transition-colors ${
-                isActive
+              aria-current={isActiveTab ? 'page' : undefined}
+              className={`flex items-center gap-1.5 px-3 py-2.5 md:py-2 text-xs font-medium whitespace-nowrap border-b-2 transition-colors shrink-0 ${
+                isActiveTab
                   ? 'border-accent text-accent'
                   : 'border-transparent text-muted hover:text-[var(--text)]'
               }`}
@@ -642,7 +745,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
 
       {/* HITL blocked banner */}
       {effectiveStatus === 'blocked' && (
-        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10">
+        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10" role="alert" aria-live="assertive">
           <div className="px-4 py-2.5 flex items-center gap-2">
             <AlertTriangle size={16} className="text-amber-500 shrink-0" />
             <span className="text-sm font-medium text-amber-500">
@@ -654,6 +757,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               value={hitlContext}
               onChange={(e) => setHitlContext(e.target.value)}
               placeholder="Type instructions or context for the agent..."
+              aria-label="Instructions or context for the agent"
               className="flex-1 min-h-[60px] max-h-[120px] px-3 py-2 text-sm rounded-lg border border-amber-500/30 bg-bg text-[var(--text)] placeholder:text-muted resize-y focus:outline-none focus:ring-1 focus:ring-amber-500/50"
               disabled={hitlSending}
             />
@@ -661,6 +765,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               onClick={handleSendContext}
               disabled={!hitlContext.trim() || hitlSending}
               title="Send context and resume"
+              aria-label="Send context and resume"
               className={`self-end px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors ${
                 hitlContext.trim() && !hitlSending
                   ? 'bg-amber-500 text-white hover:bg-amber-600'
@@ -674,6 +779,45 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               )}
               Send
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Run failed banner */}
+      {(effectiveStatus === 'failed' || effectiveStatus === 'partial_failure') && failedStoryCount > 0 && (
+        <div className="shrink-0 border-b border-red-500/30 bg-red-500/10" role="alert" aria-live="assertive">
+          <div className="px-3 md:px-4 py-2.5 md:py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-3">
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <XCircle size={18} className="text-red-500 shrink-0" />
+              <span className="text-xs md:text-sm font-medium text-red-400">
+                Run failed — {failedStoryCount} {failedStoryCount === 1 ? 'story' : 'stories'} did not complete
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleViewErrorDetail}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors"
+              >
+                <ExternalLink size={12} />
+                View error detail
+              </button>
+              <button
+                onClick={handleRetryFailed}
+                disabled={retryLoading}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  retryLoading
+                    ? 'bg-red-500/20 text-red-500/40 cursor-not-allowed'
+                    : 'bg-red-500 text-white hover:bg-red-600'
+                }`}
+              >
+                {retryLoading ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <RotateCcw size={12} />
+                )}
+                Retry failed stories
+              </button>
+            </div>
           </div>
         </div>
       )}

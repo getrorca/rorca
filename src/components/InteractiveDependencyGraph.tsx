@@ -245,6 +245,13 @@ export default function InteractiveDependencyGraph({
   // Track graph dimensions for fit-to-screen
   const graphDims = useRef({ width: 800, height: 600 });
 
+  // ─── Status-change ripple animation tracking ───
+  // Track previous statuses to detect transitions (not initial load)
+  const prevStatusesRef = useRef<Map<string, GraphNode['status']>>(new Map());
+  const isInitialLoadRef = useRef(true);
+  const [rippleNodes, setRippleNodes] = useState<Map<string, { status: GraphNode['status']; key: number }>>(new Map());
+  const rippleKeyRef = useRef(0);
+
   // Fetch graph data
   useEffect(() => {
     if (!specId || !workspaceId) return;
@@ -271,6 +278,64 @@ export default function InteractiveDependencyGraph({
 
     return () => { cancelled = true; };
   }, [specId, workspaceId, runId]);
+
+  // Detect status transitions and trigger ripple animations
+  useEffect(() => {
+    if (!liveStatuses || liveStatuses.size === 0) return;
+
+    // Skip animations on initial load / bulk state restore
+    if (isInitialLoadRef.current) {
+      // Populate prevStatuses without triggering animations
+      const initial = new Map<string, GraphNode['status']>();
+      for (const [id, s] of liveStatuses) {
+        initial.set(id, s.status);
+      }
+      prevStatusesRef.current = initial;
+      isInitialLoadRef.current = false;
+      return;
+    }
+
+    const newRipples = new Map<string, { status: GraphNode['status']; key: number }>();
+    for (const [id, s] of liveStatuses) {
+      const prev = prevStatusesRef.current.get(id);
+      if (prev && prev !== s.status) {
+        // Status changed — trigger ripple
+        rippleKeyRef.current += 1;
+        newRipples.set(id, { status: s.status, key: rippleKeyRef.current });
+      }
+    }
+
+    if (newRipples.size > 0) {
+      setRippleNodes(prev => {
+        const merged = new Map(prev);
+        for (const [id, v] of newRipples) merged.set(id, v);
+        return merged;
+      });
+
+      // Clear ripples after animation completes (400ms to exceed 300ms animation)
+      setTimeout(() => {
+        setRippleNodes(prev => {
+          const next = new Map(prev);
+          for (const id of newRipples.keys()) {
+            // Only remove if key matches (avoid clearing newer ripples)
+            const cur = next.get(id);
+            const expected = newRipples.get(id);
+            if (cur && expected && cur.key === expected.key) {
+              next.delete(id);
+            }
+          }
+          return next;
+        });
+      }, 400);
+    }
+
+    // Update prev statuses
+    const updated = new Map(prevStatusesRef.current);
+    for (const [id, s] of liveStatuses) {
+      updated.set(id, s.status);
+    }
+    prevStatusesRef.current = updated;
+  }, [liveStatuses]);
 
   // Merge live statuses from SSE into graph nodes
   const liveGraph = useMemo((): GraphResponse | null => {
@@ -500,6 +565,7 @@ export default function InteractiveDependencyGraph({
           const rx = node.x - node.width / 2;
           const ry = node.y - node.height / 2;
           const isRunning = node.status === 'running';
+          const ripple = rippleNodes.get(node.id);
 
           return (
             <g
@@ -507,7 +573,28 @@ export default function InteractiveDependencyGraph({
               onClick={(e) => handleNodeClick(node, e)}
               className="cursor-pointer"
             >
-              {/* Running pulse ring */}
+              {/* Status-change ripple ring (expand + fade) */}
+              {ripple && (
+                <rect
+                  key={`ripple-${ripple.key}`}
+                  x={rx - 4}
+                  y={ry - 4}
+                  width={node.width + 8}
+                  height={node.height + 8}
+                  rx={10}
+                  fill="none"
+                  stroke={STATUS_COLORS[ripple.status].stroke}
+                  strokeWidth={2}
+                >
+                  <animate attributeName="opacity" values="0.7;0" dur="300ms" fill="freeze" />
+                  <animate attributeName="x" values={`${rx - 4};${rx - 10}`} dur="300ms" fill="freeze" calcMode="spline" keySplines="0 0 0.2 1" />
+                  <animate attributeName="y" values={`${ry - 4};${ry - 10}`} dur="300ms" fill="freeze" calcMode="spline" keySplines="0 0 0.2 1" />
+                  <animate attributeName="width" values={`${node.width + 8};${node.width + 20}`} dur="300ms" fill="freeze" calcMode="spline" keySplines="0 0 0.2 1" />
+                  <animate attributeName="height" values={`${node.height + 8};${node.height + 20}`} dur="300ms" fill="freeze" calcMode="spline" keySplines="0 0 0.2 1" />
+                </rect>
+              )}
+
+              {/* Running pulse ring (continuous) */}
               {isRunning && (
                 <rect
                   x={rx - 3}
@@ -524,7 +611,7 @@ export default function InteractiveDependencyGraph({
                 </rect>
               )}
 
-              {/* Node background */}
+              {/* Node background — smooth fill/stroke transition on status change */}
               <rect
                 x={rx}
                 y={ry}
@@ -534,7 +621,10 @@ export default function InteractiveDependencyGraph({
                 fill={colors.fill}
                 stroke={colors.stroke}
                 strokeWidth={2}
-              />
+              >
+                <animate attributeName="fill" to={colors.fill} dur="300ms" fill="freeze" />
+                <animate attributeName="stroke" to={colors.stroke} dur="300ms" fill="freeze" />
+              </rect>
 
               {/* Story ID */}
               <text

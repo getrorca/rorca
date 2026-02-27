@@ -5,6 +5,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
+import MultiPaneTerminal from '../components/MultiPaneTerminal';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 import { HelpTooltip } from '../components/HelpTooltip';
 
@@ -21,6 +22,7 @@ interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   retried_from_run_id: number | null;
+  parallelism?: number;
 }
 
 type RunStatus = PipelineRun['status'];
@@ -394,6 +396,17 @@ export default function PipelineMonitorPanel() {
     }
 
     return run;
+  }, [selectedRunDetail, sseEvents]);
+
+  // Detect if we should show multi-pane terminal (parallelism > 1 with 2+ concurrent stories)
+  const useMultiPane = useMemo(() => {
+    if (!selectedRunDetail || (selectedRunDetail.run.parallelism ?? 1) <= 1) return false;
+    const started = new Set<string>();
+    for (const evt of sseEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_started') started.add(evt.story_id);
+    }
+    return started.size >= 2;
   }, [selectedRunDetail, sseEvents]);
 
   // Derive specId from selected run for graph tab
@@ -852,7 +865,11 @@ export default function PipelineMonitorPanel() {
                 )}
                 <div className="flex-1 min-h-0 overflow-hidden">
                   {selectedRunId ? (
-                    <RunTerminal key={selectedRunId} runId={selectedRunId} />
+                    useMultiPane ? (
+                      <MultiPaneTerminal key={selectedRunId} runId={selectedRunId} walEvents={sseEvents} />
+                    ) : (
+                      <RunTerminal key={selectedRunId} runId={selectedRunId} />
+                    )
                   ) : (
                     <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
                       Select a run to view output
