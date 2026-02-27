@@ -35,7 +35,8 @@
         "Quick-run specs are distinguishable in the Archive by a `source: 'quick-run'` tag on the spec"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "EQ-003",
@@ -158,7 +159,8 @@
         "Each parallel story subprocess receives its own `--story <ID>` flag and its own worktree path (from EQ-010)",
         "`pipeline_runs.parallelism` column (integer, default 1) stores the configured value \u2014 add via `pragma table_info` check in `db/index.ts`",
         "WAL `run_started` event payload includes `{ parallelism: N, waveCount: number }` fields",
-        "Concurrency is bounded: if wave has 10 stories and N=3, only 3 run at once \u2014 remaining queue as workers free up"
+        "Concurrency is bounded: if wave has 10 stories and N=3, only 3 run at once \u2014 remaining queue as workers free up",
+        "When `RORCA_AGENT=opencode` and parallelism > 1: omit the `--attach` flag so each story spawns its own isolated OpenCode server instance \u2014 parallelism safety takes priority over warm-server performance. When parallelism=1 (sequential), `--attach` is retained as normal for the warm-server benefit."
       ],
       "dependsOn": [
         "EQ-008"
