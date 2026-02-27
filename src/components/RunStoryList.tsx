@@ -114,8 +114,9 @@ export default function RunStoryList({ runId, walEvents, onStoryClick }: RunStor
       const result = resultMap.get(spec.id);
       let status: DerivedStatus = 'pending';
 
-      if (spec.passes === true && !result) {
+      if (spec.passes === true && (!result || result.status === 'skip')) {
         // Already passed before this run (excluded from execution)
+        // result.status === 'skip' covers the backfill inserted on re-trigger
         status = 'excluded';
       } else if (result) {
         if (result.status === 'pass') status = 'pass';
