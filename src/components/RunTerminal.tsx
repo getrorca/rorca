@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { Copy, Check } from 'lucide-react';
+import {
+  Copy, Check, Terminal as TerminalIcon, Layers,
+  ChevronDown, ChevronRight,
+  FileText, Pencil, Brain, GitCommitHorizontal, Search, Hash, AlertCircle,
+} from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
 import '@xterm/xterm/css/xterm.css';
@@ -13,6 +17,29 @@ export interface RunTerminalHandle {
 interface RunTerminalProps {
   runId: number;
 }
+
+// ─── Semantic step type (mirrors backend SemanticStep) ────────────────────────
+
+interface SemanticStep {
+  type: 'read' | 'write' | 'edit' | 'bash' | 'plan' | 'commit' | 'test' | 'search' | 'unknown';
+  label: string;
+  detail?: string;
+  ts: string;
+}
+
+const STEP_CONFIG: Record<SemanticStep['type'], { icon: typeof FileText; label: string; color: string }> = {
+  read:    { icon: FileText,            label: 'Read',    color: 'text-blue-400' },
+  write:   { icon: Pencil,              label: 'Write',   color: 'text-emerald-400' },
+  edit:    { icon: Pencil,              label: 'Edit',    color: 'text-emerald-400' },
+  bash:    { icon: TerminalIcon,        label: 'Bash',    color: 'text-amber-400' },
+  plan:    { icon: Brain,               label: 'Plan',    color: 'text-purple-400' },
+  commit:  { icon: GitCommitHorizontal, label: 'Commit',  color: 'text-cyan-400' },
+  test:    { icon: Hash,                label: 'Test',    color: 'text-teal-400' },
+  search:  { icon: Search,              label: 'Search',  color: 'text-orange-400' },
+  unknown: { icon: AlertCircle,         label: 'Unknown', color: 'text-gray-400' },
+};
+
+// ─── xterm themes ─────────────────────────────────────────────────────────────
 
 const darkTheme = {
   background: '#0d0d0d',
@@ -58,10 +85,37 @@ const lightTheme = {
   brightWhite: '#1e1e1e',
 };
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function lsKey(runId: number): string {
+  return `rorca:terminal-mode:${runId}`;
+}
+
+function loadMode(runId: number): 'raw' | 'semantic' {
+  try {
+    const v = localStorage.getItem(lsKey(runId));
+    return v === 'semantic' ? 'semantic' : 'raw';
+  } catch {
+    return 'raw';
+  }
+}
+
+function formatRelativeTime(isoTs: string, baseTs: string | null): string {
+  const t = new Date(isoTs).getTime();
+  const base = baseTs ? new Date(baseTs).getTime() : t;
+  const diffMs = t - base;
+  if (diffMs < 0) return '+0s';
+  const totalSec = Math.floor(diffMs / 1000);
+  if (totalSec < 60) return `+${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `+${min}m${sec.toString().padStart(2, '0')}s`;
+}
+
 /**
  * Embeds an xterm.js terminal that streams live stdout/stderr from a pipeline run.
- * Renders ANSI escape codes exactly as iTerm2 would — colors, bold, cursor, etc.
- * Late-joiners receive a full replay of buffered output from process start.
+ * Includes a Raw/Semantic toggle. In Semantic mode, structured `semantic_step` SSE
+ * events are rendered as a step list instead of the raw terminal.
  */
 const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -71,13 +125,29 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const { resolved } = useTheme();
   const [copied, setCopied] = useState(false);
 
+  // Toggle state — persisted per run in localStorage
+  const [mode, setMode] = useState<'raw' | 'semantic'>(() => loadMode(runId));
+
+  // Semantic step state
+  const [steps, setSteps] = useState<SemanticStep[]>([]);
+  const [expandedSet, setExpandedSet] = useState<Set<number>>(new Set());
+  const [autoScroll, setAutoScroll] = useState(true);
+  const stepListRef = useRef<HTMLDivElement>(null);
+  const stepBottomRef = useRef<HTMLDivElement>(null);
+  const [streamDone, setStreamDone] = useState(false);
+
+  // Persist mode changes
+  const handleSetMode = useCallback((m: 'raw' | 'semantic') => {
+    setMode(m);
+    try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
+  }, [runId]);
+
   // Expose scrollToStory via ref
   useImperativeHandle(ref, () => ({
     scrollToStory(storyId: string) {
       const term = termRef.current;
       if (!term) return;
       const buffer = term.buffer.active;
-      // Search buffer for a line containing the story ID
       for (let i = 0; i < buffer.length; i++) {
         const line = buffer.getLine(i);
         if (!line) continue;
@@ -93,14 +163,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const handleCopy = useCallback(async () => {
     const term = termRef.current;
     if (!term) return;
-    // Select all lines from the terminal buffer
     const buffer = term.buffer.active;
     const lines: string[] = [];
     for (let i = 0; i < buffer.length; i++) {
       const line = buffer.getLine(i);
       if (line) lines.push(line.translateToString(true));
     }
-    // Trim trailing empty lines
     while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
       lines.pop();
     }
@@ -110,15 +178,13 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       await navigator.clipboard.writeText(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // clipboard not available
-    }
+    } catch { /* clipboard not available */ }
   }, []);
 
+  // xterm + SSE setup — always runs (xterm writes happen even when hidden)
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Tear down any previous instance
     termRef.current?.dispose();
     esRef.current?.close();
 
@@ -139,8 +205,6 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
-
-    // Fit to container after a tick so DOM has settled
     requestAnimationFrame(() => fitAddon.fit());
 
     termRef.current = term;
@@ -156,21 +220,27 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         term.write(bytes);
-      } catch {
-        // ignore malformed chunk
-      }
+      } catch { /* ignore malformed chunk */ }
+    });
+
+    // Listen for structured semantic_step events from backend
+    es.addEventListener('semantic_step', (e: MessageEvent) => {
+      try {
+        const step: SemanticStep = JSON.parse(e.data);
+        setSteps(prev => [...prev, step]);
+      } catch { /* ignore malformed step */ }
     });
 
     es.addEventListener('done', () => {
+      setStreamDone(true);
       es.close();
     });
 
     es.onerror = () => {
-      // Connection dropped — don't retry automatically, output is still in buffer
+      setStreamDone(true);
       es.close();
     };
 
-    // Resize observer keeps terminal fitted to its container
     const ro = new ResizeObserver(() => fitAddon.fit());
     ro.observe(containerRef.current);
 
@@ -181,20 +251,159 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     };
   }, [runId, resolved]);
 
+  // Re-fit xterm when switching back to raw mode (container was display:none)
+  useEffect(() => {
+    if (mode === 'raw') {
+      requestAnimationFrame(() => fitRef.current?.fit());
+    }
+  }, [mode]);
+
+  // Auto-scroll semantic step list
+  useEffect(() => {
+    if (autoScroll && stepBottomRef.current) {
+      stepBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [steps, autoScroll]);
+
+  const handleStepListScroll = useCallback(() => {
+    const el = stepListRef.current;
+    if (!el) return;
+    setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+  }, []);
+
+  const toggleExpand = useCallback((index: number) => {
+    setExpandedSet(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }, []);
+
+  const firstTs = steps.length > 0 ? steps[0].ts : null;
+
   return (
-    <div className="h-full w-full relative group">
-      <div
-        ref={containerRef}
-        className="h-full w-full overflow-x-auto"
-        style={{ background: resolved === 'light' ? lightTheme.background : darkTheme.background, padding: '8px 4px', WebkitOverflowScrolling: 'touch' }}
-      />
-      <button
-        onClick={handleCopy}
-        className="absolute top-2 right-2 p-1.5 rounded-md bg-black/40 backdrop-blur-sm text-white/70 hover:text-white hover:bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity z-10"
-        title="Copy terminal output"
-      >
-        {copied ? <Check size={14} /> : <Copy size={14} />}
-      </button>
+    <div className="h-full w-full flex flex-col">
+      {/* ─── Toolbar ─────────────────────────────────────────────────────── */}
+      <div className="shrink-0 px-3 py-1.5 border-b border-border bg-panel flex items-center gap-1">
+        <button
+          onClick={() => handleSetMode('raw')}
+          className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+            mode === 'raw'
+              ? 'bg-accent/15 text-accent'
+              : 'text-muted hover:text-[var(--text)]'
+          }`}
+        >
+          <span className="flex items-center gap-1">
+            <TerminalIcon size={11} />
+            Raw
+          </span>
+        </button>
+        <button
+          onClick={() => handleSetMode('semantic')}
+          className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+            mode === 'semantic'
+              ? 'bg-accent/15 text-accent'
+              : 'text-muted hover:text-[var(--text)]'
+          }`}
+        >
+          <span className="flex items-center gap-1">
+            <Layers size={11} />
+            Semantic
+          </span>
+        </button>
+
+        {/* Copy button (raw mode only) */}
+        {mode === 'raw' && (
+          <button
+            onClick={handleCopy}
+            className="ml-auto p-1.5 rounded-md text-muted hover:text-[var(--text)] transition-colors"
+            title="Copy terminal output"
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+          </button>
+        )}
+      </div>
+
+      {/* ─── Content area ────────────────────────────────────────────────── */}
+      <div className="flex-1 min-h-0 relative">
+        {/* Raw terminal — always mounted, hidden via CSS when semantic */}
+        <div
+          ref={containerRef}
+          className="h-full w-full overflow-x-auto"
+          style={{
+            background: resolved === 'light' ? lightTheme.background : darkTheme.background,
+            padding: '8px 4px',
+            WebkitOverflowScrolling: 'touch',
+            display: mode === 'raw' ? 'block' : 'none',
+          }}
+        />
+
+        {/* Semantic step list */}
+        {mode === 'semantic' && (
+          <div className="h-full flex flex-col">
+            {steps.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center text-muted text-sm">
+                {streamDone
+                  ? 'No semantic data available for this run'
+                  : 'Waiting for semantic events\u2026'}
+              </div>
+            ) : (
+              <div
+                ref={stepListRef}
+                onScroll={handleStepListScroll}
+                className="flex-1 overflow-y-auto overflow-x-hidden"
+              >
+                {steps.map((step, i) => {
+                  const cfg = STEP_CONFIG[step.type];
+                  const Icon = cfg.icon;
+                  const hasDetail = !!step.detail;
+                  const isExpanded = expandedSet.has(i);
+
+                  return (
+                    <div key={i} className="border-b border-border/30">
+                      <div
+                        className={`px-3 py-1.5 flex items-center gap-2 ${hasDetail ? 'cursor-pointer hover:bg-panel/50' : ''} transition-colors`}
+                        onClick={hasDetail ? () => toggleExpand(i) : undefined}
+                      >
+                        {/* Expand/collapse chevron */}
+                        {hasDetail ? (
+                          isExpanded
+                            ? <ChevronDown size={12} className="text-muted shrink-0" />
+                            : <ChevronRight size={12} className="text-muted shrink-0" />
+                        ) : (
+                          <span className="w-3 shrink-0" />
+                        )}
+
+                        {/* Step icon */}
+                        <Icon size={13} className={`shrink-0 ${cfg.color}`} />
+
+                        {/* Label */}
+                        <span className="text-xs text-[var(--text)] truncate flex-1 font-mono">
+                          {step.label}
+                        </span>
+
+                        {/* Relative timestamp */}
+                        <span className="text-[10px] text-muted font-mono shrink-0 ml-2">
+                          {formatRelativeTime(step.ts, firstTs)}
+                        </span>
+                      </div>
+
+                      {/* Collapsible detail */}
+                      {hasDetail && isExpanded && (
+                        <pre className="px-3 pb-2 pl-10 text-[11px] leading-[1.4] font-mono text-muted whitespace-pre-wrap break-all">
+                          {step.detail}
+                        </pre>
+                      )}
+                    </div>
+                  );
+                })}
+                <div ref={stepBottomRef} />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 });
