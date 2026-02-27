@@ -88,6 +88,7 @@ interface PipelineRunRow {
   retried_from_run_id: number | null;
   log_path: string | null;
   agent: string;
+  parallelism: number;
 }
 
 interface StoryResultRow {
@@ -145,7 +146,8 @@ interface StoryResultRow {
  */
 router.post('/trigger', async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, dryRun, triggerType } = req.body;
+    const { specPath, workspaceId, autoWorktree, dryRun, triggerType, parallelism: rawParallelism } = req.body;
+    const parallelism = Math.max(1, Math.min(10, parseInt(rawParallelism, 10) || 1));
 
     if (!specPath || !workspaceId) {
       res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
@@ -260,8 +262,8 @@ router.post('/trigger', async (req: Request, res: Response) => {
     // 6. Create pipeline_runs record
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     const runResult = db.prepare(
-      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES (?, ?, 'running', ?)`
-    ).run(specPath, workspaceId, validTriggerType);
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism) VALUES (?, ?, 'running', ?, ?)`
+    ).run(specPath, workspaceId, validTriggerType, parallelism);
     const runId = runResult.lastInsertRowid as number;
 
     // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
@@ -372,13 +374,15 @@ router.post('/trigger', async (req: Request, res: Response) => {
       // TypeScript run-loop (cross-platform, no bash/gtimeout/python dependency)
       const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
       const backendPort = process.env.PORT || '3030';
-      child = spawn(tsxBin, [
+      const runLoopArgs = [
         runLoopTs,
         '--json', absSpecPath,
         '--cwd', cwd,
         '--run-id', String(runId),
         '--port', backendPort,
-      ], {
+        '--parallelism', String(parallelism),
+      ];
+      child = spawn(tsxBin, runLoopArgs, {
         cwd,
         stdio: ['ignore', logFd, logFd],
         detached: true,
@@ -803,6 +807,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
         '--cwd', workspace.path,
         '--run-id', String(runId),
         '--port', backendPort,
+        '--parallelism', '1',
       ], {
         cwd: workspace.path,
         stdio: ['ignore', logFd, logFd],
@@ -1458,6 +1463,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
         '--cwd', cwd,
         '--run-id', String(newRunId),
         '--port', backendPort,
+        '--parallelism', '1',
       ], {
         cwd,
         stdio: ['ignore', retryLogFd, retryLogFd],
