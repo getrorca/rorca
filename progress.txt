@@ -815,3 +815,29 @@ Key decisions:
 - Filtering uses specSlug matching between approved specs and pipeline_runs spec_paths
 - Card removal is optimistic (immediate on trigger success), with SSE providing eventual consistency
 - Pre-existing backend test infrastructure broken (jest config parse error) — not introduced by this change
+
+## Story P2-022: Multi-Pane Terminal Grid for Parallel Runs — DONE
+Files touched:
+- backend/src/lib/run-loop.ts (modified — added wave_index and log_file to story_started WAL events)
+- backend/src/routes/pipeline.ts (modified — added GET /api/pipeline/runs/:runId/stories/:storyId/log SSE route + startTailing helper)
+- src/components/MiniTerminalPane.tsx (new — mini xterm.js pane with story badge, Raw/Semantic toggle, status banner)
+- src/components/MultiPaneTerminal.tsx (new — responsive grid of MiniTerminalPanes grouped by wave)
+- src/panels/RunViewPanel.tsx (modified — conditional multi-pane vs single-pane rendering in terminal tab)
+- src/panels/PipelineMonitorPanel.tsx (modified — added parallelism to PipelineRun type, multi-pane detection + rendering)
+
+What was built:
+- Backend SSE route streams per-story log files with same chunk/semantic_step/done protocol as the main run output stream
+- Story log file discovery: checks story_started WAL payload for log_file path, falls back to forge/logs/ directory scan
+- Graceful waiting: if story log file doesn't exist yet, SSE sends "status: waiting" and polls every 500ms until file appears
+- MiniTerminalPane: compact xterm.js terminal per story with story ID badge, truncated title, Raw/Semantic toggle, status banners (green PASSED / red FAILED)
+- MultiPaneTerminal: groups stories by wave_index, renders wave labels ("Wave 0", "Wave 1"), responsive grid (2 cols on ≥900px, 1 col on narrow screens)
+- Both RunViewPanel and PipelineMonitorPanel conditionally switch to multi-pane when parallelism > 1 AND 2+ stories have started
+- Sequential (parallelism=1) runs continue to render the existing single-pane RunTerminal — zero regression
+- run-loop.ts now emits wave_index in story_started WAL events during parallel execution, and log_file path in all story_started events
+
+Key decisions:
+- Multi-pane detection is sticky: once 2+ stories have started (even if some finish), stays in multi-pane mode for that run
+- Per-story SSE route uses file tailing (200ms poll) rather than in-memory buffers — story logs are written by separate subprocesses
+- Mini-terminal panes have smaller font (10px) and reduced scrollback (10k) for better performance with multiple concurrent terminals
+- Wave grouping derived from WAL events on the client side (not a separate API call)
+- Status banner overlays at pane bottom rather than replacing content — user can still see last few log lines
