@@ -653,6 +653,18 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
       </div>
     </div>
       )}
+
+      {showTemplatePicker && (
+        <TemplatePickerModal
+          onClose={() => setShowTemplatePicker(false)}
+          onSelect={(tpl) => {
+            setSpecBrief(tpl.brief);
+            setStoryCount(tpl.storyCount);
+            setShowTemplatePicker(false);
+            setTimeout(() => briefRef.current?.focus(), 50);
+          }}
+        />
+      )}
     </div>
   );
 }
