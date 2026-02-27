@@ -33,6 +33,14 @@ import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { detectOpenCode } from './opencode-detector';
+import {
+  score as scoreStory,
+  resolveModelId,
+  getNextEscalationTier,
+  loadOrchestrationConfig,
+  type ModelTier,
+  type ScorerStory,
+} from './complexity-scorer';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -72,6 +80,26 @@ interface EngineConfig {
   agentType: AgentType;
   agentModel: string | null;
   attachAddr: string | null;
+}
+
+// ─── Escalation Tracking ─────────────────────────────────────────────────────
+
+interface EscalationState {
+  currentTier: ModelTier;
+  originalTier: ModelTier;
+  retriesOnCurrentTier: number;
+  escalationHistory: Array<{ fromTier: ModelTier; toTier: ModelTier; attemptNumber: number }>;
+}
+
+/**
+ * Extract provider prefix from a model string like "openai/gpt-4o" → "openai".
+ * Falls back to "anthropic" if no prefix present.
+ */
+function extractProvider(modelString: string | null): string {
+  if (!modelString) return 'anthropic';
+  const slashIdx = modelString.indexOf('/');
+  if (slashIdx > 0) return modelString.substring(0, slashIdx);
+  return 'anthropic';
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -1022,9 +1050,48 @@ async function executeStory(
   retryCounts: Map<string, number>,
   storyCwd?: string,
   worktreeInfo?: StoryWorktree,
+  escalationStates?: Map<string, EscalationState>,
+  allStories?: UserStory[],
 ): Promise<'passed' | 'failed' | 'skipped'> {
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
+
+  // ── Escalation: determine current model tier ────────────────────────
+  const escalationEnabled = config.agentType !== 'claude' && escalationStates !== undefined;
+  let currentModel = config.agentModel;
+
+  if (escalationEnabled && escalationStates) {
+    const orchConfig = loadOrchestrationConfig(config.cwd);
+    if (orchConfig.escalation.enabled) {
+      let escState = escalationStates.get(story.id);
+      if (!escState) {
+        // Score story to determine initial tier
+        const scorerStory: ScorerStory = {
+          id: story.id,
+          title: story.title,
+          description: story.description,
+          acceptanceCriteria: story.acceptanceCriteria,
+          dependsOn: story.dependsOn,
+        };
+        const scorerAllStories: ScorerStory[] = (allStories ?? []).map(s => ({
+          id: s.id, title: s.title, description: s.description,
+          acceptanceCriteria: s.acceptanceCriteria, dependsOn: s.dependsOn,
+        }));
+        const { tier } = scoreStory(scorerStory, scorerAllStories, config.cwd);
+        escState = {
+          currentTier: tier,
+          originalTier: tier,
+          retriesOnCurrentTier: 0,
+          escalationHistory: [],
+        };
+        escalationStates.set(story.id, escState);
+      }
+      // Resolve model from tier
+      const provider = extractProvider(config.agentModel);
+      currentModel = `${provider}/${resolveModelId(escState.currentTier, provider, config.cwd)}`;
+      console.log(`  [escalation] Tier: ${escState.currentTier} → model: ${currentModel}`);
+    }
+  }
 
   console.log(`[${mode}] ${story.id}: ${story.title} (agent: ${config.agentType})`);
   if (worktreeInfo) console.log(`  Worktree: ${worktreeInfo.worktreePath}`);
@@ -1040,11 +1107,13 @@ async function executeStory(
 
   // Emit story_started WAL event
   if (workspaceId) {
+    const escState = escalationStates?.get(story.id);
     await emitWalEvent(config.port, 'story_started', workspaceId, {
       run_id: config.runId,
       story_id: story.id,
       story_title: story.title,
       agent_type: config.agentType,
+      ...(currentModel !== config.agentModel ? { model_override: currentModel, model_tier: escState?.currentTier } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
     }, story.id);
   }
@@ -1065,7 +1134,7 @@ async function executeStory(
       effectiveCwd,
       timeoutMin * 60 * 1000,
       storyLogFile,
-      config.agentModel,
+      currentModel,
       config.attachAddr,
     );
 
@@ -1124,6 +1193,44 @@ async function executeStory(
 
       if (!gate.passed) {
         console.log(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
+
+        // Gate failure counts toward escalation retries too
+        const escState = escalationStates?.get(story.id);
+        const orchConfig2 = loadOrchestrationConfig(config.cwd);
+        const gateEscalationActive = escalationEnabled && escState && orchConfig2.escalation.enabled;
+
+        if (gateEscalationActive && escState) {
+          escState.retriesOnCurrentTier++;
+          const maxOnTier = orchConfig2.escalation.maxRetriesOnTier;
+
+          if (escState.retriesOnCurrentTier >= maxOnTier) {
+            const nextTier = getNextEscalationTier(escState.currentTier, config.cwd);
+            if (nextTier) {
+              const fromTier = escState.currentTier;
+              const totalAttempts = escState.escalationHistory.length + escState.retriesOnCurrentTier;
+              escState.escalationHistory.push({ fromTier, toTier: nextTier, attemptNumber: totalAttempts });
+              escState.currentTier = nextTier;
+              escState.retriesOnCurrentTier = 0;
+
+              const provider = extractProvider(config.agentModel);
+              currentModel = `${provider}/${resolveModelId(nextTier, provider, config.cwd)}`;
+              console.log(`${story.id} gate failed — escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
+
+              if (workspaceId) {
+                await emitWalEvent(config.port, 'story_escalated', workspaceId, {
+                  run_id: config.runId, story_id: story.id,
+                  fromTier, toTier: nextTier, attemptNumber: totalAttempts,
+                  model: currentModel, reason: `gate_${gate.reason}`,
+                }, story.id);
+              }
+              retryCounts.delete(story.id);
+              retryCounts.delete(rateLimitKey);
+              continue;
+            }
+          }
+        }
+
+        // Standard gate failure handling (no escalation possible)
         const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
         retryCounts.set(story.id, currentRetries);
 
@@ -1219,6 +1326,87 @@ async function executeStory(
       return 'failed';
     }
 
+    // ── Escalation-aware retry logic ──────────────────────────────────
+    const escState = escalationStates?.get(story.id);
+    const orchConfig = loadOrchestrationConfig(config.cwd);
+    const escalationActive = escalationEnabled && escState && orchConfig.escalation.enabled;
+
+    if (escalationActive && escState) {
+      escState.retriesOnCurrentTier++;
+      const maxOnTier = orchConfig.escalation.maxRetriesOnTier;
+
+      if (escState.retriesOnCurrentTier >= maxOnTier) {
+        // Check if we can escalate to a higher tier
+        const nextTier = getNextEscalationTier(escState.currentTier, config.cwd);
+
+        if (nextTier) {
+          const fromTier = escState.currentTier;
+          const totalAttempts = escState.escalationHistory.length + escState.retriesOnCurrentTier;
+          escState.escalationHistory.push({ fromTier, toTier: nextTier, attemptNumber: totalAttempts });
+          escState.currentTier = nextTier;
+          escState.retriesOnCurrentTier = 0;
+
+          // Resolve new model from escalated tier
+          const provider = extractProvider(config.agentModel);
+          currentModel = `${provider}/${resolveModelId(nextTier, provider, config.cwd)}`;
+
+          console.log(`${story.id} escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
+
+          // Emit story_escalated WAL event
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_escalated', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              fromTier,
+              toTier: nextTier,
+              attemptNumber: totalAttempts,
+              model: currentModel,
+              error_category: classified.category,
+              error_message: classified.message,
+            }, story.id);
+          }
+
+          // Reset retry count for the new tier and loop back to retry
+          retryCounts.delete(story.id);
+          retryCounts.delete(rateLimitKey);
+          continue;
+        }
+
+        // At opus (top tier) and still failing — give up
+        console.log(`${story.id} failed at top tier (${escState.currentTier}) after ${escState.retriesOnCurrentTier} attempts. Skipping.`);
+        console.log(`   Escalation history: ${escState.escalationHistory.map(h => `${h.fromTier}→${h.toTier}`).join(', ') || 'none'}`);
+        console.log(`   Log: ${storyLogFile}`);
+        console.log(`   Error: ${classified.message}`);
+        markStorySkipped(config.jsonPath, story.id);
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId, story_id: story.id,
+            reason: 'max_retries_all_tiers',
+            attempts: escState.escalationHistory.reduce((sum, h) => sum + h.attemptNumber, 0) + escState.retriesOnCurrentTier,
+            final_tier: escState.currentTier,
+            escalation_history: escState.escalationHistory,
+            error_category: classified.category, error_message: classified.message,
+            agent_type: config.agentType,
+          }, story.id);
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+            });
+          } catch { /* backend may be down */ }
+        }
+        return 'failed';
+      }
+
+      // Still have retries on current tier
+      console.log(`${story.id} failed on ${escState.currentTier} (attempt ${escState.retriesOnCurrentTier}/${maxOnTier}): ${classified.category}`);
+      console.log(`   Log: ${storyLogFile}`);
+      console.log(`   Error: ${classified.message}`);
+      return 'failed';
+    }
+
+    // ── Standard retry logic (no escalation: claude path or escalation disabled) ──
     const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
     retryCounts.set(story.id, currentRetries);
 
@@ -1346,6 +1534,7 @@ async function main(): Promise<void> {
 
   const workspaceId = await resolveWorkspaceId(config.port, config.cwd);
   const retryCounts = new Map<string, number>();
+  const escalationStates = new Map<string, EscalationState>();
 
   process.on('SIGINT', () => {
     console.log('');
@@ -1355,7 +1544,7 @@ async function main(): Promise<void> {
 
   // ─── Parallel execution path (N > 1) ──────────────────────────────
   if (config.parallelism > 1 && !config.specificStory) {
-    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories);
+    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, escalationStates);
     return;
   }
 
@@ -1404,207 +1593,14 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    const prompt = buildPrompt(story, mode, config.cwd, playbook, config.agentType);
-
-    const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
-    fs.writeFileSync(promptLogFile, prompt);
-
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
-    const storyLogFile = path.join(logDir, `${story.id}_${timestamp}.log`);
-
-    console.log(`  Timeout: ${timeoutMin}m (${timeoutMin * 60}s)`);
-    console.log('');
-
-    // Emit story_started WAL event
-    if (workspaceId) {
-      await emitWalEvent(config.port, 'story_started', workspaceId, {
-        run_id: config.runId,
-        story_id: story.id,
-        story_title: story.title,
-        agent_type: config.agentType,
-      }, story.id);
-    }
-
-    // Run agent subprocess
-    const result = await runAgent(
-      config.agentType,
-      prompt,
-      config.cwd,
-      timeoutMin * 60 * 1000,
-      storyLogFile,
-      config.agentModel,
-      config.attachAddr,
+    // Sequential path delegates to executeStory (which handles escalation)
+    const seqResult = await executeStory(
+      story, config, mode, playbook, logDir, workspaceId, retryCounts,
+      undefined, undefined, escalationStates, currentStories,
     );
 
-    console.log('');
-
-    // ── Rate limit detection (sequential path) ───────────────────────
-    if (result.exitCode !== 0 && result.exitCode !== 124 && isRateLimited(result)) {
-      const rlKey = `rl:${story.id}`;
-      const rlAttempts = (retryCounts.get(rlKey) ?? 0) + 1;
-      retryCounts.set(rlKey, rlAttempts);
-
-      if (rlAttempts > MAX_RATE_LIMIT_RETRIES) {
-        console.log(`${story.id} rate limited ${rlAttempts} times — exhausted. Skipping.`);
-        markStorySkipped(config.jsonPath, story.id);
-
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id,
-            reason: 'rate_limit_exhausted', attempts: rlAttempts,
-          }, story.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
-            });
-          } catch { /* backend may be down */ }
-        }
-      } else {
-        const backoffMs = RATE_LIMIT_BACKOFF_MS[rlAttempts - 1] ?? RATE_LIMIT_BACKOFF_MS[RATE_LIMIT_BACKOFF_MS.length - 1];
-        console.log(`${story.id} rate limited (attempt ${rlAttempts}/${MAX_RATE_LIMIT_RETRIES}). Retrying in ${backoffMs / 1000}s...`);
-
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_rate_limited', workspaceId, {
-            run_id: config.runId, story_id: story.id,
-            attempt: rlAttempts, retryAfterMs: backoffMs, waveIndex: 0,
-          }, story.id);
-        }
-
-        await new Promise(resolve => setTimeout(resolve, backoffMs));
-      }
-    } else if (result.exitCode === 0) {
-      console.log(`${story.id} completed (exit 0)`);
-
-      const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
-      const gate = skipGate ? { passed: true } as GateResult : runGate(config.cwd);
-
-      if (!gate.passed) {
-        console.log(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
-        const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
-        retryCounts.set(story.id, currentRetries);
-
-        if (currentRetries >= MAX_RETRIES) markStorySkipped(config.jsonPath, story.id);
-
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id, reason: gate.reason,
-            ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
-          }, story.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
-            });
-          } catch { /* backend may be down */ }
-        }
-
-        if (currentRetries >= MAX_RETRIES) {
-          console.log(`${story.id} failed gate after ${MAX_RETRIES} attempts. Skipping.`);
-          console.log(`   Fix manually, then re-run with: --story ${story.id}`);
-        } else {
-          console.log(`${story.id} gate failed (attempt ${currentRetries}/${MAX_RETRIES}). Will retry...`);
-        }
-      } else {
-        markStoryPassed(config.jsonPath, story.id);
-        retryCounts.delete(story.id);
-        retryCounts.delete(`rl:${story.id}`);
-
-        console.log(`Committing ${story.id}...`);
-        gitCommitStory(config.cwd, story.id, story.title, mode);
-
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_passed', workspaceId, {
-            run_id: config.runId, story_id: story.id, story_title: story.title,
-            agent_type: config.agentType,
-          }, story.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass' }),
-            });
-          } catch { /* backend may be down */ }
-        }
-      }
-    } else if (result.exitCode === 124) {
-      console.log(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
-      console.log(`   Log: ${storyLogFile}`);
-      console.log('   Consider increasing timeoutMinutes for this story in the spec JSON');
-      markStorySkipped(config.jsonPath, story.id);
-
-      if (workspaceId) {
-        await emitWalEvent(config.port, 'story_failed', workspaceId, {
-          run_id: config.runId, story_id: story.id,
-          reason: 'timeout', timeout_minutes: timeoutMin,
-        }, story.id);
-        try {
-          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
-          });
-        } catch { /* backend may be down */ }
-      }
-    } else {
-      // Classify OpenCode errors for user-facing messages
-      const classified = config.agentType === 'opencode'
-        ? classifyOpenCodeError(result)
-        : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
-
-      // Non-retryable errors — fail immediately, no retry
-      if (!classified.retryable) {
-        console.log(`${story.id} failed (non-retryable): ${classified.category} — ${classified.message}`);
-        console.log(`   Log: ${storyLogFile}`);
-        markStorySkipped(config.jsonPath, story.id);
-
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id,
-            reason: classified.category, error_message: classified.message,
-            agent_type: config.agentType, exit_code: result.exitCode,
-          }, story.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
-            });
-          } catch { /* backend may be down */ }
-        }
-      } else {
-        const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
-        retryCounts.set(story.id, currentRetries);
-
-        if (currentRetries >= MAX_RETRIES) {
-          console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
-          console.log(`   Log: ${storyLogFile}`);
-          console.log(`   Error: ${classified.message}`);
-          console.log(`   Fix manually, then re-run with: --story ${story.id}`);
-          markStorySkipped(config.jsonPath, story.id);
-
-          if (workspaceId) {
-            await emitWalEvent(config.port, 'story_failed', workspaceId, {
-              run_id: config.runId, story_id: story.id,
-              reason: 'max_retries', attempts: currentRetries,
-              error_category: classified.category, error_message: classified.message,
-              agent_type: config.agentType,
-            }, story.id);
-            try {
-              await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
-              });
-            } catch { /* backend may be down */ }
-          }
-        } else {
-          console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES}): ${classified.category}`);
-          console.log(`   Log: ${storyLogFile}`);
-          console.log(`   Error: ${classified.message}`);
-          console.log('   Will retry...');
-        }
-      }
-    }
-
     if (config.specificStory) {
-      process.exit(result.exitCode);
+      process.exit(seqResult === 'passed' ? 0 : 1);
     }
 
     console.log('');
@@ -1622,6 +1618,7 @@ async function runParallel(
   workspaceId: string | null,
   retryCounts: Map<string, number>,
   stories: UserStory[],
+  escalationStates?: Map<string, EscalationState>,
 ): Promise<void> {
   const waveStories: WaveUserStory[] = stories.map(s => ({
     id: s.id,
@@ -1740,7 +1737,7 @@ async function runParallel(
     const tasks = storiesWithWorktrees.map(story => {
       const wt = worktreeMap.get(story.id)!;
       return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt)
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, escalationStates, stories)
           .then(result => ({ storyId: story.id, result }));
     });
 

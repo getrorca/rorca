@@ -3,6 +3,7 @@ import {
   resolveModelId,
   loadOrchestrationConfig,
   clearConfigCache,
+  getNextEscalationTier,
   type ScorerStory,
   type ModelTier,
 } from '../complexity-scorer';
@@ -509,6 +510,99 @@ describe('complexity-scorer', () => {
       const result = score(stories[2], stories);
       expect(result.tier).toBe('opus');
       expect(result.score).toBeGreaterThan(65);
+    });
+  });
+
+  // ── Escalation config ──────────────────────────────────────────────
+
+  describe('escalation config', () => {
+    it('returns default escalation config when no config file', () => {
+      const config = loadOrchestrationConfig();
+      expect(config.escalation.enabled).toBe(true);
+      expect(config.escalation.maxRetriesOnTier).toBe(2);
+      expect(config.escalation.escalateTo.haiku).toBe('sonnet');
+      expect(config.escalation.escalateTo.sonnet).toBe('opus');
+      expect(config.escalation.escalateTo.opus).toBeNull();
+    });
+
+    it('reads custom escalation config from .rorca/config.json', () => {
+      const cwd = makeConfigDir({
+        orchestration: {
+          escalation: {
+            enabled: false,
+            maxRetriesOnTier: 3,
+            escalateTo: { haiku: 'opus', sonnet: 'opus' },
+          },
+        },
+      });
+      const config = loadOrchestrationConfig(cwd);
+      expect(config.escalation.enabled).toBe(false);
+      expect(config.escalation.maxRetriesOnTier).toBe(3);
+      expect(config.escalation.escalateTo.haiku).toBe('opus');
+      expect(config.escalation.escalateTo.sonnet).toBe('opus');
+      expect(config.escalation.escalateTo.opus).toBeNull(); // default preserved
+    });
+
+    it('merges partial escalation config with defaults', () => {
+      const cwd = makeConfigDir({
+        orchestration: {
+          escalation: { maxRetriesOnTier: 5 },
+        },
+      });
+      const config = loadOrchestrationConfig(cwd);
+      expect(config.escalation.enabled).toBe(true); // default
+      expect(config.escalation.maxRetriesOnTier).toBe(5);
+      expect(config.escalation.escalateTo.haiku).toBe('sonnet'); // default
+    });
+
+    it('rejects invalid escalateTo values', () => {
+      const cwd = makeConfigDir({
+        orchestration: {
+          escalation: {
+            escalateTo: { haiku: 'invalid_tier', sonnet: 42 },
+          },
+        },
+      });
+      const config = loadOrchestrationConfig(cwd);
+      // Invalid values should keep defaults
+      expect(config.escalation.escalateTo.haiku).toBe('sonnet');
+      expect(config.escalation.escalateTo.sonnet).toBe('opus');
+    });
+  });
+
+  // ── getNextEscalationTier ──────────────────────────────────────────
+
+  describe('getNextEscalationTier()', () => {
+    it('returns sonnet for haiku', () => {
+      expect(getNextEscalationTier('haiku')).toBe('sonnet');
+    });
+
+    it('returns opus for sonnet', () => {
+      expect(getNextEscalationTier('sonnet')).toBe('opus');
+    });
+
+    it('returns null for opus (no further escalation)', () => {
+      expect(getNextEscalationTier('opus')).toBeNull();
+    });
+
+    it('returns null when escalation is disabled', () => {
+      const cwd = makeConfigDir({
+        orchestration: {
+          escalation: { enabled: false },
+        },
+      });
+      expect(getNextEscalationTier('haiku', cwd)).toBeNull();
+    });
+
+    it('uses custom escalateTo mapping', () => {
+      const cwd = makeConfigDir({
+        orchestration: {
+          escalation: {
+            escalateTo: { haiku: 'opus' }, // skip sonnet
+          },
+        },
+      });
+      expect(getNextEscalationTier('haiku', cwd)).toBe('opus');
     });
   });
 });
