@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle, Webhook, FileText, RotateCcw, Download } from 'lucide-react';
+import {
+  Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
+  Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
+  RefreshCw, GitPullRequest, Users, X, Plus,
+} from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
 
@@ -12,15 +16,57 @@ interface GithubStatus {
   webhookId?: number;
   lastWebhookAt?: string | null;
   connectedAt?: string;
+  autoPr?: {
+    enabled: boolean;
+    targetBranch: string;
+    reviewers: string[];
+  };
 }
+
+interface GithubAccount {
+  connected: boolean;
+  username?: string;
+  avatarUrl?: string;
+  connectedAt?: string;
+  scopes?: string[];
+}
+
+interface TestResult {
+  valid: boolean;
+  username?: string;
+  error?: string;
+}
+
+// ─── Scope descriptions ─────────────────────────────────────────────────────
+
+const SCOPE_DESCRIPTIONS: Record<string, string> = {
+  'repo': 'Full control of private repositories',
+  'user:email': 'Access user email addresses',
+  'user': 'Read user profile data',
+  'read:user': 'Read user profile data',
+  'admin:repo_hook': 'Full control of repository hooks',
+  'write:repo_hook': 'Write repository hooks',
+  'read:repo_hook': 'Read repository hooks',
+  'admin:org': 'Full control of organizations',
+  'read:org': 'Read organization membership',
+  'workflow': 'Update GitHub Actions workflows',
+  'write:packages': 'Upload packages',
+  'read:packages': 'Download packages',
+  'delete:packages': 'Delete packages',
+};
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function GitHubSettingsPanel() {
   const { workspaceId } = useWorkspace();
 
+  // Workspace repo connection
   const [status, setStatus] = useState<GithubStatus | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // OAuth account
+  const [account, setAccount] = useState<GithubAccount | null>(null);
+  const [accountLoading, setAccountLoading] = useState(true);
 
   // Connect form
   const [repoOwner, setRepoOwner] = useState('');
@@ -29,11 +75,27 @@ export default function GitHubSettingsPanel() {
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
 
-  // Disconnect
+  // Disconnect (webhook)
   const [disconnectToken, setDisconnectToken] = useState('');
   const [showDisconnect, setShowDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
+
+  // OAuth disconnect
+  const [disconnectingOAuth, setDisconnectingOAuth] = useState(false);
+  const [showOAuthDisconnect, setShowOAuthDisconnect] = useState(false);
+
+  // Test connection
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+
+  // Auto-PR
+  const [autoPrEnabled, setAutoPrEnabled] = useState(false);
+  const [autoPrBranch, setAutoPrBranch] = useState('main');
+  const [autoPrReviewers, setAutoPrReviewers] = useState<string[]>([]);
+  const [newReviewer, setNewReviewer] = useState('');
+  const [savingAutoPr, setSavingAutoPr] = useState(false);
+  const [savedAutoPr, setSavedAutoPr] = useState(false);
 
   // PR template
   const [prTemplate, setPrTemplate] = useState('');
@@ -41,7 +103,7 @@ export default function GitHubSettingsPanel() {
   const [prTemplateSaved, setPrTemplateSaved] = useState(false);
   const [prTemplateLoaded, setPrTemplateLoaded] = useState(false);
 
-  // ─── Fetch status ────────────────────────────────────────────────────────
+  // ─── Fetch workspace connection status ─────────────────────────────────────
 
   const fetchStatus = useCallback(async () => {
     if (!workspaceId) return;
@@ -49,17 +111,36 @@ export default function GitHubSettingsPanel() {
     try {
       const data = await apiFetch<GithubStatus>(`/api/workspaces/${workspaceId}/github`);
       setStatus(data);
-    } catch (err: any) {
-      console.error('[GitHubSettings] Fetch error:', err);
+      if (data.autoPr) {
+        setAutoPrEnabled(data.autoPr.enabled);
+        setAutoPrBranch(data.autoPr.targetBranch);
+        setAutoPrReviewers(data.autoPr.reviewers);
+      }
+    } catch {
       setStatus({ connected: false });
     } finally {
       setLoading(false);
     }
   }, [workspaceId]);
 
-  useEffect(() => { fetchStatus(); }, [fetchStatus]);
+  // ─── Fetch OAuth account ─────────────────────────────────────────────────
 
-  // ─── Fetch PR template ─────────────────────────────────────────────────
+  const fetchAccount = useCallback(async () => {
+    if (!workspaceId) return;
+    setAccountLoading(true);
+    try {
+      const data = await apiFetch<GithubAccount>(`/api/workspaces/${workspaceId}/github/account`);
+      setAccount(data);
+    } catch {
+      setAccount({ connected: false });
+    } finally {
+      setAccountLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { fetchStatus(); fetchAccount(); }, [fetchStatus, fetchAccount]);
+
+  // ─── Fetch PR template ───────────────────────────────────────────────────
 
   useEffect(() => {
     if (!workspaceId || prTemplateLoaded) return;
@@ -68,10 +149,99 @@ export default function GitHubSettingsPanel() {
         setPrTemplate(data.workspace.pr_template ?? '');
         setPrTemplateLoaded(true);
       })
-      .catch(() => {
-        setPrTemplateLoaded(true);
-      });
+      .catch(() => { setPrTemplateLoaded(true); });
   }, [workspaceId, prTemplateLoaded]);
+
+  // ─── Handlers ────────────────────────────────────────────────────────────
+
+  async function handleConnect() {
+    if (!workspaceId || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()) return;
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const data = await apiFetch<GithubStatus>(`/api/workspaces/${workspaceId}/github/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoOwner: repoOwner.trim(), repoName: repoName.trim(), githubToken: githubToken.trim() }),
+      });
+      setStatus(data);
+      setRepoOwner('');
+      setRepoName('');
+      setGithubToken('');
+    } catch (err: unknown) {
+      setConnectError(err instanceof Error ? err.message : 'Failed to connect');
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    if (!workspaceId || !disconnectToken.trim()) return;
+    setDisconnecting(true);
+    setDisconnectError(null);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/disconnect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ githubToken: disconnectToken.trim() }),
+      });
+      setStatus({ connected: false });
+      setShowDisconnect(false);
+      setDisconnectToken('');
+    } catch (err: unknown) {
+      setDisconnectError(err instanceof Error ? err.message : 'Failed to disconnect');
+    } finally {
+      setDisconnecting(false);
+    }
+  }
+
+  async function handleTestConnection() {
+    if (!workspaceId) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await apiFetch<TestResult>(`/api/workspaces/${workspaceId}/github/test-connection`, {
+        method: 'POST',
+      });
+      setTestResult(result);
+    } catch {
+      setTestResult({ valid: false, error: 'Request failed' });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  async function handleDisconnectOAuth() {
+    if (!workspaceId) return;
+    setDisconnectingOAuth(true);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/disconnect-oauth`, { method: 'POST' });
+      setAccount({ connected: false });
+      setShowOAuthDisconnect(false);
+    } catch {
+      // silent
+    } finally {
+      setDisconnectingOAuth(false);
+    }
+  }
+
+  async function handleSaveAutoPr() {
+    if (!workspaceId || savingAutoPr) return;
+    setSavingAutoPr(true);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/auto-pr`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: autoPrEnabled, targetBranch: autoPrBranch, reviewers: autoPrReviewers }),
+      });
+      setSavedAutoPr(true);
+      setTimeout(() => setSavedAutoPr(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSavingAutoPr(false);
+    }
+  }
 
   async function handleSavePrTemplate() {
     if (!workspaceId || prTemplateSaving) return;
@@ -85,60 +255,17 @@ export default function GitHubSettingsPanel() {
       setPrTemplateSaved(true);
       setTimeout(() => setPrTemplateSaved(false), 2000);
     } catch {
-      // Silently fail
+      // silent
     } finally {
       setPrTemplateSaving(false);
     }
   }
 
-  // ─── Connect ─────────────────────────────────────────────────────────────
-
-  async function handleConnect() {
-    if (!workspaceId || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()) return;
-
-    setConnecting(true);
-    setConnectError(null);
-    try {
-      const data = await apiFetch<GithubStatus>(`/api/workspaces/${workspaceId}/github/connect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          repoOwner: repoOwner.trim(),
-          repoName: repoName.trim(),
-          githubToken: githubToken.trim(),
-        }),
-      });
-      setStatus(data);
-      setRepoOwner('');
-      setRepoName('');
-      setGithubToken('');
-    } catch (err: any) {
-      setConnectError(err.message || 'Failed to connect');
-    } finally {
-      setConnecting(false);
-    }
-  }
-
-  // ─── Disconnect ──────────────────────────────────────────────────────────
-
-  async function handleDisconnect() {
-    if (!workspaceId || !disconnectToken.trim()) return;
-
-    setDisconnecting(true);
-    setDisconnectError(null);
-    try {
-      await apiFetch<GithubStatus>(`/api/workspaces/${workspaceId}/github/disconnect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ githubToken: disconnectToken.trim() }),
-      });
-      setStatus({ connected: false });
-      setShowDisconnect(false);
-      setDisconnectToken('');
-    } catch (err: any) {
-      setDisconnectError(err.message || 'Failed to disconnect');
-    } finally {
-      setDisconnecting(false);
+  function addReviewer() {
+    const r = newReviewer.trim();
+    if (r && !autoPrReviewers.includes(r)) {
+      setAutoPrReviewers([...autoPrReviewers, r]);
+      setNewReviewer('');
     }
   }
 
@@ -153,106 +280,215 @@ export default function GitHubSettingsPanel() {
   }
 
   return (
-    <div className="h-full overflow-y-auto p-6 max-w-2xl mx-auto">
-      <div className="flex items-center gap-2 mb-6">
-        <Github size={24} strokeWidth={1.5} />
-        <h1 className="text-lg font-semibold">GitHub Integration</h1>
-      </div>
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-muted text-sm">
-          <Loader2 size={16} className="animate-spin" /> Loading connection status...
+    <div className="h-full overflow-y-auto max-w-2xl mx-auto space-y-8">
+      {/* ─── Section 1: OAuth Account ─────────────────────────────────── */}
+      <section>
+        <div className="flex items-center gap-2 mb-4">
+          <Github size={20} strokeWidth={1.5} />
+          <h2 className="text-base font-semibold text-[var(--text)]">GitHub Account</h2>
         </div>
-      ) : status?.connected ? (
-        /* ─── Connected State ─────────────────────────────────────────── */
-        <div className="space-y-4">
-          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <CheckCircle2 size={18} className="text-emerald-400" />
-              <span className="text-sm font-medium text-emerald-400">Connected</span>
-            </div>
 
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <span className="text-muted">Repository</span>
-                <p className="font-mono text-[var(--text)]">{status.repoOwner}/{status.repoName}</p>
-              </div>
-              <div>
-                <span className="text-muted">Webhook ID</span>
-                <p className="font-mono text-[var(--text)]">#{status.webhookId}</p>
-              </div>
-              <div>
-                <span className="text-muted">Connected</span>
-                <p className="text-[var(--text)]">
-                  {status.connectedAt ? new Date(status.connectedAt + 'Z').toLocaleDateString() : '-'}
-                </p>
-              </div>
-              <div>
-                <span className="text-muted">Last webhook</span>
-                <p className="text-[var(--text)]">
-                  {status.lastWebhookAt
-                    ? new Date(status.lastWebhookAt + 'Z').toLocaleString()
-                    : 'None yet'}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-3 flex items-center gap-2 text-xs text-muted">
-              <Webhook size={14} />
-              Events: push, pull_request, issues
-            </div>
+        {accountLoading ? (
+          <div className="flex items-center gap-2 text-muted text-sm">
+            <Loader2 size={16} className="animate-spin" /> Loading account...
           </div>
-
-          {/* Disconnect */}
-          {!showDisconnect ? (
-            <button
-              onClick={() => setShowDisconnect(true)}
-              className="flex items-center gap-1.5 text-sm text-red-400 hover:text-red-300 transition-colors"
-            >
-              <Unlink size={14} /> Disconnect
-            </button>
-          ) : (
-            <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4 space-y-3">
-              <p className="text-sm text-red-400">
-                This will remove the webhook from GitHub and clear the connection.
-              </p>
-              <label className="block text-xs text-muted">
-                GitHub token (needs admin:repo_hook scope)
-                <input
-                  type="password"
-                  value={disconnectToken}
-                  onChange={(e) => setDisconnectToken(e.target.value)}
-                  placeholder="ghp_..."
-                  className="mt-1 w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
-                />
-              </label>
-              {disconnectError && (
-                <div className="flex items-center gap-1.5 text-xs text-red-400">
-                  <AlertCircle size={12} /> {disconnectError}
-                </div>
-              )}
-              <div className="flex gap-2">
+        ) : account?.connected ? (
+          <div className="rounded-lg border border-border bg-panel p-4 space-y-4">
+            {/* Account info row */}
+            <div className="flex items-center gap-3">
+              <img
+                src={account.avatarUrl}
+                alt={account.username}
+                className="w-10 h-10 rounded-full border border-border"
+              />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-[var(--text)] truncate">
+                  @{account.username}
+                </p>
+                <p className="text-xs text-muted">
+                  Connected {account.connectedAt ? new Date(account.connectedAt + 'Z').toLocaleDateString() : ''}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={handleDisconnect}
-                  disabled={disconnecting || !disconnectToken.trim()}
-                  className="px-3 py-1.5 text-sm rounded bg-red-600 text-white hover:bg-red-500 disabled:opacity-50 transition-colors flex items-center gap-1.5"
+                  onClick={handleTestConnection}
+                  disabled={testing}
+                  className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  {disconnecting ? <Loader2 size={14} className="animate-spin" /> : <Unlink size={14} />}
-                  Confirm Disconnect
+                  {testing ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                  Test
                 </button>
-                <button
-                  onClick={() => { setShowDisconnect(false); setDisconnectError(null); setDisconnectToken(''); }}
-                  className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors"
-                >
-                  Cancel
-                </button>
+                {!showOAuthDisconnect ? (
+                  <button
+                    onClick={() => setShowOAuthDisconnect(true)}
+                    className="px-2.5 py-1.5 text-xs rounded text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors flex items-center gap-1.5"
+                  >
+                    <Unlink size={12} />
+                    Disconnect
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={handleDisconnectOAuth}
+                      disabled={disconnectingOAuth}
+                      className="px-2.5 py-1.5 text-xs rounded bg-red-600 text-white hover:bg-red-500 disabled:opacity-50 transition-colors"
+                    >
+                      {disconnectingOAuth ? <Loader2 size={12} className="animate-spin" /> : 'Confirm'}
+                    </button>
+                    <button
+                      onClick={() => setShowOAuthDisconnect(false)}
+                      className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
-          )}
+
+            {/* Test result */}
+            {testResult && (
+              <div className={`flex items-center gap-1.5 text-xs ${testResult.valid ? 'text-emerald-400' : 'text-red-400'}`}>
+                {testResult.valid ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
+                {testResult.valid ? `Token valid (${testResult.username})` : `Token invalid: ${testResult.error}`}
+              </div>
+            )}
+
+            {/* Scopes */}
+            {account.scopes && account.scopes.length > 0 && (
+              <div>
+                <div className="flex items-center gap-1.5 mb-2">
+                  <Shield size={14} className="text-muted" />
+                  <span className="text-xs font-medium text-muted">Granted Scopes</span>
+                </div>
+                <div className="space-y-1">
+                  {account.scopes.map(scope => (
+                    <div key={scope} className="flex items-center gap-2 text-xs">
+                      <code className="px-1.5 py-0.5 rounded bg-bg border border-border text-[var(--text)] font-mono">
+                        {scope}
+                      </code>
+                      <span className="text-muted">
+                        {SCOPE_DESCRIPTIONS[scope] || 'Access granted'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-border bg-panel p-4">
+            <p className="text-sm text-muted mb-3">
+              No GitHub account connected. Use OAuth to connect your GitHub account.
+            </p>
+            <a
+              href={`${BASE_URL}/api/auth/github`}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded bg-[#24292f] text-white hover:bg-[#32383f] transition-colors"
+            >
+              <Github size={16} />
+              Connect with GitHub
+              <ExternalLink size={12} />
+            </a>
+          </div>
+        )}
+      </section>
+
+      {/* ─── Section 2: Workspace Repository ──────────────────────────── */}
+      <section className="border-t border-border pt-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Webhook size={20} strokeWidth={1.5} />
+          <h2 className="text-base font-semibold text-[var(--text)]">Workspace Repository</h2>
         </div>
-      ) : (
-        /* ─── Disconnected State — Connect Form ───────────────────────── */
-        <div className="space-y-4">
+
+        {loading ? (
+          <div className="flex items-center gap-2 text-muted text-sm">
+            <Loader2 size={16} className="animate-spin" /> Loading connection status...
+          </div>
+        ) : status?.connected ? (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <CheckCircle2 size={18} className="text-emerald-400" />
+                <span className="text-sm font-medium text-emerald-400">Connected</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <span className="text-muted">Repository</span>
+                  <p className="font-mono text-[var(--text)]">{status.repoOwner}/{status.repoName}</p>
+                </div>
+                <div>
+                  <span className="text-muted">Webhook ID</span>
+                  <p className="font-mono text-[var(--text)]">#{status.webhookId}</p>
+                </div>
+                <div>
+                  <span className="text-muted">Connected</span>
+                  <p className="text-[var(--text)]">
+                    {status.connectedAt ? new Date(status.connectedAt + 'Z').toLocaleDateString() : '-'}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-muted">Last webhook</span>
+                  <p className="text-[var(--text)]">
+                    {status.lastWebhookAt ? new Date(status.lastWebhookAt + 'Z').toLocaleString() : 'None yet'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-3 flex items-center gap-2 text-xs text-muted">
+                <Webhook size={14} />
+                Events: push, pull_request, issues
+              </div>
+            </div>
+
+            {/* Disconnect webhook */}
+            {!showDisconnect ? (
+              <button
+                onClick={() => setShowDisconnect(true)}
+                className="flex items-center gap-1.5 text-sm text-red-400 hover:text-red-300 transition-colors"
+              >
+                <Unlink size={14} /> Disconnect Repository
+              </button>
+            ) : (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4 space-y-3">
+                <p className="text-sm text-red-400">
+                  This will remove the webhook from GitHub and clear the connection.
+                </p>
+                <label className="block text-xs text-muted">
+                  GitHub token (needs admin:repo_hook scope)
+                  <input
+                    type="password"
+                    value={disconnectToken}
+                    onChange={e => setDisconnectToken(e.target.value)}
+                    placeholder="ghp_..."
+                    className="mt-1 w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                  />
+                </label>
+                {disconnectError && (
+                  <div className="flex items-center gap-1.5 text-xs text-red-400">
+                    <AlertCircle size={12} /> {disconnectError}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleDisconnect}
+                    disabled={disconnecting || !disconnectToken.trim()}
+                    className="px-3 py-1.5 text-sm rounded bg-red-600 text-white hover:bg-red-500 disabled:opacity-50 transition-colors flex items-center gap-1.5"
+                  >
+                    {disconnecting ? <Loader2 size={14} className="animate-spin" /> : <Unlink size={14} />}
+                    Confirm Disconnect
+                  </button>
+                  <button
+                    onClick={() => { setShowDisconnect(false); setDisconnectError(null); setDisconnectToken(''); }}
+                    className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
           <div className="rounded-lg border border-border bg-panel p-4 space-y-3">
             <p className="text-sm text-muted">
               Connect a GitHub repository to receive push, pull_request, and issue events via webhook.
@@ -264,7 +500,7 @@ export default function GitHubSettingsPanel() {
                 <input
                   type="text"
                   value={repoOwner}
-                  onChange={(e) => setRepoOwner(e.target.value)}
+                  onChange={e => setRepoOwner(e.target.value)}
                   placeholder="octocat"
                   className="mt-1 w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
                 />
@@ -274,7 +510,7 @@ export default function GitHubSettingsPanel() {
                 <input
                   type="text"
                   value={repoName}
-                  onChange={(e) => setRepoName(e.target.value)}
+                  onChange={e => setRepoName(e.target.value)}
                   placeholder="my-project"
                   className="mt-1 w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
                 />
@@ -286,14 +522,14 @@ export default function GitHubSettingsPanel() {
               <input
                 type="password"
                 value={githubToken}
-                onChange={(e) => setGithubToken(e.target.value)}
+                onChange={e => setGithubToken(e.target.value)}
                 placeholder="ghp_..."
                 className="mt-1 w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
               />
             </label>
 
             <p className="text-xs text-muted">
-              The token is only used to create the webhook and is not stored. A webhook secret is generated and stored encrypted.
+              The token is only used to create the webhook and is not stored.
             </p>
 
             {connectError && (
@@ -311,14 +547,119 @@ export default function GitHubSettingsPanel() {
               Connect GitHub
             </button>
           </div>
-        </div>
+        )}
+      </section>
+
+      {/* ─── Section 3: Auto-PR Settings ──────────────────────────────── */}
+      {status?.connected && (
+        <section className="border-t border-border pt-6">
+          <div className="flex items-center gap-2 mb-4">
+            <GitPullRequest size={20} strokeWidth={1.5} />
+            <h2 className="text-base font-semibold text-[var(--text)]">Auto-PR Settings</h2>
+          </div>
+
+          <div className="rounded-lg border border-border bg-panel p-4 space-y-4">
+            {/* Enable toggle */}
+            <label className="flex items-center gap-3 cursor-pointer">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoPrEnabled}
+                onClick={() => setAutoPrEnabled(!autoPrEnabled)}
+                className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors ${
+                  autoPrEnabled ? 'bg-accent' : 'bg-border'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                    autoPrEnabled ? 'translate-x-4' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+              <span className="text-sm text-[var(--text)]">
+                Automatically create pull requests on run completion
+              </span>
+            </label>
+
+            {autoPrEnabled && (
+              <>
+                {/* Target branch */}
+                <label className="block text-xs text-muted">
+                  Target branch
+                  <input
+                    type="text"
+                    value={autoPrBranch}
+                    onChange={e => setAutoPrBranch(e.target.value)}
+                    placeholder="main"
+                    className="mt-1 w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                  />
+                </label>
+
+                {/* Reviewers */}
+                <div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <Users size={14} className="text-muted" />
+                    <span className="text-xs font-medium text-muted">Reviewers</span>
+                  </div>
+
+                  {autoPrReviewers.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {autoPrReviewers.map(r => (
+                        <span
+                          key={r}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-accent/10 text-accent"
+                        >
+                          @{r}
+                          <button
+                            onClick={() => setAutoPrReviewers(autoPrReviewers.filter(x => x !== r))}
+                            className="hover:text-red-400 transition-colors"
+                          >
+                            <X size={10} />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newReviewer}
+                      onChange={e => setNewReviewer(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addReviewer(); } }}
+                      placeholder="GitHub username"
+                      className="flex-1 px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={addReviewer}
+                      disabled={!newReviewer.trim()}
+                      className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors disabled:opacity-50 flex items-center gap-1"
+                    >
+                      <Plus size={12} /> Add
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Save button */}
+            <button
+              onClick={handleSaveAutoPr}
+              disabled={savingAutoPr}
+              className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
+            >
+              {savingAutoPr ? <Loader2 size={14} className="animate-spin" /> : null}
+              {savedAutoPr ? 'Saved!' : 'Save Auto-PR Settings'}
+            </button>
+          </div>
+        </section>
       )}
 
-      {/* ─── GitHub Actions YAML ─────────────────────────────────────── */}
-      <div className="mt-8 border-t border-border pt-6">
+      {/* ─── Section 4: GitHub Actions YAML ───────────────────────────── */}
+      <section className="border-t border-border pt-6">
         <div className="flex items-center gap-2 mb-3">
           <Download size={18} />
-          <h2 className="text-sm font-semibold">GitHub Actions Workflow</h2>
+          <h2 className="text-sm font-semibold text-[var(--text)]">GitHub Actions Workflow</h2>
         </div>
         <p className="text-xs text-muted mb-3">
           Download a GitHub Actions workflow that triggers Rorca pipeline runs on push to main.
@@ -347,7 +688,7 @@ export default function GitHubSettingsPanel() {
               a.download = 'rorca-pipeline.yml';
               a.click();
               URL.revokeObjectURL(url);
-            } catch (err: any) {
+            } catch (err) {
               console.error('[GitHubSettings] YAML download error:', err);
             }
           }}
@@ -356,13 +697,13 @@ export default function GitHubSettingsPanel() {
           <Download size={14} />
           Download Actions YAML
         </button>
-      </div>
+      </section>
 
-      {/* ─── PR Template ──────────────────────────────────────────────── */}
-      <div className="mt-8 border-t border-border pt-6">
+      {/* ─── Section 5: PR Template ───────────────────────────────────── */}
+      <section className="border-t border-border pt-6 pb-6">
         <div className="flex items-center gap-2 mb-3">
           <FileText size={18} />
-          <h2 className="text-sm font-semibold">PR Description Template</h2>
+          <h2 className="text-sm font-semibold text-[var(--text)]">PR Description Template</h2>
         </div>
         <p className="text-xs text-muted mb-3">
           Customize the PR description generated by "Copy PR Body" on story cards.
@@ -377,7 +718,7 @@ export default function GitHubSettingsPanel() {
         </p>
         <textarea
           value={prTemplate}
-          onChange={(e) => { setPrTemplate(e.target.value); setPrTemplateSaved(false); }}
+          onChange={e => { setPrTemplate(e.target.value); setPrTemplateSaved(false); }}
           placeholder="Leave empty to use the default template"
           rows={12}
           className="w-full px-3 py-2 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent resize-y"
@@ -400,7 +741,7 @@ export default function GitHubSettingsPanel() {
             Reset to Default
           </button>
         </div>
-      </div>
+      </section>
     </div>
   );
 }
