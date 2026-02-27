@@ -434,6 +434,21 @@ export function runMigrations() {
     // Backfill from existing 'agent' column so historical rows stay consistent
     db.exec("UPDATE pipeline_runs SET agent_type = agent WHERE agent IS NOT NULL AND agent != ''");
   }
+
+  // OC-009: agent_config table for persisting execution engine settings (hot-reloadable)
+  const agentConfigExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_config'`
+  ).get();
+  if (!agentConfigExists) {
+    db.exec(`
+      CREATE TABLE agent_config (
+        id TEXT PRIMARY KEY,
+        agent_type TEXT NOT NULL DEFAULT 'claude',
+        agent_model TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+  }
 }
 
 runMigrations();
