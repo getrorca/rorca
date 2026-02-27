@@ -16,6 +16,33 @@
   body {
     @apply bg-bg text-[var(--text)] antialiased;
   }
+
+  /* Global focus ring — visible on keyboard navigation, hidden on mouse clicks.
+     Uses !important to override Tailwind focus:outline-none on inputs. */
+  :focus-visible {
+    outline: 2px solid var(--accent) !important;
+    outline-offset: 2px !important;
+  }
+
+  /* Skip-to-content link — visually hidden until focused */
+  .skip-to-content {
+    position: absolute;
+    top: -100%;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: white;
+    background-color: var(--accent);
+    border-radius: 0 0 0.5rem 0.5rem;
+    text-decoration: none;
+    transition: top 0.15s ease;
+  }
+  .skip-to-content:focus {
+    top: 0;
+  }
 }
 
 @keyframes slideUp {
