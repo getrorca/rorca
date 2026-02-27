@@ -59,6 +59,8 @@ export interface ThresholdRange {
   max: number;
 }
 
+export type CapabilityMismatchMode = 'warn' | 'reroute' | 'block';
+
 export interface OrchestrationConfig {
   router: RouterMode;
   thresholds: ScoringThresholds;
@@ -68,6 +70,8 @@ export interface OrchestrationConfig {
   tokenBudgetPerStory: number;
   /** Secondary engine for rate limit overflow rerouting. null = disabled. */
   fallbackEngine: 'claude' | 'opencode' | 'codex' | null;
+  /** How to handle stories requiring tools the engine doesn't support. */
+  capabilityMismatch: CapabilityMismatchMode;
 }
 
 // ─── Defaults ───────────────────────────────────────────────────────────────
@@ -224,6 +228,7 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
     escalation: { ...DEFAULT_ESCALATION, escalateTo: { ...DEFAULT_ESCALATION.escalateTo } },
     tokenBudgetPerStory: DEFAULT_TOKEN_BUDGET_PER_STORY,
     fallbackEngine: null,
+    capabilityMismatch: 'warn',
   };
 
   if (!configPath) return defaults;
@@ -253,6 +258,13 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
       ? orch.fallbackEngine as 'claude' | 'opencode' | 'codex'
       : null;
 
+    // Parse capabilityMismatch
+    const VALID_MISMATCH_MODES: CapabilityMismatchMode[] = ['warn', 'reroute', 'block'];
+    const parsedMismatch: CapabilityMismatchMode =
+      typeof orch.capabilityMismatch === 'string' && (VALID_MISMATCH_MODES as string[]).includes(orch.capabilityMismatch)
+        ? orch.capabilityMismatch as CapabilityMismatchMode
+        : 'warn';
+
     const config: OrchestrationConfig = {
       router,
       thresholds: {
@@ -270,6 +282,7 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
         ? orch.tokenBudgetPerStory
         : DEFAULT_TOKEN_BUDGET_PER_STORY,
       fallbackEngine: parsedFallback,
+      capabilityMismatch: parsedMismatch,
     };
 
     // Merge user-provided escalateTo overrides
