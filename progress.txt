@@ -617,3 +617,28 @@ Key decisions:
 - 5s delay on failure/conflict before checking next entry prevents tight retry loops
 - `require('http')` used instead of static import to avoid test interference
 - triggerType='queued' passed to pipeline trigger for WAL event differentiation
+
+## Story RQ-003: Queue Section in Pipeline Panel UI — DONE
+Files touched:
+- src/components/RunQueueSection.tsx (new — queue list with drag-to-reorder, remove, badges)
+- src/components/SpecPickerModal.tsx (new — modal listing approved specs for adding to queue)
+- src/panels/PipelineMonitorPanel.tsx (modified — queue state, SSE refresh, queue section in sidebar + empty state)
+- src/components/Sidebar.tsx (modified — queueCount prop, badge on Hub icon)
+- src/App.tsx (modified — queue count polling, pass queueCount to Sidebar)
+
+What was built:
+- RunQueueSection component: renders queue entries in position order with spec name, parallelism badge (if >1), worktree badge (if enabled), remove (X) button, and GripVertical drag handle per row
+- Drag-to-reorder via native HTML5 DnD — calls PUT /api/run-queue/reorder on drop with new orderedIds
+- Empty state: "Queue is empty — add specs to run sequentially" with Add button
+- SpecPickerModal: fetches approved specs for workspace, shows spec title, story count, approved date; search filter; single click adds to end of queue with parallelism=1
+- Queue section integrated into PipelineMonitorPanel left sidebar below runs list — visible when queue has entries OR no active run
+- Queue also shown in the empty state view (no runs yet) so users can pre-queue specs
+- Real-time updates: SSE events (run_queued_trigger, run_finished) trigger queue refetch
+- Queue count badge on Hub nav icon (polls /api/run-queue/status every 10s)
+
+Key decisions:
+- Used native HTML5 DnD (same pattern as existing story priority drag in PipelineMonitorPanel) — no external DnD library
+- Queue section visibility: `queueEntries.length > 0 || !runs.some(r => r.status === 'running')` — always visible when queue has items or when no run is active
+- Badge on Hub icon (not a separate Pipeline icon) since pipeline maps to hub nav in minimal sidebar
+- Queue count polled every 10s in App.tsx (lightweight — single SQL COUNT query)
+- SpecPickerModal adds with default parallelism=1, autoWorktree=false — user can configure later
