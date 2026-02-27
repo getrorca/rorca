@@ -22,6 +22,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: [`${mod}`, '2'], description: 'Go to Forge' },
       { keys: [`${mod}`, '3'], description: 'Go to Run View' },
       { keys: [`${mod}`, '4'], description: 'Go to Settings' },
+      { keys: [`${mod}`, '\\'], description: 'Toggle navigation drawer' },
     ],
   },
   {
