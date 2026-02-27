@@ -9,6 +9,9 @@ import {
   Search,
   X,
   SlidersHorizontal,
+  AlertTriangle,
+  GitBranch,
+  Loader2,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -253,13 +256,17 @@ function StoryReviewCard({
   allStoryIds,
   expanded,
   focused,
+  highlighted,
   onToggle,
+  onScrollToStory,
 }: {
   story: Story;
   allStoryIds: Set<string>;
   expanded: boolean;
   focused: boolean;
+  highlighted: boolean;
   onToggle: () => void;
+  onScrollToStory: (id: string) => void;
 }) {
   const deps = story.dependsOn ?? story.dependencies ?? [];
   const ac = story.acceptanceCriteria ?? [];
@@ -280,7 +287,11 @@ function StoryReviewCard({
     <div
       data-story-id={story.id}
       className={`border rounded-lg bg-panel transition-all ${
-        focused ? 'ring-2 ring-accent/50 border-accent' : 'border-border'
+        highlighted
+          ? 'ring-2 ring-warning/60 border-warning animate-pulse'
+          : focused
+          ? 'ring-2 ring-accent/50 border-accent'
+          : 'border-border'
       } ${isExcluded ? 'opacity-50' : ''}`}
     >
       {/* Collapsed row */}
@@ -328,7 +339,7 @@ function StoryReviewCard({
           </span>
         )}
 
-        {/* Dependency indicator */}
+        {/* Dependency count indicator */}
         {deps.length > 0 && (
           <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
             {deps.length} dep{deps.length !== 1 ? 's' : ''}
@@ -340,6 +351,38 @@ function StoryReviewCard({
           {ac.length} AC
         </span>
       </button>
+
+      {/* Always-visible dependency line */}
+      <div className="px-4 pb-2 -mt-1">
+        {deps.length > 0 ? (
+          <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
+            <span className="text-muted font-medium">Depends on:</span>
+            {deps.map((d) => {
+              const resolved = allStoryIds.has(d);
+              return (
+                <button
+                  key={d}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (resolved) onScrollToStory(d);
+                  }}
+                  className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded transition-colors ${
+                    resolved
+                      ? 'bg-accent/10 text-accent hover:bg-accent/25 cursor-pointer'
+                      : 'bg-error/10 text-error cursor-default'
+                  }`}
+                  title={resolved ? `Jump to ${d}` : `${d} not found in spec`}
+                >
+                  {d}
+                  {!resolved && ' (missing)'}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <span className="text-[11px] text-muted/60">No dependencies</span>
+        )}
+      </div>
 
       {/* Expanded content */}
       {expanded && (
@@ -378,35 +421,107 @@ function StoryReviewCard({
               </ul>
             </div>
           )}
-
-          {/* Dependencies */}
-          {deps.length > 0 && (
-            <div className="mt-3">
-              <h4 className="text-xs font-semibold text-muted uppercase tracking-wide mb-1">
-                Dependencies
-              </h4>
-              <div className="flex flex-wrap gap-1">
-                {deps.map((d) => {
-                  const resolved = allStoryIds.has(d);
-                  return (
-                    <span
-                      key={d}
-                      className={`px-1.5 py-0.5 text-[10px] font-mono rounded ${
-                        resolved
-                          ? 'bg-accent/10 text-accent'
-                          : 'bg-error/10 text-error'
-                      }`}
-                    >
-                      {d}
-                      {!resolved && ' (missing)'}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ─── Circular dependency detection ──────────────────────────────── */
+
+function detectCycles(stories: Story[]): string[][] {
+  const adj = new Map<string, string[]>();
+  for (const s of stories) {
+    adj.set(s.id, s.dependsOn ?? s.dependencies ?? []);
+  }
+  const cycles: string[][] = [];
+  const visited = new Set<string>();
+  const inStack = new Set<string>();
+  const path: string[] = [];
+
+  function dfs(node: string) {
+    if (inStack.has(node)) {
+      // Found a cycle — extract it
+      const cycleStart = path.indexOf(node);
+      if (cycleStart >= 0) {
+        cycles.push(path.slice(cycleStart));
+      }
+      return;
+    }
+    if (visited.has(node)) return;
+    visited.add(node);
+    inStack.add(node);
+    path.push(node);
+    for (const dep of adj.get(node) ?? []) {
+      if (adj.has(dep)) dfs(dep);
+    }
+    path.pop();
+    inStack.delete(node);
+  }
+
+  for (const s of stories) {
+    if (!visited.has(s.id)) dfs(s.id);
+  }
+  return cycles;
+}
+
+/* ─── DAG Modal (lazy-loads DependencyGraph) ─────────────────────── */
+
+function DagModal({
+  specId,
+  workspaceId,
+  onClose,
+}: {
+  specId: string;
+  workspaceId: string;
+  onClose: () => void;
+}) {
+  const [DependencyGraph, setDependencyGraph] = useState<React.ComponentType<{
+    specId: string;
+    workspaceId: string;
+    runId?: number;
+  }> | null>(null);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    import('../components/DependencyGraph')
+      .then((mod) => setDependencyGraph(() => mod.default))
+      .catch(() => setLoadError(true));
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="bg-bg border border-border rounded-xl w-[90vw] max-w-4xl h-[80vh] flex flex-col shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+          <div className="flex items-center gap-2">
+            <GitBranch size={16} className="text-accent" />
+            <h2 className="text-sm font-semibold text-text">Dependency Chain</h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-muted hover:text-text transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto">
+          {loadError ? (
+            <div className="flex items-center justify-center h-full text-sm text-error">
+              Failed to load dependency graph
+            </div>
+          ) : !DependencyGraph ? (
+            <div className="flex items-center justify-center h-full text-sm text-muted gap-2">
+              <Loader2 size={14} className="animate-spin" />
+              Loading graph...
+            </div>
+          ) : (
+            <DependencyGraph specId={specId} workspaceId={workspaceId} />
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -434,6 +549,8 @@ export default function SpecReviewPanel({
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [complexityFilter, setComplexityFilter] = useState<ComplexityFilter>('all');
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [highlightedStoryId, setHighlightedStoryId] = useState<string | null>(null);
+  const [dagModalOpen, setDagModalOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const mod = modLabel();
 
@@ -462,6 +579,28 @@ export default function SpecReviewPanel({
 
   const stories = useMemo(() => spec?.userStories ?? spec?.stories ?? [], [spec]);
   const allStoryIds = useMemo(() => new Set(stories.map((s) => s.id)), [stories]);
+
+  // Circular dependency detection
+  const cycles = useMemo(() => detectCycles(stories), [stories]);
+
+  // Scroll to and highlight a story by ID
+  const scrollToStory = useCallback((targetId: string) => {
+    // Clear filters so the target is visible
+    setSearchQuery('');
+    setStatusFilter('all');
+    setComplexityFilter('all');
+
+    // Wait for re-render, then scroll
+    requestAnimationFrame(() => {
+      const el = containerRef.current?.querySelector(`[data-story-id="${targetId}"]`);
+      if (el) {
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setHighlightedStoryId(targetId);
+        // Clear highlight after animation
+        setTimeout(() => setHighlightedStoryId(null), 1500);
+      }
+    });
+  }, []);
 
   // Readiness: story is "ready" if >=3 AC and all deps resolved
   const readyCount = useMemo(
@@ -666,7 +805,50 @@ export default function SpecReviewPanel({
                 {spec.model}
               </span>
             )}
+            {/* Dependency chain button */}
+            {stories.length > 0 && workspaceId && (
+              <button
+                onClick={() => setDagModalOpen(true)}
+                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors border border-accent/20"
+              >
+                <GitBranch size={12} />
+                Dependency chain
+              </button>
+            )}
           </div>
+
+          {/* Circular dependency warning */}
+          {cycles.length > 0 && (
+            <div className="mt-3 ml-[30px] rounded border border-error/30 bg-error/10 p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <AlertTriangle size={14} className="text-error shrink-0" />
+                <span className="text-xs font-semibold text-error">
+                  Circular dependency detected
+                </span>
+              </div>
+              {cycles.map((cycle, ci) => (
+                <div key={ci} className="flex flex-wrap items-center gap-1 mt-1">
+                  {cycle.map((id, i) => (
+                    <span key={`${ci}-${i}`} className="inline-flex items-center gap-1">
+                      <button
+                        onClick={() => scrollToStory(id)}
+                        className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-error/15 text-error hover:bg-error/25 transition-colors cursor-pointer"
+                      >
+                        {id}
+                      </button>
+                      {i < cycle.length - 1 && (
+                        <span className="text-error/60 text-xs">&rarr;</span>
+                      )}
+                    </span>
+                  ))}
+                  <span className="text-error/60 text-xs">&rarr;</span>
+                  <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-error/15 text-error">
+                    {cycle[0]}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -707,10 +889,12 @@ export default function SpecReviewPanel({
                 allStoryIds={allStoryIds}
                 expanded={expandedIds.has(story.id)}
                 focused={i === focusedIndex}
+                highlighted={highlightedStoryId === story.id}
                 onToggle={() => {
                   toggleExpand(story.id);
                   setFocusedIndex(i);
                 }}
+                onScrollToStory={scrollToStory}
               />
             ))
           )}
@@ -775,6 +959,15 @@ export default function SpecReviewPanel({
           onCancel={() => setDialogMode(null)}
           onGoToForge={() => { setDialogMode(null); onNavigate('forge'); }}
           onTriggerRun={() => { setDialogMode(null); onNavigate('pipeline'); }}
+        />
+      )}
+
+      {/* ─── DAG modal ────────────────────────────────────────────────── */}
+      {dagModalOpen && workspaceId && (
+        <DagModal
+          specId={specId}
+          workspaceId={workspaceId}
+          onClose={() => setDagModalOpen(false)}
         />
       )}
     </div>
