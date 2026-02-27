@@ -407,6 +407,12 @@ export function runMigrations() {
       CREATE INDEX idx_run_queue_workspace_status ON run_queue(workspace_id, status);
     `);
   }
+
+  // RQ-002: Add error_message column to run_queue (idempotent)
+  const rqCols = db.pragma('table_info(run_queue)') as { name: string }[];
+  if (rqCols.length > 0 && !rqCols.some(c => c.name === 'error_message')) {
+    db.exec("ALTER TABLE run_queue ADD COLUMN error_message TEXT");
+  }
 }
 
 runMigrations();
