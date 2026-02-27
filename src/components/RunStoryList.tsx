@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 
 interface StoryResult {
@@ -25,6 +26,7 @@ interface RunStoryListProps {
   runId: number;
   walEvents: WalEvent[];
   onStoryClick?: (storyId: string) => void;
+  onRetryStory?: (storyId: string, newRunId: number) => void;
   parallelism?: number;
 }
 
@@ -154,18 +156,32 @@ function RateLimitCountdown({ retryAt }: { retryAt: number }) {
   );
 }
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const MAX_RETRIES = 3;
+
 // ─── Story row component ─────────────────────────────────────────────────────
 
-function StoryRow({ story, onStoryClick, indented }: {
+function StoryRow({ story, onStoryClick, indented, runId, onRetryStory }: {
   story: MergedStory;
   onStoryClick?: (storyId: string) => void;
   indented?: boolean;
+  runId?: number;
+  onRetryStory?: (storyId: string) => void;
 }) {
   const cfg = STATUS_CONFIG[story.status] || STATUS_CONFIG.pending;
   const Icon = cfg.icon;
   const isAnimated = story.status === 'running' || story.status === 'retry';
   const isExcluded = story.status === 'excluded';
+  const isFailed = story.status === 'fail';
   const isClickable = !!onStoryClick;
+
+  // Expandable detail for failed stories
+  const [expanded, setExpanded] = useState(false);
+  const [outputLines, setOutputLines] = useState<string[]>([]);
+  const [outputLoading, setOutputLoading] = useState(false);
+  const [failureReason, setFailureReason] = useState<string | null>(null);
+  const [retryLoading, setRetryLoading] = useState(false);
 
   // Track status transitions — animate only when status *changes* to pass
   const prevStatusRef = useRef<DerivedStatus>(story.status);
@@ -180,54 +196,155 @@ function StoryRow({ story, onStoryClick, indented }: {
     prevStatusRef.current = story.status;
   }, [story.status]);
 
+  // Fetch output when expanding a failed story
+  useEffect(() => {
+    if (expanded && isFailed && runId && outputLines.length === 0 && !outputLoading) {
+      setOutputLoading(true);
+      fetchStoryOutput(runId, story.storyId, 20)
+        .then(data => {
+          setOutputLines(data.output);
+          setFailureReason(data.failureReason);
+        })
+        .catch(() => { /* ignore */ })
+        .finally(() => setOutputLoading(false));
+    }
+  }, [expanded, isFailed, runId, story.storyId, outputLines.length, outputLoading]);
+
+  const handleToggleExpand = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpanded(prev => !prev);
+  }, []);
+
+  const handleRetry = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!runId || !onRetryStory || retryLoading) return;
+    setRetryLoading(true);
+    onRetryStory(story.storyId);
+  }, [runId, onRetryStory, retryLoading, story.storyId]);
+
+  const retriesUsed = story.retries ?? 0;
+  const canRetry = retriesUsed < MAX_RETRIES;
+
   return (
-    <div
-      onClick={isClickable ? () => onStoryClick!(story.storyId) : undefined}
-      className={`flex items-center gap-2 ${indented ? 'pl-6 pr-3' : 'px-3'} py-2 border-b border-border/50 transition-colors ${
-        cfg.rowClass || ''
-      } ${isClickable ? 'cursor-pointer hover:bg-bg/50' : ''} ${justPassed ? 'animate-story-pass' : ''}`}
-    >
-      <Icon
-        size={14}
-        className={`shrink-0 ${cfg.color} ${isAnimated ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
-      />
-      <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
-        story.status === 'running' ? 'bg-blue-500/10 text-blue-500' :
-        story.status === 'pass' ? 'bg-emerald-500/10 text-emerald-500' :
-        story.status === 'fail' ? 'bg-red-500/10 text-red-500' :
-        story.status === 'rate_limited' ? 'bg-amber-500/10 text-amber-500' :
-        'bg-bg text-muted'
-      }`}>
-        {story.storyId}
-      </span>
-      <span className={`text-xs truncate flex-1 ${
-        isExcluded ? 'line-through text-muted' : 'text-[var(--text)]'
-      }`}>
-        {story.title}
-      </span>
-      {/* Rate limit countdown */}
-      {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
-        <RateLimitCountdown retryAt={story.rateLimitRetryAt} />
-      )}
-      {/* Live elapsed timer for running stories */}
-      {story.status === 'running' && story.startedAt != null && (
-        <LiveElapsed startedAt={story.startedAt} />
-      )}
-      {/* Static elapsed for completed stories */}
-      {story.status !== 'running' && story.status !== 'rate_limited' && story.elapsed != null && (
-        <span className="text-[10px] text-muted shrink-0">
-          {formatElapsed(story.elapsed)}
+    <div className={`${cfg.rowClass || ''} ${justPassed ? 'animate-story-pass' : ''}`}>
+      {/* Main row */}
+      <div
+        onClick={isFailed ? handleToggleExpand : (isClickable ? () => onStoryClick!(story.storyId) : undefined)}
+        className={`flex items-center gap-2 ${indented ? 'pl-6 pr-3' : 'px-3'} py-2 border-b border-border/50 transition-colors ${
+          isFailed || isClickable ? 'cursor-pointer hover:bg-bg/50' : ''
+        }`}
+      >
+        {/* Expand chevron for failed stories */}
+        {isFailed ? (
+          <button onClick={handleToggleExpand} className="shrink-0 p-0 bg-transparent border-none">
+            {expanded ? (
+              <ChevronDown size={12} className="text-red-400" />
+            ) : (
+              <ChevronRight size={12} className="text-red-400" />
+            )}
+          </button>
+        ) : null}
+        <Icon
+          size={14}
+          className={`shrink-0 ${cfg.color} ${isAnimated ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
+        />
+        <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
+          story.status === 'running' ? 'bg-blue-500/10 text-blue-500' :
+          story.status === 'pass' ? 'bg-emerald-500/10 text-emerald-500' :
+          story.status === 'fail' ? 'bg-red-500/10 text-red-500' :
+          story.status === 'rate_limited' ? 'bg-amber-500/10 text-amber-500' :
+          'bg-bg text-muted'
+        }`}>
+          {story.storyId}
         </span>
-      )}
-      {story.retries != null && story.retries > 0 && (
-        <span className="text-[10px] text-yellow-500 shrink-0">
-          R{story.retries}
+        <span className={`text-xs truncate flex-1 ${
+          isExcluded ? 'line-through text-muted' : 'text-[var(--text)]'
+        }`}>
+          {story.title}
         </span>
-      )}
-      {story.rateLimitAttempt != null && story.rateLimitAttempt > 0 && (
-        <span className="text-[10px] text-amber-500 shrink-0">
-          RL{story.rateLimitAttempt}
-        </span>
+        {/* Rate limit countdown */}
+        {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
+          <RateLimitCountdown retryAt={story.rateLimitRetryAt} />
+        )}
+        {/* Live elapsed timer for running stories */}
+        {story.status === 'running' && story.startedAt != null && (
+          <LiveElapsed startedAt={story.startedAt} />
+        )}
+        {/* Static elapsed for completed stories */}
+        {story.status !== 'running' && story.status !== 'rate_limited' && story.elapsed != null && (
+          <span className="text-[10px] text-muted shrink-0">
+            {formatElapsed(story.elapsed)}
+          </span>
+        )}
+        {/* Retry count badge — "N/3 retries used" for failed stories */}
+        {isFailed && retriesUsed > 0 && (
+          <span className="text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded shrink-0 font-mono">
+            {retriesUsed}/{MAX_RETRIES} retries
+          </span>
+        )}
+        {/* Non-failed retry indicator */}
+        {!isFailed && story.retries != null && story.retries > 0 && (
+          <span className="text-[10px] text-yellow-500 shrink-0">
+            R{story.retries}
+          </span>
+        )}
+        {story.rateLimitAttempt != null && story.rateLimitAttempt > 0 && (
+          <span className="text-[10px] text-amber-500 shrink-0">
+            RL{story.rateLimitAttempt}
+          </span>
+        )}
+      </div>
+
+      {/* Expanded failure detail panel */}
+      {isFailed && expanded && (
+        <div className={`${indented ? 'pl-6 pr-3' : 'px-3'} py-2 bg-red-500/5 border-b border-border/50`}>
+          {/* Failure reason */}
+          {failureReason && (
+            <div className="text-[10px] text-red-400 font-medium mb-1.5">
+              Failure: {failureReason.replace(/_/g, ' ')}
+            </div>
+          )}
+
+          {/* Output lines */}
+          {outputLoading ? (
+            <div className="flex items-center gap-2 py-2">
+              <Loader2 size={12} className="animate-spin text-muted" />
+              <span className="text-[10px] text-muted">Loading output...</span>
+            </div>
+          ) : outputLines.length > 0 ? (
+            <pre className="text-[10px] font-mono text-muted bg-[#1e1e1e] rounded p-2 overflow-x-auto max-h-48 leading-relaxed mb-2">
+              {outputLines.join('\n')}
+            </pre>
+          ) : (
+            <div className="text-[10px] text-muted py-1 mb-2">No output available</div>
+          )}
+
+          {/* Retry button + retry count */}
+          <div className="flex items-center gap-2">
+            {canRetry && onRetryStory && (
+              <button
+                onClick={handleRetry}
+                disabled={retryLoading}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+              >
+                {retryLoading ? (
+                  <Loader2 size={10} className="animate-spin" />
+                ) : (
+                  <RotateCcw size={10} />
+                )}
+                Retry this story
+              </button>
+            )}
+            {!canRetry && (
+              <span className="text-[10px] text-red-400/70">
+                Max retries ({MAX_RETRIES}) reached
+              </span>
+            )}
+            <span className="text-[10px] text-muted ml-auto">
+              {retriesUsed}/{MAX_RETRIES} retries used
+            </span>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -289,13 +406,33 @@ function WaveHeader({ waveIndex, storyCount, waveStatus, expanded, onToggle, cou
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function RunStoryList({ runId, walEvents, onStoryClick, parallelism }: RunStoryListProps) {
+export default function RunStoryList({ runId, walEvents, onStoryClick, onRetryStory, parallelism }: RunStoryListProps) {
   const [storyResults, setStoryResults] = useState<StoryResult[]>([]);
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
   const [loading, setLoading] = useState(true);
   const [collapsedWaves, setCollapsedWaves] = useState<Set<number>>(new Set());
+  const [retryingStories, setRetryingStories] = useState<Set<string>>(new Set());
 
   const isWaveMode = (parallelism ?? 1) > 1;
+
+  // Handle individual story retry
+  const handleRetryStory = useCallback(async (storyId: string) => {
+    // Immediately show as running in UI
+    setRetryingStories(prev => new Set(prev).add(storyId));
+    try {
+      const result = await retryRun(runId, { storyIds: [storyId] });
+      if (result.runId && onRetryStory) {
+        onRetryStory(storyId, result.runId);
+      }
+    } catch {
+      // Revert on failure
+      setRetryingStories(prev => {
+        const next = new Set(prev);
+        next.delete(storyId);
+        return next;
+      });
+    }
+  }, [runId, onRetryStory]);
 
   const fetchData = useCallback(async () => {
     try {
@@ -433,6 +570,11 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
         status = 'running';
       }
 
+      // Local retry override: show as running immediately after retry button click
+      if (retryingStories.has(spec.id)) {
+        status = 'running';
+      }
+
       return {
         storyId: spec.id,
         title: spec.title,
@@ -444,7 +586,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
         rateLimitAttempt: rlInfo?.attempt ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -576,7 +718,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
                 </span>
               </div>
               {excludedStories.map(story => (
-                <StoryRow key={story.storyId} story={story} onStoryClick={onStoryClick} indented />
+                <StoryRow key={story.storyId} story={story} onStoryClick={onStoryClick} indented runId={runId} onRetryStory={handleRetryStory} />
               ))}
             </>
           )}
@@ -603,6 +745,8 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
                     key={story.storyId}
                     story={story}
                     onStoryClick={onStoryClick}
+                    onRetryStory={handleRetryStory}
+                    runId={runId}
                     indented
                   />
                 ))}
@@ -640,7 +784,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
       {/* Story list */}
       <div className="flex-1 overflow-y-auto">
         {mergedStories.map((story) => (
-          <StoryRow key={story.storyId} story={story} onStoryClick={onStoryClick} />
+          <StoryRow key={story.storyId} story={story} onStoryClick={onStoryClick} onRetryStory={handleRetryStory} runId={runId} />
         ))}
       </div>
 
