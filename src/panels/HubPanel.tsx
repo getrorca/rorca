@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
+import TriggerPopover from '../components/TriggerPopover';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from '../components/Sidebar';
@@ -416,6 +417,78 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
   );
 }
 
+// ─── Ready-to-Run Card ──────────────────────────────────────────────────────
+
+function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate }: {
+  spec: SpecSummary;
+  workspaceId: string;
+  defaultParallelism: number;
+  onNavigate: (panel: PanelId) => void;
+}) {
+  const [showPopover, setShowPopover] = useState(false);
+  const [triggerState, setTriggerState] = useState<'idle' | 'triggering' | 'success' | 'error'>('idle');
+
+  const handleTrigger = async (parallelism: number, autoWorktree: boolean) => {
+    setShowPopover(false);
+    setTriggerState('triggering');
+    try {
+      await apiFetch('/api/pipeline/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          specPath: `forge/specs/approved/${spec.id}.json`,
+          workspaceId,
+          autoWorktree,
+          parallelism,
+        }),
+      });
+      setTriggerState('success');
+      setTimeout(() => onNavigate('pipeline'), 1200);
+    } catch {
+      setTriggerState('error');
+    }
+  };
+
+  return (
+    <div className="p-4 bg-panel border border-border rounded-lg space-y-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-[var(--text)] truncate">{spec.specName}</p>
+          <p className="text-xs text-muted mt-0.5">{spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}</p>
+        </div>
+      </div>
+      <div className="relative">
+        {showPopover && (
+          <TriggerPopover
+            defaultParallelism={defaultParallelism}
+            loading={triggerState === 'triggering'}
+            onTrigger={handleTrigger}
+            onClose={() => setShowPopover(false)}
+          />
+        )}
+        {triggerState === 'success' ? (
+          <div className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+            <CheckCircle size={12} />
+            Launching...
+          </div>
+        ) : (
+          <button
+            onClick={() => setShowPopover(true)}
+            disabled={triggerState === 'triggering'}
+            className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
+          >
+            {triggerState === 'triggering' ? (
+              <><Loader2 size={12} className="animate-spin" /> Starting...</>
+            ) : (
+              <><Rocket size={12} /> Run</>
+            )}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Recent Runs Section ────────────────────────────────────────────────────
 
 function RecentRunRow({ run, onNavigateToRun }: {
@@ -462,26 +535,36 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [activeRun, setActiveRun] = useState<PipelineRun | null>(null);
   const [totalStories, setTotalStories] = useState(0);
   const [pendingSpecs, setPendingSpecs] = useState<SpecSummary[]>([]);
+  const [approvedSpecs, setApprovedSpecs] = useState<SpecSummary[]>([]);
   const [recentRuns, setRecentRuns] = useState<PipelineRun[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [defaultParallelism, setDefaultParallelism] = useState(1);
 
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
 
-    const [runsRes, specsRes] = await Promise.all([
+    const [runsRes, specsRes, approvedRes, configRes] = await Promise.all([
       apiFetch<{ items: PipelineRun[] }>(
         `/api/pipeline/runs?workspaceId=${workspaceId}&limit=20`,
       ).catch(() => ({ items: [] as PipelineRun[] })),
       apiFetch<{ items: SpecSummary[] }>(
         `/api/specs?workspaceId=${workspaceId}&status=pending`,
       ).catch(() => ({ items: [] as SpecSummary[] })),
+      apiFetch<{ items: SpecSummary[] }>(
+        `/api/specs?workspaceId=${workspaceId}&status=approved`,
+      ).catch(() => ({ items: [] as SpecSummary[] })),
+      apiFetch<{ config: { defaultParallelism?: number } }>(
+        `/api/workspaces/${workspaceId}/pipeline-config`,
+      ).catch(() => ({ config: {} as { defaultParallelism?: number } })),
     ]);
 
     const runs = runsRes.items;
     const active = runs.find((r) => r.status === 'running' || r.status === 'paused') ?? null;
     setActiveRun(active);
     setPendingSpecs(specsRes.items);
+    setApprovedSpecs(approvedRes.items);
+    setDefaultParallelism(configRes.config.defaultParallelism ?? 1);
     // Recent = completed runs (not active), most recent first
     setRecentRuns(runs.filter((r) => r.status !== 'running' && r.status !== 'paused').slice(0, 10));
 
@@ -599,8 +682,9 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
 
   const hasActiveRun = !!activeRun;
   const hasPending = pendingSpecs.length > 0;
+  const hasApproved = approvedSpecs.length > 0;
   const hasRecent = recentRuns.length > 0;
-  const isEmpty = !hasActiveRun && !hasPending && !hasRecent;
+  const isEmpty = !hasActiveRun && !hasPending && !hasApproved && !hasRecent;
 
   // ── Empty state: Workspace exists but no specs or runs ──
   if (isEmpty) {
@@ -669,6 +753,24 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
               ))}
             </div>
             <UpdatedFooter lastUpdated={lastUpdated} />
+          </section>
+        )}
+
+        {/* Ready to Run */}
+        {hasApproved && (
+          <section>
+            <SectionHeader icon={Rocket} label="Ready to Run" badge={approvedSpecs.length} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {approvedSpecs.map((spec) => (
+                <ReadyToRunCard
+                  key={spec.id}
+                  spec={spec}
+                  workspaceId={workspaceId!}
+                  defaultParallelism={defaultParallelism}
+                  onNavigate={onNavigate}
+                />
+              ))}
+            </div>
           </section>
         )}
 

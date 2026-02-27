@@ -24,6 +24,7 @@ import {
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { apiFetch } from '../lib/apiFetch';
+import TriggerPopover from '../components/TriggerPopover';
 import PricingModal from '../components/PricingModal';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
@@ -552,6 +553,8 @@ function SpecPreviewDrawer({
   const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
   const [runState, setRunState] = useState<RunState>('idle');
   const [runError, setRunError] = useState('');
+  const [showTriggerPopover, setShowTriggerPopover] = useState(false);
+  const [defaultParallelism, setDefaultParallelism] = useState(1);
   const [addState, setAddState] = useState<'idle' | 'form' | 'generating' | 'done' | 'error'>('idle');
   const [addCount, setAddCount] = useState(3);
   const [addBrief, setAddBrief] = useState('');
@@ -579,6 +582,14 @@ function SpecPreviewDrawer({
   useEffect(() => {
     setLocalStories(detail?.userStories ?? detail?.stories ?? []);
   }, [detail]);
+
+  // Fetch workspace default parallelism
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<{ config: { defaultParallelism?: number } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
+      .then(data => setDefaultParallelism(data.config.defaultParallelism ?? 1))
+      .catch(() => { /* keep default */ });
+  }, [workspaceId]);
 
   const handleToggleExclude = async (storyId: string) => {
     if (!workspaceId) return;
@@ -700,8 +711,9 @@ function SpecPreviewDrawer({
     }
   };
 
-  const handleRun = async (autoWorktree = false) => {
+  const handleRun = async (parallelism: number, autoWorktree: boolean) => {
     if (!workspaceId || !summary) return;
+    setShowTriggerPopover(false);
     setRunState('triggering');
     setRunError('');
     try {
@@ -714,6 +726,7 @@ function SpecPreviewDrawer({
             specPath: `forge/specs/approved/${summary.id}.json`,
             workspaceId,
             autoWorktree,
+            parallelism,
           }),
         }
       );
@@ -909,13 +922,13 @@ function SpecPreviewDrawer({
           <div className="px-4 py-3 border-t border-border shrink-0 bg-bg space-y-2">
             {/* Run in Pipeline button — approved specs only */}
             {summary?.status === 'approved' && (
-              <div>
+              <div className="relative">
                 {runState === 'conflict' ? (
                   <div className="rounded border border-warning/30 bg-warning/10 p-3 space-y-2">
                     <p className="text-xs text-warning font-medium">Active run in progress. Run in a new worktree?</p>
                     <div className="flex gap-2">
                       <button
-                        onClick={() => handleRun(true)}
+                        onClick={() => handleRun(defaultParallelism, true)}
                         className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 transition-opacity"
                       >
                         <GitBranch size={12} />
@@ -935,32 +948,42 @@ function SpecPreviewDrawer({
                     Switching to Pipeline Monitor...
                   </div>
                 ) : (
-                  <button
-                    onClick={() => isFreePlan ? setShowPricing(true) : handleRun(false)}
-                    disabled={runState === 'triggering'}
-                    className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium transition-opacity disabled:opacity-60 ${
-                      isFreePlan
-                        ? 'bg-amber-500/15 text-amber-600 border border-amber-500/30 hover:bg-amber-500/25'
-                        : 'bg-accent text-white hover:opacity-90'
-                    }`}
-                  >
-                    {runState === 'triggering' ? (
-                      <><Loader2 size={14} className="animate-spin" /> Starting run...</>
-                    ) : isFreePlan ? (
-                      <>
-                        <Play size={14} /> Upgrade to Run
-                      </>
-                    ) : (
-                      <>
-                        <Play size={14} /> Run in Pipeline
-                        {deferredCount > 0 && (
-                          <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-white/20">
-                            {deferredCount} deferred
-                          </span>
-                        )}
-                      </>
+                  <>
+                    {showTriggerPopover && !isFreePlan && (
+                      <TriggerPopover
+                        defaultParallelism={defaultParallelism}
+                        loading={runState === 'triggering'}
+                        onTrigger={handleRun}
+                        onClose={() => setShowTriggerPopover(false)}
+                      />
                     )}
-                  </button>
+                    <button
+                      onClick={() => isFreePlan ? setShowPricing(true) : setShowTriggerPopover(true)}
+                      disabled={runState === 'triggering'}
+                      className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium transition-opacity disabled:opacity-60 ${
+                        isFreePlan
+                          ? 'bg-amber-500/15 text-amber-600 border border-amber-500/30 hover:bg-amber-500/25'
+                          : 'bg-accent text-white hover:opacity-90'
+                      }`}
+                    >
+                      {runState === 'triggering' ? (
+                        <><Loader2 size={14} className="animate-spin" /> Starting run...</>
+                      ) : isFreePlan ? (
+                        <>
+                          <Play size={14} /> Upgrade to Run
+                        </>
+                      ) : (
+                        <>
+                          <Play size={14} /> Run in Pipeline
+                          {deferredCount > 0 && (
+                            <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-white/20">
+                              {deferredCount} deferred
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </button>
+                  </>
                 )}
                 {runState === 'error' && (
                   <p className="text-xs text-error mt-1">{runError}</p>

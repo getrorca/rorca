@@ -379,6 +379,12 @@ export function runMigrations() {
   if (!ghCols.some(c => c.name === 'auto_pr_reviewers')) {
     db.exec("ALTER TABLE workspace_github_webhooks ADD COLUMN auto_pr_reviewers TEXT NOT NULL DEFAULT '[]'");
   }
+
+  // EQ-012: Add default_parallelism column to workspaces (integer 1-10, default 1)
+  const wsColsEQ012 = db.pragma('table_info(workspaces)') as { name: string }[];
+  if (!wsColsEQ012.some(c => c.name === 'default_parallelism')) {
+    db.exec("ALTER TABLE workspaces ADD COLUMN default_parallelism INTEGER NOT NULL DEFAULT 1");
+  }
 }
 
 runMigrations();

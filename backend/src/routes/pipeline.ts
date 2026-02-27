@@ -147,11 +147,21 @@ interface StoryResultRow {
 router.post('/trigger', async (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId, autoWorktree, dryRun, triggerType, parallelism: rawParallelism } = req.body;
-    const parallelism = Math.max(1, Math.min(10, parseInt(rawParallelism, 10) || 1));
 
     if (!specPath || !workspaceId) {
       res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
       return;
+    }
+
+    // Validate parallelism: optional integer 1–10, default 1
+    let parallelism = 1;
+    if (rawParallelism !== undefined && rawParallelism !== null) {
+      const parsed = Number(rawParallelism);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
+        res.status(400).json({ error: 'parallelism must be an integer between 1 and 10' });
+        return;
+      }
+      parallelism = parsed;
     }
 
     // 1. Look up workspace path
