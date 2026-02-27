@@ -168,6 +168,13 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
 
   const toggleDrawer = useCallback(() => setDrawerOpen((v) => !v), []);
 
+  // Listen for custom toggle event (fired by CommandPalette)
+  useEffect(() => {
+    const handler = () => toggleDrawer();
+    window.addEventListener('rorca:toggle-drawer', handler);
+    return () => window.removeEventListener('rorca:toggle-drawer', handler);
+  }, [toggleDrawer]);
+
   // Global shortcut: Cmd+\ (Mac) / Ctrl+\ (Win/Linux) to toggle nav drawer
   const drawerHotkeys = useMemo<HotkeyBinding[]>(() => [
     { key: 'mod+\\', handler: toggleDrawer },
@@ -217,7 +224,7 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
 
   const renderMenuButton = (extraClass?: string) => (
     <button
-      title="Navigation"
+      title="All panels  ⌘\"
       onClick={toggleDrawer}
       className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors ${
         drawerOpen
