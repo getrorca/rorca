@@ -413,6 +413,12 @@ export function runMigrations() {
   if (rqCols.length > 0 && !rqCols.some(c => c.name === 'error_message')) {
     db.exec("ALTER TABLE run_queue ADD COLUMN error_message TEXT");
   }
+
+  // OC-003: Add opencode_server_pid column to pipeline_runs (idempotent)
+  const runColsOC003 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsOC003.some(c => c.name === 'opencode_server_pid')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN opencode_server_pid INTEGER');
+  }
 }
 
 runMigrations();

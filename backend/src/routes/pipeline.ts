@@ -89,6 +89,7 @@ interface PipelineRunRow {
   log_path: string | null;
   agent: string;
   parallelism: number;
+  opencode_server_pid: number | null;
 }
 
 interface StoryResultRow {
