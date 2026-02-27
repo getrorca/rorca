@@ -13,6 +13,7 @@ import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
+import { compileWaves, isCycleError } from '../lib/wave-compiler';
 
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
 function resolveVaultCreds(userId: string, model: string): { apiKey?: string; baseUrl?: string } {
@@ -2925,47 +2926,14 @@ function detectCycle(stories: UserStory[]): string[] | null {
 }
 
 /**
- * Compute parallel execution groups using Kahn's algorithm (topological sort by levels).
- * Each group contains stories whose dependencies are all in prior groups.
+ * Compute parallel execution groups using wave-compiler (Kahn's algorithm).
+ * Delegates to the standalone wave-compiler module. Returns string[][] for
+ * backward compatibility with the graph API response shape.
  */
 function computeParallelGroups(stories: UserStory[]): string[][] {
-  const storyIds = new Set(stories.map(s => s.id));
-  const inDegree = new Map<string, number>();
-  const dependents = new Map<string, string[]>(); // dep -> stories that depend on it
-
-  for (const s of stories) {
-    inDegree.set(s.id, 0);
-    dependents.set(s.id, []);
-  }
-
-  for (const s of stories) {
-    let count = 0;
-    for (const dep of s.dependsOn) {
-      if (storyIds.has(dep)) {
-        count++;
-        dependents.get(dep)!.push(s.id);
-      }
-    }
-    inDegree.set(s.id, count);
-  }
-
-  const groups: string[][] = [];
-  let queue = stories.filter(s => inDegree.get(s.id) === 0).map(s => s.id);
-
-  while (queue.length > 0) {
-    groups.push([...queue]);
-    const nextQueue: string[] = [];
-    for (const id of queue) {
-      for (const dep of dependents.get(id) ?? []) {
-        const newDeg = inDegree.get(dep)! - 1;
-        inDegree.set(dep, newDeg);
-        if (newDeg === 0) nextQueue.push(dep);
-      }
-    }
-    queue = nextQueue;
-  }
-
-  return groups;
+  const result = compileWaves(stories);
+  if (isCycleError(result)) return []; // Cycles handled upstream by detectCycle
+  return result.map(w => w.stories.map(s => s.id));
 }
 
 // ─── V2-011: POST /:specId/stories/bulk — Bulk story actions ─────────────────

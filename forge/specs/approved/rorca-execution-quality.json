@@ -148,7 +148,8 @@
         "The existing `computeParallelGroups` helper in `specs.ts` is replaced with a call to `compileWaves` from this module to eliminate duplication"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "EQ-009",
