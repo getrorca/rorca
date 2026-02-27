@@ -332,11 +332,111 @@ router.get('/models', async (req: Request, res: Response) => {
       providerType: info.providerType,
       costPer1kInput: info.costPer1kInput,
       costPer1kOutput: info.costPer1kOutput,
+      contextWindow: info.contextWindow,
+      speedTier: info.speedTier,
+      costTier: info.costTier,
       recommended: info.id === recommendedId,
     })),
     defaultModel: recommendedId,
     configuredProviders,
   });
+});
+
+/**
+ * @swagger
+ * /api/direction/models/test:
+ *   post:
+ *     tags: [Direction Stack]
+ *     summary: Test a specific model by sending a minimal prompt
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [modelId]
+ *             properties:
+ *               modelId: { type: string, description: "Model ID to test" }
+ *     responses:
+ *       200:
+ *         description: Test result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 latencyMs: { type: number }
+ *                 response: { type: string }
+ *       400: { description: "Missing modelId" }
+ *       500: { description: "Model test failed" }
+ */
+router.post('/models/test', async (req: Request, res: Response) => {
+  const { modelId } = req.body as { modelId?: string };
+
+  if (!modelId || typeof modelId !== 'string') {
+    res.status(400).json({ error: 'modelId is required' });
+    return;
+  }
+
+  try {
+    // Resolve provider and API key for this model
+    const modelInfo = ALL_MODELS.find(m => m.id === modelId);
+    const providerType = modelInfo?.providerType ?? 'claude-cli';
+
+    let apiKey: string | undefined;
+    let baseUrl: string | undefined;
+
+    if (providerType !== 'claude-cli' && providerType !== 'anthropic') {
+      // Check vault for API key
+      const vaultRow = db.prepare(
+        'SELECT user_id FROM api_key_vault WHERE provider = ? ORDER BY created_at DESC LIMIT 1'
+      ).get(providerType) as { user_id: string } | undefined;
+
+      if (vaultRow) {
+        const result = getVaultKey(vaultRow.user_id, providerType);
+        if (result) {
+          apiKey = result.key;
+          baseUrl = result.baseUrl ?? undefined;
+        }
+      }
+
+      // Fallback to env vars
+      if (!apiKey) {
+        if (providerType === 'openrouter') apiKey = process.env.OPENROUTER_API_KEY;
+        else if (providerType === 'openai-compat') apiKey = process.env.OPENAI_API_KEY;
+      }
+    } else if (providerType === 'anthropic') {
+      // Check vault then env
+      const vaultRow = db.prepare(
+        'SELECT user_id FROM api_key_vault WHERE provider = ? ORDER BY created_at DESC LIMIT 1'
+      ).get('anthropic') as { user_id: string } | undefined;
+
+      if (vaultRow) {
+        const result = getVaultKey(vaultRow.user_id, 'anthropic');
+        if (result) apiKey = result.key;
+      }
+      if (!apiKey) apiKey = process.env.ANTHROPIC_API_KEY;
+    }
+
+    const start = Date.now();
+    const result = await chatComplete(
+      [{ role: 'user', content: 'Respond with exactly one word: "connected"' }],
+      { model: modelId, apiKey, provider: providerType === 'claude-cli' ? 'claude-cli' : undefined, baseUrl },
+    );
+    const latencyMs = Date.now() - start;
+
+    res.json({
+      ok: true,
+      latencyMs,
+      response: result.text.trim().slice(0, 200),
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      ok: false,
+      error: err.message || 'Model test failed',
+    });
+  }
 });
 
 /**
