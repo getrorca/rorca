@@ -349,6 +349,20 @@ router.post('/trigger', async (req: Request, res: Response) => {
     const resolvedAgentType: AgentType = agentConfig.agentType;
     const resolvedAgentModel: string | null = agentConfig.agentModel;
 
+    // OC-025: Block pipeline trigger if Claude is selected but not authenticated
+    if (resolvedAgentType === 'claude') {
+      const { getClaudeAuthState } = await import('../lib/claude-auth');
+      const authState = getClaudeAuthState();
+      if (!authState.connected) {
+        res.status(403).json({
+          error: 'claude_not_authenticated',
+          message: 'Claude is not authenticated. Connect your Claude account in Settings > Execution Engine.',
+          settingsDeepLink: '/settings?tab=providers&focus=claude-auth',
+        });
+        return;
+      }
+    }
+
     const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
     const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
