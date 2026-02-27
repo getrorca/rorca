@@ -479,6 +479,7 @@ function createStoryWorktree(
 
 /**
  * Merge a story worktree branch back into the current branch of the main workspace.
+ * (Legacy — used only for single-story waves where no orchestration is needed.)
  */
 function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
   try {
@@ -495,6 +496,243 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
     try { execSync('git merge --abort', { cwd: workspaceCwd, stdio: 'pipe' }); } catch { /* already clean */ }
     return false;
   }
+}
+
+// ─── Wave Merge Orchestrator (EQ-011) ────────────────────────────────────────
+
+interface WaveMergeResult {
+  success: boolean;
+  conflictsResolved: number;
+  /** Set if merge was blocked — contains conflicting files and the storyId that caused the block */
+  blocked?: { storyId: string; conflictingFiles: string[] };
+}
+
+/**
+ * Attempt to auto-resolve merge conflicts using Claude.
+ * For each conflicting file, reads the conflict markers and asks Claude
+ * to produce resolved content. Returns true if all conflicts resolved.
+ */
+async function autoResolveConflicts(
+  cwd: string,
+  storyId: string,
+  logDir: string,
+): Promise<{ resolved: boolean; resolvedFiles: string[] }> {
+  const env = buildCleanEnv();
+  const resolvedFiles: string[] = [];
+
+  // Get list of conflicting files
+  let conflictingFiles: string[];
+  try {
+    const output = execSync('git diff --name-only --diff-filter=U', {
+      cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    conflictingFiles = output.trim().split('\n').filter(Boolean);
+  } catch {
+    return { resolved: false, resolvedFiles: [] };
+  }
+
+  if (conflictingFiles.length === 0) {
+    return { resolved: true, resolvedFiles: [] };
+  }
+
+  console.log(`  [merge] ${conflictingFiles.length} conflicting file(s): ${conflictingFiles.join(', ')}`);
+
+  for (const file of conflictingFiles) {
+    const absFile = path.join(cwd, file);
+    let conflictContent: string;
+    try {
+      conflictContent = fs.readFileSync(absFile, 'utf8');
+    } catch {
+      console.error(`  [merge] Cannot read conflicting file: ${file}`);
+      return { resolved: false, resolvedFiles };
+    }
+
+    const prompt = [
+      'Resolve this git merge conflict. Output ONLY the resolved file content with no explanation,',
+      'no markdown fences, no commentary. Choose the correct combination of both sides.',
+      '',
+      `File: ${file}`,
+      '',
+      conflictContent,
+    ].join('\n');
+
+    // Spawn a short Claude invocation for conflict resolution
+    const resolveLogFile = path.join(logDir, `${storyId}_merge_resolve_${path.basename(file)}.log`);
+    const resolvedContent = await new Promise<string | null>((resolve) => {
+      const args = [
+        '--dangerously-skip-permissions',
+        '--print',
+        prompt,
+      ];
+
+      let stdout = '';
+      const child = spawn(CLAUDE_BIN, args, {
+        cwd,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+
+      // Log stderr for debugging
+      const logFd = fs.openSync(resolveLogFile, 'a');
+      child.stderr.on('data', (chunk: Buffer) => { fs.writeSync(logFd, chunk); });
+
+      const timer = setTimeout(() => {
+        try { child.kill('SIGTERM'); } catch { /* already dead */ }
+      }, 120_000); // 2min timeout for conflict resolution
+
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        try { fs.closeSync(logFd); } catch { /* already closed */ }
+        if (code === 0 && stdout.trim().length > 0) {
+          resolve(stdout);
+        } else {
+          resolve(null);
+        }
+      });
+
+      child.on('error', () => {
+        clearTimeout(timer);
+        try { fs.closeSync(logFd); } catch { /* already closed */ }
+        resolve(null);
+      });
+    });
+
+    if (resolvedContent === null) {
+      console.error(`  [merge] Auto-resolution FAILED for ${file} (Claude exit non-zero or empty)`);
+      return { resolved: false, resolvedFiles };
+    }
+
+    // Write resolved content and stage the file
+    try {
+      fs.writeFileSync(absFile, resolvedContent);
+      execSync(`git add "${file}"`, { cwd, env, stdio: 'pipe' });
+      resolvedFiles.push(file);
+      console.log(`  [merge] Resolved ${file}`);
+    } catch (err: unknown) {
+      console.error(`  [merge] Failed to write/stage resolved ${file}: ${(err as Error).message}`);
+      return { resolved: false, resolvedFiles };
+    }
+  }
+
+  return { resolved: true, resolvedFiles };
+}
+
+/**
+ * Merge wave branches sequentially in ascending story-ID order.
+ *
+ * Uses `git merge --no-ff --no-commit` to detect conflicts before committing.
+ * On conflict: attempts auto-resolution via Claude. If that fails, aborts and
+ * returns a blocked result for HITL intervention.
+ *
+ * @param waveBranches — worktree info sorted by story ID
+ * @param waveIndex — wave number for commit messages and WAL events
+ * @param cwd — main workspace path (target branch)
+ * @param logDir — directory for merge resolution logs
+ */
+async function mergeWave(
+  waveBranches: StoryWorktree[],
+  waveIndex: number,
+  cwd: string,
+  logDir: string,
+): Promise<WaveMergeResult> {
+  const env = buildCleanEnv();
+
+  // Sort by story ID for deterministic merge order
+  const sorted = [...waveBranches].sort((a, b) => a.storyId.localeCompare(b.storyId));
+
+  let totalConflictsResolved = 0;
+
+  for (const wt of sorted) {
+    console.log(`  [merge] Merging ${wt.branchName} (${wt.storyId})...`);
+
+    // Step 1: merge --no-ff --no-commit to detect conflicts
+    let mergeClean: boolean;
+    try {
+      execSync(
+        `git merge --no-ff --no-commit "${wt.branchName}"`,
+        { cwd, env, stdio: 'pipe', timeout: 120_000 },
+      );
+      mergeClean = true;
+    } catch {
+      mergeClean = false;
+    }
+
+    if (mergeClean) {
+      // Clean merge — commit
+      try {
+        execSync(
+          `git commit -m "merge: ${wt.storyId}"`,
+          { cwd, env, stdio: 'pipe', timeout: 30_000 },
+        );
+        console.log(`  [merge] ${wt.storyId} merged cleanly`);
+      } catch {
+        // Nothing to commit (identical trees) — that's fine
+        console.log(`  [merge] ${wt.storyId} merged (no changes to commit)`);
+      }
+      continue;
+    }
+
+    // Step 2: merge conflict detected — attempt auto-resolution
+    console.log(`  [merge] Conflict detected for ${wt.storyId}, attempting auto-resolution...`);
+
+    const resolution = await autoResolveConflicts(cwd, wt.storyId, logDir);
+
+    if (resolution.resolved) {
+      // All conflicts resolved — commit
+      const filesList = resolution.resolvedFiles.join(', ');
+      try {
+        execSync(
+          `git commit -m "merge(wave-${waveIndex}): resolved conflicts in ${filesList}"`,
+          { cwd, env, stdio: 'pipe', timeout: 30_000 },
+        );
+        totalConflictsResolved += resolution.resolvedFiles.length;
+        console.log(`  [merge] ${wt.storyId} merged with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+      } catch (err: unknown) {
+        // Commit failed — abort and block
+        console.error(`  [merge] Commit after resolution failed: ${(err as Error).message}`);
+        try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
+
+        // Get conflicting files for the blocked event
+        let conflictingFiles: string[] = [];
+        try {
+          const output = execSync('git diff --name-only --diff-filter=U', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+          conflictingFiles = output.trim().split('\n').filter(Boolean);
+        } catch { /* empty */ }
+
+        return {
+          success: false,
+          conflictsResolved: totalConflictsResolved,
+          blocked: { storyId: wt.storyId, conflictingFiles },
+        };
+      }
+    } else {
+      // Auto-resolution failed — abort merge and block
+      console.error(`  [merge] Auto-resolution failed for ${wt.storyId} — blocking run`);
+      try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
+
+      // Get conflicting files for the blocked event
+      let conflictingFiles: string[] = [];
+      try {
+        // Re-attempt merge to get conflict file list (we just aborted)
+        try {
+          execSync(`git merge --no-ff --no-commit "${wt.branchName}"`, { cwd, env, stdio: 'pipe', timeout: 30_000 });
+        } catch { /* expected to fail */ }
+        const output = execSync('git diff --name-only --diff-filter=U', { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+        conflictingFiles = output.trim().split('\n').filter(Boolean);
+        try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* clean up */ }
+      } catch { /* empty */ }
+
+      return {
+        success: false,
+        conflictsResolved: totalConflictsResolved,
+        blocked: { storyId: wt.storyId, conflictingFiles },
+      };
+    }
+  }
+
+  return { success: true, conflictsResolved: totalConflictsResolved };
 }
 
 /**
@@ -1216,13 +1454,14 @@ async function runParallel(
       }
     }
 
-    // ── Post-wave: merge passed worktrees, discard failed ones ────────────
+    // ── Post-wave: merge passed worktrees via wave merge orchestrator ────
     if (passedInWave.length > 0) {
-      console.log(`  [worktree] Merging ${passedInWave.length} passed worktree(s)...`);
-      for (const wt of passedInWave) {
+      if (passedInWave.length === 1) {
+        // Single story in wave — skip orchestrator, merge directly
+        console.log(`  [worktree] Single-story wave — direct merge`);
+        const wt = passedInWave[0];
         const merged = mergeStoryWorktree(config.cwd, wt);
         if (!merged) {
-          // Merge conflict — treat as failure, don't lose the branch
           console.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
           failedIds.add(wt.storyId);
 
@@ -1235,8 +1474,58 @@ async function runParallel(
             }, wt.storyId);
           }
         }
-        // Clean up worktree + branch after merge (or failed merge)
         removeStoryWorktree(config.cwd, wt);
+      } else {
+        // Multi-story wave — use wave merge orchestrator
+        console.log(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
+        const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir);
+
+        if (mergeResult.success) {
+          // All merged — emit wave_merged WAL event
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'wave_merged', workspaceId, {
+              run_id: config.runId,
+              wave: wave.index,
+              storiesCount: passedInWave.length,
+              conflictsResolved: mergeResult.conflictsResolved,
+            });
+          }
+          console.log(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
+
+          // Clean up all passed worktrees + branches
+          for (const wt of passedInWave) {
+            removeStoryWorktree(config.cwd, wt);
+          }
+        } else if (mergeResult.blocked) {
+          // Merge blocked — emit run_blocked WAL event, pause the run
+          console.error(`  [merge] Wave ${wave.index} BLOCKED on ${mergeResult.blocked.storyId}`);
+          console.error(`  [merge] Conflicting files: ${mergeResult.blocked.conflictingFiles.join(', ')}`);
+
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'run_blocked', workspaceId, {
+              run_id: config.runId,
+              reason: 'merge_conflict',
+              conflictingFiles: mergeResult.blocked.conflictingFiles,
+              wave: wave.index,
+              storyId: mergeResult.blocked.storyId,
+            });
+          }
+
+          // Mark the blocking story as failed
+          failedIds.add(mergeResult.blocked.storyId);
+
+          // Don't clean up worktrees — user needs the branches for manual resolution
+          console.log(`  [merge] Worktree branches preserved for manual resolution. Pausing run.`);
+
+          // Clean up only the failed worktrees (not passed — user may need to inspect)
+          for (const wt of failedInWave) {
+            removeStoryWorktree(config.cwd, wt);
+          }
+
+          // Pause — exit with code 2 to indicate HITL needed
+          console.log(`\n[run-loop] Run paused due to merge conflict. Resolve manually and resume.`);
+          process.exit(2);
+        }
       }
     }
 
