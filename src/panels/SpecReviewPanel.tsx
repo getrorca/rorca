@@ -6,6 +6,12 @@ import {
   CheckCircle2,
   XCircle,
   ListChecks,
+  Search,
+  X,
+  SlidersHorizontal,
+  AlertTriangle,
+  GitBranch,
+  Loader2,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -54,6 +60,195 @@ function ComplexityBadge({ value }: { value: number }) {
   );
 }
 
+/* ─── Filter types ────────────────────────────────────────────────── */
+
+type StatusFilter = 'all' | 'excluded' | 'has-deps';
+type ComplexityFilter = 'all' | 'low' | 'medium' | 'high';
+
+const STATUS_CHIPS: { value: StatusFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'excluded', label: 'Excluded' },
+  { value: 'has-deps', label: 'Has Dependencies' },
+];
+
+const COMPLEXITY_CHIPS: { value: ComplexityFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+];
+
+function activeFilterCount(
+  search: string,
+  status: StatusFilter,
+  complexity: ComplexityFilter,
+): number {
+  let count = 0;
+  if (search.trim()) count++;
+  if (status !== 'all') count++;
+  if (complexity !== 'all') count++;
+  return count;
+}
+
+function matchesFilters(
+  story: Story,
+  search: string,
+  status: StatusFilter,
+  complexity: ComplexityFilter,
+): boolean {
+  // Text search — title + description
+  if (search.trim()) {
+    const q = search.toLowerCase();
+    const titleMatch = story.title.toLowerCase().includes(q);
+    const descMatch = (story.description ?? '').toLowerCase().includes(q);
+    if (!titleMatch && !descMatch) return false;
+  }
+
+  // Status filter
+  if (status === 'excluded' && story.excluded !== true) return false;
+  if (status === 'has-deps') {
+    const deps = story.dependsOn ?? story.dependencies ?? [];
+    if (deps.length === 0) return false;
+  }
+
+  // Complexity filter
+  if (complexity !== 'all') {
+    const c = story.complexity ?? 0;
+    if (complexity === 'low' && c > 2) return false;
+    if (complexity === 'medium' && c !== 3) return false;
+    if (complexity === 'high' && c < 4) return false;
+  }
+
+  return true;
+}
+
+/* ─── Filter Bar ─────────────────────────────────────────────────── */
+
+function StoryFilterBar({
+  search,
+  onSearchChange,
+  status,
+  onStatusChange,
+  complexity,
+  onComplexityChange,
+  activeCount,
+  onClearAll,
+  filtersOpen,
+  onToggleFilters,
+}: {
+  search: string;
+  onSearchChange: (v: string) => void;
+  status: StatusFilter;
+  onStatusChange: (v: StatusFilter) => void;
+  complexity: ComplexityFilter;
+  onComplexityChange: (v: ComplexityFilter) => void;
+  activeCount: number;
+  onClearAll: () => void;
+  filtersOpen: boolean;
+  onToggleFilters: () => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {/* Search + filter toggle row */}
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search
+            size={14}
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none"
+          />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search stories..."
+            className="w-full pl-8 pr-8 py-1.5 text-sm rounded-lg bg-panel border border-border text-text placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+          {search && (
+            <button
+              onClick={() => onSearchChange('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+
+        <button
+          onClick={onToggleFilters}
+          className={`relative flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+            filtersOpen || activeCount > 0
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-border bg-panel text-muted hover:text-text'
+          }`}
+        >
+          <SlidersHorizontal size={13} />
+          Filters
+          {activeCount > 0 && (
+            <span className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-accent text-white text-[10px] font-bold flex items-center justify-center">
+              {activeCount}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {/* Filter chips — collapsible */}
+      {filtersOpen && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1">
+          {/* Status chips */}
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] font-semibold text-muted uppercase tracking-wide mr-1">
+              Status
+            </span>
+            {STATUS_CHIPS.map((chip) => (
+              <button
+                key={chip.value}
+                onClick={() => onStatusChange(chip.value)}
+                className={`px-2 py-0.5 text-[11px] rounded-full border transition-colors ${
+                  status === chip.value
+                    ? 'border-accent bg-accent/15 text-accent font-medium'
+                    : 'border-border bg-panel text-muted hover:text-text'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Complexity chips */}
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] font-semibold text-muted uppercase tracking-wide mr-1">
+              Complexity
+            </span>
+            {COMPLEXITY_CHIPS.map((chip) => (
+              <button
+                key={chip.value}
+                onClick={() => onComplexityChange(chip.value)}
+                className={`px-2 py-0.5 text-[11px] rounded-full border transition-colors ${
+                  complexity === chip.value
+                    ? 'border-accent bg-accent/15 text-accent font-medium'
+                    : 'border-border bg-panel text-muted hover:text-text'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Clear all */}
+          {activeCount > 0 && (
+            <button
+              onClick={onClearAll}
+              className="ml-auto text-[11px] text-muted hover:text-error transition-colors"
+            >
+              Clear all
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── Story Review Card ───────────────────────────────────────────── */
 
 function StoryReviewCard({
@@ -61,13 +256,17 @@ function StoryReviewCard({
   allStoryIds,
   expanded,
   focused,
+  highlighted,
   onToggle,
+  onScrollToStory,
 }: {
   story: Story;
   allStoryIds: Set<string>;
   expanded: boolean;
   focused: boolean;
+  highlighted: boolean;
   onToggle: () => void;
+  onScrollToStory: (id: string) => void;
 }) {
   const deps = story.dependsOn ?? story.dependencies ?? [];
   const ac = story.acceptanceCriteria ?? [];
@@ -88,7 +287,11 @@ function StoryReviewCard({
     <div
       data-story-id={story.id}
       className={`border rounded-lg bg-panel transition-all ${
-        focused ? 'ring-2 ring-accent/50 border-accent' : 'border-border'
+        highlighted
+          ? 'ring-2 ring-warning/60 border-warning animate-pulse'
+          : focused
+          ? 'ring-2 ring-accent/50 border-accent'
+          : 'border-border'
       } ${isExcluded ? 'opacity-50' : ''}`}
     >
       {/* Collapsed row */}
@@ -136,7 +339,7 @@ function StoryReviewCard({
           </span>
         )}
 
-        {/* Dependency indicator */}
+        {/* Dependency count indicator */}
         {deps.length > 0 && (
           <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
             {deps.length} dep{deps.length !== 1 ? 's' : ''}
@@ -148,6 +351,38 @@ function StoryReviewCard({
           {ac.length} AC
         </span>
       </button>
+
+      {/* Always-visible dependency line */}
+      <div className="px-4 pb-2 -mt-1">
+        {deps.length > 0 ? (
+          <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
+            <span className="text-muted font-medium">Depends on:</span>
+            {deps.map((d) => {
+              const resolved = allStoryIds.has(d);
+              return (
+                <button
+                  key={d}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (resolved) onScrollToStory(d);
+                  }}
+                  className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded transition-colors ${
+                    resolved
+                      ? 'bg-accent/10 text-accent hover:bg-accent/25 cursor-pointer'
+                      : 'bg-error/10 text-error cursor-default'
+                  }`}
+                  title={resolved ? `Jump to ${d}` : `${d} not found in spec`}
+                >
+                  {d}
+                  {!resolved && ' (missing)'}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <span className="text-[11px] text-muted/60">No dependencies</span>
+        )}
+      </div>
 
       {/* Expanded content */}
       {expanded && (
@@ -186,35 +421,107 @@ function StoryReviewCard({
               </ul>
             </div>
           )}
-
-          {/* Dependencies */}
-          {deps.length > 0 && (
-            <div className="mt-3">
-              <h4 className="text-xs font-semibold text-muted uppercase tracking-wide mb-1">
-                Dependencies
-              </h4>
-              <div className="flex flex-wrap gap-1">
-                {deps.map((d) => {
-                  const resolved = allStoryIds.has(d);
-                  return (
-                    <span
-                      key={d}
-                      className={`px-1.5 py-0.5 text-[10px] font-mono rounded ${
-                        resolved
-                          ? 'bg-accent/10 text-accent'
-                          : 'bg-error/10 text-error'
-                      }`}
-                    >
-                      {d}
-                      {!resolved && ' (missing)'}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ─── Circular dependency detection ──────────────────────────────── */
+
+function detectCycles(stories: Story[]): string[][] {
+  const adj = new Map<string, string[]>();
+  for (const s of stories) {
+    adj.set(s.id, s.dependsOn ?? s.dependencies ?? []);
+  }
+  const cycles: string[][] = [];
+  const visited = new Set<string>();
+  const inStack = new Set<string>();
+  const path: string[] = [];
+
+  function dfs(node: string) {
+    if (inStack.has(node)) {
+      // Found a cycle — extract it
+      const cycleStart = path.indexOf(node);
+      if (cycleStart >= 0) {
+        cycles.push(path.slice(cycleStart));
+      }
+      return;
+    }
+    if (visited.has(node)) return;
+    visited.add(node);
+    inStack.add(node);
+    path.push(node);
+    for (const dep of adj.get(node) ?? []) {
+      if (adj.has(dep)) dfs(dep);
+    }
+    path.pop();
+    inStack.delete(node);
+  }
+
+  for (const s of stories) {
+    if (!visited.has(s.id)) dfs(s.id);
+  }
+  return cycles;
+}
+
+/* ─── DAG Modal (lazy-loads DependencyGraph) ─────────────────────── */
+
+function DagModal({
+  specId,
+  workspaceId,
+  onClose,
+}: {
+  specId: string;
+  workspaceId: string;
+  onClose: () => void;
+}) {
+  const [DependencyGraph, setDependencyGraph] = useState<React.ComponentType<{
+    specId: string;
+    workspaceId: string;
+    runId?: number;
+  }> | null>(null);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    import('../components/DependencyGraph')
+      .then((mod) => setDependencyGraph(() => mod.default))
+      .catch(() => setLoadError(true));
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="bg-bg border border-border rounded-xl w-[90vw] max-w-4xl h-[80vh] flex flex-col shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+          <div className="flex items-center gap-2">
+            <GitBranch size={16} className="text-accent" />
+            <h2 className="text-sm font-semibold text-text">Dependency Chain</h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-muted hover:text-text transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto">
+          {loadError ? (
+            <div className="flex items-center justify-center h-full text-sm text-error">
+              Failed to load dependency graph
+            </div>
+          ) : !DependencyGraph ? (
+            <div className="flex items-center justify-center h-full text-sm text-muted gap-2">
+              <Loader2 size={14} className="animate-spin" />
+              Loading graph...
+            </div>
+          ) : (
+            <DependencyGraph specId={specId} workspaceId={workspaceId} />
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -238,6 +545,12 @@ export default function SpecReviewPanel({
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
   const [dialogMode, setDialogMode] = useState<'approve' | 'reject' | 'post-approve' | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [complexityFilter, setComplexityFilter] = useState<ComplexityFilter>('all');
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [highlightedStoryId, setHighlightedStoryId] = useState<string | null>(null);
+  const [dagModalOpen, setDagModalOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const mod = modLabel();
 
@@ -267,6 +580,28 @@ export default function SpecReviewPanel({
   const stories = useMemo(() => spec?.userStories ?? spec?.stories ?? [], [spec]);
   const allStoryIds = useMemo(() => new Set(stories.map((s) => s.id)), [stories]);
 
+  // Circular dependency detection
+  const cycles = useMemo(() => detectCycles(stories), [stories]);
+
+  // Scroll to and highlight a story by ID
+  const scrollToStory = useCallback((targetId: string) => {
+    // Clear filters so the target is visible
+    setSearchQuery('');
+    setStatusFilter('all');
+    setComplexityFilter('all');
+
+    // Wait for re-render, then scroll
+    requestAnimationFrame(() => {
+      const el = containerRef.current?.querySelector(`[data-story-id="${targetId}"]`);
+      if (el) {
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setHighlightedStoryId(targetId);
+        // Clear highlight after animation
+        setTimeout(() => setHighlightedStoryId(null), 1500);
+      }
+    });
+  }, []);
+
   // Readiness: story is "ready" if >=3 AC and all deps resolved
   const readyCount = useMemo(
     () =>
@@ -278,6 +613,30 @@ export default function SpecReviewPanel({
     [stories, allStoryIds],
   );
   const readinessPct = stories.length > 0 ? Math.round((readyCount / stories.length) * 100) : 0;
+
+  // Filtered stories
+  const filteredStories = useMemo(
+    () => stories.filter((s) => matchesFilters(s, searchQuery, statusFilter, complexityFilter)),
+    [stories, searchQuery, statusFilter, complexityFilter],
+  );
+  const filterCount = activeFilterCount(searchQuery, statusFilter, complexityFilter);
+
+  // Reset focused index when filter results change
+  useEffect(() => {
+    setFocusedIndex(0);
+  }, [searchQuery, statusFilter, complexityFilter]);
+
+  const clearAllFilters = useCallback(() => {
+    setSearchQuery('');
+    setStatusFilter('all');
+    setComplexityFilter('all');
+  }, []);
+
+  // Reset filters when spec changes (navigation)
+  useEffect(() => {
+    clearAllFilters();
+    setFiltersOpen(false);
+  }, [specId, clearAllFilters]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpandedIds((prev) => {
@@ -302,14 +661,14 @@ export default function SpecReviewPanel({
 
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
-        setFocusedIndex((prev) => Math.min(prev + 1, stories.length - 1));
+        setFocusedIndex((prev) => Math.min(prev + 1, filteredStories.length - 1));
       } else if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
         setFocusedIndex((prev) => Math.max(prev - 1, 0));
       } else if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
-        if (stories[focusedIndex]) {
-          toggleExpand(stories[focusedIndex].id);
+        if (filteredStories[focusedIndex]) {
+          toggleExpand(filteredStories[focusedIndex].id);
         }
       } else if (e.key === 'Escape') {
         // Collapse all
@@ -319,16 +678,16 @@ export default function SpecReviewPanel({
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [stories, focusedIndex, toggleExpand]);
+  }, [filteredStories, focusedIndex, toggleExpand]);
 
   // Scroll focused card into view
   useEffect(() => {
-    if (!stories[focusedIndex]) return;
+    if (!filteredStories[focusedIndex]) return;
     const el = containerRef.current?.querySelector(
-      `[data-story-id="${stories[focusedIndex].id}"]`,
+      `[data-story-id="${filteredStories[focusedIndex].id}"]`,
     );
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }, [focusedIndex, stories]);
+  }, [focusedIndex, filteredStories]);
 
   // Actions — called from confirmation dialog
   const handleConfirmApprove = async () => {
@@ -422,8 +781,17 @@ export default function SpecReviewPanel({
             <div className="flex items-center gap-1.5 text-xs text-muted">
               <ListChecks size={13} />
               <span>
-                <span className="font-semibold text-text">{stories.length}</span>{' '}
-                {stories.length === 1 ? 'story' : 'stories'}
+                {filterCount > 0 ? (
+                  <>
+                    <span className="font-semibold text-text">{filteredStories.length}</span>
+                    /{stories.length} stories
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold text-text">{stories.length}</span>{' '}
+                    {stories.length === 1 ? 'story' : 'stories'}
+                  </>
+                )}
               </span>
             </div>
             <div className="flex items-center gap-1.5">
@@ -437,7 +805,68 @@ export default function SpecReviewPanel({
                 {spec.model}
               </span>
             )}
+            {/* Dependency chain button */}
+            {stories.length > 0 && workspaceId && (
+              <button
+                onClick={() => setDagModalOpen(true)}
+                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors border border-accent/20"
+              >
+                <GitBranch size={12} />
+                Dependency chain
+              </button>
+            )}
           </div>
+
+          {/* Circular dependency warning */}
+          {cycles.length > 0 && (
+            <div className="mt-3 ml-[30px] rounded border border-error/30 bg-error/10 p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <AlertTriangle size={14} className="text-error shrink-0" />
+                <span className="text-xs font-semibold text-error">
+                  Circular dependency detected
+                </span>
+              </div>
+              {cycles.map((cycle, ci) => (
+                <div key={ci} className="flex flex-wrap items-center gap-1 mt-1">
+                  {cycle.map((id, i) => (
+                    <span key={`${ci}-${i}`} className="inline-flex items-center gap-1">
+                      <button
+                        onClick={() => scrollToStory(id)}
+                        className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-error/15 text-error hover:bg-error/25 transition-colors cursor-pointer"
+                      >
+                        {id}
+                      </button>
+                      {i < cycle.length - 1 && (
+                        <span className="text-error/60 text-xs">&rarr;</span>
+                      )}
+                    </span>
+                  ))}
+                  <span className="text-error/60 text-xs">&rarr;</span>
+                  <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-error/15 text-error">
+                    {cycle[0]}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ─── Filter bar ─────────────────────────────────────────────── */}
+      <div className="px-4 sm:px-6 py-3 border-b border-border/50 shrink-0 bg-bg">
+        <div className="max-w-3xl mx-auto">
+          <StoryFilterBar
+            search={searchQuery}
+            onSearchChange={setSearchQuery}
+            status={statusFilter}
+            onStatusChange={setStatusFilter}
+            complexity={complexityFilter}
+            onComplexityChange={setComplexityFilter}
+            activeCount={filterCount}
+            onClearAll={clearAllFilters}
+            filtersOpen={filtersOpen}
+            onToggleFilters={() => setFiltersOpen((p) => !p)}
+          />
         </div>
       </div>
 
@@ -448,18 +877,24 @@ export default function SpecReviewPanel({
             <div className="text-center text-sm text-muted py-12">
               No stories in this spec
             </div>
+          ) : filteredStories.length === 0 ? (
+            <div className="text-center text-sm text-muted py-12">
+              No stories match your filters
+            </div>
           ) : (
-            stories.map((story, i) => (
+            filteredStories.map((story, i) => (
               <StoryReviewCard
                 key={story.id}
                 story={story}
                 allStoryIds={allStoryIds}
                 expanded={expandedIds.has(story.id)}
                 focused={i === focusedIndex}
+                highlighted={highlightedStoryId === story.id}
                 onToggle={() => {
                   toggleExpand(story.id);
                   setFocusedIndex(i);
                 }}
+                onScrollToStory={scrollToStory}
               />
             ))
           )}
@@ -524,6 +959,15 @@ export default function SpecReviewPanel({
           onCancel={() => setDialogMode(null)}
           onGoToForge={() => { setDialogMode(null); onNavigate('forge'); }}
           onTriggerRun={() => { setDialogMode(null); onNavigate('pipeline'); }}
+        />
+      )}
+
+      {/* ─── DAG modal ────────────────────────────────────────────────── */}
+      {dagModalOpen && workspaceId && (
+        <DagModal
+          specId={specId}
+          workspaceId={workspaceId}
+          onClose={() => setDagModalOpen(false)}
         />
       )}
     </div>

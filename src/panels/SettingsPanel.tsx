@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard } from 'lucide-react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, CreditCard, ExternalLink, Download, Crown, Users, FileText, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
@@ -10,7 +10,7 @@ import { modLabel } from '../hooks/useHotkeys';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account';
+export type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account' | 'billing';
 
 interface ProfileData {
   id: string;
@@ -120,6 +120,7 @@ export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab
     { id: 'github', label: 'GitHub', icon: Github },
     { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
     { id: 'account', label: 'Account', icon: User },
+    { id: 'billing', label: 'Billing', icon: CreditCard },
   ];
 
   return (
@@ -136,6 +137,7 @@ export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab
             <button
               key={id}
               onClick={() => setActiveTab(id)}
+              aria-current={activeTab === id ? 'page' : undefined}
               className={`w-full flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors ${
                 activeTab === id
                   ? 'bg-accent/10 text-accent'
@@ -159,6 +161,7 @@ export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab
             <button
               key={id}
               onClick={() => setActiveTab(id)}
+              aria-current={activeTab === id ? 'page' : undefined}
               className={`flex items-center justify-center gap-1 px-3 py-2 text-xs whitespace-nowrap transition-colors ${
                 activeTab === id
                   ? 'text-accent border-b-2 border-accent'
@@ -183,6 +186,7 @@ export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab
           {activeTab === 'github' && <GitHubSettingsPanel />}
           {activeTab === 'shortcuts' && <ShortcutsSection />}
           {activeTab === 'account' && <AccountSection />}
+          {activeTab === 'billing' && <BillingSection />}
         </div>
       </div>
     </div>
@@ -530,6 +534,7 @@ function ProvidersSection() {
                         onClick={() => removeKey(k.id)}
                         className="p-1 text-muted hover:text-red-500 transition-colors shrink-0"
                         title="Remove key"
+                        aria-label="Remove API key"
                       >
                         <Trash2 size={12} />
                       </button>
@@ -967,6 +972,420 @@ function DisplaySection() {
   );
 }
 
+// ─── Billing Section ─────────────────────────────────────────────────────────
+
+interface BillingStatus {
+  plan: string;
+  subscription: {
+    status: string;
+    plan: string;
+    currentPeriodStart: string | null;
+    currentPeriodEnd: string | null;
+    stripeSubscriptionId: string | null;
+  } | null;
+  seats: { used: number; limit: number | null };
+  plans: Record<string, { name: string; priceMonthly: number; features: string[] }>;
+  stripeConfigured: boolean;
+}
+
+interface Invoice {
+  id: string;
+  number: string | null;
+  status: string;
+  amountDue: number;
+  amountPaid: number;
+  currency: string;
+  created: string | null;
+  periodStart: string | null;
+  periodEnd: string | null;
+  hostedInvoiceUrl: string | null;
+  invoicePdf: string | null;
+}
+
+const PLAN_ICONS: Record<string, typeof Zap> = {
+  free: Zap,
+  solo: Zap,
+  pro: Crown,
+  team: Users,
+};
+
+const PLAN_COLORS: Record<string, string> = {
+  free: 'text-muted border-border bg-bg',
+  solo: 'text-accent border-accent/40 bg-accent/5',
+  pro: 'text-purple-400 border-purple-400/40 bg-purple-400/5',
+  team: 'text-amber-400 border-amber-400/40 bg-amber-400/5',
+};
+
+function BillingSection() {
+  const [status, setStatus] = useState<BillingStatus | null>(null);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [portalLoading, setPortalLoading] = useState(false);
+  const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [showAllInvoices, setShowAllInvoices] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    Promise.all([
+      apiFetch<BillingStatus>('/api/billing/status'),
+      apiFetch<{ invoices: Invoice[] }>('/api/billing/invoices'),
+    ])
+      .then(([statusData, invoiceData]) => {
+        setStatus(statusData);
+        setInvoices(invoiceData.invoices);
+      })
+      .catch(() => setError('Failed to load billing information'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const openPortal = async () => {
+    setPortalLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetch<{ url?: string; error?: string }>('/api/billing/portal', {
+        method: 'POST',
+      });
+      if (res.url) {
+        window.open(res.url, '_blank');
+      } else {
+        setError(res.error || 'Failed to open billing portal');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to open billing portal');
+    } finally {
+      setPortalLoading(false);
+    }
+  };
+
+  const handleCheckout = async (planId: string) => {
+    setCheckoutLoading(planId);
+    setError(null);
+    try {
+      const res = await apiFetch<{ url?: string; error?: string }>('/api/billing/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan: planId }),
+      });
+      if (res.url) {
+        window.location.href = res.url;
+      } else {
+        setError(res.error || 'Failed to start checkout');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to start checkout');
+    } finally {
+      setCheckoutLoading(null);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading billing...</div>;
+  }
+
+  if (!status) {
+    return <p className="text-sm text-red-500">{error || 'Failed to load billing'}</p>;
+  }
+
+  const currentPlan = status.plan;
+  const planInfo = status.plans[currentPlan];
+  const PlanIcon = PLAN_ICONS[currentPlan] || Zap;
+  const planColor = PLAN_COLORS[currentPlan] || PLAN_COLORS.free;
+  const isActive = status.subscription?.status === 'active';
+  const isPaid = currentPlan !== 'free';
+  const renewalDate = status.subscription?.currentPeriodEnd
+    ? new Date(status.subscription.currentPeriodEnd)
+    : null;
+
+  const visibleInvoices = showAllInvoices ? invoices : invoices.slice(0, 5);
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      {/* Current Plan Badge */}
+      <div className={`border rounded-lg p-5 ${planColor}`}>
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg border border-current/20 flex items-center justify-center">
+              <PlanIcon size={20} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-semibold">{planInfo?.name || 'Free'} Plan</h2>
+                {isActive && isPaid && (
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-green-500/15 text-green-500">
+                    Active
+                  </span>
+                )}
+                {status.subscription?.status === 'past_due' && (
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-amber-500/15 text-amber-500">
+                    Past Due
+                  </span>
+                )}
+                {status.subscription?.status === 'canceled' && (
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-red-500/15 text-red-500">
+                    Canceled
+                  </span>
+                )}
+              </div>
+              {isPaid && (
+                <p className="text-sm mt-0.5 opacity-80">${planInfo?.priceMonthly}/month</p>
+              )}
+              {!isPaid && (
+                <p className="text-xs mt-0.5 opacity-70">Upgrade to unlock pipeline execution</p>
+              )}
+            </div>
+          </div>
+          {isPaid && status.stripeConfigured && (
+            <button
+              onClick={openPortal}
+              disabled={portalLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-current/20 rounded hover:bg-white/5 transition-colors disabled:opacity-50"
+            >
+              {portalLoading ? <Loader2 size={12} className="animate-spin" /> : <ExternalLink size={12} />}
+              Manage Billing
+            </button>
+          )}
+        </div>
+
+        {/* Subscription details */}
+        {isPaid && (
+          <div className="mt-4 grid grid-cols-2 gap-4 pt-4 border-t border-current/10">
+            <div>
+              <p className="text-[10px] uppercase tracking-wider opacity-60 mb-0.5">Renewal Date</p>
+              <p className="text-sm font-medium">
+                {renewalDate ? renewalDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A'}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-wider opacity-60 mb-0.5">Seats</p>
+              <p className="text-sm font-medium">
+                {status.seats.used} used{status.seats.limit ? ` / ${status.seats.limit} max` : ' (unlimited)'}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Plan Comparison Table */}
+      <div>
+        <h3 className="text-sm font-semibold text-[var(--text)] mb-3">
+          {isPaid ? 'Change Plan' : 'Upgrade Your Plan'}
+        </h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          {Object.entries(status.plans).map(([planId, plan]) => {
+            const isCurrent = planId === currentPlan;
+            const Icon = PLAN_ICONS[planId] || Zap;
+            return (
+              <div
+                key={planId}
+                className={`border rounded-lg p-4 flex flex-col ${
+                  isCurrent
+                    ? 'border-accent/60 bg-accent/5'
+                    : 'border-border bg-bg hover:border-accent/30'
+                } transition-colors`}
+              >
+                <div className="flex items-center gap-2 mb-2">
+                  <Icon size={16} className={isCurrent ? 'text-accent' : 'text-muted'} />
+                  <span className="text-sm font-medium text-[var(--text)]">{plan.name}</span>
+                  {isCurrent && (
+                    <span className="px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider rounded bg-accent/15 text-accent">
+                      Current
+                    </span>
+                  )}
+                </div>
+                <div className="mb-3">
+                  <span className="text-lg font-bold text-[var(--text)]">
+                    {plan.priceMonthly === 0 ? 'Free' : `$${plan.priceMonthly}`}
+                  </span>
+                  {plan.priceMonthly > 0 && <span className="text-xs text-muted">/mo</span>}
+                </div>
+                <ul className="flex-1 space-y-1.5 mb-4">
+                  {plan.features.map(f => (
+                    <li key={f} className="flex items-start gap-1.5 text-[11px] text-muted">
+                      <Check size={10} className="mt-0.5 text-green-500 shrink-0" />
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+                {!isCurrent && planId !== 'free' && status.stripeConfigured && (
+                  <button
+                    onClick={() => handleCheckout(planId)}
+                    disabled={!!checkoutLoading}
+                    className="w-full py-1.5 rounded text-xs font-medium bg-accent text-white hover:bg-accent/90 disabled:opacity-50 transition-colors"
+                  >
+                    {checkoutLoading === planId ? (
+                      <span className="flex items-center justify-center gap-1">
+                        <Loader2 size={10} className="animate-spin" /> Redirecting...
+                      </span>
+                    ) : (
+                      isPaid ? `Switch to ${plan.name}` : `Get ${plan.name}`
+                    )}
+                  </button>
+                )}
+                {isCurrent && (
+                  <div className="w-full py-1.5 rounded text-xs font-medium text-center text-accent bg-accent/10">
+                    Current Plan
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {!status.stripeConfigured && (
+          <p className="text-xs text-muted mt-3 flex items-center gap-1.5">
+            <AlertTriangle size={12} className="text-amber-500" />
+            Stripe is not configured. Set STRIPE_SECRET_KEY in backend/.env to enable billing.
+          </p>
+        )}
+      </div>
+
+      {/* Invoice History */}
+      <div className="border-t border-border pt-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-[var(--text)]">Invoice History</h3>
+          {isPaid && status.stripeConfigured && (
+            <button
+              onClick={openPortal}
+              disabled={portalLoading}
+              className="text-xs text-accent hover:text-accent/80 transition-colors"
+            >
+              View all in Stripe
+            </button>
+          )}
+        </div>
+
+        {invoices.length === 0 ? (
+          <div className="border border-border rounded p-6 text-center">
+            <FileText size={24} className="mx-auto text-muted mb-2" />
+            <p className="text-sm text-muted">No invoices yet</p>
+            <p className="text-xs text-muted mt-1">Invoices will appear here after your first payment</p>
+          </div>
+        ) : (
+          <div className="border border-border rounded overflow-hidden">
+            <div className="grid grid-cols-[1fr_80px_80px_60px] gap-2 px-4 py-2 bg-bg text-[10px] text-muted font-medium uppercase tracking-wider border-b border-border">
+              <span>Invoice</span>
+              <span>Amount</span>
+              <span>Date</span>
+              <span className="text-right">Action</span>
+            </div>
+            {visibleInvoices.map(inv => (
+              <div key={inv.id} className="grid grid-cols-[1fr_80px_80px_60px] gap-2 px-4 py-2.5 border-b border-border last:border-b-0 items-center">
+                <div className="min-w-0">
+                  <p className="text-sm text-[var(--text)] truncate">{inv.number || inv.id.slice(0, 16)}</p>
+                  <p className="text-[10px] text-muted capitalize">{inv.status}</p>
+                </div>
+                <span className="text-sm text-[var(--text)]">
+                  ${(inv.amountPaid / 100).toFixed(2)}
+                </span>
+                <span className="text-xs text-muted">
+                  {inv.created ? new Date(inv.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
+                </span>
+                <div className="flex justify-end">
+                  {inv.invoicePdf && (
+                    <a
+                      href={inv.invoicePdf}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-1 text-muted hover:text-accent transition-colors"
+                      title="Download PDF"
+                      aria-label="Download invoice PDF"
+                    >
+                      <Download size={14} />
+                    </a>
+                  )}
+                  {!inv.invoicePdf && inv.hostedInvoiceUrl && (
+                    <a
+                      href={inv.hostedInvoiceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-1 text-muted hover:text-accent transition-colors"
+                      title="View invoice"
+                      aria-label="View invoice"
+                    >
+                      <ExternalLink size={14} />
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+            {invoices.length > 5 && (
+              <button
+                onClick={() => setShowAllInvoices(!showAllInvoices)}
+                className="w-full flex items-center justify-center gap-1 px-4 py-2 text-xs text-muted hover:text-[var(--text)] transition-colors border-t border-border"
+              >
+                {showAllInvoices ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                {showAllInvoices ? 'Show less' : `Show all ${invoices.length} invoices`}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Cancel Subscription */}
+      {isPaid && isActive && status.stripeConfigured && (
+        <div className="border-t border-border pt-6">
+          <h3 className="text-sm font-semibold text-[var(--text)] mb-2">Cancel Subscription</h3>
+          {!showCancelConfirm ? (
+            <div>
+              <p className="text-xs text-muted mb-3">
+                Cancel your subscription. You'll retain access to your current plan until the end of your billing period.
+              </p>
+              <button
+                onClick={() => setShowCancelConfirm(true)}
+                className="px-4 py-2 text-sm text-red-500 border border-red-500/30 rounded hover:bg-red-500/5 transition-colors"
+              >
+                Cancel Subscription
+              </button>
+            </div>
+          ) : (
+            <div className="border border-red-500/30 rounded p-4 space-y-3 bg-red-500/5">
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={16} className="text-red-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-medium text-[var(--text)]">Are you sure?</p>
+                  <p className="text-xs text-muted mt-1">
+                    Your subscription will remain active until{' '}
+                    <span className="font-medium text-[var(--text)]">
+                      {renewalDate ? renewalDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'the end of your billing period'}
+                    </span>
+                    . After that, your account will revert to the Free plan. No further charges will be made.
+                  </p>
+                  <p className="text-xs text-muted mt-2">
+                    You can manage cancellation through the Stripe billing portal, which allows you to cancel immediately or at the end of the period.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={openPortal}
+                  disabled={portalLoading}
+                  className="flex items-center gap-1.5 px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 transition-colors"
+                >
+                  {portalLoading ? <Loader2 size={14} className="animate-spin" /> : <ExternalLink size={14} />}
+                  Continue to Cancel
+                </button>
+                <button
+                  onClick={() => setShowCancelConfirm(false)}
+                  className="px-4 py-2 text-sm text-muted hover:text-[var(--text)] transition-colors"
+                >
+                  Keep Plan
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {error && (
+        <p className="text-xs text-red-500 flex items-center gap-1">
+          <AlertTriangle size={12} />
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ─── Account Section (Profile + Notifications + Danger Zone) ─────────────────
 
 function AccountSection() {
@@ -1154,6 +1573,7 @@ function ProfileSection() {
             <button
               type="button"
               onClick={() => setShowPasswords(!showPasswords)}
+              aria-label={showPasswords ? 'Hide passwords' : 'Show passwords'}
               className="absolute right-2 top-6 p-1 text-muted hover:text-[var(--text)]"
             >
               {showPasswords ? <EyeOff size={14} /> : <Eye size={14} />}
@@ -1472,6 +1892,8 @@ function ShortcutsSection() {
 function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () => void }) {
   return (
     <button
+      role="switch"
+      aria-checked={checked}
       onClick={onChange}
       className={`relative w-9 h-5 rounded-full transition-colors ${
         checked ? 'bg-accent' : 'bg-border'

@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2 } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, AlertCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
-import TriggerPopover from '../components/TriggerPopover';
+// TriggerPopover removed — Ready-to-Run cards now trigger directly
+import { ToastContainer } from '../components/Toast';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from '../components/Sidebar';
+import { HubSkeleton } from '../components/Skeleton';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -91,7 +93,7 @@ const STATUS_BADGE_LABELS: Record<string, string> = {
   running: 'Running',
   paused: 'Paused',
   done: 'Passed',
-  failed: 'Failed',
+  failed: '\u2717 Failed',
   partial_failure: 'Partial',
   cancelled: 'Cancelled',
 };
@@ -175,13 +177,16 @@ const BORDER_LEFT: Record<string, string> = {
 
 // ─── Active Run Section ─────────────────────────────────────────────────────
 
-function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
+function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
   run: PipelineRun;
   totalStories: number;
   onNavigateToRun?: (runId: number) => void;
+  onRunCompleted?: (status: 'done' | 'failed') => void;
 }) {
   const walEvents = usePipelineSSE(String(run.id));
   const [actionLoading, setActionLoading] = useState<'pause' | 'kill' | null>(null);
+  const [completionBorder, setCompletionBorder] = useState<'none' | 'success' | 'failure'>('none');
+  const completionFired = useRef(false);
 
   // Derive live story progress from SSE events + initial story_results
   const { passed, failed, currentStoryTitle, currentRunStatus } = useMemo(() => {
@@ -224,6 +229,16 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
     };
   }, [walEvents, run.status]);
 
+  // Detect run completion and trigger border transition
+  useEffect(() => {
+    if (completionFired.current) return;
+    if (currentRunStatus === 'done' || currentRunStatus === 'failed' || currentRunStatus === 'cancelled') {
+      completionFired.current = true;
+      setCompletionBorder(currentRunStatus === 'done' ? 'success' : 'failure');
+      onRunCompleted?.(currentRunStatus === 'done' ? 'done' : 'failed');
+    }
+  }, [currentRunStatus, onRunCompleted]);
+
   // Use SSE-derived status if events have come in, otherwise fall back to polled status
   const effectiveStatus = walEvents.length > 0 ? currentRunStatus : run.status;
   const completed = passed + failed;
@@ -253,14 +268,20 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
     setActionLoading(null);
   };
 
+  const borderTransitionClass = completionBorder === 'success'
+    ? 'border-emerald-500 border-l-emerald-500'
+    : completionBorder === 'failure'
+    ? 'border-red-500 border-l-red-500'
+    : `border-border ${BORDER_LEFT[effectiveStatus] || 'border-l-gray-500'}`;
+
   return (
     <button
       onClick={() => onNavigateToRun?.(run.id)}
-      className={`w-full text-left p-4 bg-panel border border-border border-l-4 ${BORDER_LEFT[effectiveStatus] || 'border-l-gray-500'} rounded-lg hover:border-accent/50 transition-colors group`}
+      className={`w-full text-left p-4 bg-panel border border-l-4 ${borderTransitionClass} rounded-lg hover:border-accent/50 transition-[border-color] duration-1000 group animate-slide-down-in`}
     >
       {/* Header row: status + run ID + actions */}
       <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" aria-live="polite">
           <span className={`w-2 h-2 rounded-full ${STATUS_DOTS[effectiveStatus] || 'bg-gray-500'}`} />
           <span className="text-sm font-semibold text-[var(--text)] capitalize">{effectiveStatus}</span>
           <span className="text-xs text-muted font-mono">#{run.id}</span>
@@ -273,13 +294,14 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
                 tabIndex={0}
                 onClick={handlePause}
                 onKeyDown={(e) => { if (e.key === 'Enter') handlePause(e as unknown as React.MouseEvent); }}
-                className={`p-1 rounded hover:bg-bg transition-colors ${actionLoading === 'pause' ? 'opacity-50' : ''}`}
+                className={`w-11 h-11 sm:w-8 sm:h-8 flex items-center justify-center rounded hover:bg-bg transition-colors ${actionLoading === 'pause' ? 'opacity-50' : ''}`}
                 title={effectiveStatus === 'paused' ? 'Resume' : 'Pause'}
+                aria-label={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
               >
                 {effectiveStatus === 'paused' ? (
-                  <Play size={14} className="text-yellow-500" />
+                  <Play size={16} className="text-yellow-500" />
                 ) : (
-                  <Pause size={14} className="text-yellow-500" />
+                  <Pause size={16} className="text-yellow-500" />
                 )}
               </span>
               <span
@@ -287,10 +309,11 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
                 tabIndex={0}
                 onClick={handleKill}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleKill(e as unknown as React.MouseEvent); }}
-                className={`p-1 rounded hover:bg-bg transition-colors ${actionLoading === 'kill' ? 'opacity-50' : ''}`}
+                className={`w-11 h-11 sm:w-8 sm:h-8 flex items-center justify-center rounded hover:bg-bg transition-colors ${actionLoading === 'kill' ? 'opacity-50' : ''}`}
                 title="Kill"
+                aria-label="Kill run"
               >
-                <Square size={14} className="text-red-500" />
+                <Square size={16} className="text-red-500" />
               </span>
             </>
           )}
@@ -311,7 +334,14 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
       )}
 
       {/* Progress bar */}
-      <div className="w-full h-1.5 bg-border rounded-full overflow-hidden mb-2">
+      <div
+        className="w-full h-1.5 bg-border rounded-full overflow-hidden mb-2"
+        role="progressbar"
+        aria-valuenow={progressPct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`Run progress: ${passed} of ${total} stories passed`}
+      >
         <div
           className={`h-full rounded-full transition-all duration-500 ${
             effectiveStatus === 'failed' ? 'bg-red-500' :
@@ -397,9 +427,9 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
           tabIndex={0}
           onClick={(e) => handleAction(e, 'approve')}
           onKeyDown={(e) => { if (e.key === 'Enter') handleAction(e as unknown as React.MouseEvent, 'approve'); }}
-          className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors ${actionLoading === 'approve' ? 'opacity-50 pointer-events-none' : ''}`}
+          className={`inline-flex items-center gap-1 px-3 py-2 min-h-[44px] text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors ${actionLoading === 'approve' ? 'opacity-50 pointer-events-none' : ''}`}
         >
-          <CheckCircle size={12} />
+          <CheckCircle size={14} />
           Approve
         </span>
         <span
@@ -407,9 +437,9 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
           tabIndex={0}
           onClick={(e) => handleAction(e, 'reject')}
           onKeyDown={(e) => { if (e.key === 'Enter') handleAction(e as unknown as React.MouseEvent, 'reject'); }}
-          className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors ${actionLoading === 'reject' ? 'opacity-50 pointer-events-none' : ''}`}
+          className={`inline-flex items-center gap-1 px-3 py-2 min-h-[44px] text-xs font-medium rounded-md bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors ${actionLoading === 'reject' ? 'opacity-50 pointer-events-none' : ''}`}
         >
-          <XCircle size={12} />
+          <XCircle size={14} />
           Reject
         </span>
       </div>
@@ -419,86 +449,101 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
 
 // ─── Ready-to-Run Card ──────────────────────────────────────────────────────
 
-function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate }: {
+function ReadyToRunCard({ spec, workspaceId, workspaceName, workspaceBusy, onTriggered }: {
   spec: SpecSummary;
   workspaceId: string;
-  defaultParallelism: number;
-  onNavigate: (panel: PanelId) => void;
+  workspaceName: string;
+  workspaceBusy: boolean;
+  onTriggered: (specId: string) => void;
 }) {
-  const [showPopover, setShowPopover] = useState(false);
   const [triggerState, setTriggerState] = useState<'idle' | 'triggering' | 'success' | 'error'>('idle');
+  const specPath = `forge/specs/approved/${spec.id}.json`;
 
-  const handleTrigger = async (parallelism: number, autoWorktree: boolean) => {
-    setShowPopover(false);
+  const handleTrigger = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (workspaceBusy || triggerState === 'triggering') return;
     setTriggerState('triggering');
     try {
-      await apiFetch('/api/pipeline/trigger', {
+      const result = await apiFetch<{ conflict?: boolean }>('/api/pipeline/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          specPath: `forge/specs/approved/${spec.id}.json`,
-          workspaceId,
-          autoWorktree,
-          parallelism,
-        }),
+        body: JSON.stringify({ specPath, workspaceId }),
       });
+      if (result.conflict) {
+        setTriggerState('error');
+        return;
+      }
       setTriggerState('success');
-      setTimeout(() => onNavigate('pipeline'), 1200);
+      onTriggered(spec.id);
     } catch {
       setTriggerState('error');
+      setTimeout(() => setTriggerState('idle'), 3000);
     }
   };
 
   return (
     <div className="p-4 bg-panel border border-border rounded-lg space-y-3">
+      {/* Title + story count badge */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-[var(--text)] truncate">{spec.specName}</p>
-          <p className="text-xs text-muted mt-0.5">{spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}</p>
-        </div>
-      </div>
-      <div className="relative">
-        {showPopover && (
-          <TriggerPopover
-            defaultParallelism={defaultParallelism}
-            loading={triggerState === 'triggering'}
-            onTrigger={handleTrigger}
-            onClose={() => setShowPopover(false)}
-          />
-        )}
-        {triggerState === 'success' ? (
-          <div className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
-            <CheckCircle size={12} />
-            Launching...
+          <div className="flex items-center gap-2 mt-1 text-xs text-muted">
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-accent/10 text-accent text-[10px] font-semibold leading-none">
+              {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
+            </span>
+            <span>Generated {relativeTime(spec.generatedAt)}</span>
           </div>
-        ) : (
-          <button
-            onClick={() => setShowPopover(true)}
-            disabled={triggerState === 'triggering'}
-            className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
-          >
-            {triggerState === 'triggering' ? (
-              <><Loader2 size={12} className="animate-spin" /> Starting...</>
-            ) : (
-              <><Rocket size={12} /> Run</>
-            )}
-          </button>
-        )}
+        </div>
+        {/* Workspace badge */}
+        <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-bg text-muted border border-border">
+          <FolderGit2 size={10} />
+          {workspaceName}
+        </span>
       </div>
+
+      {/* Trigger button */}
+      {triggerState === 'success' ? (
+        <div className="flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+          <CheckCircle size={14} />
+          Launching...
+        </div>
+      ) : (
+        <button
+          onClick={handleTrigger}
+          disabled={workspaceBusy || triggerState === 'triggering'}
+          title={workspaceBusy ? 'A run is already active for this workspace' : specPath}
+          className={`flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium transition-opacity ${
+            workspaceBusy
+              ? 'bg-yellow-500/10 text-yellow-600 border border-yellow-500/30 cursor-not-allowed'
+              : 'bg-accent text-white hover:opacity-90 disabled:opacity-60'
+          }`}
+        >
+          {workspaceBusy ? (
+            <><AlertCircle size={14} /> Workspace busy</>
+          ) : triggerState === 'triggering' ? (
+            <><Loader2 size={14} className="animate-spin" /> Starting...</>
+          ) : triggerState === 'error' ? (
+            <><XCircle size={14} /> Failed — retry</>
+          ) : (
+            <>Trigger <ArrowRight size={14} /></>
+          )}
+        </button>
+      )}
     </div>
   );
 }
 
 // ─── Recent Runs Section ────────────────────────────────────────────────────
 
-function RecentRunRow({ run, onNavigateToRun }: {
+function RecentRunRow({ run, onNavigateToRun, justCompleted }: {
   run: PipelineRun;
   onNavigateToRun?: (runId: number) => void;
+  justCompleted?: boolean;
 }) {
   return (
     <button
       onClick={() => onNavigateToRun?.(run.id)}
-      className="w-full text-left px-3 py-2.5 hover:bg-bg transition-colors group"
+      className={`w-full text-left px-3 py-2.5 min-h-[44px] hover:bg-bg transition-colors group${justCompleted ? ' animate-slide-to-recent' : ''}`}
     >
       <div className="flex items-center justify-between gap-3">
         {/* Left: spec name + run ID */}
@@ -512,10 +557,10 @@ function RecentRunRow({ run, onNavigateToRun }: {
 
         {/* Right: status badge + timestamp + duration */}
         <div className="flex items-center gap-2 shrink-0">
-          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${STATUS_BADGE_STYLES[run.status] || 'bg-gray-500/10 text-gray-400'}`}>
+          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${STATUS_BADGE_STYLES[run.status] || 'bg-gray-500/10 text-gray-400'}`} aria-live="polite">
             {STATUS_BADGE_LABELS[run.status] || run.status}
           </span>
-          <span className="text-xs text-muted whitespace-nowrap">
+          <span className="hidden sm:inline text-xs text-muted whitespace-nowrap">
             {formatTimestamp(run.started_at)}
           </span>
           <span className="text-xs text-muted font-mono tabular-nums whitespace-nowrap">
@@ -529,8 +574,14 @@ function RecentRunRow({ run, onNavigateToRun }: {
 
 // ─── HubPanel ───────────────────────────────────────────────────────────────
 
+interface CompletionToast {
+  id: number;
+  message: string;
+  type: 'success' | 'error';
+}
+
 export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview }: { onNavigate: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; onNavigateToSpecReview?: (specId: string) => void }) {
-  const { workspaceId, workspaces, addWorkspace } = useWorkspace();
+  const { workspaceId, workspaces, selectedWorkspace, addWorkspace } = useWorkspace();
   const [showAddWorkspace, setShowAddWorkspace] = useState(false);
   const [activeRun, setActiveRun] = useState<PipelineRun | null>(null);
   const [totalStories, setTotalStories] = useState(0);
@@ -539,12 +590,30 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [recentRuns, setRecentRuns] = useState<PipelineRun[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [defaultParallelism, setDefaultParallelism] = useState(1);
+  const [completionToasts, setCompletionToasts] = useState<CompletionToast[]>([]);
+  const completionToastId = useRef(0);
+  const [justCompletedRunIds, setJustCompletedRunIds] = useState<Set<number>>(new Set());
+
+  const showCompletionToast = useCallback((status: 'done' | 'failed', specName: string) => {
+    const id = completionToastId.current++;
+    const message = status === 'done'
+      ? `Run completed: ${specName}`
+      : `Run failed: ${specName}`;
+    const type = status === 'done' ? 'success' as const : 'error' as const;
+    setCompletionToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setCompletionToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  }, []);
+
+  const dismissCompletionToast = useCallback((id: number) => {
+    setCompletionToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
 
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
 
-    const [runsRes, specsRes, approvedRes, configRes] = await Promise.all([
+    const [runsRes, specsRes, approvedRes] = await Promise.all([
       apiFetch<{ items: PipelineRun[] }>(
         `/api/pipeline/runs?workspaceId=${workspaceId}&limit=20`,
         { silent: true },
@@ -557,20 +626,18 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
         `/api/specs?workspaceId=${workspaceId}&status=approved`,
         { silent: true },
       ).catch(() => ({ items: [] as SpecSummary[] })),
-      apiFetch<{ config: { defaultParallelism?: number } }>(
-        `/api/workspaces/${workspaceId}/pipeline-config`,
-        { silent: true },
-      ).catch(() => ({ config: {} as { defaultParallelism?: number } })),
     ]);
 
     const runs = runsRes.items;
     const active = runs.find((r) => r.status === 'running' || r.status === 'paused') ?? null;
     setActiveRun(active);
     setPendingSpecs(specsRes.items);
-    setApprovedSpecs(approvedRes.items);
-    setDefaultParallelism(configRes.config.defaultParallelism ?? 1);
     // Recent = completed runs (not active), most recent first
     setRecentRuns(runs.filter((r) => r.status !== 'running' && r.status !== 'paused').slice(0, 10));
+
+    // Filter approved specs: exclude any that have an active or completed run
+    const runSpecSlugs = new Set(runs.map((r) => specSlug(r.spec_path)));
+    setApprovedSpecs(approvedRes.items.filter((s) => !runSpecSlugs.has(s.id)));
 
     // Fetch total story count from spec for the active run
     if (active) {
@@ -677,11 +744,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   }
 
   if (!loaded) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <span className="text-sm text-muted">Loading...</span>
-      </div>
-    );
+    return <HubSkeleton />;
   }
 
   const hasActiveRun = !!activeRun;
@@ -725,6 +788,9 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
 
   return (
     <div className="h-full overflow-y-auto">
+      {/* Completion toast — top-right slide-in */}
+      <ToastContainer toasts={completionToasts} onDismiss={dismissCompletionToast} position="top-right" />
+
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8">
         {/* Active Run */}
         {hasActiveRun && (
@@ -734,6 +800,10 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
               run={activeRun}
               totalStories={totalStories}
               onNavigateToRun={onNavigateToRun}
+              onRunCompleted={(status) => {
+                showCompletionToast(status, specLabel(activeRun.spec_path));
+                setJustCompletedRunIds(prev => new Set(prev).add(activeRun.id));
+              }}
             />
           </section>
         )}
@@ -770,8 +840,13 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                   key={spec.id}
                   spec={spec}
                   workspaceId={workspaceId!}
-                  defaultParallelism={defaultParallelism}
-                  onNavigate={onNavigate}
+                  workspaceName={selectedWorkspace?.name ?? 'workspace'}
+                  workspaceBusy={hasActiveRun}
+                  onTriggered={() => {
+                    // Remove from ready-to-run immediately; SSE refetch will
+                    // populate the active run section when run_started arrives
+                    setApprovedSpecs((prev) => prev.filter((s) => s.id !== spec.id));
+                  }}
                 />
               ))}
             </div>
@@ -792,7 +867,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
             </div>
             <div className="bg-panel border border-border rounded-lg divide-y divide-border">
               {recentRuns.map((run) => (
-                <RecentRunRow key={run.id} run={run} onNavigateToRun={onNavigateToRun} />
+                <RecentRunRow key={run.id} run={run} onNavigateToRun={onNavigateToRun} justCompleted={justCompletedRunIds.has(run.id)} />
               ))}
             </div>
             <UpdatedFooter lastUpdated={lastUpdated} />

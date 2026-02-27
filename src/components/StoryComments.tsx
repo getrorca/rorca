@@ -50,7 +50,7 @@ function timeAgo(dateStr: string): string {
 
 function Avatar({ name, url }: { name: string; url: string | null }) {
   if (url) {
-    return <img src={url} alt={name} className="w-6 h-6 rounded-full shrink-0" />;
+    return <img src={url} alt={name} width={24} height={24} loading="lazy" className="w-6 h-6 rounded-full shrink-0" />;
   }
   const initial = name.charAt(0).toUpperCase();
   return (
