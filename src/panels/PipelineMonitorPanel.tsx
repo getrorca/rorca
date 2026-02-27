@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle, DollarSign } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -10,8 +10,9 @@ import { HelpTooltip } from '../components/HelpTooltip';
 import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
 import SpecPickerModal from '../components/SpecPickerModal';
 import AgentBadge from '../components/AgentBadge';
+import FinOpsTab from '../components/FinOpsTab';
 
-type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens';
+type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens' | 'finops';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -974,6 +975,17 @@ export default function PipelineMonitorPanel() {
                   </span>
                 )}
               </button>
+              <button
+                onClick={() => setDetailTab('finops')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  detailTab === 'finops'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                }`}
+              >
+                <DollarSign className="w-3.5 h-3.5" />
+                FinOps
+              </button>
             </div>
 
             {/* Terminal tab — xterm.js live output */}
@@ -1256,6 +1268,18 @@ export default function PipelineMonitorPanel() {
                         <span className="ml-auto">Context window: {formatTokens(CONTEXT_WINDOW)}</span>
                       </div>
                     </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {/* FinOps tab — cost breakdown and savings */}
+            {detailTab === 'finops' && (
+              <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                {selectedRunId ? (
+                  <FinOpsTab runId={selectedRunId} />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                    Select a run to view FinOps data
                   </div>
                 )}
               </div>
