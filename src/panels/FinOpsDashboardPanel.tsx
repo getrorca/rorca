@@ -221,7 +221,7 @@ export default function FinOpsDashboardPanel() {
         {data.allSubscription && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-500/10 border border-orange-500/20 text-xs text-orange-400">
             <Info size={14} className="shrink-0" />
-            <span>All runs used Claude subscription — token counts shown, no dollar costs.</span>
+            <span>All runs used subscription-based agents (Claude/Codex) — token counts shown, no dollar costs.</span>
           </div>
         )}
 
