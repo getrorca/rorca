@@ -1,6 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { listBackups } from '../lib/backup';
+import { agentType } from '../lib/config';
+import { detectOpenCode } from '../lib/opencode-detector';
+import { detectCodex } from '../lib/codex-detector';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -50,12 +53,25 @@ router.get('/', (_req: Request, res: Response) => {
   const status = dbConnected ? 'healthy' : 'degraded';
   const statusCode = dbConnected ? 200 : 503;
 
+  // OC-002: Include opencode status when agentType=opencode
+  const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
+  // OC-024: Include codex status when agentType=codex
+  const codex = agentType === 'codex' ? detectCodex() : undefined;
+
   res.status(statusCode).json({
     status,
     version: VERSION,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     db_connected: dbConnected,
     active_runs: activeRuns,
+    ...(agentType === 'opencode' && opencode ? {
+      opencodeInstalled: opencode.opencodeInstalled,
+      opencodeVersion: opencode.opencodeVersion,
+    } : {}),
+    ...(agentType === 'codex' && codex ? {
+      codexInstalled: codex.codexInstalled,
+      codexVersion: codex.codexVersion,
+    } : {}),
   });
 });
 
@@ -125,6 +141,11 @@ router.get('/detailed', (_req: Request, res: Response) => {
   const status = dbConnected ? 'healthy' : 'degraded';
   const statusCode = dbConnected ? 200 : 503;
 
+  // OC-002: Include opencode status when agentType=opencode
+  const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
+  // OC-024: Include codex status when agentType=codex
+  const codex = agentType === 'codex' ? detectCodex() : undefined;
+
   res.status(statusCode).json({
     status,
     version: VERSION,
@@ -135,6 +156,14 @@ router.get('/detailed', (_req: Request, res: Response) => {
     pending_specs_count: pendingSpecsCount,
     memory_usage: memoryUsage,
     last_backup_at: lastBackupAt,
+    ...(agentType === 'opencode' && opencode ? {
+      opencodeInstalled: opencode.opencodeInstalled,
+      opencodeVersion: opencode.opencodeVersion,
+    } : {}),
+    ...(agentType === 'codex' && codex ? {
+      codexInstalled: codex.codexInstalled,
+      codexVersion: codex.codexVersion,
+    } : {}),
   });
 });
 

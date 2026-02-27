@@ -1,12 +1,13 @@
-import { useState, useEffect, useCallback } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, CreditCard, ExternalLink, Download, Crown, Users, FileText, ChevronDown, ChevronUp } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
 import { useDirectionLayer } from '../hooks/useDirectionLayer';
-import { apiFetch, clearTokens } from '../lib/apiFetch';
+import { apiFetch, clearTokens, BASE_URL } from '../lib/apiFetch';
 import GitHubSettingsPanel from './GitHubSettingsPanel';
 import { modLabel } from '../hooks/useHotkeys';
+import OpenCodeSetupGuide from '../components/OpenCodeSetupGuide';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -262,7 +263,7 @@ const PROVIDER_DESCRIPTIONS: Record<string, string> = {
   'claude-cli': 'Uses your Claude subscription via the claude CLI. No API key needed.',
   'anthropic': 'Direct API access to Claude models. Requires an Anthropic API key.',
   'openai-compat': 'Any OpenAI-compatible endpoint (OpenAI, Groq, Together, DeepSeek, Ollama, etc.).',
-  'openrouter': 'Access 200+ models through a single API key.',
+  'openrouter': 'Access 200+ models through a single API key. Configure in Execution Engine above.',
 };
 
 function ProvidersAndDisplaySection() {
@@ -270,8 +271,1042 @@ function ProvidersAndDisplaySection() {
     <div className="max-w-2xl space-y-8">
       <DisplaySection />
       <div className="border-t border-border pt-6">
+        <ExecutionEngineSection />
+      </div>
+      <div className="border-t border-border pt-6">
+        <ModelRoutingSection />
+      </div>
+      <div className="border-t border-border pt-6">
         <ProvidersSection />
       </div>
+    </div>
+  );
+}
+
+// ─── Execution Engine Section (OC-009) ───────────────────────────────────────
+
+interface AgentConfig {
+  agentType: 'claude' | 'opencode' | 'codex';
+  agentModel: string | null;
+  opencodeInstalled: boolean | null;
+  opencodeVersion: string | null;
+  codexInstalled: boolean | null;
+  codexVersion: string | null;
+  copilotConnected: boolean;
+  copilotUsername: string | null;
+}
+
+interface CopilotStatus {
+  connected: boolean;
+  githubUsername: string | null;
+  connectedAt: string | null;
+}
+
+interface OpenCodeModelEntry {
+  id: string;
+  name: string;
+  provider: string;
+  contextWindow: number;
+}
+
+interface OllamaStatus {
+  available: boolean;
+  models: Array<{ id: string; name: string; size: number; parameterSize: string }>;
+  error?: string;
+}
+
+// ─── Claude Auth Status (OC-025) ────────────────────────────────────────────
+
+interface ClaudeAuthState {
+  connected: boolean;
+  email?: string;
+  tier?: string;
+  expiresAt?: number;
+  cliInstalled: boolean;
+  cliVersion?: string;
+}
+
+function ClaudeAuthStatus() {
+  const [auth, setAuth] = useState<ClaudeAuthState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchAuth = useCallback(async () => {
+    try {
+      const state = await apiFetch<ClaudeAuthState>('/api/config/claude-auth');
+      setAuth(state);
+    } catch { /* silent */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchAuth();
+  }, [fetchAuth]);
+
+  // Listen for SSE events for auth changes
+  useEffect(() => {
+    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
+    const handler = (e: MessageEvent) => {
+      try {
+        const event = JSON.parse(e.data);
+        if (event.event_type === 'claude_auth_connected' || event.event_type === 'claude_auth_disconnected') {
+          fetchAuth();
+        }
+      } catch { /* ignore parse errors */ }
+    };
+    es.addEventListener('wal_event', handler);
+    return () => { es.close(); };
+  }, [fetchAuth]);
+
+  const handleLogin = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await apiFetch('/api/config/claude-auth/login', { method: 'POST' });
+    } catch (err: any) {
+      setError(err.message || 'Failed to trigger Claude login');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await apiFetch('/api/config/claude-auth/logout', { method: 'POST' });
+      setAuth(prev => prev ? { ...prev, connected: false, email: undefined, tier: undefined, expiresAt: undefined } : prev);
+    } catch (err: any) {
+      setError(err.message || 'Failed to disconnect Claude');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-muted text-xs">
+        <Loader2 size={12} className="animate-spin" /> Checking Claude auth...
+      </div>
+    );
+  }
+
+  if (!auth) return null;
+
+  // Token expiry warning: within 24h
+  const expiringWarning = auth.expiresAt && (auth.expiresAt - Date.now()) < 24 * 60 * 60 * 1000 && auth.expiresAt > Date.now();
+
+  return (
+    <div className={`border rounded-lg p-4 transition-colors ${
+      auth.connected
+        ? expiringWarning
+          ? 'border-amber-500/30 bg-amber-500/5'
+          : 'border-green-500/30 bg-green-500/5'
+        : 'border-amber-500/30 bg-amber-500/5'
+    }`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={`w-2.5 h-2.5 rounded-full ${
+            auth.connected
+              ? expiringWarning ? 'bg-amber-400' : 'bg-green-400'
+              : 'bg-amber-400'
+          }`} />
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-[var(--text)]">Claude Account</span>
+              {auth.cliVersion && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent border border-accent/20">
+                  CLI v{auth.cliVersion}
+                </span>
+              )}
+              {!auth.cliInstalled && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-red-500/15 text-red-400 border border-red-500/20">
+                  CLI not found
+                </span>
+              )}
+            </div>
+            {auth.connected ? (
+              <p className="text-xs text-green-400 mt-0.5 flex items-center gap-1">
+                <CheckCircle2 size={12} />
+                {auth.email
+                  ? <>Connected as <span className="font-medium">{auth.email}</span>{auth.tier ? ` (Claude ${auth.tier})` : ''}</>
+                  : 'Connected via Claude CLI'
+                }
+              </p>
+            ) : (
+              <p className="text-xs text-amber-400 mt-0.5 flex items-center gap-1">
+                <AlertTriangle size={12} />
+                Not connected — sign in to enable pipeline execution
+              </p>
+            )}
+            {expiringWarning && (
+              <p className="text-[11px] text-amber-400 mt-1 flex items-center gap-1">
+                <AlertTriangle size={11} />
+                Session expiring soon — reconnect to avoid pipeline failures
+              </p>
+            )}
+          </div>
+        </div>
+        <div>
+          {auth.connected ? (
+            <button
+              onClick={handleLogout}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-red-500/30 rounded text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />}
+              Disconnect
+            </button>
+          ) : (
+            <button
+              onClick={handleLogin}
+              disabled={actionLoading || !auth.cliInstalled}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+              Connect Claude Account
+            </button>
+          )}
+        </div>
+      </div>
+      {error && (
+        <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+          <XCircle size={14} />
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Codex Auth Status (OC-026) ─────────────────────────────────────────────
+
+interface CodexAuthState {
+  connected: boolean;
+  username?: string;
+  plan?: string;
+  cliInstalled: boolean;
+  cliVersion?: string;
+}
+
+function CodexAuthStatus() {
+  const [auth, setAuth] = useState<CodexAuthState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchAuth = useCallback(async () => {
+    try {
+      const state = await apiFetch<CodexAuthState>('/api/config/codex-auth');
+      setAuth(state);
+    } catch { /* silent */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchAuth();
+  }, [fetchAuth]);
+
+  // Listen for SSE events for auth changes
+  useEffect(() => {
+    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
+    const handler = (e: MessageEvent) => {
+      try {
+        const event = JSON.parse(e.data);
+        if (event.event_type === 'codex_auth_connected' || event.event_type === 'codex_auth_disconnected') {
+          fetchAuth();
+        }
+      } catch { /* ignore parse errors */ }
+    };
+    es.addEventListener('wal_event', handler);
+    return () => { es.close(); };
+  }, [fetchAuth]);
+
+  const handleLogin = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await apiFetch('/api/config/codex-auth/login', { method: 'POST' });
+    } catch (err: any) {
+      setError(err.message || 'Failed to trigger Codex login');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await apiFetch('/api/config/codex-auth/logout', { method: 'POST' });
+      setAuth(prev => prev ? { ...prev, connected: false, username: undefined, plan: undefined } : prev);
+    } catch (err: any) {
+      setError(err.message || 'Failed to disconnect ChatGPT');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-muted text-xs">
+        <Loader2 size={12} className="animate-spin" /> Checking Codex auth...
+      </div>
+    );
+  }
+
+  if (!auth) return null;
+
+  // Capitalize plan name for display
+  const planDisplay = auth.plan ? auth.plan.charAt(0).toUpperCase() + auth.plan.slice(1) : null;
+
+  return (
+    <div className={`border rounded-lg p-4 transition-colors ${
+      auth.connected
+        ? 'border-green-500/30 bg-green-500/5'
+        : 'border-amber-500/30 bg-amber-500/5'
+    }`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={`w-2.5 h-2.5 rounded-full ${
+            auth.connected ? 'bg-green-400' : 'bg-amber-400'
+          }`} />
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-[var(--text)]">ChatGPT Account</span>
+              {auth.cliVersion && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent border border-accent/20">
+                  CLI v{auth.cliVersion}
+                </span>
+              )}
+              {!auth.cliInstalled && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-red-500/15 text-red-400 border border-red-500/20">
+                  CLI not found
+                </span>
+              )}
+            </div>
+            {auth.connected ? (
+              <p className="text-xs text-green-400 mt-0.5 flex items-center gap-1">
+                <CheckCircle2 size={12} />
+                {auth.username
+                  ? <>Connected as <span className="font-medium">{auth.username}</span>{planDisplay ? ` (ChatGPT ${planDisplay})` : ''}</>
+                  : 'Connected via Codex CLI'
+                }
+              </p>
+            ) : (
+              <p className="text-xs text-amber-400 mt-0.5 flex items-center gap-1">
+                <AlertTriangle size={12} />
+                Not connected — sign in to enable Codex pipeline execution
+              </p>
+            )}
+          </div>
+        </div>
+        <div>
+          {auth.connected ? (
+            <button
+              onClick={handleLogout}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-red-500/30 rounded text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />}
+              Disconnect
+            </button>
+          ) : (
+            <button
+              onClick={handleLogin}
+              disabled={actionLoading || !auth.cliInstalled}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+              Connect ChatGPT Account
+            </button>
+          )}
+        </div>
+      </div>
+      {error && (
+        <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+          <XCircle size={14} />
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExecutionEngineSection() {
+  const [config, setConfig] = useState<AgentConfig | null>(null);
+  const [models, setModels] = useState<OpenCodeModelEntry[]>([]);
+  const [grouped, setGrouped] = useState<Record<string, OpenCodeModelEntry[]>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
+  const [copilotStatus, setCopilotStatus] = useState<CopilotStatus>({ connected: false, githubUsername: null, connectedAt: null });
+  const [copilotLoading, setCopilotLoading] = useState(false);
+  const [showSetupGuide, setShowSetupGuide] = useState(false);
+
+  // OpenRouter state (OC-027)
+  const [openRouterConnected, setOpenRouterConnected] = useState(false);
+  const [openRouterModelCount, setOpenRouterModelCount] = useState<number | null>(null);
+  const [openRouterFreeCount, setOpenRouterFreeCount] = useState<number | null>(null);
+  const [openRouterTesting, setOpenRouterTesting] = useState(false);
+  const [openRouterTestError, setOpenRouterTestError] = useState<string | null>(null);
+  const [openRouterKey, setOpenRouterKey] = useState('');
+  const [openRouterSaving, setOpenRouterSaving] = useState(false);
+  const [openRouterModels, setOpenRouterModels] = useState<Array<{
+    id: string; name: string; provider: string; contextWindow: number; free: boolean;
+  }>>([]);
+  const [openRouterGrouped, setOpenRouterGrouped] = useState<Record<string, Array<{
+    id: string; name: string; provider: string; contextWindow: number; free: boolean;
+  }>>>({});
+
+  // Local form state
+  const [selectedType, setSelectedType] = useState<'claude' | 'opencode' | 'codex'>('claude');
+  const [selectedModel, setSelectedModel] = useState<string>('');
+
+  const fetchCopilotStatus = useCallback(async () => {
+    try {
+      const status = await apiFetch<CopilotStatus>('/api/copilot/status');
+      setCopilotStatus(status);
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => {
+    Promise.all([
+      apiFetch<AgentConfig>('/api/config'),
+      apiFetch<{ models: OpenCodeModelEntry[]; grouped: Record<string, OpenCodeModelEntry[]>; ollamaAvailable?: boolean }>('/api/config/opencode-models'),
+      apiFetch<OllamaStatus>('/api/config/ollama'),
+    ]).then(([cfg, modelData, ollama]) => {
+      setConfig(cfg);
+      setSelectedType(cfg.agentType === 'opencode' ? 'opencode' : cfg.agentType === 'codex' ? 'codex' : 'claude');
+      setSelectedModel(cfg.agentModel ?? '');
+      setModels(modelData.models);
+      setGrouped(modelData.grouped);
+      setOllamaStatus(ollama);
+      setCopilotStatus({ connected: cfg.copilotConnected, githubUsername: cfg.copilotUsername, connectedAt: null });
+    }).catch(() => {})
+      .finally(() => setLoading(false));
+    fetchCopilotStatus();
+  }, [fetchCopilotStatus]);
+
+  // Check URL params for copilot=connected (OAuth callback redirect)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('copilot') === 'connected') {
+      fetchCopilotStatus();
+      // Clean up URL
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [fetchCopilotStatus]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const result = await apiFetch<{ agentType: string; agentModel: string | null }>('/api/config/agent', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agentType: selectedType,
+          agentModel: selectedType === 'opencode' ? selectedModel : null,
+        }),
+      });
+      setConfig(prev => prev ? {
+        ...prev,
+        agentType: result.agentType as AgentConfig['agentType'],
+        agentModel: result.agentModel,
+      } : prev);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to save configuration');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCopilotConnect = async () => {
+    setCopilotLoading(true);
+    try {
+      const { url } = await apiFetch<{ url: string }>('/api/copilot/connect');
+      window.location.href = url;
+    } catch (err: any) {
+      setError(err.message || 'Failed to start GitHub Copilot sign-in');
+      setCopilotLoading(false);
+    }
+  };
+
+  const handleCopilotDisconnect = async () => {
+    setCopilotLoading(true);
+    try {
+      await apiFetch('/api/copilot/disconnect', { method: 'DELETE' });
+      setCopilotStatus({ connected: false, githubUsername: null, connectedAt: null });
+      // If currently using copilot model, clear the selection
+      if (selectedModel === 'github/copilot') {
+        setSelectedModel('');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to disconnect GitHub Copilot');
+    } finally {
+      setCopilotLoading(false);
+    }
+  };
+
+  // ─── OpenRouter handlers (OC-027) ─────────────────────────────────────────
+
+  const fetchOpenRouterModels = useCallback(async () => {
+    try {
+      const data = await apiFetch<{
+        models: Array<{ id: string; name: string; provider: string; contextWindow: number; free: boolean }>;
+        modelCount: number;
+        grouped: Record<string, Array<{ id: string; name: string; provider: string; contextWindow: number; free: boolean }>>;
+      }>('/api/config/openrouter-models');
+      setOpenRouterModels(data.models);
+      setOpenRouterGrouped(data.grouped);
+      setOpenRouterModelCount(data.modelCount);
+      setOpenRouterConnected(true);
+      setOpenRouterTestError(null);
+    } catch {
+      // Key not configured or API error — not connected
+      setOpenRouterConnected(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedType === 'opencode') {
+      fetchOpenRouterModels();
+    }
+  }, [selectedType, fetchOpenRouterModels]);
+
+  const handleOpenRouterTest = async (keyToTest?: string) => {
+    setOpenRouterTesting(true);
+    setOpenRouterTestError(null);
+    try {
+      const result = await apiFetch<{ ok: boolean; latencyMs?: number; modelCount?: number; freeCount?: number; error?: string }>(
+        '/api/config/openrouter-test',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: keyToTest }),
+        },
+      );
+      if (result.ok) {
+        setOpenRouterConnected(true);
+        setOpenRouterModelCount(result.modelCount ?? null);
+        setOpenRouterFreeCount(result.freeCount ?? null);
+        setOpenRouterTestError(null);
+        // Refresh model list
+        fetchOpenRouterModels();
+      } else {
+        setOpenRouterConnected(false);
+        setOpenRouterTestError(result.error ?? 'Connection failed');
+      }
+    } catch (err: any) {
+      setOpenRouterConnected(false);
+      setOpenRouterTestError(err.message || 'Connection failed');
+    } finally {
+      setOpenRouterTesting(false);
+    }
+  };
+
+  const handleOpenRouterSaveKey = async () => {
+    if (!openRouterKey.trim()) return;
+    setOpenRouterSaving(true);
+    setOpenRouterTestError(null);
+    try {
+      await apiFetch('/api/vault/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'openrouter', key: openRouterKey.trim(), label: 'OpenRouter' }),
+      });
+      // Test the saved key
+      await handleOpenRouterTest();
+      setOpenRouterKey('');
+    } catch (err: any) {
+      setOpenRouterTestError(err.message || 'Failed to save key');
+    } finally {
+      setOpenRouterSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading execution engine config...</div>;
+  }
+
+  const hasChanges = config && (
+    selectedType !== config.agentType ||
+    (selectedType === 'opencode' && selectedModel !== (config.agentModel ?? ''))
+  );
+
+  const PROVIDER_ORDER = ['OpenAI', 'Google', 'Anthropic', 'OpenRouter', 'GitHub Copilot', 'Local'];
+
+  return (
+    <div className="space-y-5">
+      {showSetupGuide && <OpenCodeSetupGuide onClose={() => setShowSetupGuide(false)} />}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+            <Cpu size={16} className="text-accent" />
+            Execution Engine
+          </h2>
+          <p className="text-xs text-muted mt-0.5">
+            Choose how Rorca executes pipeline stories
+            <button
+              onClick={() => setShowSetupGuide(true)}
+              className="inline-flex items-center gap-1 ml-2 text-accent hover:text-accent/80 transition-colors"
+            >
+              <BookOpen size={11} />
+              <span className="underline underline-offset-2">Setup Guide</span>
+            </button>
+          </p>
+        </div>
+        {/* Status badge */}
+        <div className="flex items-center gap-2">
+          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${
+            config?.agentType === 'codex'
+              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+              : config?.agentType === 'opencode'
+                ? config?.agentModel === 'github/copilot'
+                  ? 'bg-[#24292f]/20 text-[#8b949e] border border-[#30363d]'
+                  : config?.agentModel?.startsWith('ollama/')
+                    ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                    : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+                : 'bg-accent/10 text-accent border border-accent/20'
+          }`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${
+              config?.agentType === 'codex'
+                ? 'bg-emerald-400'
+                : config?.agentType === 'opencode'
+                  ? config?.agentModel === 'github/copilot' ? 'bg-[#8b949e]'
+                    : config?.agentModel?.startsWith('ollama/') ? 'bg-green-400' : 'bg-purple-400'
+                  : 'bg-accent'
+            }`} />
+            {config?.agentType === 'codex'
+              ? 'Codex CLI'
+              : config?.agentType === 'opencode'
+                ? config?.agentModel === 'github/copilot' ? 'GitHub Copilot'
+                  : config?.agentModel?.startsWith('ollama/') ? 'Local (Ollama)' : 'OpenCode'
+                : 'Claude'}
+            {config?.agentType === 'opencode' && config?.agentModel && config?.agentModel !== 'github/copilot' && (
+              <span className="text-muted ml-0.5">
+                {models.find(m => m.id === config.agentModel)?.name ?? config.agentModel}
+              </span>
+            )}
+          </span>
+          {config?.agentType === 'codex' && (
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-500/15 text-emerald-400">
+              Subscription
+            </span>
+          )}
+          {config?.agentType === 'opencode' && config?.agentModel === 'github/copilot' && (
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400">
+              Subscription
+            </span>
+          )}
+          {config?.agentType === 'opencode' && config?.agentModel?.startsWith('ollama/') && (
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-green-500/15 text-green-400">
+              Free
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Agent type toggle */}
+      <div className="flex gap-3">
+        <button
+          onClick={() => setSelectedType('claude')}
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
+            selectedType === 'claude'
+              ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
+              : 'border-border bg-bg hover:border-accent/30'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
+              selectedType === 'claude' ? 'border-accent' : 'border-border'
+            }`}>
+              {selectedType === 'claude' && <div className="w-1.5 h-1.5 rounded-full bg-accent" />}
+            </div>
+            <span className="text-sm font-medium text-[var(--text)]">Claude Subscription</span>
+          </div>
+          <p className="text-[11px] text-muted ml-5">
+            Uses <code className="text-xs bg-panel px-1 rounded">claude --print</code> via your Pro/Max subscription. No API key needed.
+          </p>
+        </button>
+
+        <button
+          onClick={() => setSelectedType('opencode')}
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
+            selectedType === 'opencode'
+              ? 'border-purple-500/60 bg-purple-500/5 ring-1 ring-purple-500/30'
+              : 'border-border bg-bg hover:border-purple-500/30'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
+              selectedType === 'opencode' ? 'border-purple-500' : 'border-border'
+            }`}>
+              {selectedType === 'opencode' && <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />}
+            </div>
+            <span className="text-sm font-medium text-[var(--text)]">OpenCode (API Key)</span>
+          </div>
+          <p className="text-[11px] text-muted ml-5">
+            75+ models via API key: OpenAI, Google, Anthropic, OpenRouter, local Ollama.
+          </p>
+        </button>
+
+        <button
+          onClick={() => setSelectedType('codex')}
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
+            selectedType === 'codex'
+              ? 'border-emerald-500/60 bg-emerald-500/5 ring-1 ring-emerald-500/30'
+              : 'border-border bg-bg hover:border-emerald-500/30'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
+              selectedType === 'codex' ? 'border-emerald-500' : 'border-border'
+            }`}>
+              {selectedType === 'codex' && <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+            </div>
+            <span className="text-sm font-medium text-[var(--text)]">Codex CLI (ChatGPT subscription)</span>
+          </div>
+          <p className="text-[11px] text-muted ml-5">
+            Uses <code className="text-xs bg-panel px-1 rounded">codex --approval-mode auto-edit</code> via your ChatGPT Plus/Pro subscription.
+          </p>
+        </button>
+      </div>
+
+      {/* Claude auth status (OC-025) */}
+      {selectedType === 'claude' && <ClaudeAuthStatus />}
+
+      {/* Codex auth status (OC-026) */}
+      {selectedType === 'codex' && <CodexAuthStatus />}
+
+      {/* OpenCode installation status */}
+      {selectedType === 'opencode' && config && (
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${
+          config.opencodeInstalled
+            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+            : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
+        }`}>
+          {config.opencodeInstalled ? (
+            <>
+              <CheckCircle2 size={14} />
+              OpenCode installed{config.opencodeVersion ? ` (v${config.opencodeVersion})` : ''}
+            </>
+          ) : (
+            <>
+              <AlertTriangle size={14} />
+              OpenCode not found. Install: <code className="bg-panel px-1 rounded">npm i -g opencode</code>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Ollama status (shown when OpenCode selected) */}
+      {selectedType === 'opencode' && ollamaStatus && (
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${
+          ollamaStatus.available
+            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+            : 'bg-zinc-500/10 border border-zinc-500/20 text-zinc-400'
+        }`}>
+          {ollamaStatus.available ? (
+            <>
+              <CheckCircle2 size={14} />
+              Ollama running — {ollamaStatus.models.length} model{ollamaStatus.models.length !== 1 ? 's' : ''} available
+              <span className="ml-auto px-1.5 py-0.5 text-[10px] font-semibold rounded bg-green-500/15 text-green-400">
+                Local — Free
+              </span>
+            </>
+          ) : (
+            <>
+              <AlertTriangle size={14} />
+              Ollama not detected. Start with: <code className="bg-panel px-1 rounded">ollama serve</code>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Model selector (only when OpenCode selected) */}
+      {selectedType === 'opencode' && (
+        <div>
+          <label className="block text-xs text-muted mb-2">Model</label>
+          <div className="relative">
+            <select
+              value={selectedModel}
+              onChange={e => setSelectedModel(e.target.value)}
+              className="w-full px-3 py-2.5 text-sm bg-bg border border-border rounded-lg focus:border-purple-500/60 outline-none appearance-none pr-8"
+            >
+              <option value="">Select a model...</option>
+              {PROVIDER_ORDER.filter(p => grouped[p]).map(provider => (
+                <optgroup key={provider} label={provider === 'Local' ? 'Local (Ollama) — Free' : provider === 'GitHub Copilot' ? 'GitHub Copilot — Subscription' : provider}>
+                  {grouped[provider].map(m => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} — {m.contextWindow >= 1000000
+                        ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
+                        : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+              {/* OpenRouter models grouped by provider family (OC-027) */}
+              {openRouterConnected && Object.entries(openRouterGrouped)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([family, familyModels]) => (
+                <optgroup key={`or-${family}`} label={`OpenRouter — ${family}`}>
+                  {familyModels.map(m => (
+                    <option key={`or-${m.id}`} value={`openrouter/${m.id}`}>
+                      {m.name}{m.free && m.contextWindow >= 8192 ? ' [Free]' : ''} — {m.contextWindow >= 1000000
+                        ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
+                        : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+          </div>
+          {!selectedModel && (
+            <p className="text-[11px] text-amber-400 mt-1.5">Select a model to enable OpenCode execution</p>
+          )}
+          {/* Free tier badge for selected Ollama model */}
+          {selectedModel.startsWith('ollama/') && (
+            <div className="flex items-center gap-2 mt-2">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
+                Local — Free
+              </span>
+              <span className="text-[11px] text-muted">No API key required. Runs entirely on your machine.</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* GitHub Copilot connection status (shown when OpenCode selected) */}
+      {selectedType === 'opencode' && (
+        <div className={`border rounded-lg p-4 transition-colors ${
+          copilotStatus.connected
+            ? 'border-green-500/30 bg-green-500/5'
+            : 'border-border bg-bg'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Github size={18} className={copilotStatus.connected ? 'text-green-400' : 'text-muted'} />
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-[var(--text)]">GitHub Copilot</span>
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">
+                    Subscription
+                  </span>
+                </div>
+                {copilotStatus.connected ? (
+                  <p className="text-xs text-green-400 mt-0.5 flex items-center gap-1">
+                    <CheckCircle2 size={12} />
+                    Connected as <span className="font-medium">{copilotStatus.githubUsername}</span>
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted mt-0.5">
+                    Sign in with GitHub to use your Copilot subscription for model access
+                  </p>
+                )}
+              </div>
+            </div>
+            <div>
+              {copilotStatus.connected ? (
+                <button
+                  onClick={handleCopilotDisconnect}
+                  disabled={copilotLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-red-500/30 rounded text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                >
+                  {copilotLoading ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />}
+                  Disconnect
+                </button>
+              ) : (
+                <button
+                  onClick={handleCopilotConnect}
+                  disabled={copilotLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[#24292f] text-white rounded hover:bg-[#2f363d] transition-colors disabled:opacity-50"
+                >
+                  {copilotLoading ? <Loader2 size={12} className="animate-spin" /> : <Github size={12} />}
+                  Sign in with GitHub
+                </button>
+              )}
+            </div>
+          </div>
+          {/* Subscription badge when connected and github/copilot selected */}
+          {copilotStatus.connected && selectedModel === 'github/copilot' && (
+            <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded bg-purple-500/10 border border-purple-500/20">
+              <span className="text-xs text-purple-400">
+                Using your GitHub Copilot subscription — no per-token API billing
+              </span>
+            </div>
+          )}
+          {/* Warning when copilot model selected but not connected */}
+          {!copilotStatus.connected && selectedModel === 'github/copilot' && (
+            <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400">
+              <AlertTriangle size={14} />
+              Sign in with GitHub above to use Copilot
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* OpenRouter provider card (OC-027) */}
+      {selectedType === 'opencode' && (
+        <div className={`border rounded-lg p-4 transition-colors ${
+          openRouterConnected
+            ? 'border-orange-500/30 bg-orange-500/5'
+            : 'border-border bg-bg'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Globe size={18} className={openRouterConnected ? 'text-orange-400' : 'text-muted'} />
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-[var(--text)]">OpenRouter</span>
+                  {openRouterConnected && openRouterModelCount !== null && (
+                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-orange-500/15 text-orange-400 border border-orange-500/20">
+                      {openRouterModelCount} models available
+                    </span>
+                  )}
+                </div>
+                {openRouterConnected ? (
+                  <p className="text-xs text-green-400 mt-0.5 flex items-center gap-1">
+                    <CheckCircle2 size={12} />
+                    Connected
+                    {openRouterFreeCount !== null && openRouterFreeCount > 0 && (
+                      <span className="text-muted ml-1">({openRouterFreeCount} free models)</span>
+                    )}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted mt-0.5">
+                    Access 200+ models through a single API key. Supports OpenAI, Anthropic, Google, Meta, Mistral, and more.
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {openRouterConnected && (
+                <button
+                  onClick={() => handleOpenRouterTest()}
+                  disabled={openRouterTesting}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border rounded hover:border-orange-500/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+                >
+                  {openRouterTesting ? <Loader2 size={12} className="animate-spin" /> : <Globe size={12} />}
+                  Test Connection
+                </button>
+              )}
+              <a
+                href="https://openrouter.ai/models"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 px-3 py-1.5 text-xs text-muted hover:text-[var(--text)] border border-border rounded hover:border-orange-500/40 transition-colors"
+              >
+                Browse all models
+              </a>
+            </div>
+          </div>
+
+          {/* Test result */}
+          {openRouterTestError && (
+            <div className="mt-3 px-3 py-2 rounded text-xs flex items-center gap-2 bg-red-500/10 border border-red-500/20 text-red-400">
+              <XCircle size={14} />
+              {openRouterTestError}
+            </div>
+          )}
+
+          {/* API key input (shown when not connected) */}
+          {!openRouterConnected && (
+            <div className="mt-3 border border-border rounded p-3 space-y-3 bg-panel">
+              <div>
+                <label className="block text-xs text-muted mb-1">OpenRouter API Key</label>
+                <input
+                  type="password"
+                  value={openRouterKey}
+                  onChange={e => setOpenRouterKey(e.target.value)}
+                  placeholder="sk-or-..."
+                  className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-orange-500/60 outline-none font-mono"
+                  autoFocus
+                />
+                <p className="text-[10px] text-muted mt-1">
+                  Get your key at{' '}
+                  <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:underline">
+                    openrouter.ai/keys
+                  </a>
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleOpenRouterTest(openRouterKey.trim())}
+                  disabled={openRouterTesting || !openRouterKey.trim()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border rounded hover:border-orange-500/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+                >
+                  {openRouterTesting ? <Loader2 size={12} className="animate-spin" /> : <Globe size={12} />}
+                  Test Connection
+                </button>
+                <button
+                  onClick={handleOpenRouterSaveKey}
+                  disabled={openRouterSaving || !openRouterKey.trim()}
+                  className="flex items-center gap-2 px-4 py-1.5 text-xs bg-orange-500 text-white rounded hover:bg-orange-500/90 disabled:opacity-50 transition-colors"
+                >
+                  {openRouterSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                  Save Key
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* OpenRouter model selector (shown when connected and an OpenRouter model is selected or browsing) */}
+          {openRouterConnected && openRouterModels.length > 0 && selectedModel.startsWith('openrouter/') && (
+            <div className="mt-3">
+              <label className="block text-xs text-muted mb-1.5">OpenRouter Model</label>
+              <div className="relative">
+                <select
+                  value={selectedModel}
+                  onChange={e => setSelectedModel(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-orange-500/60 outline-none appearance-none pr-8"
+                >
+                  {Object.entries(openRouterGrouped)
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([family, familyModels]) => (
+                    <optgroup key={family} label={family}>
+                      {familyModels.map(m => (
+                        <option key={m.id} value={`openrouter/${m.id}`}>
+                          {m.name}{m.free ? ' [Free]' : ''} — {m.contextWindow >= 1000000
+                            ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
+                            : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+          <XCircle size={14} />
+          {error}
+        </div>
+      )}
+
+      {/* Save button */}
+      <button
+        onClick={handleSave}
+        disabled={saving || !hasChanges || (selectedType === 'opencode' && !selectedModel) || (selectedType === 'codex' && config?.codexInstalled === false)}
+        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+      >
+        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
+        {saved ? 'Saved' : 'Save Engine Configuration'}
+      </button>
     </div>
   );
 }
@@ -1823,6 +2858,7 @@ const SHORTCUT_GROUPS = (() => {
         { keys: [`${mod}`, '2'], description: 'Go to Forge' },
         { keys: [`${mod}`, '3'], description: 'Go to Run View' },
         { keys: [`${mod}`, '4'], description: 'Go to Settings' },
+        { keys: [`${mod}`, '\\'], description: 'Toggle navigation drawer' },
       ],
     },
     {
@@ -1883,6 +2919,411 @@ function ShortcutsSection() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ─── Model Routing Section (OC-021) ──────────────────────────────────────────
+
+type RouterMode = 'auto' | 'fixed' | 'manual';
+type TaskType = 'echolocation' | 'planning' | 'coding' | 'lintFix' | 'testing' | 'documentation';
+
+interface OrchestrationState {
+  router: RouterMode;
+  thresholds: { haiku: [number, number]; sonnet: [number, number]; opus: [number, number] };
+  taskCascades: Record<TaskType, string>;
+  escalation: { enabled: boolean; maxRetriesOnTier: number; chain: string[]; escalateTo: Record<string, string | null> };
+  tokenBudgetPerStory: number;
+}
+
+const TASK_TYPE_LABELS: Record<TaskType, { label: string; description: string }> = {
+  echolocation: { label: 'Echolocation', description: 'Codebase exploration & context gathering' },
+  planning: { label: 'Planning', description: 'Implementation strategy & architecture decisions' },
+  coding: { label: 'Coding', description: 'Code implementation' },
+  lintFix: { label: 'Lint Fix', description: 'Lint & typecheck error resolution' },
+  testing: { label: 'Testing', description: 'Test writing & validation' },
+  documentation: { label: 'Documentation', description: 'Documentation generation' },
+};
+
+const ROUTER_MODE_INFO: Record<RouterMode, { label: string; description: string }> = {
+  auto: { label: 'Auto (Complexity Scorer)', description: 'Automatically assigns model tier based on story complexity signals' },
+  fixed: { label: 'Fixed', description: 'Uses the spec model for all stories — no tier assignment' },
+  manual: { label: 'Manual', description: 'Per-story modelTier overrides in spec JSON — falls back to auto if unset' },
+};
+
+function ModelRoutingSection() {
+  const { workspaceId } = useWorkspace();
+  const [config, setConfig] = useState<OrchestrationState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    const url = workspaceId
+      ? `/api/config/orchestration?workspaceId=${workspaceId}`
+      : '/api/config/orchestration';
+    apiFetch<OrchestrationState>(url)
+      .then(data => {
+        setConfig(data);
+        setDirty(false);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [workspaceId]);
+
+  const update = <K extends keyof OrchestrationState>(key: K, value: OrchestrationState[K]) => {
+    setConfig(prev => prev ? { ...prev, [key]: value } : prev);
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    if (!config || !workspaceId) return;
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      // Convert threshold ranges to the format backend expects
+      const payload = {
+        router: config.router,
+        thresholds: {
+          haiku: config.thresholds.haiku,
+          sonnet: config.thresholds.sonnet,
+          opus: config.thresholds.opus,
+        },
+        taskCascades: config.taskCascades,
+        escalation: config.escalation,
+        tokenBudgetPerStory: config.tokenBudgetPerStory,
+      };
+      const result = await apiFetch<OrchestrationState>('/api/config/orchestration', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, orchestration: payload }),
+      });
+      setConfig(result);
+      setDirty(false);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to save';
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading model routing config...</div>;
+  }
+
+  if (!config) return null;
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+          <SlidersHorizontal size={16} className="text-accent" />
+          Model Routing
+        </h2>
+        <p className="text-xs text-muted mt-0.5">
+          Configure how stories are assigned to model tiers and which models handle each task type.
+        </p>
+      </div>
+
+      {/* Router mode */}
+      <div>
+        <label className="block text-xs text-muted mb-2">Router Mode</label>
+        <div className="grid grid-cols-3 gap-2">
+          {(['auto', 'fixed', 'manual'] as RouterMode[]).map(mode => {
+            const info = ROUTER_MODE_INFO[mode];
+            return (
+              <button
+                key={mode}
+                onClick={() => update('router', mode)}
+                className={`border rounded-lg p-3 text-left transition-all ${
+                  config.router === mode
+                    ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
+                    : 'border-border bg-bg hover:border-accent/30'
+                }`}
+              >
+                <span className="text-xs font-medium text-[var(--text)]">{info.label}</span>
+                <p className="text-[10px] text-muted mt-0.5 leading-tight">{info.description}</p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Three-tier threshold slider (only shown in auto mode) */}
+      {config.router === 'auto' && (
+        <div>
+          <label className="block text-xs text-muted mb-2">Complexity Thresholds</label>
+          <ThresholdSlider
+            haikuMax={config.thresholds.haiku[1]}
+            sonnetMax={config.thresholds.sonnet[1]}
+            onChange={(haikuMax, sonnetMax) => {
+              update('thresholds', {
+                haiku: [0, haikuMax],
+                sonnet: [haikuMax + 1, sonnetMax],
+                opus: [sonnetMax + 1, 100],
+              });
+            }}
+          />
+        </div>
+      )}
+
+      {/* Task cascades */}
+      <div>
+        <label className="block text-xs text-muted mb-2">Task Type Model Assignments</label>
+        <div className="border border-border rounded overflow-hidden">
+          {(Object.entries(TASK_TYPE_LABELS) as [TaskType, { label: string; description: string }][]).map(([taskType, info]) => (
+            <div key={taskType} className="flex items-center justify-between px-4 py-2.5 border-b border-border last:border-b-0">
+              <div className="min-w-0">
+                <span className="text-sm text-[var(--text)]">{info.label}</span>
+                <p className="text-[10px] text-muted">{info.description}</p>
+              </div>
+              <input
+                type="text"
+                value={config.taskCascades[taskType] ?? ''}
+                onChange={e => {
+                  const newCascades = { ...config.taskCascades, [taskType]: e.target.value };
+                  update('taskCascades', newCascades);
+                }}
+                className="w-64 px-2 py-1.5 text-xs bg-bg border border-border rounded focus:border-accent outline-none font-mono"
+                placeholder="model-id"
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Escalation */}
+      <div>
+        <label className="block text-xs text-muted mb-2">Escalation</label>
+        <div className="border border-border rounded p-4 bg-bg space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-sm text-[var(--text)]">Auto-escalate on failure</span>
+              <p className="text-[10px] text-muted">Upgrade to a higher tier when a story fails repeatedly</p>
+            </div>
+            <ToggleSwitch
+              checked={config.escalation.enabled}
+              onChange={() => update('escalation', { ...config.escalation, enabled: !config.escalation.enabled })}
+            />
+          </div>
+          {config.escalation.enabled && (
+            <div className="flex items-center gap-4 pt-1">
+              <div className="flex-1">
+                <label className="block text-[10px] text-muted mb-1">Max retries per tier</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={config.escalation.maxRetriesOnTier}
+                  onChange={e => update('escalation', { ...config.escalation, maxRetriesOnTier: parseInt(e.target.value) || 0 })}
+                  className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="block text-[10px] text-muted mb-1">Chain</label>
+                <div className="flex items-center gap-1 text-xs text-muted">
+                  <span className="px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">Haiku</span>
+                  <span>&rarr;</span>
+                  <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">Sonnet</span>
+                  <span>&rarr;</span>
+                  <span className="px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">Opus</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Token budget */}
+      <div>
+        <label className="block text-xs text-muted mb-2">Token Budget Per Story</label>
+        <div className="flex items-center gap-3">
+          <input
+            type="number"
+            min={1000}
+            step={5000}
+            value={config.tokenBudgetPerStory}
+            onChange={e => update('tokenBudgetPerStory', parseInt(e.target.value) || 50000)}
+            className="w-40 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+          />
+          <span className="text-xs text-muted">input tokens before warning (default: 50,000)</span>
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+          <XCircle size={14} />
+          {error}
+        </div>
+      )}
+
+      {/* No workspace warning */}
+      {!workspaceId && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-amber-500/10 border border-amber-500/20 text-amber-400">
+          <AlertTriangle size={14} />
+          Select a workspace to save routing configuration to .rorca/config.json
+        </div>
+      )}
+
+      {/* Save */}
+      <button
+        onClick={handleSave}
+        disabled={saving || !dirty || !workspaceId}
+        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+      >
+        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
+        {saved ? 'Saved' : 'Save Routing Configuration'}
+      </button>
+    </div>
+  );
+}
+
+// ─── Three-Tier Threshold Slider ──────────────────────────────────────────────
+
+function ThresholdSlider({
+  haikuMax,
+  sonnetMax,
+  onChange,
+}: {
+  haikuMax: number;
+  sonnetMax: number;
+  onChange: (haikuMax: number, sonnetMax: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef<'haiku' | 'sonnet' | null>(null);
+
+  const getPositionFromEvent = (e: MouseEvent | React.MouseEvent): number => {
+    if (!trackRef.current) return 0;
+    const rect = trackRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    return Math.round((x / rect.width) * 100);
+  };
+
+  const handleMouseDown = (handle: 'haiku' | 'sonnet') => (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = handle;
+
+    const onMove = (ev: MouseEvent) => {
+      const pos = getPositionFromEvent(ev);
+      if (dragging.current === 'haiku') {
+        const clamped = Math.max(1, Math.min(pos, sonnetMax - 1));
+        onChange(clamped, sonnetMax);
+      } else if (dragging.current === 'sonnet') {
+        const clamped = Math.max(haikuMax + 1, Math.min(pos, 99));
+        onChange(haikuMax, clamped);
+      }
+    };
+
+    const onUp = () => {
+      dragging.current = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  return (
+    <div className="space-y-2">
+      {/* Slider track */}
+      <div
+        ref={trackRef}
+        className="relative h-8 rounded-lg overflow-hidden cursor-pointer select-none"
+        style={{ background: 'var(--bg)' }}
+      >
+        {/* Haiku region */}
+        <div
+          className="absolute top-0 bottom-0 bg-green-500/20 border-r-2 border-green-500/60"
+          style={{ left: 0, width: `${haikuMax}%` }}
+        />
+        {/* Sonnet region */}
+        <div
+          className="absolute top-0 bottom-0 bg-blue-500/20 border-r-2 border-blue-500/60"
+          style={{ left: `${haikuMax}%`, width: `${sonnetMax - haikuMax}%` }}
+        />
+        {/* Opus region */}
+        <div
+          className="absolute top-0 bottom-0 bg-purple-500/20"
+          style={{ left: `${sonnetMax}%`, right: 0 }}
+        />
+
+        {/* Haiku handle */}
+        <div
+          className="absolute top-0 bottom-0 w-3 cursor-ew-resize z-10 group"
+          style={{ left: `calc(${haikuMax}% - 6px)` }}
+          onMouseDown={handleMouseDown('haiku')}
+        >
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-6 rounded-sm bg-green-400 border border-green-500 shadow-sm group-hover:bg-green-300 transition-colors" />
+        </div>
+
+        {/* Sonnet handle */}
+        <div
+          className="absolute top-0 bottom-0 w-3 cursor-ew-resize z-10 group"
+          style={{ left: `calc(${sonnetMax}% - 6px)` }}
+          onMouseDown={handleMouseDown('sonnet')}
+        >
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-6 rounded-sm bg-blue-400 border border-blue-500 shadow-sm group-hover:bg-blue-300 transition-colors" />
+        </div>
+
+        {/* Labels inside regions */}
+        <div className="absolute inset-0 flex items-center pointer-events-none text-[10px] font-medium">
+          <span className="text-green-400 flex-none text-center" style={{ width: `${haikuMax}%` }}>
+            Haiku (0–{haikuMax})
+          </span>
+          <span className="text-blue-400 flex-none text-center" style={{ width: `${sonnetMax - haikuMax}%` }}>
+            Sonnet ({haikuMax + 1}–{sonnetMax})
+          </span>
+          <span className="text-purple-400 flex-1 text-center">
+            Opus ({sonnetMax + 1}–100)
+          </span>
+        </div>
+      </div>
+
+      {/* Numeric inputs for precise adjustment */}
+      <div className="flex items-center gap-4 text-xs">
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-green-400" />
+          <span className="text-muted">Haiku max:</span>
+          <input
+            type="number"
+            min={1}
+            max={sonnetMax - 1}
+            value={haikuMax}
+            onChange={e => {
+              const v = parseInt(e.target.value) || 1;
+              onChange(Math.max(1, Math.min(v, sonnetMax - 1)), sonnetMax);
+            }}
+            className="w-14 px-1.5 py-0.5 bg-bg border border-border rounded text-center focus:border-accent outline-none"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-blue-400" />
+          <span className="text-muted">Sonnet max:</span>
+          <input
+            type="number"
+            min={haikuMax + 1}
+            max={99}
+            value={sonnetMax}
+            onChange={e => {
+              const v = parseInt(e.target.value) || (haikuMax + 1);
+              onChange(haikuMax, Math.max(haikuMax + 1, Math.min(v, 99)));
+            }}
+            className="w-14 px-1.5 py-0.5 bg-bg border border-border rounded text-center focus:border-accent outline-none"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-purple-400" />
+          <span className="text-muted">Opus: {sonnetMax + 1}–100</span>
+        </div>
+      </div>
     </div>
   );
 }

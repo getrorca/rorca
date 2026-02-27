@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle, DollarSign } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -8,8 +8,12 @@ import RunTerminal from '../components/RunTerminal';
 import MultiPaneTerminal from '../components/MultiPaneTerminal';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 import { HelpTooltip } from '../components/HelpTooltip';
+import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
+import SpecPickerModal from '../components/SpecPickerModal';
+import AgentBadge from '../components/AgentBadge';
+import FinOpsTab from '../components/FinOpsTab';
 
-type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens';
+type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens' | 'finops';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -22,7 +26,8 @@ interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   retried_from_run_id: number | null;
-  parallelism?: number;
+  agent_type?: string;
+  agent_model?: string | null;
 }
 
 type RunStatus = PipelineRun['status'];
@@ -42,6 +47,18 @@ interface StoryResult {
 
 type StoryStatus = 'pending' | 'running' | 'pass' | 'fail' | 'retry' | 'skipped';
 
+interface EscalationInfo {
+  fromTier: string;
+  toTier: string;
+  attemptNumber: number;
+}
+
+interface RerouteInfo {
+  fromEngine: string;
+  toEngine: string;
+  reason: string;
+}
+
 interface DerivedStory {
   storyId: string;
   status: StoryStatus;
@@ -51,6 +68,9 @@ interface DerivedStory {
   priority: number;  // 1=urgent, 2=high, 3=normal, 4=low
   inputTokens: number | null;
   outputTokens: number | null;
+  escalation: EscalationInfo | null;
+  agent?: string;
+  reroute?: RerouteInfo | null;
 }
 
 const CONTEXT_WINDOW = 200_000; // 200k token context window
@@ -168,6 +188,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           priority: existing?.priority ?? 3,
           inputTokens: existing?.inputTokens ?? null,
           outputTokens: existing?.outputTokens ?? null,
+          escalation: existing?.escalation ?? null,
         });
         break;
       case 'story_passed':
@@ -186,6 +207,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
             priority: 3,
             inputTokens: payload.input_tokens ?? null,
             outputTokens: payload.output_tokens ?? null,
+            escalation: null,
           });
         }
         break;
@@ -205,12 +227,35 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
             priority: 3,
             inputTokens: payload.input_tokens ?? null,
             outputTokens: payload.output_tokens ?? null,
+            escalation: null,
           });
         }
         break;
       case 'story_retry':
         if (existing) {
           existing.status = 'retry';
+        }
+        break;
+      case 'story_escalated':
+        if (existing) {
+          existing.escalation = {
+            fromTier: payload.fromTier || '?',
+            toTier: payload.toTier || '?',
+            attemptNumber: payload.attemptNumber ?? 0,
+          };
+          // Story restarts on the new tier — mark as running again
+          existing.status = 'running';
+        }
+        break;
+      case 'story_rerouted':
+        if (existing) {
+          existing.reroute = {
+            fromEngine: payload.fromEngine || '?',
+            toEngine: payload.toEngine || '?',
+            reason: payload.reason || 'rate_limit',
+          };
+          // Story restarts on the fallback engine — mark as running
+          existing.status = 'running';
         }
         break;
       case 'story_skipped':
@@ -223,6 +268,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           priority: existing?.priority ?? 3,
           inputTokens: null,
           outputTokens: null,
+          escalation: null,
         });
         break;
     }
@@ -240,6 +286,7 @@ export default function PipelineMonitorPanel() {
   const [selectedRunDetail, setSelectedRunDetail] = useState<{
     run: PipelineRun;
     stories: StoryResult[];
+    specStories?: Array<{ id: string; title: string; agent?: string; reroute?: RerouteInfo }>;
   } | null>(null);
   const [expandedStory, setExpandedStory] = useState<string | null>(null);
   const [logLines, setLogLines] = useState<string[]>([]);
@@ -249,6 +296,8 @@ export default function PipelineMonitorPanel() {
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const dragSrcId = useRef<string | null>(null);
+  const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
+  const [specPickerOpen, setSpecPickerOpen] = useState(false);
 
   // SSE for live updates
   const sseEvents = usePipelineSSE(selectedRunId ? String(selectedRunId) : null);
@@ -266,13 +315,54 @@ export default function PipelineMonitorPanel() {
       .catch(console.error);
   }, [workspaceId]);
 
+  // ─── Queue data ────────────────────────────────────────────────
+  const fetchQueue = useCallback(() => {
+    if (!workspaceId) return;
+    apiFetch<{ items: QueueEntry[] }>(`/api/run-queue?workspaceId=${workspaceId}`)
+      .then((data) => setQueueEntries(data.items))
+      .catch(() => setQueueEntries([]));
+  }, [workspaceId]);
+
+  useEffect(() => { fetchQueue(); }, [fetchQueue]);
+
+  // Refresh queue when SSE delivers a queue-related event
+  useEffect(() => {
+    const queueEvents = sseEvents.filter(
+      (e) => e.event_type === 'run_queued_trigger' || e.event_type === 'run_finished'
+    );
+    if (queueEvents.length > 0) {
+      fetchQueue();
+    }
+  }, [sseEvents, fetchQueue]);
+
+  const handleSpecPicked = useCallback(async (spec: { id: string; specName: string }) => {
+    if (!workspaceId) return;
+    setSpecPickerOpen(false);
+    try {
+      await apiFetch('/api/run-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId: Number(workspaceId),
+          specId: spec.id,
+          specPath: `forge/specs/approved/${spec.id}.json`,
+          parallelism: 1,
+          autoWorktree: false,
+        }),
+      });
+      fetchQueue();
+    } catch (err) {
+      console.error('[RunQueue] Add failed:', err);
+    }
+  }, [workspaceId, fetchQueue]);
+
   // Fetch run detail when selection changes
   useEffect(() => {
     if (!selectedRunId) {
       setSelectedRunDetail(null);
       return;
     }
-    apiFetch<{ run: PipelineRun; stories: StoryResult[] }>(`/api/pipeline/runs/${selectedRunId}`)
+    apiFetch<{ run: PipelineRun; stories: StoryResult[]; specStories?: Array<{ id: string; title: string; agent?: string; reroute?: RerouteInfo }> }>(`/api/pipeline/runs/${selectedRunId}`)
       .then(setSelectedRunDetail)
       .catch(console.error);
   }, [selectedRunId]);
@@ -303,18 +393,35 @@ export default function PipelineMonitorPanel() {
     return map;
   }, [specStories]);
 
+  // Build reroute + agent lookup from run detail's specStories
+  const rerouteMap = useMemo(() => {
+    const map = new Map<string, { agent?: string; reroute?: RerouteInfo }>();
+    for (const s of selectedRunDetail?.specStories ?? []) {
+      if (s.agent || s.reroute) {
+        map.set(s.id, { agent: s.agent, reroute: s.reroute });
+      }
+    }
+    return map;
+  }, [selectedRunDetail]);
+
   // Derive live stories from SSE events, merged with DB story results
   const derivedStories = useMemo(() => {
-    const fromDB: DerivedStory[] = (selectedRunDetail?.stories || []).map((s) => ({
-      storyId: s.story_id,
-      status: s.status === 'pass' ? 'pass' : s.status === 'fail' ? 'fail' : s.status === 'retry' ? 'retry' : s.status === 'skip' ? 'skipped' : 'pending' as StoryStatus,
-      title: s.story_id,
-      elapsed: elapsedTime(s.started_at, s.finished_at),
-      startedAt: s.started_at,
-      priority: priorityMap.get(s.story_id) ?? 3,
-      inputTokens: s.input_tokens,
-      outputTokens: s.output_tokens,
-    }));
+    const fromDB: DerivedStory[] = (selectedRunDetail?.stories || []).map((s) => {
+      const extra = rerouteMap.get(s.story_id);
+      return {
+        storyId: s.story_id,
+        status: s.status === 'pass' ? 'pass' : s.status === 'fail' ? 'fail' : s.status === 'retry' ? 'retry' : s.status === 'skip' ? 'skipped' : 'pending' as StoryStatus,
+        title: s.story_id,
+        elapsed: elapsedTime(s.started_at, s.finished_at),
+        startedAt: s.started_at,
+        priority: priorityMap.get(s.story_id) ?? 3,
+        inputTokens: s.input_tokens,
+        outputTokens: s.output_tokens,
+        escalation: null,
+        agent: extra?.agent,
+        reroute: extra?.reroute ?? null,
+      };
+    });
 
     const fromSSE = deriveStoriesFromEvents(sseEvents);
 
@@ -335,6 +442,7 @@ export default function PipelineMonitorPanel() {
           priority: s.priority ?? 3,
           inputTokens: null,
           outputTokens: null,
+          escalation: null,
         });
       }
     }
@@ -599,7 +707,7 @@ export default function PipelineMonitorPanel() {
 
   if (runs.length === 0 && !selectedRunId) {
     return (
-      <div className="flex items-center justify-center h-full">
+      <div className="flex flex-col items-center justify-center h-full">
         <div className="text-center max-w-md space-y-3">
           <Terminal className="w-10 h-10 mx-auto text-[var(--text-muted)]" />
           <p className="text-[var(--text-muted)] text-sm leading-relaxed">
@@ -631,6 +739,34 @@ export default function PipelineMonitorPanel() {
             </div>
           )}
         </div>
+
+        {/* Queue section in empty state */}
+        <div className="w-full max-w-md mt-6 rounded-lg border border-[var(--border)] bg-[var(--surface)]">
+          <div className="p-3 flex items-center justify-between border-b border-[var(--border)]">
+            <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
+              Queue
+              {queueEntries.length > 0 && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
+                  {queueEntries.length}
+                </span>
+              )}
+            </span>
+          </div>
+          <RunQueueSection
+            entries={queueEntries}
+            onRefresh={fetchQueue}
+            onAddClick={() => setSpecPickerOpen(true)}
+          />
+        </div>
+
+        {workspaceId && (
+          <SpecPickerModal
+            workspaceId={workspaceId}
+            open={specPickerOpen}
+            onClose={() => setSpecPickerOpen(false)}
+            onSelect={handleSpecPicked}
+          />
+        )}
       </div>
     );
   }
@@ -673,7 +809,7 @@ export default function PipelineMonitorPanel() {
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto min-h-0">
           {runs.map((run) => (
             <button
               key={run.id}
@@ -693,13 +829,54 @@ export default function PipelineMonitorPanel() {
                   </span>
                 )}
               </div>
-              <div className="mt-1 text-xs text-[var(--text-muted)] pl-4">
-                {elapsedTime(run.started_at, run.finished_at)}
+              <div className="mt-1 flex items-center gap-2 pl-4">
+                <span className="text-xs text-[var(--text-muted)]">
+                  {elapsedTime(run.started_at, run.finished_at)}
+                </span>
+                <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
               </div>
             </button>
           ))}
         </div>
+
+        {/* Queue section */}
+        {(queueEntries.length > 0 || !runs.some((r) => r.status === 'running')) && (
+          <div className="border-t border-[var(--border)] shrink-0">
+            <div className="p-3 flex items-center justify-between">
+              <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
+                Queue
+                {queueEntries.length > 0 && (
+                  <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
+                    {queueEntries.length}
+                  </span>
+                )}
+              </span>
+              <button
+                onClick={() => setSpecPickerOpen(true)}
+                className="p-1 rounded hover:bg-[var(--border)] transition-colors"
+                title="Add to Queue"
+              >
+                <List className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+              </button>
+            </div>
+            <RunQueueSection
+              entries={queueEntries}
+              onRefresh={fetchQueue}
+              onAddClick={() => setSpecPickerOpen(true)}
+            />
+          </div>
+        )}
       </div>
+
+      {/* Spec Picker Modal */}
+      {workspaceId && (
+        <SpecPickerModal
+          workspaceId={workspaceId}
+          open={specPickerOpen}
+          onClose={() => setSpecPickerOpen(false)}
+          onSelect={handleSpecPicked}
+        />
+      )}
 
       {/* Main area — Selected run detail */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -728,6 +905,7 @@ export default function PipelineMonitorPanel() {
                 >
                   {liveRun.status === 'partial_failure' ? 'partial failure' : liveRun.status}
                 </span>
+                <AgentBadge agentType={liveRun.agent_type} agentModel={liveRun.agent_model} size="md" />
                 {liveRun.retried_from_run_id != null && (
                   <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-500/20 text-purple-400 flex items-center gap-1">
                     <RotateCcw className="w-3 h-3" />
@@ -845,6 +1023,17 @@ export default function PipelineMonitorPanel() {
                   </span>
                 )}
               </button>
+              <button
+                onClick={() => setDetailTab('finops')}
+                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  detailTab === 'finops'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                }`}
+              >
+                <DollarSign className="w-3.5 h-3.5" />
+                FinOps
+              </button>
             </div>
 
             {/* Terminal tab — xterm.js live output */}
@@ -950,6 +1139,22 @@ export default function PipelineMonitorPanel() {
                             ) : (
                               <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
                                 {story.status}
+                              </span>
+                            )}
+                            {story.escalation && (
+                              <span
+                                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-500/15 text-amber-400 border border-amber-500/30 flex-shrink-0"
+                                title={`Escalated from ${story.escalation.fromTier} to ${story.escalation.toTier} (attempt ${story.escalation.attemptNumber})`}
+                              >
+                                Escalated: {story.escalation.fromTier.charAt(0).toUpperCase() + story.escalation.fromTier.slice(1)}&rarr;{story.escalation.toTier.charAt(0).toUpperCase() + story.escalation.toTier.slice(1)}
+                              </span>
+                            )}
+                            {story.reroute && (
+                              <span
+                                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30 flex-shrink-0"
+                                title={`Rerouted from ${story.reroute.fromEngine} to ${story.reroute.toEngine} (${story.reroute.reason})`}
+                              >
+                                Rerouted: {story.reroute.fromEngine.charAt(0).toUpperCase() + story.reroute.fromEngine.slice(1)}&rarr;{story.reroute.toEngine.charAt(0).toUpperCase() + story.reroute.toEngine.slice(1)} ({story.reroute.reason.replace('_', ' ')})
                               </span>
                             )}
                             <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
@@ -1123,6 +1328,18 @@ export default function PipelineMonitorPanel() {
                         <span className="ml-auto">Context window: {formatTokens(CONTEXT_WINDOW)}</span>
                       </div>
                     </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {/* FinOps tab — cost breakdown and savings */}
+            {detailTab === 'finops' && (
+              <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                {selectedRunId ? (
+                  <FinOpsTab runId={selectedRunId} />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                    Select a run to view FinOps data
                   </div>
                 )}
               </div>

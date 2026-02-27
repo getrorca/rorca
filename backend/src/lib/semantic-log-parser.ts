@@ -8,6 +8,14 @@ export interface SemanticStep {
   label: string;
   detail?: string;
   ts: string;
+  /** Original tool name (e.g. 'webfetch', 'grep') — used by frontend for icon mapping */
+  toolName?: string;
+  /** Duration in milliseconds (populated when tool_result follows tool_call) */
+  durationMs?: number;
+  /** Whether this step represents an error */
+  isError?: boolean;
+  /** Tool output (stdout/stderr for bash, result text for others) */
+  output?: string;
 }
 
 // ─── Claude stream-json tool name → SemanticStep type mapping ─────────────────
@@ -151,11 +159,11 @@ export function parseOpenCodeLine(line: string): SemanticStep | null {
 
     // tool_call → map tool name to step type
     if (obj.type === 'tool_call') {
-      const toolName: string = (obj.tool ?? obj.name ?? '').toLowerCase();
-      const stepType = OPENCODE_TOOL_MAP[toolName] ?? 'unknown';
+      const rawToolName: string = (obj.tool ?? obj.name ?? '').toLowerCase();
+      const stepType = OPENCODE_TOOL_MAP[rawToolName] ?? 'unknown';
       const args = obj.args ?? obj.input ?? {};
 
-      let label = obj.tool ?? obj.name ?? toolName;
+      let label = obj.tool ?? obj.name ?? rawToolName;
       let detail: string | undefined;
 
       switch (stepType) {
@@ -180,7 +188,28 @@ export function parseOpenCodeLine(line: string): SemanticStep | null {
           label = obj.tool ?? obj.name ?? 'Unknown tool';
       }
 
-      return { type: stepType, label, detail, ts };
+      return { type: stepType, label, detail, ts, toolName: rawToolName };
+    }
+
+    // tool_result → enrich previous step with output and duration
+    if (obj.type === 'tool_result') {
+      const output: string = (obj.content ?? obj.result ?? '') as string;
+      const durationMs: number | undefined = typeof obj.duration_ms === 'number' ? obj.duration_ms : undefined;
+      const toolName: string = (obj.tool ?? obj.name ?? '').toLowerCase();
+      const stepType = OPENCODE_TOOL_MAP[toolName] || undefined;
+      // Emit as a step so the frontend can attach duration/output to its UI
+      if (toolName) {
+        return {
+          type: stepType ?? 'unknown',
+          label: `${obj.tool ?? toolName} result`,
+          detail: output.slice(0, 500),
+          ts,
+          toolName,
+          durationMs,
+          output: output.slice(0, 2000),
+        };
+      }
+      return null;
     }
 
     // assistant → plan
@@ -196,7 +225,15 @@ export function parseOpenCodeLine(line: string): SemanticStep | null {
     // completion → commit
     if (obj.type === 'completion') {
       const text: string = obj.content ?? obj.result ?? '';
-      return { type: 'commit', label: 'Run completed', detail: text.slice(0, 200), ts };
+      const exitCode = obj.exitCode ?? obj.exit_code;
+      const isFailed = exitCode !== undefined && exitCode !== 0;
+      return {
+        type: isFailed ? 'unknown' : 'commit',
+        label: isFailed ? 'Failed' : 'Run completed',
+        detail: text.slice(0, 200),
+        ts,
+        isError: isFailed || undefined,
+      };
     }
 
     // error
@@ -206,6 +243,7 @@ export function parseOpenCodeLine(line: string): SemanticStep | null {
         label: 'Error',
         detail: (obj.message ?? obj.error ?? '').slice(0, 200),
         ts,
+        isError: true,
       };
     }
 

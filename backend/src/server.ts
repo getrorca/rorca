@@ -7,7 +7,7 @@ import directionRouter from './routes/direction';
 import specsRouter from './routes/specs';
 import walRouter from './routes/wal';
 import contextRouter from './routes/context';
-import pipelineRouter, { cleanupOldLogs } from './routes/pipeline';
+import pipelineRouter, { cleanupOldLogs, cleanupOrphanRuns } from './routes/pipeline';
 import hooksRouter from './routes/hooks';
 import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
@@ -37,6 +37,7 @@ import settingsRouter from './routes/settings';
 import billingRouter, { webhookRouter as billingWebhookRouter } from './routes/billing';
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
+import { startQueueConsumer } from './lib/queue-consumer';
 import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
@@ -45,8 +46,18 @@ import { publicReviewRouter, specReviewRouter } from './routes/review';
 import { errorHandler } from './lib/error-handler';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { db } from './db/index';
+import runQueueRouter from './routes/run-queue';
+import configRouter from './routes/config';
+import copilotRouter from './routes/copilot';
+import { agentType } from './lib/config';
+import { requireOpenCode } from './lib/opencode-detector';
 
 dotenv.config();
+
+// OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
+if (agentType === 'opencode') {
+  requireOpenCode();
+}
 
 const app = express();
 const PORT = process.env.PORT || 3030;
@@ -128,6 +139,9 @@ app.use('/api/admin', backupsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/billing', billingRouter);
+app.use('/api/run-queue', runQueueRouter);
+app.use('/api/config', configRouter);
+app.use('/api/copilot', copilotRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
@@ -149,10 +163,15 @@ subscribe(fireAgentHooks);
 // V2-073: Subscribe notification dispatcher to WAL broadcasts
 startNotificationDispatcher();
 
+// RQ-002: Subscribe queue consumer to auto-trigger next run on completion
+startQueueConsumer();
+
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
     console.log(`Rorca backend listening on port ${PORT}`);
+    // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
+    cleanupOrphanRuns();
     startScheduler();
     cleanupOldLogs();
     // V2-099: Run EXPLAIN QUERY PLAN audit at startup

@@ -49,6 +49,7 @@ function matchesHotkey(e: KeyboardEvent, parsed: ReturnType<typeof parseHotkey>)
   if (parsed.key === 'backspace') return eventKey === 'backspace';
   if (parsed.key === '/') return eventKey === '/';
   if (parsed.key === '?') return eventKey === '?';
+  if (parsed.key === '\\') return eventKey === '\\';
   return eventKey === parsed.key;
 }
 
