@@ -13,7 +13,8 @@
         "Auto-refresh pauses when tab is backgrounded (visibilitychange API)"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-002",
@@ -302,6 +303,27 @@
       ],
       "dependsOn": [
         "P2-019"
+      ],
+      "passes": false
+    },
+    {
+      "id": "P2-021",
+      "title": "Hub Ready-to-Run Queue",
+      "description": "Add a 'Ready to Run' section to HubPanel.tsx between Pending Reviews and Recent Runs, showing approved specs that have not yet been triggered. Users can trigger a run directly from the Hub without navigating to the Archive panel.",
+      "acceptanceCriteria": [
+        "Hub shows a 'Ready to Run' section between Pending Reviews and Recent Runs",
+        "Fetch approved specs from GET /api/specs?status=approved and filter out any that have an active or recent run (cross-reference pipeline_runs)",
+        "Each card shows: spec title, story count badge, 'Generated N days ago' timestamp, workspace badge",
+        "Each card has a 'Trigger \u2192' button that calls POST /api/pipeline/trigger with the spec path and workspace ID",
+        "On trigger: button shows spinner, card moves to the Active Run section when run_started WAL event arrives via SSE",
+        "Empty state: 'No specs ready to run \u2014 approve a spec in Forge to get started' with a link to Forge",
+        "Section hidden entirely when empty (no empty section header taking up space)",
+        "Cards respect the auto-refresh cadence from P2-001 (refetch every 30s)",
+        "Conflict detection: if a run is already active for that workspace, Trigger button shows 'Workspace busy' and is disabled",
+        "Trigger button tooltip shows the full spec path for power users"
+      ],
+      "dependsOn": [
+        "P2-001"
       ],
       "passes": false
     }
