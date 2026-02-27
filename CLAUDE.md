@@ -425,6 +425,8 @@ OPENCODE_BIN=/path/to/opencode  # Auto-detected if in PATH
 When `RORCA_AGENT=claude` (default), uses `claude --print` via `~/.claude/` auth — no API key needed.
 When `RORCA_AGENT=opencode`, uses `opencode run --format json --attach --model $RORCA_MODEL`.
 
+**OpenCode minimum version**: `0.1.0` (enforced at startup via `backend/src/lib/opencode-detector.ts`). Backend exits with code 1 if `RORCA_AGENT=opencode` and binary is missing or below minimum version. Health endpoint (`GET /api/health`) returns `{ opencodeInstalled, opencodeVersion }` when `agentType=opencode`.
+
 ## Performance Targets
 - Spec generation: < 60s (LLM call)
 - Archive search: < 100ms (SQLite full-text scan)
