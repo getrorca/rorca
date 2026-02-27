@@ -545,12 +545,29 @@ export function StoryCard({
             </div>
           )}
 
-          {story.dependencies && story.dependencies.length > 0 && (
-            <div className="mt-2 text-xs text-muted">
-              <span className="font-medium">Depends on:</span>{' '}
-              {story.dependencies.join(', ')}
-            </div>
-          )}
+          {(() => {
+            const deps = story.dependsOn ?? story.dependencies ?? [];
+            return deps.length > 0 ? (
+              <div className="mt-2 flex items-center gap-1.5 flex-wrap text-xs">
+                <span className="text-muted font-medium">Depends on:</span>
+                {deps.map((d) => (
+                  <span
+                    key={d}
+                    className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded ${
+                      allStoryIds?.has(d)
+                        ? 'bg-accent/10 text-accent'
+                        : 'bg-error/10 text-error'
+                    }`}
+                  >
+                    {d}
+                    {allStoryIds && !allStoryIds.has(d) && ' (missing)'}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-2 text-[11px] text-muted/60">No dependencies</div>
+            );
+          })()}
         </div>
       )}
 
