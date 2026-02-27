@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 const STORAGE_KEY = 'rorca-split-pane-ratio';
 const DEFAULT_RATIO = 0.6;
@@ -10,6 +11,7 @@ interface SplitPaneProps {
 }
 
 export default function SplitPane({ left, right }: SplitPaneProps) {
+  const isMobile = useIsMobile();
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
 
@@ -63,6 +65,23 @@ export default function SplitPane({ left, right }: SplitPaneProps) {
     };
   }, []);
 
+  // Mobile: vertical stack — terminal 60vh top, story list scrollable below
+  if (isMobile) {
+    return (
+      <div className="flex-1 min-h-0 flex flex-col overflow-y-auto">
+        {/* Top pane: terminal at 60vh */}
+        <div className="shrink-0" style={{ height: '60vh' }}>
+          <div className="h-full overflow-hidden">{left}</div>
+        </div>
+        {/* Bottom pane: story list, scrollable */}
+        <div className="shrink-0 border-t border-border" style={{ minHeight: '40vh' }}>
+          {right}
+        </div>
+      </div>
+    );
+  }
+
+  // Desktop: horizontal split pane with draggable divider
   return (
     <div ref={containerRef} className="flex-1 min-h-0 flex flex-row relative">
       {/* Left pane */}
