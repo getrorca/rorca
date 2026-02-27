@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   ChevronRight,
   Inbox,
@@ -29,6 +29,8 @@ import { ReadinessRing } from '../components/ReadinessRing';
 import { TagChipsReadonly } from '../components/TagChips';
 import { AssigneeDropdown, AssigneeAvatar } from '../components/AssigneeDropdown';
 import type { Assignee } from '../components/AssigneeDropdown';
+import { SpecConfirmDialog } from '../components/SpecConfirmDialog';
+import { useHotkeys, modLabel } from '../hooks/useHotkeys';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -124,6 +126,13 @@ export default function ReviewQueuePanel() {
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>('all');
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState('');
+  const [dialogMode, setDialogMode] = useState<'approve' | 'reject' | 'post-approve' | null>(null);
+
+  // ⌘↩ approve, ⌘⌫ reject — only when a spec is selected
+  useHotkeys(useMemo(() => [
+    { key: 'mod+enter', handler: () => { if (selectedId && !dialogMode) setDialogMode('approve'); } },
+    { key: 'mod+backspace', handler: () => { if (selectedId && !dialogMode) setDialogMode('reject'); } },
+  ], [selectedId, dialogMode]));
 
   // ─── Fetch spec list ───────────────────────────────────────────────
   const fetchSpecs = useCallback(async () => {
@@ -187,6 +196,50 @@ export default function ReviewQueuePanel() {
       await fetchSpecs();
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Approve failed', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Dialog-driven approve (with post-approve prompt)
+  const handleDialogApprove = async () => {
+    if (!selectedId) return;
+    setActionLoading(true);
+    try {
+      await apiFetch(`/api/specs/${selectedId}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      showToast('Spec approved', 'success');
+      setDialogMode('post-approve');
+      await fetchSpecs();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Approve failed', 'error');
+      setDialogMode(null);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Dialog-driven reject (with reason)
+  const handleDialogReject = async (reason?: string) => {
+    if (!selectedId) return;
+    setActionLoading(true);
+    try {
+      await apiFetch(`/api/specs/${selectedId}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, reason: reason || undefined }),
+      });
+      showToast('Spec rejected', 'success');
+      setDialogMode(null);
+      setSelectedId(null);
+      setSpecDetail(null);
+      await fetchSpecs();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Reject failed', 'error');
+      setDialogMode(null);
     } finally {
       setActionLoading(false);
     }
@@ -488,6 +541,22 @@ export default function ReviewQueuePanel() {
             />
           </div>
         </div>
+      )}
+
+      {/* ─── Keyboard-triggered confirmation dialog ────────────────── */}
+      {dialogMode && selectedId && (
+        <SpecConfirmDialog
+          mode={dialogMode}
+          specName={selectedSpec?.specName ?? selectedId}
+          loading={actionLoading}
+          onConfirm={(reason) => {
+            if (dialogMode === 'approve') handleDialogApprove();
+            else if (dialogMode === 'reject') handleDialogReject(reason);
+          }}
+          onCancel={() => setDialogMode(null)}
+          onGoToForge={() => { setDialogMode(null); setSelectedId(null); setSpecDetail(null); }}
+          onTriggerRun={() => { setDialogMode(null); setSelectedId(null); setSpecDetail(null); }}
+        />
       )}
 
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
