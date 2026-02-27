@@ -783,3 +783,27 @@ Key decisions:
 - Fallback path reuses the exact same SDK logic (chatComplete + JSON parse + validation) — zero behavior change for RORCA_AGENT=claude
 - WAL event payload includes `provider: 'opencode'` when OpenCode path is used
 - Spec quality validation is shared between OpenCode path and could be reused by SDK path in future
+
+## Story OC-009: Settings UI — Agent Configuration Panel — DONE
+Files touched:
+- backend/src/routes/config.ts (rewritten — added GET /opencode-models, PUT /agent, hot-reload config, DB persistence)
+- backend/src/db/index.ts (modified — idempotent agent_config table creation)
+- src/panels/SettingsPanel.tsx (modified — added ExecutionEngineSection component with toggle, model selector, status badge)
+
+What was built:
+- 'Execution Engine' section in Settings → Model & Providers tab, positioned between Display and Provider sections
+- Toggle between Claude subscription and OpenCode (API key) with radio-style cards showing descriptions
+- When OpenCode selected: grouped model dropdown (OpenAI, Google, Anthropic, OpenRouter, Local) with context window info
+- GET /api/config/opencode-models returns Models.dev compatible list with grouped providers
+- PUT /api/config/agent validates agent type, checks OpenCode binary availability, validates API key presence for provider, persists to `agent_config` DB table
+- Config hot-reloaded in-memory — no backend restart required on save
+- Status badge shows current agent type and model name in top-right of section
+- OpenCode installation status banner (green if installed with version, amber warning if missing)
+- Validation: OpenCode model requires matching provider API key in vault
+
+Key decisions:
+- `agent_config` table (single row, id='default') for DB persistence — survives backend restarts
+- On module load, config loaded from DB first, then falls back to env vars (RORCA_AGENT, RORCA_MODEL)
+- Model catalog is static (hardcoded in config.ts) — matches current Models.dev popular models
+- Provider-to-vault-key mapping validates API key presence before allowing save (e.g. OpenAI models need 'openai-compat' vault key)
+- Local/Ollama models skip API key validation (no key required)

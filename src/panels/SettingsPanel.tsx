@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard } from 'lucide-react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
@@ -266,8 +266,240 @@ function ProvidersAndDisplaySection() {
     <div className="max-w-2xl space-y-8">
       <DisplaySection />
       <div className="border-t border-border pt-6">
+        <ExecutionEngineSection />
+      </div>
+      <div className="border-t border-border pt-6">
         <ProvidersSection />
       </div>
+    </div>
+  );
+}
+
+// ─── Execution Engine Section (OC-009) ───────────────────────────────────────
+
+interface AgentConfig {
+  agentType: 'claude' | 'opencode' | 'codex';
+  agentModel: string | null;
+  opencodeInstalled: boolean | null;
+  opencodeVersion: string | null;
+}
+
+interface OpenCodeModelEntry {
+  id: string;
+  name: string;
+  provider: string;
+  contextWindow: number;
+}
+
+function ExecutionEngineSection() {
+  const [config, setConfig] = useState<AgentConfig | null>(null);
+  const [models, setModels] = useState<OpenCodeModelEntry[]>([]);
+  const [grouped, setGrouped] = useState<Record<string, OpenCodeModelEntry[]>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Local form state
+  const [selectedType, setSelectedType] = useState<'claude' | 'opencode'>('claude');
+  const [selectedModel, setSelectedModel] = useState<string>('');
+
+  useEffect(() => {
+    Promise.all([
+      apiFetch<AgentConfig>('/api/config'),
+      apiFetch<{ models: OpenCodeModelEntry[]; grouped: Record<string, OpenCodeModelEntry[]> }>('/api/config/opencode-models'),
+    ]).then(([cfg, modelData]) => {
+      setConfig(cfg);
+      setSelectedType(cfg.agentType === 'opencode' ? 'opencode' : 'claude');
+      setSelectedModel(cfg.agentModel ?? '');
+      setModels(modelData.models);
+      setGrouped(modelData.grouped);
+    }).catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const result = await apiFetch<{ agentType: string; agentModel: string | null }>('/api/config/agent', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agentType: selectedType,
+          agentModel: selectedType === 'opencode' ? selectedModel : null,
+        }),
+      });
+      setConfig(prev => prev ? {
+        ...prev,
+        agentType: result.agentType as AgentConfig['agentType'],
+        agentModel: result.agentModel,
+      } : prev);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to save configuration');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading execution engine config...</div>;
+  }
+
+  const hasChanges = config && (
+    selectedType !== (config.agentType === 'opencode' ? 'opencode' : 'claude') ||
+    (selectedType === 'opencode' && selectedModel !== (config.agentModel ?? ''))
+  );
+
+  const PROVIDER_ORDER = ['OpenAI', 'Google', 'Anthropic', 'OpenRouter', 'Local'];
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+            <Cpu size={16} className="text-accent" />
+            Execution Engine
+          </h2>
+          <p className="text-xs text-muted mt-0.5">Choose how Rorca executes pipeline stories</p>
+        </div>
+        {/* Status badge */}
+        <div className="flex items-center gap-2">
+          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${
+            config?.agentType === 'opencode'
+              ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+              : 'bg-accent/10 text-accent border border-accent/20'
+          }`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${
+              config?.agentType === 'opencode' ? 'bg-purple-400' : 'bg-accent'
+            }`} />
+            {config?.agentType === 'opencode' ? 'OpenCode' : 'Claude'}
+            {config?.agentType === 'opencode' && config?.agentModel && (
+              <span className="text-muted ml-0.5">
+                {models.find(m => m.id === config.agentModel)?.name ?? config.agentModel}
+              </span>
+            )}
+          </span>
+        </div>
+      </div>
+
+      {/* Agent type toggle */}
+      <div className="flex gap-3">
+        <button
+          onClick={() => setSelectedType('claude')}
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
+            selectedType === 'claude'
+              ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
+              : 'border-border bg-bg hover:border-accent/30'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
+              selectedType === 'claude' ? 'border-accent' : 'border-border'
+            }`}>
+              {selectedType === 'claude' && <div className="w-1.5 h-1.5 rounded-full bg-accent" />}
+            </div>
+            <span className="text-sm font-medium text-[var(--text)]">Claude Subscription</span>
+          </div>
+          <p className="text-[11px] text-muted ml-5">
+            Uses <code className="text-xs bg-panel px-1 rounded">claude --print</code> via your Pro/Max subscription. No API key needed.
+          </p>
+        </button>
+
+        <button
+          onClick={() => setSelectedType('opencode')}
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
+            selectedType === 'opencode'
+              ? 'border-purple-500/60 bg-purple-500/5 ring-1 ring-purple-500/30'
+              : 'border-border bg-bg hover:border-purple-500/30'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
+              selectedType === 'opencode' ? 'border-purple-500' : 'border-border'
+            }`}>
+              {selectedType === 'opencode' && <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />}
+            </div>
+            <span className="text-sm font-medium text-[var(--text)]">OpenCode (API Key)</span>
+          </div>
+          <p className="text-[11px] text-muted ml-5">
+            75+ models via API key: OpenAI, Google, Anthropic, OpenRouter, local Ollama.
+          </p>
+        </button>
+      </div>
+
+      {/* OpenCode installation status */}
+      {selectedType === 'opencode' && config && (
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${
+          config.opencodeInstalled
+            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+            : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
+        }`}>
+          {config.opencodeInstalled ? (
+            <>
+              <CheckCircle2 size={14} />
+              OpenCode installed{config.opencodeVersion ? ` (v${config.opencodeVersion})` : ''}
+            </>
+          ) : (
+            <>
+              <AlertTriangle size={14} />
+              OpenCode not found. Install: <code className="bg-panel px-1 rounded">npm i -g opencode</code>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Model selector (only when OpenCode selected) */}
+      {selectedType === 'opencode' && (
+        <div>
+          <label className="block text-xs text-muted mb-2">Model</label>
+          <div className="relative">
+            <select
+              value={selectedModel}
+              onChange={e => setSelectedModel(e.target.value)}
+              className="w-full px-3 py-2.5 text-sm bg-bg border border-border rounded-lg focus:border-purple-500/60 outline-none appearance-none pr-8"
+            >
+              <option value="">Select a model...</option>
+              {PROVIDER_ORDER.filter(p => grouped[p]).map(provider => (
+                <optgroup key={provider} label={provider}>
+                  {grouped[provider].map(m => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} — {m.contextWindow >= 1000000
+                        ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
+                        : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+          </div>
+          {!selectedModel && (
+            <p className="text-[11px] text-amber-400 mt-1.5">Select a model to enable OpenCode execution</p>
+          )}
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+          <XCircle size={14} />
+          {error}
+        </div>
+      )}
+
+      {/* Save button */}
+      <button
+        onClick={handleSave}
+        disabled={saving || !hasChanges || (selectedType === 'opencode' && !selectedModel)}
+        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+      >
+        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
+        {saved ? 'Saved' : 'Save Engine Configuration'}
+      </button>
     </div>
   );
 }
