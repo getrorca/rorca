@@ -242,7 +242,10 @@ export interface Template {
   id: string;
   name: string;
   description?: string;
+  brief?: string;
   storyCount: number;
+  usageCount?: number;
+  lastUsedAt?: string | null;
   createdAt: string;
 }
 
