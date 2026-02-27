@@ -761,3 +761,25 @@ Key decisions:
 - Server PID persisted via onPidReady callback → UPDATE opencode_server_pid on pipeline_runs
 - Legacy run-loop fallback paths preserved: execution-engine.ts preferred, then run-loop.ts, then run-loop.sh
 - Pipeline integration tests are pre-existing broken (all 43 original tests fail due to better-sqlite3 native binding issue in Jest environment) — OC-006 tests follow same pattern
+
+## Story OC-008: OpenCode Spec Generation — DONE
+Files touched:
+- backend/src/lib/opencode-spec-gen.ts (NEW) — OpenCode spec generation module
+- backend/src/routes/specs.ts (modified) — Agent-type branching in POST /generate
+- backend/src/lib/__tests__/opencode-spec-gen.test.ts (NEW) — 10 tests for validation + type guard
+
+What was built:
+- `generateSpecViaOpenCode()` spawns `opencode run --format json --model <model>` with a prompt that instructs OpenCode to read CLAUDE.md, glob existing specs, read package.json before generating
+- POST /api/specs/generate detects `configuredAgentType === 'opencode'` and routes to OpenCode path
+- On OpenCode failure (timeout, non-zero exit, bad JSON), falls back to SDK path (llm-client.ts chatComplete)
+- `validateSpecQuality()` enforces: stories array non-empty, each story has id/title/description/acceptanceCriteria/dependsOn
+- 120s timeout for opencode path (vs default SDK timeout)
+- JSON extraction from event stream: scans assistant + completion events in reverse order, with fallback to raw stdout parsing
+- `isSpecError()` type guard for clean error handling
+
+Key decisions:
+- OpenCode prompt tells agent to explore codebase FIRST (read CLAUDE.md, glob specs, read package.json) then output raw JSON — leverages full tool access
+- Token usage set to {0,0} for OpenCode path since JSON event stream doesn't report usage
+- Fallback path reuses the exact same SDK logic (chatComplete + JSON parse + validation) — zero behavior change for RORCA_AGENT=claude
+- WAL event payload includes `provider: 'opencode'` when OpenCode path is used
+- Spec quality validation is shared between OpenCode path and could be reused by SDK path in future
