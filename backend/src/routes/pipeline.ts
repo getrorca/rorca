@@ -2145,7 +2145,10 @@ function recordTokenUsage(runId: number, storyId: string, inputTokens: number, o
 
 router.post('/story-result', (req: Request, res: Response) => {
   try {
-    const { runId, storyId, status } = req.body as { runId?: number; storyId?: string; status?: string };
+    const { runId, storyId, status, worktreePath, worktreeBranch } = req.body as {
+      runId?: number; storyId?: string; status?: string;
+      worktreePath?: string; worktreeBranch?: string;
+    };
 
     if (!runId || !storyId || !status) {
       res.status(400).json({ error: 'runId, storyId, and status are required' });
@@ -2158,8 +2161,9 @@ router.post('/story-result', (req: Request, res: Response) => {
     }
 
     db.prepare(
-      `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, ?, ?, datetime('now'))`
-    ).run(runId, storyId, status);
+      `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch)
+       VALUES (?, ?, ?, datetime('now'), ?, ?)`
+    ).run(runId, storyId, status, worktreePath ?? null, worktreeBranch ?? null);
 
     res.status(201).json({ ok: true });
   } catch (error: any) {
