@@ -395,6 +395,135 @@
       ],
       "dependsOn": ["OC-001", "OC-003", "OC-015", "OC-023"],
       "passes": false
+    },
+    {
+      "id": "OC-025",
+      "title": "Claude Subscription In-App Auth Detection and Login",
+      "description": "Detect Claude subscription auth state by reading ~/.claude/.credentials.json (the shared credential store used by VSCode, Cursor, and all Claude Code integrations). Show connection status in Settings. If not authenticated, provide a 'Connect Claude Account' button that spawns 'claude auth login' as a child process — delegating entirely to Claude CLI's own PKCE browser OAuth flow. No OAuth reimplementation required. Poll for credential file changes after triggering, fire SSE event to frontend when authenticated.",
+      "acceptanceCriteria": [
+        "On Settings > Execution Engine load, backend reads ~/.claude/.credentials.json and returns { connected: boolean, email?: string, tier?: string, expiresAt?: number }",
+        "GET /api/config/claude-auth returns auth state without exposing raw token to frontend",
+        "Settings UI shows: 'Connected as user@example.com (Claude Max)' with green indicator when authenticated",
+        "Settings UI shows: 'Not connected' with amber indicator and 'Connect Claude Account' button when not authenticated",
+        "'Connect Claude Account' button calls POST /api/config/claude-auth/login which spawns 'claude auth login' as detached child process (opens browser via Claude CLI's own PKCE flow)",
+        "Backend polls ~/.claude/.credentials.json every 2s after triggering login, fires SSE event { type: 'claude_auth_connected', email, tier } when token appears",
+        "Frontend receives SSE event and updates Settings UI to connected state without page reload",
+        "Token expiry warning: if expiresAt within 24h, show amber 'Session expiring soon — reconnect' warning",
+        "'Disconnect' button runs 'claude auth logout' subprocess and updates UI",
+        "Auth state checked on every pipeline trigger — if Claude disconnected and RORCA_AGENT=claude, trigger is blocked with 'Claude not authenticated' error and Settings deep-link"
+      ],
+      "dependsOn": ["OC-001"],
+      "passes": false
+    },
+    {
+      "id": "OC-026",
+      "title": "Codex CLI In-App Auth Detection and Login",
+      "description": "Same auth detection and login pattern as OC-025 but for the Codex CLI credential store. Detect Codex auth state from disk, show ChatGPT account connection status in Settings, provide a connect button that delegates to 'codex auth login' subprocess. Codex CLI handles its own OAuth flow — Rorca only wraps the trigger and detects completion.",
+      "acceptanceCriteria": [
+        "Backend detects Codex auth state by running 'codex auth status' or reading Codex credential file (location documented in CLAUDE.md after discovery)",
+        "GET /api/config/codex-auth returns { connected: boolean, username?: string, plan?: string }",
+        "Settings UI shows Codex connection state with same connected/disconnected pattern as OC-025",
+        "'Connect ChatGPT Account' button spawns 'codex auth login' as detached child process",
+        "Backend polls for auth completion every 2s, fires SSE event { type: 'codex_auth_connected', username, plan } when authenticated",
+        "Frontend updates Settings UI on SSE event without page reload",
+        "'Disconnect' button runs 'codex auth logout' subprocess",
+        "Auth state checked on every pipeline trigger — if Codex disconnected and RORCA_AGENT=codex, trigger blocked with 'Codex not authenticated' error",
+        "CLAUDE.md documents Codex credential file location and auth flow for future reference"
+      ],
+      "dependsOn": ["OC-024"],
+      "passes": false
+    },
+    {
+      "id": "OC-027",
+      "title": "OpenRouter Dedicated Provider Setup",
+      "description": "OpenRouter provides access to 75+ models via a single API key and deserves a first-class dedicated setup experience rather than being grouped into a generic API key field. Implement a dedicated OpenRouter card in Settings with key validation, live model catalog, and model count badge.",
+      "acceptanceCriteria": [
+        "Settings > Execution Engine shows a dedicated 'OpenRouter' provider card (not generic API key input)",
+        "API key input field with 'Test Connection' button that calls GET https://openrouter.ai/api/v1/models with the provided key",
+        "On successful test: show model count badge 'N models available' and green connected indicator",
+        "On failed test: show specific error (invalid key, network error, rate limited)",
+        "API key stored encrypted in vault table (same as other provider keys)",
+        "GET /api/config/openrouter-models returns filtered/sorted model list from OpenRouter API (cached 1h)",
+        "Model dropdown in Settings groups OpenRouter models by provider family (OpenAI, Anthropic, Google, Meta, Mistral, etc.)",
+        "'Browse all models' link opens OpenRouter model catalog in new tab",
+        "Free models on OpenRouter (context length ≥ 8k) shown with 'Free' badge in model dropdown",
+        "Trigger modal shows selected OpenRouter model with provider family label e.g. 'OpenRouter — meta-llama/llama-3.3-70b'"
+      ],
+      "dependsOn": ["OC-009"],
+      "passes": false
+    },
+    {
+      "id": "OC-028",
+      "title": "Per-Story Agent Routing — Multi-Engine Orchestration",
+      "description": "Upgrade RORCA_AGENT from a run-level config to a story-level routing system. Each story can be assigned a specific engine+model either manually via spec JSON, automatically via the complexity scorer, or via a routing table in .rorca/config.json. This enables a single spec run to use Claude Max for complex architecture stories, Codex for simple CRUD, and Ollama for docs — each story gets the optimal engine for its task type.",
+      "acceptanceCriteria": [
+        "Spec JSON userStories support optional 'agent' field: { agent?: 'claude' | 'opencode' | 'codex' | 'ollama', model?: string } — overrides global RORCA_AGENT for that story",
+        ".rorca/config.json orchestration section gains 'engines' routing table: { architecture: { engine, model }, feature: { engine, model }, test: { engine }, crud: { engine }, docs: { engine, model } }",
+        "orchestration.router gains new value 'multi-engine' alongside existing 'auto' | 'fixed' | 'manual'",
+        "Complexity scorer (OC-019) extended to output engine assignment: score() returns { tier, engine, model, signals } — engine assigned from routing table based on detected task type",
+        "execution-engine.ts reads per-story agent assignment from story metadata, falls back to global config if not set",
+        "Trigger modal shows engine distribution preview before run starts: '12 × Claude · 14 × Codex · 4 × Ollama'",
+        "Run View story list shows engine badge per row: [Claude] [Codex] [GPT-4o] color-coded by engine type",
+        "FinOps dashboard (OC-023) aggregates cost by engine: separate cost rows for each engine used in a run",
+        "Spec JSON schema updated in spec-schema.ts to include optional agent field with validation",
+        "Unit tests cover routing table resolution, per-story override precedence, and fallback to global config"
+      ],
+      "dependsOn": ["OC-021", "OC-019"],
+      "passes": false
+    },
+    {
+      "id": "OC-029",
+      "title": "Multi-Engine Run Lifecycle Management",
+      "description": "Manage the process lifecycle for runs that use multiple execution engines simultaneously. OpenCode server starts conditionally (only when opencode-assigned stories exist), Claude and Codex spawn fresh per story, and rate limit overflows automatically reroute stories to the configured secondary engine rather than halting the run.",
+      "acceptanceCriteria": [
+        "Before run starts, execution-engine.ts scans story agent assignments — only starts OpenCode server (OC-003) if ≥1 story is assigned to opencode",
+        "OpenCode server reused across all opencode-assigned stories in the run, stopped after last opencode story completes",
+        "Claude and Codex stories always spawn fresh per story (no persistent server) — no change to existing subprocess model",
+        "Rate limit detection: if story fails with 429/rate-limit signal on primary engine, log WAL event { type: 'story_rerouted', fromEngine, toEngine, storyId, reason: 'rate_limit' } and retry on configured secondary engine",
+        "Secondary engine fallback configurable in .rorca/config.json: orchestration.fallbackEngine (default: null — disable overflow)",
+        "Run View shows reroute indicator on story row: 'Rerouted: Claude→Codex (rate limited)'",
+        "Pipeline trigger validates all required engines are authenticated before starting — surfaces specific errors per engine (e.g. 'Codex not authenticated — 3 stories assigned')",
+        "On backend restart mid-run: cleanup handles mixed engine state — kills opencode server PIDs, marks claude/codex stories failed per existing pattern",
+        "GET /api/pipeline/runs/:id returns per-story engine assignment in stories array",
+        "Integration test: mock run with 3 stories across 2 engines verifies correct lifecycle (server start/stop, subprocess spawns, WAL events)"
+      ],
+      "dependsOn": ["OC-028", "OC-003"],
+      "passes": false
+    },
+    {
+      "id": "OC-030",
+      "title": "Codex Direction Stack Injection",
+      "description": "Codex CLI supports AGENTS.md files for persistent context injection (equivalent to CLAUDE.md for Claude Code). Before spawning each Codex story subprocess, write the synthesized direction stack (L1-L5) to the workspace AGENTS.md or pass it via Codex's --instructions flag. Clean up after story completes. Without this, Codex stories run with zero direction context — no engineering principles, no architecture constraints, no stack-specific guidance.",
+      "acceptanceCriteria": [
+        "Before execution-engine.ts spawns Codex subprocess, backend calls directionStack.synthesize() for the workspace (same call used for OC-016 OpenCode path)",
+        "Synthesized direction stack written to .codex/AGENTS.md in workspace (or passed via --instructions flag — whichever Codex CLI supports, determined during implementation and documented in CLAUDE.md)",
+        "Direction context written fresh before each Codex story (not cached) to pick up latest direction stack changes",
+        "Context file cleaned up after each story completes (restore original AGENTS.md if it existed, delete if Rorca created it)",
+        "If workspace already has AGENTS.md: append direction stack section clearly delimited by Rorca markers (# === RORCA DIRECTION START === ... # === RORCA DIRECTION END ===), remove markers section after story",
+        "Codex story prompt includes explicit instruction to read the direction context before starting work",
+        "Verify via Codex CLI docs that context injection mechanism works — document findings in CLAUDE.md",
+        "Unit test: verifies AGENTS.md is written before spawn and cleaned up after story regardless of pass/fail outcome"
+      ],
+      "dependsOn": ["OC-024", "OC-016"],
+      "passes": false
+    },
+    {
+      "id": "OC-031",
+      "title": "Tool Capability Gating — Pre-Spawn Compatibility Check",
+      "description": "Before routing a story to an execution engine, check whether the story's requirements are compatible with that engine's tool set. Codex lacks webfetch, websearch, native glob, and grep. Stories requiring these tools should warn in the trigger modal and optionally auto-reroute to a capable engine rather than failing silently mid-run.",
+      "acceptanceCriteria": [
+        "backend/src/lib/tool-capability-checker.ts exports check(story, engine) → { compatible: boolean, missingTools: string[], warnings: string[] }",
+        "Tool capability matrix defined: claude={ bash, edit, read, write, glob, grep, webfetch, websearch, task, todowrite }, opencode={ bash, edit, read, write, glob, grep, webfetch, websearch }, codex={ bash, edit, read, write }, ollama={ bash, edit, read, write }",
+        "Keyword detection in story description + acceptanceCriteria: 'webfetch'/'fetch URL'/'documentation lookup' → requires webfetch; 'find files'/'search codebase' → requires glob/grep; 'subagent'/'parallel' → requires task tool",
+        "Trigger modal shows capability warnings per story when detected: 'US-007 uses webfetch — not supported by Codex, will reroute to Claude'",
+        "orchestration.capabilityMismatch config in .rorca/config.json: 'warn' (default) | 'reroute' | 'block'",
+        "When 'reroute': execution-engine.ts automatically escalates to nearest capable engine before spawn (Codex→OpenCode→Claude)",
+        "When 'block': trigger returns 400 with list of incompatible story+engine pairs before run starts",
+        "WAL event on capability reroute: { type: 'story_rerouted', reason: 'capability_mismatch', missingTools, fromEngine, toEngine }",
+        "Unit tests cover all tool capability matrix entries and all three mismatch handling modes"
+      ],
+      "dependsOn": ["OC-028"],
+      "passes": false
     }
   ]
 }
