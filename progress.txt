@@ -961,3 +961,27 @@ Key decisions:
 - Port 0 for WAL events = no backend needed (fetch to port 0 silently fails per engine's catch block)
 - Temp dirs cleaned up in afterEach for CI isolation
 - Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged
+
+## Story OC-020: Story Escalation Cascade — Model Tier Upgrade on Failure — DONE
+Files touched:
+- backend/src/lib/complexity-scorer.ts (modified — EscalationConfig type, DEFAULT_ESCALATION, config loader, getNextEscalationTier export)
+- backend/src/lib/execution-engine.ts (modified — escalation state tracking, per-tier retry logic, story_escalated WAL event, sequential path refactored to use executeStory)
+- backend/src/lib/__tests__/complexity-scorer.test.ts (modified — 9 new tests for escalation config + getNextEscalationTier)
+- src/panels/PipelineMonitorPanel.tsx (modified — EscalationInfo type on DerivedStory, story_escalated event handler, amber badge UI)
+
+What was built:
+- EscalationConfig in .rorca/config.json: orchestration.escalation.enabled (default: true), orchestration.escalation.maxRetriesOnTier (default: 2), orchestration.escalation.escalateTo mapping (default: haiku→sonnet, sonnet→opus, opus→null)
+- Per-tier retry tracking in execution-engine.ts via EscalationState per story: tracks currentTier, originalTier, retriesOnCurrentTier, and full escalationHistory
+- Escalation logic: When retries on current tier >= maxRetriesOnTier, checks getNextEscalationTier(). If higher tier available: resolves new model ID from provider cascades, resets retry counter, continues execution loop. If at top tier (opus): marks story failed with max_retries_all_tiers reason.
+- WAL event: story_escalated emitted on every tier upgrade with { fromTier, toTier, attemptNumber, model, error_category, error_message, story_id, run_id }
+- Gate failure escalation: Typecheck/E2E gate failures also count toward tier retries and trigger escalation
+- Claude subscription guard: Escalation disabled when agentType === 'claude' — subscription path has fixed model, no mid-story tier switching
+- Run View UI: Amber badge "Escalated: Haiku→Sonnet" in story list with tooltip showing attempt number
+- Sequential path refactor: main() sequential loop now delegates to executeStory() (eliminates ~200 lines of duplicated logic)
+
+Key decisions:
+- Escalation state is per-story per-run (in-memory Map), not persisted — WAL events provide the durable audit trail
+- Provider extracted from model string ("openai/gpt-4o" → "openai") for cascade model resolution
+- Gate failures (typecheck/e2e) count as tier-level failures too — a model that produces code that doesn't compile should be escalated
+- Sequential path refactored to use executeStory() to avoid maintaining escalation logic in two places
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged

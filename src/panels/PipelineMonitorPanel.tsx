@@ -45,6 +45,12 @@ interface StoryResult {
 
 type StoryStatus = 'pending' | 'running' | 'pass' | 'fail' | 'retry' | 'skipped';
 
+interface EscalationInfo {
+  fromTier: string;
+  toTier: string;
+  attemptNumber: number;
+}
+
 interface DerivedStory {
   storyId: string;
   status: StoryStatus;
@@ -54,6 +60,7 @@ interface DerivedStory {
   priority: number;  // 1=urgent, 2=high, 3=normal, 4=low
   inputTokens: number | null;
   outputTokens: number | null;
+  escalation: EscalationInfo | null;
 }
 
 const CONTEXT_WINDOW = 200_000; // 200k token context window
@@ -171,6 +178,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           priority: existing?.priority ?? 3,
           inputTokens: existing?.inputTokens ?? null,
           outputTokens: existing?.outputTokens ?? null,
+          escalation: existing?.escalation ?? null,
         });
         break;
       case 'story_passed':
@@ -189,6 +197,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
             priority: 3,
             inputTokens: payload.input_tokens ?? null,
             outputTokens: payload.output_tokens ?? null,
+            escalation: null,
           });
         }
         break;
@@ -208,12 +217,24 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
             priority: 3,
             inputTokens: payload.input_tokens ?? null,
             outputTokens: payload.output_tokens ?? null,
+            escalation: null,
           });
         }
         break;
       case 'story_retry':
         if (existing) {
           existing.status = 'retry';
+        }
+        break;
+      case 'story_escalated':
+        if (existing) {
+          existing.escalation = {
+            fromTier: payload.fromTier || '?',
+            toTier: payload.toTier || '?',
+            attemptNumber: payload.attemptNumber ?? 0,
+          };
+          // Story restarts on the new tier — mark as running again
+          existing.status = 'running';
         }
         break;
       case 'story_skipped':
@@ -226,6 +247,7 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           priority: existing?.priority ?? 3,
           inputTokens: null,
           outputTokens: null,
+          escalation: null,
         });
         break;
     }
@@ -360,6 +382,7 @@ export default function PipelineMonitorPanel() {
       priority: priorityMap.get(s.story_id) ?? 3,
       inputTokens: s.input_tokens,
       outputTokens: s.output_tokens,
+      escalation: null,
     }));
 
     const fromSSE = deriveStoriesFromEvents(sseEvents);
@@ -381,6 +404,7 @@ export default function PipelineMonitorPanel() {
           priority: s.priority ?? 3,
           inputTokens: null,
           outputTokens: null,
+          escalation: null,
         });
       }
     }
@@ -1051,6 +1075,14 @@ export default function PipelineMonitorPanel() {
                             ) : (
                               <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
                                 {story.status}
+                              </span>
+                            )}
+                            {story.escalation && (
+                              <span
+                                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-500/15 text-amber-400 border border-amber-500/30 flex-shrink-0"
+                                title={`Escalated from ${story.escalation.fromTier} to ${story.escalation.toTier} (attempt ${story.escalation.attemptNumber})`}
+                              >
+                                Escalated: {story.escalation.fromTier.charAt(0).toUpperCase() + story.escalation.fromTier.slice(1)}&rarr;{story.escalation.toTier.charAt(0).toUpperCase() + story.escalation.toTier.slice(1)}
                               </span>
                             )}
                             <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
