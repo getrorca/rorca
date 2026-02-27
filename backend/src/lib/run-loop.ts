@@ -64,6 +64,9 @@ interface RunLoopConfig {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const MAX_RETRIES = 3;
+const MAX_RATE_LIMIT_RETRIES = 4;
+const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000, 240_000]; // 30s, 60s, 120s, 240s
+const RATE_LIMIT_FAST_EXIT_THRESHOLD_MS = 5_000; // exit within 5s = heuristic for immediate rejection
 const DEFAULT_TIMEOUT_MINUTES = 45;
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN ||
@@ -270,15 +273,22 @@ function buildPrompt(
   ].join('\n');
 }
 
-/** Spawn claude and return exit code. Resolves when process exits. */
+interface ClaudeResult {
+  exitCode: number;
+  stderrTail: string; // last ~4KB of stderr for rate limit detection
+  elapsedMs: number;
+}
+
+/** Spawn claude and return exit code + stderr tail + elapsed time. */
 function runClaude(
   prompt: string,
   cwd: string,
   timeoutMs: number,
   logFile: string,
-): Promise<number> {
+): Promise<ClaudeResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
+    const startTime = Date.now();
 
     const args = [
       '--dangerously-skip-permissions',
@@ -289,12 +299,30 @@ function runClaude(
     ];
 
     const logFd = fs.openSync(logFile, 'a');
+    // stdout → log file, stderr → pipe (so we can capture rate limit messages)
     const child = spawn(CLAUDE_BIN, args, {
       cwd,
       env,
-      stdio: ['ignore', logFd, logFd],
+      stdio: ['ignore', logFd, 'pipe'],
     });
     fs.closeSync(logFd);
+
+    // Capture last ~4KB of stderr for rate limit detection
+    const stderrChunks: Buffer[] = [];
+    let stderrSize = 0;
+    const MAX_STDERR = 4096;
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      // Also append stderr to log file for debugging
+      fs.appendFileSync(logFile, chunk);
+      stderrChunks.push(chunk);
+      stderrSize += chunk.length;
+      // Keep only the tail
+      while (stderrSize > MAX_STDERR && stderrChunks.length > 1) {
+        const removed = stderrChunks.shift()!;
+        stderrSize -= removed.length;
+      }
+    });
 
     // AbortController-based timeout (replaces gtimeout --foreground)
     const timer = setTimeout(() => {
@@ -310,19 +338,32 @@ function runClaude(
     child.on('error', (err) => {
       clearTimeout(timer);
       console.error(`[run-loop] Failed to spawn claude: ${err.message}`);
-      resolve(1);
+      resolve({ exitCode: 1, stderrTail: err.message, elapsedMs: Date.now() - startTime });
     });
 
     child.on('exit', (code) => {
       clearTimeout(timer);
+      const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
+      const elapsedMs = Date.now() - startTime;
       // exit code null when killed by signal — treat as timeout (124, like gtimeout)
       if (code === null) {
-        resolve(124);
+        resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
-        resolve(code);
+        resolve({ exitCode: code, stderrTail, elapsedMs });
       }
     });
   });
+}
+
+/** Check if a failed story run was due to rate limiting */
+function isRateLimited(result: ClaudeResult): boolean {
+  if (result.exitCode === 0) return false;
+  // Check stderr for rate limit indicators (case-insensitive)
+  const lower = result.stderrTail.toLowerCase();
+  if (lower.includes('rate limit') || lower.includes('overloaded')) return true;
+  // Heuristic: exit code 1 within < 5 seconds = immediate rejection (likely rate limit)
+  if (result.exitCode === 1 && result.elapsedMs < RATE_LIMIT_FAST_EXIT_THRESHOLD_MS) return true;
+  return false;
 }
 
 /** Mark a story as passed in the spec JSON file */
@@ -801,36 +842,156 @@ async function executeStory(
     ? { worktreePath: worktreeInfo.worktreePath, worktreeBranch: worktreeInfo.branchName }
     : {};
 
-  // Run Claude — in worktree cwd if provided
-  const exitCode = await runClaude(
-    prompt,
-    effectiveCwd,
-    timeoutMin * 60 * 1000,
-    storyLogFile,
-  );
+  // Track rate limit retries separately from logic retries
+  const rateLimitKey = `rl:${story.id}`;
+  let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
 
-  if (exitCode === 0) {
-    console.log(`${story.id} completed (exit 0)`);
+  // Rate limit retry loop — re-spawns story after exponential backoff
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    // Run Claude — in worktree cwd if provided
+    const result = await runClaude(
+      prompt,
+      effectiveCwd,
+      timeoutMin * 60 * 1000,
+      storyLogFile,
+    );
 
-    // Validation gate — run in the story's own cwd
-    const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
-    const gate = skipGate ? { passed: true } as GateResult : runGate(effectiveCwd);
+    // ── Rate limit detection (before normal exit code handling) ─────────
+    if (result.exitCode !== 0 && result.exitCode !== 124 && isRateLimited(result)) {
+      rateLimitAttempts++;
+      retryCounts.set(rateLimitKey, rateLimitAttempts);
 
-    if (!gate.passed) {
-      console.log(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
-      const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
-      retryCounts.set(story.id, currentRetries);
-
-      if (currentRetries >= MAX_RETRIES) {
+      if (rateLimitAttempts > MAX_RATE_LIMIT_RETRIES) {
+        console.log(`${story.id} rate limited ${rateLimitAttempts} times — exhausted. Marking failed.`);
         markStorySkipped(config.jsonPath, story.id);
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'rate_limit_exhausted',
+            attempts: rateLimitAttempts,
+          }, story.id);
+
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+            });
+          } catch { /* backend may be down */ }
+        }
+        return 'failed';
       }
+
+      const backoffMs = RATE_LIMIT_BACKOFF_MS[rateLimitAttempts - 1] ?? RATE_LIMIT_BACKOFF_MS[RATE_LIMIT_BACKOFF_MS.length - 1];
+      console.log(`${story.id} rate limited (attempt ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES}). Retrying in ${backoffMs / 1000}s...`);
+
+      // Emit story_rate_limited WAL event — drives UI amber state
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_rate_limited', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          attempt: rateLimitAttempts,
+          retryAfterMs: backoffMs,
+          waveIndex: worktreeInfo ? undefined : 0, // wave index not available here; set by caller context
+        }, story.id);
+      }
+
+      // Backoff — sleep then re-spawn
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+
+      // Re-emit story_started before retry
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_started', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          story_title: story.title,
+          ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
+        }, story.id);
+      }
+      continue; // retry the story
+    }
+
+    // ── Normal exit code handling ──────────────────────────────────────
+    if (result.exitCode === 0) {
+      console.log(`${story.id} completed (exit 0)`);
+
+      // Validation gate — run in the story's own cwd
+      const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
+      const gate = skipGate ? { passed: true } as GateResult : runGate(effectiveCwd);
+
+      if (!gate.passed) {
+        console.log(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
+        const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+        retryCounts.set(story.id, currentRetries);
+
+        if (currentRetries >= MAX_RETRIES) {
+          markStorySkipped(config.jsonPath, story.id);
+        }
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: gate.reason,
+            ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
+          }, story.id);
+
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+            });
+          } catch { /* backend may be down */ }
+        }
+
+        if (currentRetries >= MAX_RETRIES) {
+          console.log(`${story.id} failed gate after ${MAX_RETRIES} attempts. Skipping.`);
+          return 'failed';
+        }
+        return 'failed';
+      }
+
+      // Gate passed — commit in the story's cwd (worktree or main)
+      markStoryPassed(config.jsonPath, story.id);
+      retryCounts.delete(story.id);
+      retryCounts.delete(rateLimitKey);
+
+      console.log(`Committing ${story.id}...`);
+      gitCommitStory(effectiveCwd, story.id, story.title, mode);
+
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_passed', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          story_title: story.title,
+        }, story.id);
+
+        try {
+          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass', ...storyResultExtra }),
+          });
+        } catch { /* backend may be down */ }
+      }
+      return 'passed';
+    }
+
+    if (result.exitCode === 124) {
+      console.log(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
+      console.log(`   Log: ${storyLogFile}`);
+      markStorySkipped(config.jsonPath, story.id);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId,
           story_id: story.id,
-          reason: gate.reason,
-          ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
+          reason: 'timeout',
+          timeout_minutes: timeoutMin,
         }, story.id);
 
         try {
@@ -841,94 +1002,41 @@ async function executeStory(
           });
         } catch { /* backend may be down */ }
       }
+      return 'failed';
+    }
 
-      if (currentRetries >= MAX_RETRIES) {
-        console.log(`${story.id} failed gate after ${MAX_RETRIES} attempts. Skipping.`);
-        return 'failed';
+    // Non-zero exit — retry logic (not rate limit)
+    const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+    retryCounts.set(story.id, currentRetries);
+
+    if (currentRetries >= MAX_RETRIES) {
+      console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
+      console.log(`   Log: ${storyLogFile}`);
+      markStorySkipped(config.jsonPath, story.id);
+
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          reason: 'max_retries',
+          attempts: currentRetries,
+        }, story.id);
+
+        try {
+          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+          });
+        } catch { /* backend may be down */ }
       }
       return 'failed';
     }
 
-    // Gate passed — commit in the story's cwd (worktree or main)
-    markStoryPassed(config.jsonPath, story.id);
-    retryCounts.delete(story.id);
-
-    console.log(`Committing ${story.id}...`);
-    gitCommitStory(effectiveCwd, story.id, story.title, mode);
-
-    if (workspaceId) {
-      await emitWalEvent(config.port, 'story_passed', workspaceId, {
-        run_id: config.runId,
-        story_id: story.id,
-        story_title: story.title,
-      }, story.id);
-
-      try {
-        await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass', ...storyResultExtra }),
-        });
-      } catch { /* backend may be down */ }
-    }
-    return 'passed';
-  }
-
-  if (exitCode === 124) {
-    console.log(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
+    console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES})`);
     console.log(`   Log: ${storyLogFile}`);
-    markStorySkipped(config.jsonPath, story.id);
-
-    if (workspaceId) {
-      await emitWalEvent(config.port, 'story_failed', workspaceId, {
-        run_id: config.runId,
-        story_id: story.id,
-        reason: 'timeout',
-        timeout_minutes: timeoutMin,
-      }, story.id);
-
-      try {
-        await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
-        });
-      } catch { /* backend may be down */ }
-    }
     return 'failed';
-  }
-
-  // Non-zero exit — retry logic
-  const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
-  retryCounts.set(story.id, currentRetries);
-
-  if (currentRetries >= MAX_RETRIES) {
-    console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
-    console.log(`   Log: ${storyLogFile}`);
-    markStorySkipped(config.jsonPath, story.id);
-
-    if (workspaceId) {
-      await emitWalEvent(config.port, 'story_failed', workspaceId, {
-        run_id: config.runId,
-        story_id: story.id,
-        reason: 'max_retries',
-        attempts: currentRetries,
-      }, story.id);
-
-      try {
-        await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
-        });
-      } catch { /* backend may be down */ }
-    }
-    return 'failed';
-  }
-
-  console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES})`);
-  console.log(`   Log: ${storyLogFile}`);
-  return 'failed';
+  } // end while (rate limit retry loop)
 }
 
 /**
@@ -1118,7 +1226,7 @@ async function main(): Promise<void> {
     }
 
     // Run Claude
-    const exitCode = await runClaude(
+    const result = await runClaude(
       prompt,
       config.cwd,
       timeoutMin * 60 * 1000,
@@ -1127,7 +1235,50 @@ async function main(): Promise<void> {
 
     console.log('');
 
-    if (exitCode === 0) {
+    // ── Rate limit detection (sequential path) ─────────────────────────
+    if (result.exitCode !== 0 && result.exitCode !== 124 && isRateLimited(result)) {
+      const rateLimitKey = `rl:${story.id}`;
+      const rlAttempts = (retryCounts.get(rateLimitKey) ?? 0) + 1;
+      retryCounts.set(rateLimitKey, rlAttempts);
+
+      if (rlAttempts > MAX_RATE_LIMIT_RETRIES) {
+        console.log(`${story.id} rate limited ${rlAttempts} times — exhausted. Skipping.`);
+        markStorySkipped(config.jsonPath, story.id);
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'rate_limit_exhausted',
+            attempts: rlAttempts,
+          }, story.id);
+
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+            });
+          } catch { /* backend may be down */ }
+        }
+      } else {
+        const backoffMs = RATE_LIMIT_BACKOFF_MS[rlAttempts - 1] ?? RATE_LIMIT_BACKOFF_MS[RATE_LIMIT_BACKOFF_MS.length - 1];
+        console.log(`${story.id} rate limited (attempt ${rlAttempts}/${MAX_RATE_LIMIT_RETRIES}). Retrying in ${backoffMs / 1000}s...`);
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_rate_limited', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            attempt: rlAttempts,
+            retryAfterMs: backoffMs,
+            waveIndex: 0,
+          }, story.id);
+        }
+
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        // Don't increment normal retries — loop will re-pick this story
+      }
+    } else if (result.exitCode === 0) {
       console.log(`${story.id} completed (exit 0)`);
 
       // Validation gate — skip on dry-run or RORCA_SKIP_GATE=1
@@ -1176,6 +1327,7 @@ async function main(): Promise<void> {
         // Gate passed — proceed with marking story passed and committing
         markStoryPassed(config.jsonPath, story.id);
         retryCounts.delete(story.id);
+        retryCounts.delete(`rl:${story.id}`);
 
         console.log(`Committing ${story.id}...`);
         gitCommitStory(config.cwd, story.id, story.title, mode);
@@ -1200,7 +1352,7 @@ async function main(): Promise<void> {
           } catch { /* backend may be down */ }
         }
       }
-    } else if (exitCode === 124) {
+    } else if (result.exitCode === 124) {
       // Timeout (mirrors gtimeout exit code 124)
       console.log(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
       console.log(`   Log: ${storyLogFile}`);
@@ -1267,7 +1419,7 @@ async function main(): Promise<void> {
 
     // If running a specific story, exit after one run
     if (config.specificStory) {
-      process.exit(exitCode);
+      process.exit(result.exitCode);
     }
 
     console.log('');
