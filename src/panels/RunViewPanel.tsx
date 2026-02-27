@@ -29,6 +29,8 @@ interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   parallelism?: number;
+  agentType?: string;
+  agentModel?: string | null;
 }
 
 interface RunApiResponse {
@@ -36,6 +38,8 @@ interface RunApiResponse {
   stories: unknown[];
   specStories: { id: string; title: string }[];
   specModel?: string | null;
+  agentType?: string;
+  agentModel?: string | null;
   tokenSummary?: { inputTokens: number; outputTokens: number };
 }
 
@@ -542,6 +546,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               Parallelism: {run.parallelism}
             </span>
           )}
+          {/* Agent badge */}
+          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${
+            run.agentType === 'opencode' ? 'bg-cyan-500/10 text-cyan-500' : 'bg-orange-500/10 text-orange-500'
+          }`}>
+            {run.agentType === 'opencode'
+              ? run.agentModel?.split('/').pop() || 'OpenCode'
+              : 'Claude'}
+          </span>
         </div>
 
         {/* Pipeline controls */}

@@ -81,9 +81,35 @@ const PROVIDER_KEY_MAP: Record<string, string[]> = {
  */
 router.get('/', (_req: Request, res: Response) => {
   const opencode = currentAgentType === 'opencode' ? detectOpenCode() : null;
+
+  // Determine if user has an API key for the selected model's provider
+  let hasApiKey = true; // claude doesn't need one
+  let modelDisplayName: string | null = null;
+  if (currentAgentType === 'opencode') {
+    if (currentAgentModel) {
+      const modelEntry = OPENCODE_MODELS.find(m => m.id === currentAgentModel);
+      modelDisplayName = modelEntry?.name ?? currentAgentModel.split('/').pop() ?? currentAgentModel;
+      if (modelEntry) {
+        const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
+        if (requiredProviders.length > 0) {
+          const placeholders = requiredProviders.map(() => '?').join(',');
+          const row = db.prepare(
+            `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`
+          ).get(...requiredProviders);
+          hasApiKey = !!row;
+        }
+        // Local models don't need a key
+      }
+    } else {
+      hasApiKey = false; // No model configured at all
+    }
+  }
+
   res.json({
     agentType: currentAgentType,
     agentModel: currentAgentModel,
+    modelDisplayName,
+    hasApiKey,
     opencodeInstalled: opencode?.opencodeInstalled ?? null,
     opencodeVersion: opencode?.opencodeVersion ?? null,
   });
