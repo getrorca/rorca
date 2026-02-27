@@ -209,14 +209,22 @@ function buildPrompt(
   mode: 'impl' | 'qa' | 'journey',
   cwd: string,
   playbook?: string,
+  agentType?: AgentType,
 ): string {
   const ac = getAcceptance(story);
   const acSection = ac ? `\nAcceptance Criteria:\n${ac}` : '';
+
+  // OpenCode reads skill files from .opencode/skills/<name>/SKILL.md — instruct it to load direction stack
+  const openCodeSkillInstruction = agentType === 'opencode'
+    && fs.existsSync(path.join(cwd, '.opencode', 'skills', 'rorca', 'SKILL.md'))
+    ? 'Read .opencode/skills/rorca/SKILL.md before starting work for project context and direction stack.\n'
+    : '';
 
   if (mode === 'journey') {
     const journeySkill = playbook ? readWorkspaceFile(cwd, playbook) : '';
     return [
       'You are simulating real users navigating the application. Read CLAUDE.md for architecture.',
+      openCodeSkillInstruction,
       '', journeySkill, '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
@@ -229,6 +237,7 @@ function buildPrompt(
       : '';
     return [
       'You are writing tests for this project. Read CLAUDE.md for architecture and gotchas.',
+      openCodeSkillInstruction,
       '', playbookInstruction, '',
       '## Workflow',
       '1. Read the relevant AGENTS.md in each directory you\'ll modify',
@@ -252,6 +261,7 @@ function buildPrompt(
     || readWorkspaceFile(cwd, '.claude', 'skills', 'dimitri.md');
   return [
     'Follow this workflow for implementation:',
+    openCodeSkillInstruction,
     '', skillContent, '', '---', '',
     `Your task (${story.id}):`,
     story.description, acSection,
@@ -1020,7 +1030,7 @@ async function executeStory(
   if (worktreeInfo) console.log(`  Worktree: ${worktreeInfo.worktreePath}`);
   console.log(`  Timeout: ${timeoutMin}m`);
 
-  const prompt = buildPrompt(story, mode, effectiveCwd, playbook);
+  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, config.agentType);
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
   fs.writeFileSync(promptLogFile, prompt);
@@ -1394,7 +1404,7 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    const prompt = buildPrompt(story, mode, config.cwd, playbook);
+    const prompt = buildPrompt(story, mode, config.cwd, playbook, config.agentType);
 
     const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
     fs.writeFileSync(promptLogFile, prompt);
