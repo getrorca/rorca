@@ -20,7 +20,6 @@ import EmailVerificationBanner from './components/EmailVerificationBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { onApiFetchError } from './lib/apiFetch';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
-import DirectionStackPanel from './panels/DirectionStackPanel';
 import ReviewQueuePanel from './panels/ReviewQueuePanel';
 import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
 import WorktreesPanel from './panels/WorktreesPanel';
@@ -133,7 +132,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
     case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief } : {})} />;
     case 'spec-review': return <SpecReviewPanel specId={reviewSpecId ?? ''} onBack={() => onNavigate('hub')} onNavigate={onNavigate} />;
-    case 'stack': return <DirectionStackPanel />;
+    case 'stack': return <SettingsPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'queue': return <ReviewQueuePanel />;
     case 'pipeline': return <PipelineMonitorPanel />;
