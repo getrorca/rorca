@@ -324,6 +324,15 @@ export function runMigrations() {
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN parallelism INTEGER NOT NULL DEFAULT 1");
   }
 
+  // EQ-010: Add worktree_path and worktree_branch columns to story_results (idempotent)
+  const srColsEQ010 = db.pragma('table_info(story_results)') as { name: string }[];
+  if (!srColsEQ010.some(c => c.name === 'worktree_path')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN worktree_path TEXT');
+  }
+  if (!srColsEQ010.some(c => c.name === 'worktree_branch')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN worktree_branch TEXT');
+  }
+
   // EQ-007: Add author_name column to story_comments for guest reviewers (idempotent)
   const scCols = db.pragma('table_info(story_comments)') as { name: string }[];
   if (!scCols.some(c => c.name === 'author_name')) {
