@@ -27,6 +27,12 @@ export interface ChatOptions {
 
 // ─── Model Registry ──────────────────────────────────────────────────────────
 
+/** Speed classification for model selection UI. */
+export type SpeedTier = 'fast' | 'medium' | 'slow';
+
+/** Cost classification for model selection UI. */
+export type CostTier = 'free' | 'low' | 'medium' | 'high' | 'premium';
+
 /** Models available per provider. `providerType` links to routing logic. */
 export interface ModelInfo {
   id: string;
@@ -35,6 +41,9 @@ export interface ModelInfo {
   providerType: ProviderType;
   costPer1kInput: number;
   costPer1kOutput: number;
+  contextWindow: number;
+  speedTier: SpeedTier;
+  costTier: CostTier;
 }
 
 /** All known models across providers. */
@@ -47,6 +56,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'anthropic',
     costPer1kInput: 0.003,
     costPer1kOutput: 0.015,
+    contextWindow: 200000,
+    speedTier: 'medium',
+    costTier: 'medium',
   },
   {
     id: 'claude-opus-4-6',
@@ -55,6 +67,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'anthropic',
     costPer1kInput: 0.015,
     costPer1kOutput: 0.075,
+    contextWindow: 200000,
+    speedTier: 'slow',
+    costTier: 'premium',
   },
   {
     id: 'claude-haiku-4-5-20251001',
@@ -63,6 +78,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'anthropic',
     costPer1kInput: 0.0008,
     costPer1kOutput: 0.004,
+    contextWindow: 200000,
+    speedTier: 'fast',
+    costTier: 'low',
   },
   // ── OpenAI-compat (covers OpenAI, Groq, Together, DeepSeek, Mistral, Ollama) ──
   {
@@ -72,6 +90,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.0025,
     costPer1kOutput: 0.01,
+    contextWindow: 128000,
+    speedTier: 'medium',
+    costTier: 'medium',
   },
   {
     id: 'gpt-4o-mini',
@@ -80,6 +101,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.00015,
     costPer1kOutput: 0.0006,
+    contextWindow: 128000,
+    speedTier: 'fast',
+    costTier: 'low',
   },
   {
     id: 'deepseek-chat',
@@ -88,6 +112,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.00027,
     costPer1kOutput: 0.0011,
+    contextWindow: 128000,
+    speedTier: 'medium',
+    costTier: 'low',
   },
   {
     id: 'deepseek-reasoner',
@@ -96,6 +123,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.00055,
     costPer1kOutput: 0.0022,
+    contextWindow: 128000,
+    speedTier: 'slow',
+    costTier: 'low',
   },
   // ── Groq ──
   {
@@ -105,6 +135,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.00059,
     costPer1kOutput: 0.00079,
+    contextWindow: 128000,
+    speedTier: 'fast',
+    costTier: 'low',
   },
   {
     id: 'gemma2-9b-it',
@@ -113,6 +146,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.0002,
     costPer1kOutput: 0.0002,
+    contextWindow: 8192,
+    speedTier: 'fast',
+    costTier: 'free',
   },
   // ── Together AI ──
   {
@@ -122,6 +158,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.00088,
     costPer1kOutput: 0.00088,
+    contextWindow: 128000,
+    speedTier: 'fast',
+    costTier: 'low',
   },
   // ── Fireworks ──
   {
@@ -131,6 +170,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.0009,
     costPer1kOutput: 0.0009,
+    contextWindow: 128000,
+    speedTier: 'fast',
+    costTier: 'low',
   },
   // ── Mistral ──
   {
@@ -140,6 +182,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.002,
     costPer1kOutput: 0.006,
+    contextWindow: 128000,
+    speedTier: 'medium',
+    costTier: 'medium',
   },
   {
     id: 'codestral-latest',
@@ -148,6 +193,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.0003,
     costPer1kOutput: 0.0009,
+    contextWindow: 256000,
+    speedTier: 'fast',
+    costTier: 'low',
   },
   // ── Cerebras ──
   {
@@ -157,6 +205,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.00085,
     costPer1kOutput: 0.00085,
+    contextWindow: 128000,
+    speedTier: 'fast',
+    costTier: 'low',
   },
   // ── Perplexity ──
   {
@@ -166,6 +217,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openai-compat',
     costPer1kInput: 0.003,
     costPer1kOutput: 0.015,
+    contextWindow: 200000,
+    speedTier: 'medium',
+    costTier: 'medium',
   },
   // ── OpenRouter (covers Gemini, Grok, and any other outlier) ──
   {
@@ -175,6 +229,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openrouter',
     costPer1kInput: 0.00125,
     costPer1kOutput: 0.01,
+    contextWindow: 1000000,
+    speedTier: 'medium',
+    costTier: 'medium',
   },
   {
     id: 'google/gemini-2.5-flash-preview',
@@ -183,6 +240,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openrouter',
     costPer1kInput: 0.00015,
     costPer1kOutput: 0.0006,
+    contextWindow: 1000000,
+    speedTier: 'fast',
+    costTier: 'low',
   },
   {
     id: 'x-ai/grok-3',
@@ -191,6 +251,9 @@ export const ALL_MODELS: ModelInfo[] = [
     providerType: 'openrouter',
     costPer1kInput: 0.003,
     costPer1kOutput: 0.015,
+    contextWindow: 131072,
+    speedTier: 'medium',
+    costTier: 'medium',
   },
 ];
 
@@ -462,14 +525,22 @@ export async function fetchOpenRouterModels(apiKey: string): Promise<ModelInfo[]
     }>;
   };
 
-  return body.data.map(m => ({
-    id: m.id,
-    label: m.name,
-    provider: 'OpenRouter',
-    providerType: 'openrouter' as ProviderType,
-    costPer1kInput: m.pricing?.prompt ? parseFloat(m.pricing.prompt) * 1000 : 0,
-    costPer1kOutput: m.pricing?.completion ? parseFloat(m.pricing.completion) * 1000 : 0,
-  }));
+  return body.data.map(m => {
+    const inputCost = m.pricing?.prompt ? parseFloat(m.pricing.prompt) * 1000 : 0;
+    const outputCost = m.pricing?.completion ? parseFloat(m.pricing.completion) * 1000 : 0;
+    const avgCost = (inputCost + outputCost) / 2;
+    return {
+      id: m.id,
+      label: m.name,
+      provider: 'OpenRouter',
+      providerType: 'openrouter' as ProviderType,
+      costPer1kInput: inputCost,
+      costPer1kOutput: outputCost,
+      contextWindow: (m as any).context_length ?? 128000,
+      speedTier: 'medium' as SpeedTier,
+      costTier: (avgCost === 0 ? 'free' : avgCost < 0.002 ? 'low' : avgCost < 0.01 ? 'medium' : avgCost < 0.05 ? 'high' : 'premium') as CostTier,
+    };
+  });
 }
 
 // ─── Unified Entry Point ─────────────────────────────────────────────────────
