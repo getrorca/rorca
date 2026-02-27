@@ -41,6 +41,7 @@ import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
 import { rateLimiter } from './lib/rate-limiter';
+import { publicReviewRouter, specReviewRouter } from './routes/review';
 import { errorHandler } from './lib/error-handler';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { db } from './db/index';
@@ -86,6 +87,8 @@ app.use('/api/auth', rateLimiter, authRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/billing', billingWebhookRouter); // Stripe webhook (no auth, needs raw body)
 app.use('/api/invites', rateLimiter, invitesRouter);
+// EQ-007: Public review routes (no auth required — accessed via shareable token)
+app.use('/api/review', rateLimiter, publicReviewRouter);
 registerWebhookHandlers();
 
 // ─── Auth middleware (all routes below require authentication) ───
@@ -99,6 +102,8 @@ app.use(rateLimiter);
 app.use('/api/workspaces', workspacesRouter);
 app.use('/api/direction', directionRouter);
 app.use('/api/specs', specsRouter);
+// EQ-007: Review link creation (auth-protected, mounted under /api/specs)
+app.use('/api/specs', specReviewRouter);
 app.use('/api/wal', walRouter);
 app.use('/api/context', contextRouter);
 app.use('/api/pipeline', pipelineRouter);

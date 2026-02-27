@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   ChevronRight,
   Inbox,
@@ -15,6 +15,9 @@ import {
   Eye,
   MessageSquare,
   AlertCircle,
+  Share2,
+  Link2,
+  ExternalLink,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -641,10 +644,75 @@ function SpecPreview({
 
   const [specAssignee, setSpecAssignee] = useState<Assignee | null>(summary.assignee ?? null);
 
+  // Share for Review
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [shareLoading, setShareLoading] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [hasNewComments, setHasNewComments] = useState(false);
+
+  // Track when user last viewed comments (per spec)
+  const lastViewedRef = useRef<Record<string, number>>({});
+
+  // Check for new review comments by polling comment counts
+  const prevCommentCountRef = useRef<number | null>(null);
+  useEffect(() => {
+    // Reset on spec change
+    setShareUrl(null);
+    setHasNewComments(false);
+    prevCommentCountRef.current = null;
+
+    const checkNewComments = () => {
+      apiFetch<{ counts: Record<string, number> }>(`/api/specs/${summary.id}/comments/counts`)
+        .then(data => {
+          const total = Object.values(data.counts).reduce((s, c) => s + c, 0);
+          if (prevCommentCountRef.current !== null && total > prevCommentCountRef.current) {
+            setHasNewComments(true);
+          }
+          prevCommentCountRef.current = total;
+        })
+        .catch(() => {});
+    };
+
+    checkNewComments();
+    const interval = setInterval(checkNewComments, 15_000); // poll every 15s
+    return () => clearInterval(interval);
+  }, [summary.id]);
+
   // Sync when summary changes
   useEffect(() => {
     setSpecAssignee(summary.assignee ?? null);
   }, [summary.assignee]);
+
+  const handleShareForReview = async () => {
+    if (shareLoading) return;
+    setShareLoading(true);
+    try {
+      const result = await apiFetch<{ url: string; token: string; expiresAt: string }>(
+        `/api/specs/${summary.id}/review-link`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        },
+      );
+      setShareUrl(result.url);
+      // Auto-copy to clipboard
+      await navigator.clipboard.writeText(result.url);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 3000);
+    } catch {
+      // Error handled by global toast
+    } finally {
+      setShareLoading(false);
+    }
+  };
+
+  const handleCopyShareUrl = async () => {
+    if (!shareUrl) return;
+    await navigator.clipboard.writeText(shareUrl);
+    setShareCopied(true);
+    setTimeout(() => setShareCopied(false), 2000);
+  };
 
   const handleAssignSpec = async (userId: string | null) => {
     const result = await apiFetch<{ ok: boolean; assignee?: Assignee; assigneeId?: null }>(
@@ -675,13 +743,52 @@ function SpecPreview({
       <div className="px-4 py-3 border-b border-border shrink-0">
         <div className="flex items-center justify-between">
           <h3 className="text-base font-mono font-semibold text-text">{summary.specName}</h3>
-          <AssigneeDropdown
-            assignee={specAssignee}
-            onAssign={handleAssignSpec}
-            workspaceId={workspaceId}
-            size="md"
-          />
+          <div className="flex items-center gap-2">
+            {/* Share for Review button */}
+            <div className="relative">
+              <button
+                onClick={handleShareForReview}
+                disabled={shareLoading}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border border-border text-muted hover:text-text hover:border-accent/40 transition-colors disabled:opacity-50"
+                title="Share for external review"
+              >
+                <Share2 size={12} />
+                {shareLoading ? 'Generating...' : 'Share'}
+              </button>
+              {hasNewComments && (
+                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-accent animate-pulse" />
+              )}
+            </div>
+            <AssigneeDropdown
+              assignee={specAssignee}
+              onAssign={handleAssignSpec}
+              workspaceId={workspaceId}
+              size="md"
+            />
+          </div>
         </div>
+        {/* Share URL display */}
+        {shareUrl && (
+          <div className="flex items-center gap-2 mt-2 px-2.5 py-2 rounded bg-panel border border-border">
+            <Link2 size={12} className="text-muted shrink-0" />
+            <span className="text-xs font-mono text-text truncate flex-1">{shareUrl}</span>
+            <button
+              onClick={handleCopyShareUrl}
+              className="shrink-0 flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
+            >
+              {shareCopied ? <><Check size={10} /> Copied</> : <><Copy size={10} /> Copy</>}
+            </button>
+            <a
+              href={shareUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 p-1 text-muted hover:text-text transition-colors"
+              title="Open review page"
+            >
+              <ExternalLink size={12} />
+            </a>
+          </div>
+        )}
         <div className="flex items-center gap-3 mt-0.5">
           <p className="text-xs text-muted flex items-center gap-1">
             <Clock size={10} />
