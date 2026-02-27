@@ -551,6 +551,20 @@ curl http://localhost:3030/api/health
 
 **Notes**: `RORCA_MODEL` is ignored when `RORCA_AGENT=codex` — Codex CLI uses the model tied to your ChatGPT subscription. Model cascading and escalation are disabled for codex (subscription-based, no tier assignment). Binary detection via `backend/src/lib/codex-detector.ts`.
 
+### Codex Direction Stack Injection (OC-030)
+Codex CLI auto-discovers `AGENTS.md` files from the Git root directory and injects them as context before the user prompt (see [OpenAI docs](https://developers.openai.com/codex/guides/agents-md/)). Rorca leverages this by writing the synthesized direction stack (L1-L5) to the workspace root `AGENTS.md` before each Codex pipeline run.
+
+**How it works:**
+- `pipeline.ts` calls `writeCodexAgentsMd()` before spawning the execution engine when `RORCA_AGENT=codex`
+- Synthesizes L1-L5 direction layers (same `synthesize()` call used for OpenCode's `.opencode/skills/rorca/SKILL.md`)
+- If workspace already has `AGENTS.md`: appends a delimited section using markers (`# === RORCA DIRECTION START ===` / `# === RORCA DIRECTION END ===`)
+- If no `AGENTS.md` exists: creates one with just the direction stack section
+- Direction context is written fresh before each run (not cached) to pick up latest direction stack changes
+- On run completion (pass or fail), `removeCodexAgentsMd()` restores the original `AGENTS.md` or deletes the file if Rorca created it
+- `execution-engine.ts` `buildPrompt()` adds an explicit instruction for Codex stories to follow AGENTS.md guidance
+
+**Key difference from OpenCode:** OpenCode uses `.opencode/skills/rorca/SKILL.md` (a dedicated skill file in a hidden directory). Codex uses the workspace root `AGENTS.md` because that's what Codex CLI auto-discovers. The marker-based append/restore pattern ensures existing `AGENTS.md` content is preserved.
+
 ## Performance Targets
 - Spec generation: < 60s (LLM call)
 - Archive search: < 100ms (SQLite full-text scan)
