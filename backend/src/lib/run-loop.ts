@@ -9,17 +9,20 @@
  *   npx tsx backend/src/lib/run-loop.ts --json /path/to/spec.json --cwd /path/to/workspace --run-id 42
  *
  * Flags:
- *   --json <path>       Spec JSON file (required)
- *   --cwd <path>        Working directory / workspace root (required)
- *   --run-id <number>   Pipeline run ID for WAL event reporting (required)
- *   --story <id>        Run a single specific story
- *   --dry-run           Preview next story without executing
- *   --port <number>     Backend port for WAL events (default: 3030)
+ *   --json <path>           Spec JSON file (required)
+ *   --cwd <path>            Working directory / workspace root (required)
+ *   --run-id <number>       Pipeline run ID for WAL event reporting (required)
+ *   --story <id>            Run a single specific story
+ *   --dry-run               Preview next story without executing
+ *   --port <number>         Backend port for WAL events (default: 3030)
+ *   --parallelism <N>       Max concurrent story subprocesses per wave (1–10, default: 1)
  */
 
 import { spawn, execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { compileWaves, isCycleError } from './wave-compiler';
+import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -55,6 +58,7 @@ interface RunLoopConfig {
   specificStory?: string;
   dryRun: boolean;
   port: number;
+  parallelism: number;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -437,6 +441,240 @@ function runGate(cwd: string): GateResult {
   return { passed: true };
 }
 
+// ─── Parallel Execution Helpers ──────────────────────────────────────────────
+
+/**
+ * Run a single story end-to-end: emit WAL events, spawn claude, handle result.
+ * Returns 'passed' | 'failed' | 'skipped'.
+ */
+async function executeStory(
+  story: UserStory,
+  config: RunLoopConfig,
+  mode: 'impl' | 'qa' | 'journey',
+  playbook: string | undefined,
+  logDir: string,
+  workspaceId: string | null,
+  retryCounts: Map<string, number>,
+): Promise<'passed' | 'failed' | 'skipped'> {
+  const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
+
+  console.log(`[${mode}] ${story.id}: ${story.title}`);
+  console.log(`  Timeout: ${timeoutMin}m`);
+
+  // Build prompt
+  const prompt = buildPrompt(story, mode, config.cwd, playbook);
+
+  // Write prompt to log file for debugging
+  const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
+  fs.writeFileSync(promptLogFile, prompt);
+
+  // Story log file
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+  const storyLogFile = path.join(logDir, `${story.id}_${timestamp}.log`);
+
+  // Emit story_started WAL event
+  if (workspaceId) {
+    await emitWalEvent(config.port, 'story_started', workspaceId, {
+      run_id: config.runId,
+      story_id: story.id,
+      story_title: story.title,
+    }, story.id);
+  }
+
+  // Run Claude
+  const exitCode = await runClaude(
+    prompt,
+    config.cwd,
+    timeoutMin * 60 * 1000,
+    storyLogFile,
+  );
+
+  if (exitCode === 0) {
+    console.log(`${story.id} completed (exit 0)`);
+
+    // Validation gate
+    const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
+    const gate = skipGate ? { passed: true } as GateResult : runGate(config.cwd);
+
+    if (!gate.passed) {
+      console.log(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
+      const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+      retryCounts.set(story.id, currentRetries);
+
+      if (currentRetries >= MAX_RETRIES) {
+        markStorySkipped(config.jsonPath, story.id);
+      }
+
+      if (workspaceId) {
+        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          reason: gate.reason,
+          ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
+        }, story.id);
+
+        try {
+          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+          });
+        } catch { /* backend may be down */ }
+      }
+
+      if (currentRetries >= MAX_RETRIES) {
+        console.log(`${story.id} failed gate after ${MAX_RETRIES} attempts. Skipping.`);
+        return 'failed';
+      }
+      return 'failed';
+    }
+
+    // Gate passed
+    markStoryPassed(config.jsonPath, story.id);
+    retryCounts.delete(story.id);
+
+    console.log(`Committing ${story.id}...`);
+    gitCommitStory(config.cwd, story.id, story.title, mode);
+
+    if (workspaceId) {
+      await emitWalEvent(config.port, 'story_passed', workspaceId, {
+        run_id: config.runId,
+        story_id: story.id,
+        story_title: story.title,
+      }, story.id);
+
+      try {
+        await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass' }),
+        });
+      } catch { /* backend may be down */ }
+    }
+    return 'passed';
+  }
+
+  if (exitCode === 124) {
+    console.log(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
+    console.log(`   Log: ${storyLogFile}`);
+    markStorySkipped(config.jsonPath, story.id);
+
+    if (workspaceId) {
+      await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        run_id: config.runId,
+        story_id: story.id,
+        reason: 'timeout',
+        timeout_minutes: timeoutMin,
+      }, story.id);
+
+      try {
+        await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+        });
+      } catch { /* backend may be down */ }
+    }
+    return 'failed';
+  }
+
+  // Non-zero exit — retry logic
+  const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+  retryCounts.set(story.id, currentRetries);
+
+  if (currentRetries >= MAX_RETRIES) {
+    console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
+    console.log(`   Log: ${storyLogFile}`);
+    markStorySkipped(config.jsonPath, story.id);
+
+    if (workspaceId) {
+      await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        run_id: config.runId,
+        story_id: story.id,
+        reason: 'max_retries',
+        attempts: currentRetries,
+      }, story.id);
+
+      try {
+        await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+        });
+      } catch { /* backend may be down */ }
+    }
+    return 'failed';
+  }
+
+  console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES})`);
+  console.log(`   Log: ${storyLogFile}`);
+  return 'failed';
+}
+
+/**
+ * Compute the transitive set of story IDs that are blocked because they depend
+ * (directly or transitively) on at least one story in `failedIds`.
+ */
+function computeBlockedStories(
+  allStories: UserStory[],
+  failedIds: Set<string>,
+  alreadyProcessed: Set<string>,
+): Map<string, string[]> {
+  // Build reverse-dep lookup: for each story, which other stories depend on it
+  const blocked = new Map<string, string[]>(); // storyId -> [blockedBy ids]
+  const unprocessed = allStories.filter(s =>
+    !alreadyProcessed.has(s.id) && !failedIds.has(s.id) && !s.excluded && !s.skipped && !isPassed(s)
+  );
+
+  // BFS: start from failedIds, propagate to all transitive dependents
+  const allBlockedIds = new Set<string>(failedIds);
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const story of unprocessed) {
+      if (allBlockedIds.has(story.id)) continue;
+      const deps = story.dependsOn ?? [];
+      const blockers = deps.filter(dep => allBlockedIds.has(dep));
+      if (blockers.length > 0) {
+        allBlockedIds.add(story.id);
+        blocked.set(story.id, blockers);
+        changed = true;
+      }
+    }
+  }
+
+  return blocked;
+}
+
+/**
+ * Run tasks with bounded concurrency using Promise.allSettled semantics.
+ * At most `limit` tasks run concurrently; the rest queue up as workers free.
+ */
+async function runWithBoundedConcurrency<T>(
+  tasks: Array<() => Promise<T>>,
+  limit: number,
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(tasks.length);
+  let nextIdx = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIdx < tasks.length) {
+      const idx = nextIdx++;
+      try {
+        const value = await tasks[idx]();
+        results[idx] = { status: 'fulfilled', value };
+      } catch (reason) {
+        results[idx] = { status: 'rejected', reason };
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 // ─── Main Loop ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -464,6 +702,7 @@ async function main(): Promise<void> {
   console.log('========================================');
   console.log('');
   console.log(`Progress: ${progress.passed}/${progress.total}`);
+  console.log(`Parallelism: ${config.parallelism}`);
   console.log(`JSON: ${config.jsonPath}`);
   if (playbook) console.log(`Playbook: ${playbook}`);
   console.log('');
@@ -473,7 +712,6 @@ async function main(): Promise<void> {
 
   // Track retries per story
   const retryCounts = new Map<string, number>();
-  let iteration = 0;
 
   // Handle Ctrl+C gracefully
   process.on('SIGINT', () => {
@@ -481,6 +719,15 @@ async function main(): Promise<void> {
     console.log('Loop stopped by user.');
     process.exit(0);
   });
+
+  // ─── Parallel execution path (N > 1) ────────────────────────────────────
+  if (config.parallelism > 1 && !config.specificStory) {
+    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories);
+    return;
+  }
+
+  // ─── Sequential execution path (N = 1, identical to original) ───────────
+  let iteration = 0;
 
   while (true) {
     iteration++;
@@ -710,6 +957,186 @@ async function main(): Promise<void> {
   }
 }
 
+// ─── Parallel Execution (N > 1) ──────────────────────────────────────────────
+
+async function runParallel(
+  config: RunLoopConfig,
+  mode: 'impl' | 'qa' | 'journey',
+  playbook: string | undefined,
+  logDir: string,
+  workspaceId: string | null,
+  retryCounts: Map<string, number>,
+  stories: UserStory[],
+): Promise<void> {
+  // Convert to wave-compiler format (fields have compatible shape)
+  const waveStories: WaveUserStory[] = stories.map(s => ({
+    id: s.id,
+    title: s.title,
+    description: s.description,
+    acceptanceCriteria: s.acceptanceCriteria ?? [],
+    dependsOn: s.dependsOn ?? [],
+    passes: s.passes,
+    excluded: s.excluded,
+    priority: s.priority,
+    timeoutMinutes: s.timeoutMinutes,
+  }));
+
+  const waveResult = compileWaves(waveStories);
+
+  if (isCycleError(waveResult)) {
+    console.error(`[run-loop] Dependency cycle detected among stories: ${waveResult.involvedIds.join(', ')}`);
+    console.error(`[run-loop] Cannot run in parallel mode. Fix dependsOn fields or use --parallelism 1`);
+    process.exit(1);
+  }
+
+  const waves: Wave[] = waveResult;
+
+  console.log(`Compiled ${stories.length} stories into ${waves.length} waves`);
+  for (const wave of waves) {
+    console.log(`  Wave ${wave.index}: ${wave.stories.map(s => s.id).join(', ')}`);
+  }
+  console.log('');
+
+  // Emit run_started with parallelism + waveCount
+  if (workspaceId) {
+    await emitWalEvent(config.port, 'run_started', workspaceId, {
+      run_id: config.runId,
+      parallelism: config.parallelism,
+      waveCount: waves.length,
+    });
+  }
+
+  // Track all failed story IDs across waves for transitive blocking
+  const failedIds = new Set<string>();
+  const processedIds = new Set<string>();
+
+  for (const wave of waves) {
+    console.log('==========================================');
+    console.log(`  Wave ${wave.index} — ${wave.stories.length} stories (parallelism=${config.parallelism})`);
+    console.log('==========================================');
+
+    // Filter out stories that are blocked by earlier failures
+    const executableStories: UserStory[] = [];
+    for (const waveStory of wave.stories) {
+      // Look up the original UserStory (with full fields like acceptance, notes, etc.)
+      const original = stories.find(s => s.id === waveStory.id);
+      if (!original) continue;
+
+      if (original.excluded || original.skipped) {
+        processedIds.add(original.id);
+        continue;
+      }
+
+      // Check if any direct dependency failed
+      const deps = original.dependsOn ?? [];
+      const blockers = deps.filter(dep => failedIds.has(dep));
+      if (blockers.length > 0) {
+        // This story is blocked — skip it
+        console.log(`  ${original.id} BLOCKED by: ${blockers.join(', ')}`);
+        failedIds.add(original.id);
+        processedIds.add(original.id);
+        markStorySkipped(config.jsonPath, original.id);
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: original.id,
+            reason: 'blocked_by',
+            blockedBy: blockers,
+          }, original.id);
+
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ runId: config.runId, storyId: original.id, status: 'skip' }),
+            });
+          } catch { /* backend may be down */ }
+        }
+        continue;
+      }
+
+      executableStories.push(original);
+    }
+
+    if (executableStories.length === 0) {
+      console.log('  No executable stories in this wave — skipping');
+      continue;
+    }
+
+    // Build task functions for bounded concurrency
+    const tasks = executableStories.map(story => () =>
+      executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts)
+        .then(result => ({ storyId: story.id, result }))
+    );
+
+    // Run with bounded concurrency — Promise.allSettled semantics
+    const results = await runWithBoundedConcurrency(tasks, config.parallelism);
+
+    // Process results
+    for (const settled of results) {
+      if (settled.status === 'fulfilled') {
+        const { storyId, result } = settled.value;
+        processedIds.add(storyId);
+        if (result === 'failed') {
+          failedIds.add(storyId);
+        }
+      } else {
+        // Should not happen since executeStory handles its own errors,
+        // but handle defensively
+        console.error(`[run-loop] Unexpected rejection in wave ${wave.index}:`, settled.reason);
+      }
+    }
+
+    // After wave settles: compute transitively blocked stories in remaining waves
+    const allStories = getStories(JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')));
+    const newlyBlocked = computeBlockedStories(allStories, failedIds, processedIds);
+
+    for (const [blockedId, blockers] of newlyBlocked) {
+      // Only emit for stories not yet processed
+      if (!processedIds.has(blockedId)) {
+        console.log(`  ${blockedId} transitively BLOCKED by: ${blockers.join(', ')}`);
+        failedIds.add(blockedId);
+        processedIds.add(blockedId);
+        markStorySkipped(config.jsonPath, blockedId);
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: blockedId,
+            reason: 'blocked_by',
+            blockedBy: blockers,
+          }, blockedId);
+
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ runId: config.runId, storyId: blockedId, status: 'skip' }),
+            });
+          } catch { /* backend may be down */ }
+        }
+      }
+    }
+
+    console.log('');
+
+    // Brief pause between waves
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+
+  // Final summary
+  const finalSpec: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
+  const finalStories = getStories(finalSpec);
+  const finalProgress = getProgress(finalStories);
+  console.log('');
+  console.log(`All waves complete! ${finalProgress.passed}/${finalProgress.total} stories passed`);
+  if (failedIds.size > 0) {
+    console.log(`Failed/blocked: ${[...failedIds].join(', ')}`);
+  }
+  process.exit(failedIds.size > 0 ? 1 : 0);
+}
+
 /** Look up workspace ID from the Rorca backend by path */
 async function resolveWorkspaceId(port: number, cwd: string): Promise<string | null> {
   try {
@@ -732,6 +1159,7 @@ function parseArgs(): RunLoopConfig {
   let specificStory: string | undefined;
   let dryRun = false;
   let port = parseInt(process.env.PORT ?? '3030', 10);
+  let parallelism = 1;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -753,6 +1181,9 @@ function parseArgs(): RunLoopConfig {
       case '--port':
         port = parseInt(args[++i], 10);
         break;
+      case '--parallelism':
+        parallelism = Math.max(1, Math.min(10, parseInt(args[++i], 10) || 1));
+        break;
       default:
         console.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
@@ -760,11 +1191,11 @@ function parseArgs(): RunLoopConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    console.error('Usage: run-loop.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>]');
+    console.error('Usage: run-loop.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>]');
     process.exit(1);
   }
 
-  return { jsonPath, cwd, runId, specificStory, dryRun, port };
+  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
