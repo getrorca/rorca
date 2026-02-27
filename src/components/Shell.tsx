@@ -154,17 +154,27 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     }
   }, [events, refreshActiveRuns]);
 
+  // Track whether the dot just appeared (for fade-in animation)
+  const [dotJustAppeared, setDotJustAppeared] = useState(false);
+  const dotAnimTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Sync visibility with activeRun presence
   useEffect(() => {
     if (activeRun && pillState === 'idle') {
       setPillState('running');
       setVisible(true);
+      setDotJustAppeared(true);
+      if (dotAnimTimer.current) clearTimeout(dotAnimTimer.current);
+      dotAnimTimer.current = setTimeout(() => setDotJustAppeared(false), 600);
     }
   }, [activeRun, pillState]);
 
-  // Cleanup timer on unmount
+  // Cleanup timers on unmount
   useEffect(() => {
-    return () => { if (hideTimer.current) clearTimeout(hideTimer.current); };
+    return () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+      if (dotAnimTimer.current) clearTimeout(dotAnimTimer.current);
+    };
   }, []);
 
   // Nothing to show
@@ -199,10 +209,10 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     >
       {isDone ? (
         <span className="relative flex h-2.5 w-2.5">
-          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500" />
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500 animate-dot-fade-pulse" />
         </span>
       ) : (
-        <span className="relative flex h-2.5 w-2.5">
+        <span className={`relative flex h-2.5 w-2.5${dotJustAppeared ? ' animate-dot-fade-pulse' : ''}`}>
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
           <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-accent" />
         </span>
