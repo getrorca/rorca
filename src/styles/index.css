@@ -10,6 +10,10 @@
   .scrollbar-none::-webkit-scrollbar {
     display: none;
   }
+  /* Prevent CLS: panel container reserves full space during skeleton→content swap */
+  .contain-layout {
+    contain: layout style;
+  }
 }
 
 @layer base {

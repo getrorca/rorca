@@ -8,6 +8,10 @@ export default defineConfig({
     port: 5210,
   },
   build: {
+    // Inject modulepreload hints for dynamically imported chunks
+    modulePreload: { polyfill: true },
+    // Target modern browsers — avoid legacy polyfills that bloat main bundle
+    target: 'es2020',
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -23,9 +27,13 @@ export default defineConfig({
           if (id.includes('node_modules/@xterm/')) {
             return 'xterm';
           }
-          // Command palette
+          // Command palette — lazy loaded, separate chunk
           if (id.includes('node_modules/cmdk')) {
             return 'cmdk';
+          }
+          // Lucide icons — tree-shaken but used widely; separate chunk
+          if (id.includes('node_modules/lucide-react')) {
+            return 'icons';
           }
         },
       },

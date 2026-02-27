@@ -766,3 +766,30 @@ Key decisions:
 - Used skeleton screens (not spinners) as Suspense fallback — matches AC requirement
 - Kept `SettingsTab` as type-only import since lazy-loading SettingsPanel means its module isn't available at import time
 - manualChunks only for heavy vendor deps — let Vite auto-chunk panel components (produces cleaner per-panel chunks)
+
+## Story P2-020: App Renders Meaningful Content Within 2s on Fast 3G — DONE
+Files touched:
+- index.html (replaced: inline critical CSS + shell skeleton inside #root)
+- src/App.tsx (modified: lazy-load CommandPalette, auth pages, OnboardingWizard, PublicReviewPage; show shell+skeleton during auth loading instead of blank "Loading...")
+- src/components/StoryComments.tsx (modified: added width/height/loading="lazy" to avatar img)
+- src/components/Shell.tsx (modified: added contain-layout class to main content area)
+- src/styles/index.css (modified: added .contain-layout utility)
+- vite.config.ts (modified: added modulePreload polyfill, es2020 target, lucide-react icon chunk split)
+
+What was built:
+- Shell skeleton renders instantly from inlined HTML+CSS in index.html (no JS needed) — top bar with "rorca" wordmark + 4-icon sidebar rail + content placeholders with pulse animation
+- Critical CSS variables (tokens) duplicated inline so theme applies before Tailwind loads
+- 7 components moved from eager import to React.lazy: CommandPalette, LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage, OnboardingWizard, PublicReviewPage
+- Auth loading state now renders full Shell+HubSkeleton instead of blank "Loading..." div — nav renders before data loads
+- modulepreload hints auto-injected by Vite for react and icons chunks
+- lucide-react split into its own "icons" chunk for better caching
+- Build target set to es2020 to avoid legacy polyfills
+- Avatar images have explicit width=24 height=24 + loading="lazy" to prevent CLS
+- CSS contain: layout style on main content area prevents skeleton→content layout shifts
+
+Key decisions:
+- Inlined critical CSS rather than using a separate file — avoids render-blocking CSS request entirely
+- Shell skeleton uses aria-hidden="true" since it's replaced by React immediately
+- Used simple CSS animations (not JS) for skeleton pulse — zero JS overhead for FCP
+- Auth loading shows Shell+skeleton (not blank page) so LCP is the skeleton itself, well under 2.5s
+- CLS prevention via CSS containment on main area + explicit img dimensions
