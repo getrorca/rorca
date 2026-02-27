@@ -34,7 +34,7 @@ const STATUS_CONFIG: Record<DerivedStatus, { icon: typeof CheckCircle2; color: s
   pending:      { icon: Circle,       color: 'text-gray-400',    label: 'Pending' },
   running:      { icon: Loader2,      color: 'text-blue-500',    label: 'Running',      rowClass: 'border-l-2 border-l-blue-500 bg-blue-500/5' },
   pass:         { icon: CheckCircle2, color: 'text-emerald-500', label: 'Passed' },
-  fail:         { icon: XCircle,      color: 'text-red-500',     label: 'Failed' },
+  fail:         { icon: XCircle,      color: 'text-red-500',     label: 'Failed',       rowClass: 'border-l-2 border-l-red-500 bg-red-500/5' },
   excluded:     { icon: SkipForward,  color: 'text-gray-400',    label: 'Excluded' },
   skip:         { icon: SkipForward,  color: 'text-gray-400',    label: 'Skipped' },
   retry:        { icon: Loader2,      color: 'text-yellow-500',  label: 'Retrying',     rowClass: 'border-l-2 border-l-yellow-500 bg-yellow-500/5' },

@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, XCircle, RotateCcw, ExternalLink } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
-import { pauseRun, resumeRun, cancelRun, injectContext } from '../api/pipeline';
+import { pauseRun, resumeRun, cancelRun, injectContext, retryRun } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
 
@@ -82,7 +82,7 @@ const STATUS_BADGE_LABELS: Record<string, string> = {
   paused: 'Paused',
   blocked: 'Blocked',
   done: 'Passed',
-  failed: 'Failed',
+  failed: '\u2717 Failed',
   partial_failure: 'Partial',
   cancelled: 'Cancelled',
 };
@@ -313,6 +313,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [showKillConfirm, setShowKillConfirm] = useState(false);
   const [hitlContext, setHitlContext] = useState('');
   const [hitlSending, setHitlSending] = useState(false);
+  const [retryLoading, setRetryLoading] = useState(false);
 
   const [specModel, setSpecModel] = useState<string | null>(null);
   const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
@@ -442,6 +443,60 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       setHitlSending(false);
     }
   }, [runId, hitlContext, fetchRun]);
+
+  // Derive failed story IDs from WAL events
+  const failedStoryIds = useMemo(() => {
+    const failed = new Set<string>();
+    const passed = new Set<string>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_failed') {
+        failed.add(evt.story_id);
+        passed.delete(evt.story_id);
+      } else if (evt.event_type === 'story_passed') {
+        passed.add(evt.story_id);
+        failed.delete(evt.story_id);
+      }
+    }
+    return failed;
+  }, [walEvents]);
+
+  const failedStoryCount = failedStoryIds.size;
+
+  const handleRetryFailed = useCallback(async () => {
+    if (failedStoryCount === 0) return;
+    setRetryLoading(true);
+    try {
+      const result = await retryRun(runId, {
+        storyIds: [...failedStoryIds],
+        workspaceId: workspaceId ?? undefined,
+      });
+      // Navigate to the new retry run
+      if (result.runId) {
+        window.location.hash = 'terminal';
+        window.location.reload();
+      }
+    } catch (err) {
+      console.error('[RunView] Retry failed:', err);
+    } finally {
+      setRetryLoading(false);
+    }
+  }, [runId, failedStoryIds, failedStoryCount, workspaceId]);
+
+  const handleViewErrorDetail = useCallback(() => {
+    // Switch to terminal tab and scroll to the last failed story
+    handleTabChange('terminal');
+    // Find last failed story ID from WAL events
+    let lastFailedId: string | null = null;
+    for (const evt of walEvents) {
+      if (evt.event_type === 'story_failed' && evt.story_id) {
+        lastFailedId = evt.story_id;
+      }
+    }
+    if (lastFailedId && terminalRef.current) {
+      setTimeout(() => terminalRef.current?.scrollToStory(lastFailedId!), 100);
+    }
+  }, [walEvents, handleTabChange]);
 
   if (loading) {
     return <RunViewTerminalSkeleton />;
@@ -647,6 +702,43 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               )}
               Send
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Run failed banner */}
+      {(effectiveStatus === 'failed' || effectiveStatus === 'partial_failure') && failedStoryCount > 0 && (
+        <div className="shrink-0 border-b border-red-500/30 bg-red-500/10">
+          <div className="px-4 py-3 flex items-center gap-3">
+            <XCircle size={18} className="text-red-500 shrink-0" />
+            <span className="text-sm font-medium text-red-400 flex-1">
+              Run failed — {failedStoryCount} {failedStoryCount === 1 ? 'story' : 'stories'} did not complete
+            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleViewErrorDetail}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors"
+              >
+                <ExternalLink size={12} />
+                View error detail
+              </button>
+              <button
+                onClick={handleRetryFailed}
+                disabled={retryLoading}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  retryLoading
+                    ? 'bg-red-500/20 text-red-500/40 cursor-not-allowed'
+                    : 'bg-red-500 text-white hover:bg-red-600'
+                }`}
+              >
+                {retryLoading ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <RotateCcw size={12} />
+                )}
+                Retry failed stories
+              </button>
+            </div>
           </div>
         </div>
       )}

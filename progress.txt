@@ -658,3 +658,24 @@ Key decisions:
 - DirectionSidebarSkeleton renders only content rows (not full container) since it's placed inside the existing sidebar `overflow-y-auto` div
 - Terminal skeleton bars use `bg-[#333]` on `bg-[#1e1e1e]` to match the real xterm.js dark theme
 - Skeleton widths match real content widths exactly to prevent layout shift on load
+
+## Story P2-012: Prominent Error Display for Failed Runs — DONE
+Files touched:
+- src/panels/RunViewPanel.tsx (modified — failure banner, retry button, view error detail, XCircle/RotateCcw/ExternalLink icons, retryRun import, failedStoryIds derivation)
+- src/panels/HubPanel.tsx (modified — STATUS_BADGE_LABELS.failed updated to '✗ Failed')
+- src/components/RunStoryList.tsx (modified — added rowClass to fail status config for red highlight)
+
+What was built:
+- **Run View failure banner**: Red banner appears below tab bar when `effectiveStatus === 'failed' || 'partial_failure'` with XCircle icon and message "Run failed — N stories did not complete"
+- **Retry failed stories button**: In the failure banner, calls `retryRun()` API with the specific failed story IDs, navigates to new retry run on success
+- **View error detail button**: In the failure banner, switches to terminal tab and calls `scrollToStory()` on the last failed story ID from WAL events
+- **Hub ✗ Failed badge**: STATUS_BADGE_LABELS updated to show "✗ Failed" (Unicode ✗ prefix) for both HubPanel and RunViewPanel
+- **Failed story row highlighting**: RunStoryList fail status now includes `rowClass: 'border-l-2 border-l-red-500 bg-red-500/5'` for red left border + subtle red background
+- **WAL-driven**: All failure state derived from `run_failed` WAL event via existing `usePipelineSSE` hook + `effectiveStatus` useMemo
+
+Key decisions:
+- Failed story IDs derived from WAL events (not API call) — already available via SSE, no extra round trip
+- Retry navigates via page reload to the new run (simplest approach since runId is in the URL)
+- View error detail uses setTimeout(100ms) to allow tab switch to complete before scrollToStory
+- Banner shows for both 'failed' and 'partial_failure' statuses (both have failed stories)
+- Hub card red border already existed via BORDER_LEFT mapping — only badge label needed the ✗ prefix
