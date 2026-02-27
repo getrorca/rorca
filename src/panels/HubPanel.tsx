@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, Menu } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
@@ -771,6 +771,13 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
               Set direction
             </button>
           </div>
+          <button
+            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
+            className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors mt-4"
+          >
+            <Menu size={12} />
+            All panels
+          </button>
         </div>
       </div>
     );
@@ -873,6 +880,17 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
             <UpdatedFooter lastUpdated={lastUpdated} />
           </section>
         )}
+
+        {/* Footer: subtle link to nav drawer */}
+        <div className="flex justify-center pt-2 pb-4">
+          <button
+            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
+            className="inline-flex items-center gap-1.5 text-xs text-muted/60 hover:text-muted transition-colors"
+          >
+            <Menu size={12} />
+            All panels
+          </button>
+        </div>
       </div>
     </div>
   );
