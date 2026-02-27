@@ -302,8 +302,17 @@ export class OpenCodeStreamParser {
     this.buffer = '';
   }
 
+  /** Count of malformed lines since last valid JSON — for recovery diagnostics */
+  private malformedCount = 0;
+
+  /** Get the count of malformed lines encountered */
+  getMalformedCount(): number {
+    return this.malformedCount;
+  }
+
   /**
    * Parse a single complete line. Returns null for empty/unparseable lines.
+   * Malformed JSON is logged and emitted as raw terminal output for recovery.
    */
   private parseLine(line: string): ParsedEvent | null {
     const trimmed = line.trim();
@@ -314,11 +323,41 @@ export class OpenCodeStreamParser {
 
     try {
       const event: OpenCodeEvent = JSON.parse(trimmed);
+      // Valid JSON resets malformed counter
+      if (this.malformedCount > 0) {
+        this.malformedCount = 0;
+      }
       return parseOpenCodeEvent(event);
     } catch {
+      this.malformedCount++;
+
+      // Detect rate limit errors in raw text output (some providers return
+      // plain text 429 errors that aren't wrapped in JSON)
+      const lower = trimmed.toLowerCase();
+      if (lower.includes('429') || lower.includes('rate limit') || lower.includes('too many requests')
+          || lower.includes('quota exceeded') || lower.includes('tokens per min')) {
+        const waitMatch = trimmed.match(/(?:retry[- ]after|wait|reset in)[:\s]+(\d+)/i);
+        const waitSec = waitMatch ? parseInt(waitMatch[1], 10) : null;
+        return {
+          raw: { type: 'error', message: trimmed, error: 'rate_limit' },
+          semantic: {
+            type: 'unknown',
+            label: 'Rate Limited',
+            detail: waitSec ? `Rate limited — waiting ${waitSec}s` : 'Rate limited by provider',
+            ts: new Date().toISOString(),
+          },
+          terminal: `${ANSI.yellow}${ANSI.bold}[Rate Limited]${ANSI.reset} ${ANSI.yellow}${waitSec ? `Waiting ${waitSec}s...` : trimmed.slice(0, 120)}${ANSI.reset}`,
+          signal: { completed: false, failed: false, error: `rate_limit:${waitSec ?? ''}` },
+        };
+      }
+
       // Not valid JSON — emit as raw terminal output (some opencode versions
       // may emit plain text status lines mixed with JSON)
       if (trimmed.length > 0) {
+        // Log malformed lines for diagnostics (first occurrence per burst)
+        if (this.malformedCount === 1) {
+          console.error(`[opencode-parser] Malformed JSON line: ${trimmed.slice(0, 200)}`);
+        }
         return {
           raw: { type: 'raw', content: trimmed },
           semantic: null,

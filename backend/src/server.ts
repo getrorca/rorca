@@ -7,7 +7,7 @@ import directionRouter from './routes/direction';
 import specsRouter from './routes/specs';
 import walRouter from './routes/wal';
 import contextRouter from './routes/context';
-import pipelineRouter, { cleanupOldLogs } from './routes/pipeline';
+import pipelineRouter, { cleanupOldLogs, cleanupOrphanRuns } from './routes/pipeline';
 import hooksRouter from './routes/hooks';
 import worktreesRouter from './routes/worktrees';
 import templatesRouter from './routes/templates';
@@ -170,6 +170,8 @@ startQueueConsumer();
 if (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
     console.log(`Rorca backend listening on port ${PORT}`);
+    // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
+    cleanupOrphanRuns();
     startScheduler();
     cleanupOldLogs();
     // V2-099: Run EXPLAIN QUERY PLAN audit at startup

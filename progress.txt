@@ -882,3 +882,27 @@ Key decisions:
 - OAuth callback redirects to `http://localhost:5210/?copilot=connected` — frontend detects param and refreshes status.
 - `GITHUB_TOKEN` env var injected in both primary trigger path and secondary (single-story) trigger path in pipeline.ts.
 - 2 pre-existing backend type errors (rate-limiter.ts, run-queue.ts) verified not introduced by OC-014.
+
+## Story OC-015: Robust OpenCode Error Handling & Orphan Cleanup — DONE
+Files touched:
+- backend/src/lib/execution-engine.ts (modified — OpenCode error classifier, classified error WAL payloads in both sequential + parallel paths)
+- backend/src/lib/opencode-parser.ts (modified — malformed JSON recovery with counter, rate limit detection from raw text in event stream)
+- backend/src/routes/pipeline.ts (modified — OpenCode server health monitor with restart attempt, orphan process cleanup function)
+- backend/src/server.ts (modified — cleanupOrphanRuns() called at startup)
+
+What was built:
+- **Error classifier** (`classifyOpenCodeError`): Categorizes OpenCode failures into 7 types: `not_installed`, `api_key_invalid`, `model_not_available`, `rate_limited`, `server_crashed`, `malformed_output`, `timeout`, `unknown`. Each has `retryable` flag — non-retryable errors (wrong API key, missing model) skip all retry logic and fail immediately with clear user-facing message in WAL.
+- **Enhanced WAL payloads**: `story_failed` events now include `error_category`, `error_message`, `agent_type`, `exit_code` for OpenCode runs. Enables UI to show "Provider API key invalid" vs generic "max_retries" messages.
+- **Server crash detection**: Pipeline trigger spawns a 5s health check interval that monitors OpenCode server `isAlive()`. On crash: attempts one restart (uses existing `OpenCodeServer.restart()`). On restart failure: kills execution engine process group, emits `opencode_server_crash` WAL event, run fails gracefully.
+- **Malformed JSON recovery**: `OpenCodeStreamParser.parseLine()` now tracks malformed line count, logs first occurrence per burst, and specifically detects rate limit errors in plain text output (429, "rate limit", "too many requests", "quota exceeded"). Rate limit lines emitted as yellow `[Rate Limited]` terminal entries with extracted wait time.
+- **Orphan process cleanup**: `cleanupOrphanRuns()` exported from pipeline.ts, called by server.ts at startup. Scans `pipeline_runs WHERE status IN ('running', 'paused')`, kills engine PIDs (process group SIGTERM) + OpenCode server PIDs, marks runs failed, emits `run_finished` WAL events with `reason: 'orphan_cleanup'`.
+- **Rate limit 429 detection from event stream**: Parser detects `429`, `rate limit`, `too many requests`, `quota exceeded`, `tokens per min` in raw text lines. Extracts `retry-after` seconds when available. Emits semantic + terminal entries for UI display.
+
+Key decisions:
+- Error classification runs ONLY for `agentType === 'opencode'` — Claude path keeps existing generic retry behavior (no regression risk)
+- Non-retryable errors bypass retry counter entirely — prevents 3 wasted retries when API key is wrong
+- `extractProviderHint()` and `extractModelHint()` parse stderr to include provider/model name in error message
+- Server health check interval (5s) is a reasonable balance between detection latency and overhead
+- Orphan cleanup kills process group (-pid SIGTERM) first, falls back to individual PID — handles both detached process groups and direct children
+- Malformed JSON counter resets on first valid JSON line — prevents log spam during recovery
+- Pre-existing type errors (rate-limiter.ts, run-queue.ts) unchanged — verified not introduced by OC-015
