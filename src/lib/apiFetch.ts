@@ -109,7 +109,7 @@ function parseErrorBody(status: number, text: string): ApiError {
 
 // ─── Core fetch ───────────────────────────────────────────────────────────────
 
-export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
+export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: boolean }): Promise<T> {
   const at = getAccessToken();
 
   const headers: Record<string, string> = {
@@ -157,7 +157,11 @@ export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> 
 
   if (!res.ok) {
     const errText = await res.text();
-    notifyError(`${res.status}: ${errText.slice(0, 200)}`);
+    // 429 is transient (rate limit window resets soon) — never show toast.
+    // Also skip toast if caller passed silent:true (background polling).
+    if (res.status !== 429 && !opts?.silent) {
+      notifyError(`${res.status}: ${errText.slice(0, 200)}`);
+    }
     throw parseErrorBody(res.status, errText);
   }
   return res.json() as Promise<T>;
