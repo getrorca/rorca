@@ -178,6 +178,73 @@ export function RunViewTerminalSkeleton() {
   );
 }
 
+/** Forge panel skeleton: textarea + sidebar */
+export function ForgeSkeleton() {
+  return (
+    <div className="h-full flex">
+      {/* Main area */}
+      <div className="flex-1 flex flex-col p-6 space-y-4">
+        <SkeletonLine className="w-32 h-5" />
+        <SkeletonBlock className="w-full h-32 rounded-lg" />
+        <div className="flex items-center gap-2">
+          <SkeletonBadge className="w-24 h-8 rounded-md" />
+          <SkeletonBadge className="w-20 h-8 rounded-md" />
+        </div>
+        <div className="space-y-2 pt-4">
+          <SkeletonLine className="w-24 h-3.5" />
+          <SkeletonBlock className="w-full h-20 rounded-lg" />
+        </div>
+      </div>
+      {/* Sidebar */}
+      <div className="w-72 border-l border-border p-4 space-y-3 hidden lg:block">
+        <SkeletonLine className="w-28 h-3.5" />
+        {[0, 1, 2].map((i) => (
+          <SkeletonBlock key={i} className="w-full h-12 rounded-lg" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Settings panel skeleton: tab bar + content */
+export function SettingsSkeleton() {
+  return (
+    <div className="h-full flex flex-col">
+      {/* Tab bar */}
+      <div className="shrink-0 px-6 pt-4 flex items-center gap-4 border-b border-border pb-3">
+        {[0, 1, 2, 3, 4].map((i) => (
+          <SkeletonLine key={i} className="w-16 h-4" />
+        ))}
+      </div>
+      {/* Content */}
+      <div className="flex-1 p-6 space-y-4 overflow-y-auto">
+        <SkeletonLine className="w-40 h-5" />
+        <SkeletonBlock className="w-full h-24 rounded-lg" />
+        <SkeletonLine className="w-32 h-5" />
+        <SkeletonBlock className="w-full h-24 rounded-lg" />
+        <SkeletonLine className="w-36 h-5" />
+        <SkeletonBlock className="w-full h-16 rounded-lg" />
+      </div>
+    </div>
+  );
+}
+
+/** Generic panel skeleton: title + content blocks */
+export function GenericPanelSkeleton() {
+  return (
+    <div className="h-full flex flex-col p-6 space-y-4">
+      <SkeletonLine className="w-40 h-5" />
+      <SkeletonBlock className="w-full h-32 rounded-lg" />
+      <div className="space-y-2">
+        <SkeletonLine className="w-full h-3.5" />
+        <SkeletonLine className="w-3/4 h-3.5" />
+        <SkeletonLine className="w-5/6 h-3.5" />
+      </div>
+      <SkeletonBlock className="w-full h-48 rounded-lg" />
+    </div>
+  );
+}
+
 /** Matches DirectionPreviewSidebar content: 3 layer rows (rendered inside existing container) */
 export function DirectionSidebarSkeleton() {
   return (
