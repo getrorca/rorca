@@ -34,15 +34,16 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 │  /api/pipeline    /api/worktrees  /api/context           │
 └───────────┬──────────────────────┬──────────────────────┘
             │                      │
-    ┌───────▼──────┐    ┌──────────▼──────────┐
-    │ SQLite (WAL) │    │  claude --print      │
-    │ rorca.db    │    │  (your subscription) │
-    └──────────────┘    └─────────────────────┘
+    ┌───────▼──────┐    ┌──────────▼───────────────────────┐
+    │ SQLite (WAL) │    │  Execution Engine                 │
+    │ rorca.db     │    │  ├── claude --print  (Claude sub) │
+    │              │    │  └── opencode run    (75+ models) │
+    └──────────────┘    └──────────────────────────────────┘
 ```
 
 **Backend**: Express.js + SQLite (`better-sqlite3`, WAL mode)
 **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS
-**LLM**: Your Claude subscription via `claude --print` — no API key required
+**Execution**: Two first-class paths — `claude --print` (Claude subscription) or `opencode run` (75+ models via API key)
 **MCP**: 5 tools that expose Rorca to Claude Code for in-session spec generation
 
 ---
@@ -50,8 +51,10 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 ## Prerequisites
 
 - **Node.js** 18 or later
-- **Claude Code CLI** installed and authenticated (`claude --version`)
 - **Git** (for workspace registration and git hydration)
+- **One of the following execution engines:**
+  - **Claude Code CLI** installed and authenticated (`claude --version`) — uses your Pro/Max subscription, no API key
+  - **OpenCode CLI** (`npm i -g opencode`, `opencode --version` >= 0.1.0) + an API key for your chosen provider
 
 ---
 
@@ -64,7 +67,18 @@ npm install
 cd backend && npm install && cd ..
 ```
 
-No API keys needed. Rorca uses your Claude subscription via the `claude` CLI.
+### Configure execution engine
+
+By default, Rorca uses your Claude subscription (`claude --print`). No API keys needed.
+
+To use OpenCode (75+ models via API key), set these in `backend/.env`:
+
+```bash
+RORCA_AGENT=opencode
+RORCA_MODEL=openai/gpt-4o    # or google/gemini-2.0-flash, ollama/llama3, etc.
+```
+
+See the [Execution Engine](#execution-engine) section below for full provider setup, or use the in-app Setup Guide at **Settings > Model & Providers > Execution Engine**.
 
 ---
 
@@ -159,6 +173,53 @@ When a spec running in a dedicated worktree is complete, open the **Worktrees** 
 ### 9. Review history
 
 The **Archive** panel shows all completed runs with full-text search across spec names, story titles, and acceptance criteria.
+
+---
+
+## Execution Engine
+
+Rorca supports two execution paths — both first-class, both using the same tool set (edit, bash, read, write, glob, grep).
+
+### Claude subscription (default)
+
+Uses `claude --print` via your Pro/Max/Max5x subscription. No API key needed.
+
+```bash
+# backend/.env (or omit — claude is the default)
+RORCA_AGENT=claude
+```
+
+**Advantages**: Prompt caching (~10x lower latency after turn 1), surgical diff edits (~150 tokens vs full rewrites), persistent bash shell state, CLAUDE.md auto-injection, hierarchical subagents.
+
+### OpenCode (multi-model)
+
+Uses `opencode run` with any of 75+ models via API key, OAuth, or local inference.
+
+```bash
+# backend/.env
+RORCA_AGENT=opencode
+RORCA_MODEL=openai/gpt-4o
+```
+
+**Supported providers:**
+
+| Provider | Example model | Auth |
+|----------|--------------|------|
+| OpenAI | `openai/gpt-4o` | API key |
+| Google | `google/gemini-2.0-flash` | API key |
+| Anthropic API | `anthropic/claude-sonnet-4-5-20250929` | API key |
+| OpenRouter | `openrouter/auto` | API key |
+| Ollama | `ollama/llama3` | None (free, local) |
+| GitHub Copilot | `github/copilot` | GitHub OAuth |
+
+**Advantages**: Model choice flexibility, cost optimization via model cascading (Haiku→Sonnet→Opus by story complexity), local execution with Ollama, subscription-based with GitHub Copilot.
+
+API keys can be added via:
+- `backend/.env` environment variables
+- **Settings > Model & Providers > Add Key** (encrypted AES-256-GCM vault)
+- **Settings > Execution Engine > Sign in with GitHub** (for Copilot OAuth)
+
+The in-app **Setup Guide** (Settings > Model & Providers > Execution Engine) walks through installation and provider configuration step by step.
 
 ---
 
@@ -257,6 +318,11 @@ rorca/
 | Service | What it does |
 |---------|-------------|
 | `llm-client.ts` | Calls `claude --print` (your subscription) — no API key needed |
+| `execution-engine.ts` | Universal execution engine — handles claude, opencode, and codex agent paths |
+| `opencode-detector.ts` | Detects OpenCode binary, validates version, startup guard |
+| `opencode-server.ts` | Manages warm OpenCode server lifecycle for `--attach` mode |
+| `opencode-parser.ts` | Streaming JSON parser for OpenCode `--format json` output |
+| `opencode-spec-gen.ts` | Spec generation via OpenCode (codebase-aware, tool-assisted) |
 | `direction-stack.ts` | Synthesizes L1–L5 layers into a single context string |
 | `spec-writer.ts` | Parses LLM output and writes spec JSON to `specs/` |
 | `context-extractor.ts` | Multi-source context ingestion (paste, file, URL, Q&A) |
@@ -283,9 +349,9 @@ npm run self-register    # Register ~/rorca/ as its own workspace
 
 ---
 
-## The Ralph Loop (`scripts/run-loop.sh`)
+## The Ralph Loop (Execution Engine)
 
-`run-loop.sh` is the execution engine that drives Claude Code story-by-story through a spec. It lives in the **project workspace** (e.g. your app's repo), not in Rorca itself.
+The Ralph Loop runs specs story-by-story through the execution engine. The primary engine is `backend/src/lib/execution-engine.ts` (TypeScript, cross-platform), which supports all agent types (claude, opencode, codex). The legacy `scripts/run-loop.sh` is a bash fallback.
 
 ### CLI usage
 
@@ -357,6 +423,15 @@ The path must be absolute. Re-add with the full path:
 claude mcp remove rorca
 claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts
 ```
+
+**OpenCode: "opencode: command not found"**
+Install with `npm i -g opencode`. If installed but not found, set `OPENCODE_BIN=/path/to/opencode` in `backend/.env`.
+
+**OpenCode: Backend exits with "OpenCode version too old"**
+Minimum version is 0.1.0. Update with `npm i -g opencode@latest`.
+
+**OpenCode: "No API key for this provider" in trigger modal**
+Add your provider's API key via Settings > Model & Providers > Add Key, or set the corresponding env var (e.g. `OPENAI_API_KEY`).
 
 **Pipeline Monitor not updating**
 The SSE connection opens on panel mount. Navigate away and back to reconnect.
