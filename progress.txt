@@ -595,249 +595,550 @@ Key decisions:
 - Edit Brief clears generatedSpec and auto-focuses the textarea after 50ms RAF delay
 - Story cards use line-clamp-1 for description truncation in collapsed state
 
-## Story P2-007: Settings Billing Tab — DONE
+## Story RQ-002: Queue Consumer Auto-Trigger — DONE
 Files touched:
-- backend/src/routes/billing.ts (modified — enhanced /status with seats+features+stripeConfigured, added GET /invoices endpoint)
-- src/panels/SettingsPanel.tsx (modified — added 'billing' tab type, CreditCard icon, full BillingSection component)
+- backend/src/lib/queue-consumer.ts (new — SSE hub subscriber for auto-triggering queued runs)
+- backend/src/db/index.ts (modified — idempotent error_message column on run_queue)
+- backend/src/server.ts (modified — imported and initialized startQueueConsumer)
 
 What was built:
-- **Current Plan Badge**: Colored card showing plan name (Free/Solo/Pro/Team) with icon, price, status badge (Active/Past Due/Canceled), renewal date, and seats used/limit
-- **Subscription Details**: Period dates and seat counts from DB, displayed in a 2-column grid
-- **Plan Comparison Table**: 4-column grid showing all plans with features list, prices, and upgrade/switch buttons
-- **Manage Billing**: Opens Stripe customer portal (new tab) for payment method, address, etc.
-- **Invoice History**: Table showing invoice number, amount, date, status, with PDF download links from Stripe API. Collapsible to 5 items with "Show all" toggle
-- **Cancel Subscription**: Two-step confirmation with grace period explanation (access until billing period end), routes to Stripe portal for actual cancellation
-- **Stripe-not-configured fallback**: Warning message when STRIPE_SECRET_KEY is absent, all checkout/portal buttons hidden
-- **GET /api/billing/invoices**: Fetches up to 24 invoices from Stripe API, returns normalized invoice data with hosted_invoice_url and invoice_pdf
-- **GET /api/billing/status** enriched: now returns seats (used + limit), full plan features array, stripeConfigured boolean, period start date
-- **Seat counting**: Counts team_members where user is team owner, applies plan-based limits (free/solo=1, pro=5, team=unlimited)
+- `startQueueConsumer()` subscribes to SSE hub via `subscribe()`, listens for `run_finished` WAL events
+- On `run_finished`: queries `run_queue` for next pending entry matching workspace_id, triggers via internal HTTP POST to `/api/pipeline/trigger` (zero code duplication)
+- Status transitions: pending → triggering → triggered (success) or failed (error with error_message)
+- On conflict (active run exists): reverts to pending, retries after 5s delay
+- On trigger failure: marks entry failed with error message, continues to next pending entry after 5s
+- Emits `run_queued_trigger` WAL event with specId, queuePosition, queueEntryId on successful trigger
+- `error_message` TEXT column added to run_queue table (idempotent ALTER TABLE)
+- Zero overhead when queue is empty — early return on missing workspace_id or no pending entries
 
 Key decisions:
-- Cancel flow redirects to Stripe portal (not direct API cancellation) — Stripe handles proration, reactivation, and grace period logic
-- Invoice amounts divided by 100 (Stripe stores in cents)
-- Seats derived from teams + team_members tables (existing schema, no new tables)
-- BillingSection is a sibling section to AccountSection, not nested within it — billing is its own tab for discoverability
+- Internal HTTP request to `POST /api/pipeline/trigger` rather than extracting trigger logic — keeps single code path for all triggers (manual, scheduled, queued)
+- Conflict handling reverts status to pending (not failed) since it's transient — the run will complete and re-trigger
+- 5s delay on failure/conflict before checking next entry prevents tight retry loops
+- `require('http')` used instead of static import to avoid test interference
+- triggerType='queued' passed to pipeline trigger for WAL event differentiation
 
-## Story P2-009: Run Lifecycle Animations — DONE
+## Story RQ-003: Queue Section in Pipeline Panel UI — DONE
 Files touched:
-- src/styles/index.css (modified — 4 new keyframes + 4 utility classes)
-- src/components/Shell.tsx (modified — RunPill dot fade-in pulse animation on run start)
-- src/components/Toast.tsx (modified — position prop for top-right slide-in)
-- src/panels/HubPanel.tsx (modified — ActiveRunCard slide-down, border transition, completion toast, RecentRunRow slide)
+- src/components/RunQueueSection.tsx (new — queue list with drag-to-reorder, remove, badges)
+- src/components/SpecPickerModal.tsx (new — modal listing approved specs for adding to queue)
+- src/panels/PipelineMonitorPanel.tsx (modified — queue state, SSE refresh, queue section in sidebar + empty state)
+- src/components/Sidebar.tsx (modified — queueCount prop, badge on Hub icon)
+- src/App.tsx (modified — queue count polling, pass queueCount to Sidebar)
 
 What was built:
-- **Run pill dot**: Fades in with scale-pulse animation (`dotFadeInPulse`) when a new run starts, using `animate-dot-fade-pulse` class with 500ms bounce easing
-- **ActiveRunCard slide-down**: Card uses `animate-slide-down-in` (400ms ease-out from -16px) when appearing in the Running section
-- **Border transition on completion**: Card border transitions from blue to emerald (success) or red (failure) over 1s using `transition-[border-color] duration-1000`, driven by SSE `run_finished`/`run_failed` events
-- **Completion toast**: Top-right slide-in toast (`animate-slide-in-top-right`, 350ms) shows "Run completed: <spec>" or "Run failed: <spec>" on run end, auto-dismisses after 5s
-- **Recent Runs slide**: When a run moves to Recent Runs list, the row plays `animate-slide-to-recent` (400ms ease-out from -12px with scale 0.98→1)
+- RunQueueSection component: renders queue entries in position order with spec name, parallelism badge (if >1), worktree badge (if enabled), remove (X) button, and GripVertical drag handle per row
+- Drag-to-reorder via native HTML5 DnD — calls PUT /api/run-queue/reorder on drop with new orderedIds
+- Empty state: "Queue is empty — add specs to run sequentially" with Add button
+- SpecPickerModal: fetches approved specs for workspace, shows spec title, story count, approved date; search filter; single click adds to end of queue with parallelism=1
+- Queue section integrated into PipelineMonitorPanel left sidebar below runs list — visible when queue has entries OR no active run
+- Queue also shown in the empty state view (no runs yet) so users can pre-queue specs
+- Real-time updates: SSE events (run_queued_trigger, run_finished) trigger queue refetch
+- Queue count badge on Hub nav icon (polls /api/run-queue/status every 10s)
 
 Key decisions:
-- All animations use CSS keyframes (no JS animation libraries) — consistent with existing P2-008 animation system
-- Completion detection via SSE events in ActiveRunCard useMemo → useEffect, fires `onRunCompleted` callback once per run
-- Top-right toast uses separate `ToastContainer` with `position="top-right"` prop rather than modifying global toast position
-- `justCompletedRunIds` Set tracks which runs just finished so slide animation only plays on new arrivals, not existing items
-- RunPill dot animation resets via `dotJustAppeared` state with 600ms timeout to avoid replaying on re-renders
+- Used native HTML5 DnD (same pattern as existing story priority drag in PipelineMonitorPanel) — no external DnD library
+- Queue section visibility: `queueEntries.length > 0 || !runs.some(r => r.status === 'running')` — always visible when queue has items or when no run is active
+- Badge on Hub icon (not a separate Pipeline icon) since pipeline maps to hub nav in minimal sidebar
+- Queue count polled every 10s in App.tsx (lightweight — single SQL COUNT query)
+- SpecPickerModal adds with default parallelism=1, autoWorktree=false — user can configure later
 
-## Story P2-011: Skeleton Placeholder Screens — DONE
+## Story RQ-004: Queue Controls in Trigger Modal + Hub Queue Status — DONE
 Files touched:
-- src/components/Skeleton.tsx (new — shared skeleton primitives + composite skeletons)
-- src/panels/HubPanel.tsx (modified — replaced "Loading..." text with HubSkeleton)
-- src/panels/RunViewPanel.tsx (modified — replaced "Loading run #X..." text with RunViewTerminalSkeleton)
-- src/components/DirectionPreviewSidebar.tsx (modified — replaced "Loading..." text with DirectionSidebarSkeleton)
+- src/components/TriggerPopover.tsx (modified — added onAddToQueue callback, queueLoading prop, secondary "Add to Queue" button with tooltip)
+- src/panels/HubPanel.tsx (modified — queue status section below active run, ReadyToRunCard gains Add to Queue, SSE queue refresh, useGlobalToast)
 
 What was built:
-- **Skeleton primitives**: SkeletonBlock, SkeletonLine, SkeletonBadge, SkeletonCircle — all use Tailwind `animate-pulse` with `bg-border/50`
-- **HubSkeleton**: 3 sections matching real Hub layout — active run card skeleton (status dot, spec name, progress bar, footer), pending review card skeleton (title, meta, story previews, action buttons), recent runs list skeleton (3 rows with dot, name, badge, timestamps)
-- **RunViewTerminalSkeleton**: Header skeleton + tab bar skeleton + 10 grey bars on dark background (`bg-[#1e1e1e]`) with varying widths via `Math.sin` for natural look
-- **DirectionSidebarSkeleton**: 3 layer rows with status dots, labels, and description lines — rendered inside existing sidebar container (no duplicate wrapper)
-- All transitions from skeleton to content are instant (no flash) since skeletons match exact layout dimensions
+- TriggerPopover now has two action buttons: "Run Now" (primary, existing behavior) and "Add to Queue" (secondary, border-only style)
+- "Add to Queue" button has tooltip "Will run after the active spec completes" — always enabled (queue can be pre-loaded)
+- ReadyToRunCard passes parallelism + autoWorktree settings to POST /api/run-queue when adding to queue
+- After Add to Queue: modal closes, toast shows "Added to queue — will run after current spec completes"
+- Hub panel shows queue status below active run card: "N specs queued — next: <spec name>" with "View Queue" link to Pipeline panel
+- Queue status section hidden when queue is empty
+- Queue status updates in real-time via SSE (run_queued_trigger and run_finished events trigger refetch)
+- Queue status also polled every 30s alongside existing data
 
 Key decisions:
-- Created shared Skeleton.tsx with both primitives and composites (no separate files — all are small)
-- DirectionSidebarSkeleton renders only content rows (not full container) since it's placed inside the existing sidebar `overflow-y-auto` div
-- Terminal skeleton bars use `bg-[#333]` on `bg-[#1e1e1e]` to match the real xterm.js dark theme
-- Skeleton widths match real content widths exactly to prevent layout shift on load
+- Queue button is optional via onAddToQueue prop — TriggerPopover remains backward-compatible for callers that don't pass it
+- Used useGlobalToast (not local toast) for consistency with rest of app
+- Queue status fetched via /api/run-queue/status endpoint (already built in RQ-001) — returns queueLength + nextSpec
+- SSE handler uses separate QUEUE_EVENTS set to trigger queue refetch independently of run list refetch
+- ListPlus icon from lucide-react for queue section header
 
-## Story P2-012: Prominent Error Display for Failed Runs — DONE
+## Story OC-002: OpenCode Binary Detection & Startup Guard — DONE
 Files touched:
-- src/panels/RunViewPanel.tsx (modified — failure banner, retry button, view error detail, XCircle/RotateCcw/ExternalLink icons, retryRun import, failedStoryIds derivation)
-- src/panels/HubPanel.tsx (modified — STATUS_BADGE_LABELS.failed updated to '✗ Failed')
-- src/components/RunStoryList.tsx (modified — added rowClass to fail status config for red highlight)
+- backend/src/lib/opencode-detector.ts (new — detectOpenCode, requireOpenCode, semverGte, MIN_OPENCODE_VERSION)
+- backend/src/server.ts (modified — startup guard: requireOpenCode() when agentType=opencode)
+- backend/src/routes/health.ts (modified — opencodeInstalled + opencodeVersion in health responses when agentType=opencode)
+- backend/src/lib/__tests__/opencode-detector.test.ts (new — 15 tests)
+- backend/src/routes/__tests__/health.test.ts (modified — 3 new tests for opencode health fields)
+- CLAUDE.md (modified — documented minimum supported OpenCode version)
 
 What was built:
-- **Run View failure banner**: Red banner appears below tab bar when `effectiveStatus === 'failed' || 'partial_failure'` with XCircle icon and message "Run failed — N stories did not complete"
-- **Retry failed stories button**: In the failure banner, calls `retryRun()` API with the specific failed story IDs, navigates to new retry run on success
-- **View error detail button**: In the failure banner, switches to terminal tab and calls `scrollToStory()` on the last failed story ID from WAL events
-- **Hub ✗ Failed badge**: STATUS_BADGE_LABELS updated to show "✗ Failed" (Unicode ✗ prefix) for both HubPanel and RunViewPanel
-- **Failed story row highlighting**: RunStoryList fail status now includes `rowClass: 'border-l-2 border-l-red-500 bg-red-500/5'` for red left border + subtle red background
-- **WAL-driven**: All failure state derived from `run_failed` WAL event via existing `usePipelineSSE` hook + `effectiveStatus` useMemo
+- `detectOpenCode()` resolves binary path (OPENCODE_BIN env → `which opencode`), runs `--version`, parses semver output
+- `requireOpenCode()` called at server startup when RORCA_AGENT=opencode: exits with code 1 + clear error message if binary missing or below minimum version
+- GET /api/health and /api/health/detailed return `{ opencodeInstalled, opencodeVersion }` when agentType=opencode (omitted for claude/codex)
+- Minimum supported version: 0.1.0, enforced at startup
 
 Key decisions:
-- Failed story IDs derived from WAL events (not API call) — already available via SSE, no extra round trip
-- Retry navigates via page reload to the new run (simplest approach since runId is in the URL)
-- View error detail uses setTimeout(100ms) to allow tab switch to complete before scrollToStory
-- Banner shows for both 'failed' and 'partial_failure' statuses (both have failed stories)
-- Hub card red border already existed via BORDER_LEFT mapping — only badge label needed the ✗ prefix
+- Binary resolution priority: OPENCODE_BIN env var > `which opencode` (allows custom install paths)
+- Startup guard runs BEFORE Express listen() — fail-fast, no half-started server
+- Version comparison strips prerelease suffix for major.minor.patch comparison
+- If binary exists but --version fails, treated as installed with unknown version (no exit, allows graceful degradation)
+- Health endpoint runs detectOpenCode() on each request (not cached) — reflects real-time binary state
 
-## Story P2-013: Individual Story Failure Handling — DONE
+## Story OC-003: OpenCode Warm Server Lifecycle Manager — DONE
 Files touched:
-- backend/src/routes/pipeline.ts (modified — added GET /runs/:runId/stories/:storyId/output endpoint)
-- src/api/pipeline.ts (modified — added fetchStoryOutput function + StoryOutput interface)
-- src/components/RunStoryList.tsx (modified — expandable failed rows, retry button, output preview, retry count badge)
+- backend/src/lib/opencode-server.ts (new — OpenCodeServer class with start/attach/stop/restart)
+- backend/src/db/index.ts (modified — idempotent opencode_server_pid column on pipeline_runs)
+- backend/src/routes/pipeline.ts (modified — PipelineRunRow type updated with opencode_server_pid)
+- backend/src/lib/__tests__/opencode-server.test.ts (new — 21 tests)
 
 What was built:
-- **Backend story output endpoint**: GET /api/pipeline/runs/:runId/stories/:storyId/output returns last N lines (default 20, max 100) of story output extracted from run log file, plus failure reason/attempts from WAL events
-- **Expandable failed story rows**: Failed stories show chevron toggle; clicking expands to reveal last 20 lines of output in a dark-themed `<pre>` block, failure reason badge, and retry controls
-- **"Retry this story" button**: Calls existing POST /api/pipeline/runs/:id/retry with `storyIds: [storyId]`, immediately sets story status to running in UI via local state override
-- **Retry count badge**: Failed stories show "N/3 retries used" badge in red; expanded detail shows "N/3 retries used" and "Max retries (3) reached" when exhausted
-- **Optimistic UI**: `retryingStories` Set in RunStoryList overrides story status to 'running' immediately on retry click, before API response
-- **onRetryStory callback**: New prop on RunStoryList allows parent (RunViewPanel) to handle navigation to new retry run
+- `OpenCodeServer` class manages a warm `opencode server` process lifecycle for reuse across stories via `--attach`
+- `start()`: spawns `opencode server --socket <path>` as detached process, polls for socket file (100ms interval), 10s timeout before giving up
+- `attach()`: returns socket path for `opencode run --attach <socket>` — throws if server not running
+- `stop()`: sends SIGTERM, waits 5s, escalates to SIGKILL, cleans up socket file
+- `restart()`: one restart attempt allowed per instance (per AC). Cleans up old socket, re-spawns
+- `isAlive()`: checks process via `process.kill(pid, 0)` — returns false if ESRCH
+- `onPidReady` callback fires immediately after spawn for DB persistence
+- Server PID stored via `opencode_server_pid` column on `pipeline_runs` table (nullable INTEGER, idempotent ALTER TABLE)
+- Logs server stdout/stderr to `os.tmpdir()/rorca-opencode-server-<timestamp>.log`
+- 21 tests covering: constructor (binary resolution, missing binary, initial state), start (spawn args, PID callback, premature exit, spawn error, timeout, idempotency), attach (running/not running), isAlive (no process, alive, dead), restart (success, single attempt only), stop (SIGTERM+cleanup, no-op, dead process), log path
 
 Key decisions:
-- Story output extracted from run log file by regex-matching story ID patterns (not per-story log files, which aren't reliably tracked in DB)
-- Falls back to in-memory output buffer for active runs, then to WAL event payload for failure metadata
-- Individual story retry reuses existing bulk retry endpoint with `storyIds: [storyId]` — no new backend endpoint needed
-- MAX_RETRIES constant (3) defined in frontend to match backend run-loop.ts MAX_RETRIES
-- Expand/collapse state is per-row, output fetched lazily on first expand only
+- Socket path uniqueness: includes `process.pid` and `Date.now()` to avoid collisions across concurrent runs
+- Used `setInterval(100ms)` polling for socket file readiness (simpler than stdout parsing, works across opencode versions)
+- Single restart attempt (not infinite retries) — if server crashes twice, the run should fail and notify user
+- `detached: true` + `child.unref()` so server survives backend restarts (same pattern as pipeline run-loop spawn)
+- Log fd passed via `stdio: ['ignore', logFd, logFd]` — same pattern as run-loop.ts (survives parent death, no SIGPIPE)
 
-## Story P2-014: Mobile Responsive Design (<768px) — DONE
+## Story OC-005: OpenCode JSON Event Stream Parser — DONE
 Files touched:
-- src/components/Sidebar.tsx (modified — mobile drawer widened to w-48, text labels added, 44px touch targets)
-- src/components/Shell.tsx (modified — hamburger 44px, workspace truncates to first word on mobile, PlanBadge/Tips/ThemeToggle hidden below sm:, RunPill/UserMenu 44px, dropdowns use fixed positioning on mobile)
-- src/panels/HubPanel.tsx (modified — approve/reject buttons 44px min-height, run button 44px, pause/kill 44px on mobile, recent run rows 44px, timestamp hidden on mobile)
-- src/components/NotificationBell.tsx (modified — bell button 44px on mobile, dropdown uses fixed positioning to avoid overflow)
+- backend/src/lib/opencode-parser.ts (new — streaming JSON parser for OpenCode --format json output)
+- backend/src/lib/__tests__/opencode-parser.test.ts (new — 49 tests)
 
 What was built:
-- **Sidebar mobile drawer**: Widened from 56px (icon-only) to 192px (w-48) with text labels next to icons, all nav buttons 44px height
-- **Top bar priority hiding**: PlanBadge, ShowTipsToggle, and ThemeToggle hidden below 640px (sm:) breakpoint; only essential items (hamburger, logo, workspace, notification, run pill, user) remain
-- **Workspace selector truncation**: On mobile, workspace name shows first word only (split on space/hyphen); full name on sm:+
-- **Touch targets**: All interactive elements (hamburger, nav buttons, approve/reject, run, pause/kill, notification bell, user menu, recent run rows) have minimum 44×44px on mobile
-- **Dropdown overflow prevention**: WorkspaceSelector, NotificationBell, and UserMenu dropdowns use `fixed` positioning on mobile (inset-x-3 or right-3 + top-14) to prevent horizontal overflow at 375px
-- **No horizontal scroll**: Shell root has overflow-x-hidden, all dropdowns constrained within viewport
-- **Hub cards**: Already had grid-cols-1 sm:grid-cols-2 (no change needed), active run card already full-width
-- **Recent runs**: Timestamp (formatted date) hidden on mobile, duration always visible
+- `OpenCodeStreamParser` class: streaming parser that buffers partial/chunked JSON lines, emits `ParsedEvent` objects containing semantic log entries + human-readable terminal output + completion/error signals
+- `parseOpenCodeEvent()`: maps individual OpenCode JSON events to `SemanticStep` (reusing type from semantic-log-parser.ts) + ANSI-colored terminal text for xterm.js + `StreamSignal` for story pass/fail detection
+- Tool mapping: read, write, edit, bash, glob, grep, webfetch, websearch → same semantic types as existing parser
+- Terminal output with ANSI color codes: `[Read]` cyan, `[Write]` green, `[Edit]` yellow, `[Bash]` magenta, `[Search]` blue, `[Error]` red, `[Planning]` dim
+- `aggregateSignals()`: scans parsed events for completion/error signals, failure overrides completion
+- `parseOpenCodeStream()`: convenience function for bulk parsing (log replay / testing)
+- Handles: tool_call, tool_result, assistant, completion, error, status, raw text, heartbeat, empty lines, SSE comments
 
 Key decisions:
-- Used sm: (640px) breakpoint for hiding top bar items rather than md: (768px) — gives more breathing room
-- Mobile sidebar shows rorca wordmark + close button in header row for brand recognition
-- Dropdowns switch from absolute to fixed positioning on mobile for viewport containment
-- RunPill hides "New Spec" text on mobile (plus icon only) to save horizontal space
-- Touch target enlargement uses sm: breakpoint to revert to compact sizes on desktop
+- Separate file from semantic-log-parser.ts — opencode-parser.ts handles streaming + terminal rendering + signals, while semantic-log-parser.ts remains the simple per-line semantic extractor
+- `ParsedEvent` combines semantic + terminal + signal in one object — execution-engine.ts can use all three outputs from a single parse
+- Non-JSON lines emitted as raw terminal output (type='raw') — some opencode versions emit plain text mixed with JSON
+- flush() method for stream end — ensures final partial line is processed
+- Error signals propagated immediately (no buffering) — execution-engine can react to failures in real-time
+- 49 tests covering: all event types, partial chunking (2-chunk, 3-chunk), mixed JSON/text, SSE comments, signal aggregation, edge cases
 
-## Story P2-018: Virtual Scroll for Story List — DONE
+## Story OC-006: Pipeline Trigger OpenCode Integration — DONE
 Files touched:
-- package.json (modified — added @tanstack/react-virtual)
-- src/components/RunStoryList.tsx (rewritten — virtual scroll with @tanstack/react-virtual)
+- backend/src/db/index.ts (modified — idempotent agent_model column addition to pipeline_runs)
+- backend/src/routes/pipeline.ts (modified — agentConfig import, OpenCode server lifecycle, execution-engine.ts spawn, agent fields in response)
+- backend/src/routes/__tests__/pipeline.test.ts (modified — 5 new OC-006 tests)
 
 What was built:
-- **Virtual scroll**: `useVirtualizer` from `@tanstack/react-virtual` renders only visible rows in both sequential and wave-grouped layouts
-- **Fixed 48px row height**: All rows (stories, wave headers, excluded headers) use `ROW_HEIGHT = 48` constant via `estimateSize`
-- **Unified virtual item model**: Both sequential and wave layouts flatten into a single `VirtualItem[]` array (`story | wave-header | excluded-header` discriminated union) for the virtualizer
-- **Auto-scroll active story**: When a story transitions to `running` (detected via `runningStoryIds` diff against `prevRunningRef`), `scrollToIndex` with `align: 'auto'` + smooth behavior scrolls it into view
-- **Keyboard navigation**: Container has `tabIndex={0}` + `onKeyDown` handler — ArrowUp/Down moves `focusedIndex`, Enter activates (story click or wave toggle), Home/End jump to first/last item. Focused row gets `ring-2 ring-accent/50 bg-accent/5` highlight
-- **Scroll position preserved**: `scrollOffsetRef` captures scroll position on every scroll event and feeds `initialOffset` to virtualizer — persists across tab switches since the ref survives React re-renders
-- **10-item overscan**: Renders 10 extra items above/below viewport for smooth scrolling without visible blank areas
-- **ARIA**: Container has `role="listbox"`, each virtual row has `role="option"` with `aria-selected` for focus state
+- POST /api/pipeline/trigger detects agentType from config (RORCA_AGENT env var via config.ts singleton)
+- When opencode: starts OpenCodeServer before spawning execution-engine.ts, passes --attach <socket> flag
+- Passes --agent, --model, --attach as CLI args to execution-engine.ts (not env vars)
+- Strips Claude-specific env vars when using any agent type (same as before)
+- Server lifecycle tied to pipeline run: ocServer.stop() called in child exit handler
+- OpenCode server start failure → run marked failed, WAL event emitted, 422 returned
+- pipeline_runs stores agent (existing column) and agent_model (new column) per run
+- INSERT includes agent type and model; response includes agentType and agentModel
+- GET /api/pipeline/runs/:id returns top-level agentType and agentModel fields (defaults to 'claude'/null for old runs)
+- Execution priority: execution-engine.ts (universal) → run-loop.ts (legacy TS) → run-loop.sh (legacy bash)
+- When agent is opencode/codex, execution-engine.ts is required (422 if missing)
 
 Key decisions:
-- Used `@tanstack/react-virtual` (TanStack Virtual) over `react-window` — more modern, better React 18 support, smaller bundle
-- Wave mode flattens waves + stories into single virtual list — collapsed waves exclude their story items from the array, making the virtualizer's item count automatically correct
-- `estimateSize` returns fixed 48px — no `measureElement` needed since AC explicitly says "no dynamic height required"
-- Failed story expansion renders inline below the 48px row (outside virtualizer measurement) — works naturally since expansion is a rare interaction
-- Keyboard focus ring uses `ring-inset` to avoid layout shift from outline width
+- Reused existing `agent` column (added by EQ-004) for agent_type storage — no rename needed, column stores 'claude'|'opencode'|'codex'
+- Added `agent_model` TEXT column idempotently via pragma table_info check (same pattern as other columns)
+- OpenCodeServer instantiated per-trigger, not globally — each run gets its own server instance and socket
+- Server PID persisted via onPidReady callback → UPDATE opencode_server_pid on pipeline_runs
+- Legacy run-loop fallback paths preserved: execution-engine.ts preferred, then run-loop.ts, then run-loop.sh
+- Pipeline integration tests are pre-existing broken (all 43 original tests fail due to better-sqlite3 native binding issue in Jest environment) — OC-006 tests follow same pattern
 
-## Story P2-019: Code Splitting for Lazy-Loaded Panels — DONE
+## Story OC-008: OpenCode Spec Generation — DONE
 Files touched:
-- src/App.tsx (modified — React.lazy + Suspense for all 23 panels)
-- src/components/Skeleton.tsx (modified — added ForgeSkeleton, SettingsSkeleton, GenericPanelSkeleton)
-- vite.config.ts (modified — manualChunks for react, charts, xterm, cmdk)
+- backend/src/lib/opencode-spec-gen.ts (NEW) — OpenCode spec generation module
+- backend/src/routes/specs.ts (modified) — Agent-type branching in POST /generate
+- backend/src/lib/__tests__/opencode-spec-gen.test.ts (NEW) — 10 tests for validation + type guard
 
 What was built:
-- All 23 panel imports converted from static `import` to `React.lazy(() => import(...))` — each panel is now a separate Vite chunk
-- `Suspense` wrapper in `ActivePanel` with panel-specific skeleton fallbacks: HubSkeleton, ForgeSkeleton, SettingsSkeleton, RunViewTerminalSkeleton, GenericPanelSkeleton
-- RunViewPanel also wrapped in its own `Suspense` boundary with `RunViewTerminalSkeleton`
-- Vite `manualChunks` splits vendor libs: `react` (45kb gz), `charts/recharts+d3` (127kb gz), `xterm` (84kb gz), `cmdk`
-- Initial JS bundle: index (32kb gz) + react (45kb gz) = ~78kb gzipped (target: <200kb)
-- No single chunk exceeds 500kb raw (largest: treemap 452kb, cytoscape 442kb, mermaid 442kb)
-- `SettingsTab` type imported separately via `import type` to avoid pulling SettingsPanel into initial bundle
+- `generateSpecViaOpenCode()` spawns `opencode run --format json --model <model>` with a prompt that instructs OpenCode to read CLAUDE.md, glob existing specs, read package.json before generating
+- POST /api/specs/generate detects `configuredAgentType === 'opencode'` and routes to OpenCode path
+- On OpenCode failure (timeout, non-zero exit, bad JSON), falls back to SDK path (llm-client.ts chatComplete)
+- `validateSpecQuality()` enforces: stories array non-empty, each story has id/title/description/acceptanceCriteria/dependsOn
+- 120s timeout for opencode path (vs default SDK timeout)
+- JSON extraction from event stream: scans assistant + completion events in reverse order, with fallback to raw stdout parsing
+- `isSpecError()` type guard for clean error handling
 
 Key decisions:
-- Used skeleton screens (not spinners) as Suspense fallback — matches AC requirement
-- Kept `SettingsTab` as type-only import since lazy-loading SettingsPanel means its module isn't available at import time
-- manualChunks only for heavy vendor deps — let Vite auto-chunk panel components (produces cleaner per-panel chunks)
+- OpenCode prompt tells agent to explore codebase FIRST (read CLAUDE.md, glob specs, read package.json) then output raw JSON — leverages full tool access
+- Token usage set to {0,0} for OpenCode path since JSON event stream doesn't report usage
+- Fallback path reuses the exact same SDK logic (chatComplete + JSON parse + validation) — zero behavior change for RORCA_AGENT=claude
+- WAL event payload includes `provider: 'opencode'` when OpenCode path is used
+- Spec quality validation is shared between OpenCode path and could be reused by SDK path in future
 
-## Story P2-020: App Renders Meaningful Content Within 2s on Fast 3G — DONE
+## Story OC-009: Settings UI — Agent Configuration Panel — DONE
 Files touched:
-- index.html (replaced: inline critical CSS + shell skeleton inside #root)
-- src/App.tsx (modified: lazy-load CommandPalette, auth pages, OnboardingWizard, PublicReviewPage; show shell+skeleton during auth loading instead of blank "Loading...")
-- src/components/StoryComments.tsx (modified: added width/height/loading="lazy" to avatar img)
-- src/components/Shell.tsx (modified: added contain-layout class to main content area)
-- src/styles/index.css (modified: added .contain-layout utility)
-- vite.config.ts (modified: added modulePreload polyfill, es2020 target, lucide-react icon chunk split)
+- backend/src/routes/config.ts (rewritten — added GET /opencode-models, PUT /agent, hot-reload config, DB persistence)
+- backend/src/db/index.ts (modified — idempotent agent_config table creation)
+- src/panels/SettingsPanel.tsx (modified — added ExecutionEngineSection component with toggle, model selector, status badge)
 
 What was built:
-- Shell skeleton renders instantly from inlined HTML+CSS in index.html (no JS needed) — top bar with "rorca" wordmark + 4-icon sidebar rail + content placeholders with pulse animation
-- Critical CSS variables (tokens) duplicated inline so theme applies before Tailwind loads
-- 7 components moved from eager import to React.lazy: CommandPalette, LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage, OnboardingWizard, PublicReviewPage
-- Auth loading state now renders full Shell+HubSkeleton instead of blank "Loading..." div — nav renders before data loads
-- modulepreload hints auto-injected by Vite for react and icons chunks
-- lucide-react split into its own "icons" chunk for better caching
-- Build target set to es2020 to avoid legacy polyfills
-- Avatar images have explicit width=24 height=24 + loading="lazy" to prevent CLS
-- CSS contain: layout style on main content area prevents skeleton→content layout shifts
+- 'Execution Engine' section in Settings → Model & Providers tab, positioned between Display and Provider sections
+- Toggle between Claude subscription and OpenCode (API key) with radio-style cards showing descriptions
+- When OpenCode selected: grouped model dropdown (OpenAI, Google, Anthropic, OpenRouter, Local) with context window info
+- GET /api/config/opencode-models returns Models.dev compatible list with grouped providers
+- PUT /api/config/agent validates agent type, checks OpenCode binary availability, validates API key presence for provider, persists to `agent_config` DB table
+- Config hot-reloaded in-memory — no backend restart required on save
+- Status badge shows current agent type and model name in top-right of section
+- OpenCode installation status banner (green if installed with version, amber warning if missing)
+- Validation: OpenCode model requires matching provider API key in vault
 
 Key decisions:
-- Inlined critical CSS rather than using a separate file — avoids render-blocking CSS request entirely
-- Shell skeleton uses aria-hidden="true" since it's replaced by React immediately
-- Used simple CSS animations (not JS) for skeleton pulse — zero JS overhead for FCP
-- Auth loading shows Shell+skeleton (not blank page) so LCP is the skeleton itself, well under 2.5s
-- CLS prevention via CSS containment on main area + explicit img dimensions
+- `agent_config` table (single row, id='default') for DB persistence — survives backend restarts
+- On module load, config loaded from DB first, then falls back to env vars (RORCA_AGENT, RORCA_MODEL)
+- Model catalog is static (hardcoded in config.ts) — matches current Models.dev popular models
+- Provider-to-vault-key mapping validates API key presence before allowing save (e.g. OpenAI models need 'openai-compat' vault key)
+- Local/Ollama models skip API key validation (no key required)
 
-## Story P2-021: Ready to Run Section in HubPanel — DONE
+## Story OC-010: Trigger Modal Engine Display + Run View Agent Badge — DONE
 Files touched:
-- src/panels/HubPanel.tsx (modified — ReadyToRunCard rewritten, fetchData updated)
+- backend/src/routes/config.ts (modified — GET /api/config now returns modelDisplayName + hasApiKey)
+- src/components/TriggerPopover.tsx (rewritten — fetches agent config, shows Engine row, warnings, disables trigger when misconfigured)
+- src/panels/HubPanel.tsx (modified — passes onNavigate to TriggerPopover)
+- src/panels/ArchivePanel.tsx (modified — passes onNavigate to TriggerPopover)
+- src/panels/RunViewPanel.tsx (modified — agentType/agentModel on PipelineRun interface, agent badge in header)
 
 What was built:
-- "Ready to Run" section between Pending Reviews and Recent Runs showing approved specs without active/recent pipeline runs
-- Each card shows: spec title, story count badge, "Generated N ago" timestamp, workspace name badge
-- Direct "Trigger →" button that calls POST /api/pipeline/trigger (no popover intermediary)
-- On trigger: spinner shown, card removed from Ready to Run; SSE refetch populates Active Run section
-- Conflict detection: when workspace has an active run, button shows "Workspace busy" (disabled, yellow)
-- Tooltip on trigger button shows full spec path for power users
-- Section hidden entirely when no approved specs are ready (no empty header)
-- Cross-references pipeline_runs to filter out specs that already have runs
-- Respects 30s auto-refresh cadence + SSE-driven immediate refetch on run state changes
+- TriggerPopover fetches GET /api/config on mount, displays "Engine" row showing "Claude (Pro/Max)" or "OpenCode — <model name>"
+- Engine label links to Settings panel via onNavigate prop for quick reconfiguration
+- Warning when RORCA_AGENT=opencode but no model configured: "No model configured — go to Settings"
+- Warning when model set but no API key for provider: "No API key for this provider — go to Settings"
+- Run Now + Add to Queue buttons disabled when engine is misconfigured (no model or no API key)
+- GET /api/config extended with `modelDisplayName` (human-readable model name) and `hasApiKey` (checks api_key_vault for provider)
+- RunViewPanel header shows agent badge: orange "Claude" or cyan "<model name>" next to status badge
+- Badge shows the model's short name (e.g. "GPT-4o") extracted from agentModel field
 
 Key decisions:
-- Removed TriggerPopover dependency — Hub cards use direct trigger for speed (popover still exists for other panels)
-- Removed defaultParallelism state/fetch since it's no longer used after removing popover
-- Filtering uses specSlug matching between approved specs and pipeline_runs spec_paths
-- Card removal is optimistic (immediate on trigger success), with SSE providing eventual consistency
-- Pre-existing backend test infrastructure broken (jest config parse error) — not introduced by this change
+- Single fetch to GET /api/config (not a new endpoint) — extended existing endpoint with two new fields
+- hasApiKey check reuses same PROVIDER_KEY_MAP + api_key_vault query as PUT /agent validation
+- onNavigate prop is optional on TriggerPopover — graceful degradation if caller doesn't pass it
+- Agent badge always shown in RunViewPanel (defaults to "Claude" for runs without agentType)
 
-## Story P2-022: Multi-Pane Terminal Grid for Parallel Runs — DONE
+## Story OC-011: Structured Event Renderer for OpenCode — DONE
 Files touched:
-- backend/src/lib/run-loop.ts (modified — added wave_index and log_file to story_started WAL events)
-- backend/src/routes/pipeline.ts (modified — added GET /api/pipeline/runs/:runId/stories/:storyId/log SSE route + startTailing helper)
-- src/components/MiniTerminalPane.tsx (new — mini xterm.js pane with story badge, Raw/Semantic toggle, status banner)
-- src/components/MultiPaneTerminal.tsx (new — responsive grid of MiniTerminalPanes grouped by wave)
-- src/panels/RunViewPanel.tsx (modified — conditional multi-pane vs single-pane rendering in terminal tab)
-- src/panels/PipelineMonitorPanel.tsx (modified — added parallelism to PipelineRun type, multi-pane detection + rendering)
+- backend/src/lib/semantic-log-parser.ts (modified — extended SemanticStep with toolName, durationMs, isError, output; added tool_result parsing for OpenCode)
+- backend/src/routes/pipeline.ts (modified — emits run_meta SSE event with agentType at connection)
+- src/components/RunTerminal.tsx (rewritten — dual renderer: OpenCode vs Claude semantic view)
 
 What was built:
-- Backend SSE route streams per-story log files with same chunk/semantic_step/done protocol as the main run output stream
-- Story log file discovery: checks story_started WAL payload for log_file path, falls back to forge/logs/ directory scan
-- Graceful waiting: if story log file doesn't exist yet, SSE sends "status: waiting" and polls every 500ms until file appears
-- MiniTerminalPane: compact xterm.js terminal per story with story ID badge, truncated title, Raw/Semantic toggle, status banners (green PASSED / red FAILED)
-- MultiPaneTerminal: groups stories by wave_index, renders wave labels ("Wave 0", "Wave 1"), responsive grid (2 cols on ≥900px, 1 col on narrow screens)
-- Both RunViewPanel and PipelineMonitorPanel conditionally switch to multi-pane when parallelism > 1 AND 2+ stories have started
-- Sequential (parallelism=1) runs continue to render the existing single-pane RunTerminal — zero regression
-- run-loop.ts now emits wave_index in story_started WAL events during parallel execution, and log_file path in all story_started events
+- Backend emits `run_meta` SSE event immediately on connection with `{ agentType, agentModel }` — frontend detects agent type without extra API call
+- SemanticStep extended with optional fields: `toolName` (raw tool name for icon mapping), `durationMs` (tool execution duration), `isError` (error flag), `output` (tool stdout/stderr text up to 2KB)
+- OpenCode `tool_result` events now parsed into SemanticStep (previously returned null) — provides duration + output data for UI
+- OpenCode `completion` events detect non-zero exit codes and set `isError: true`
+- Frontend `RunTerminal.tsx` uses `agentType` from `run_meta` event to select renderer:
+  - `agent_type=opencode`: `OpenCodeStepRow` with tool-specific icons (FilePlus→write, Globe→webfetch/websearch, Terminal→bash, FileText→read, Pencil→edit, Search→glob/grep), tool name badges, Clock+duration display, collapsible bash output (command shown as `$ command`, output in scrollable pre block), error events in red with red background tint and red bordered output container
+  - `agent_type=claude`: `ClaudeStepRow` — identical to previous implementation, no changes
+- "OpenCode" badge shown in toolbar when agent_type is opencode/codex
+- Raw/Semantic toggle continues to work for both paths
 
 Key decisions:
-- Multi-pane detection is sticky: once 2+ stories have started (even if some finish), stays in multi-pane mode for that run
-- Per-story SSE route uses file tailing (200ms poll) rather than in-memory buffers — story logs are written by separate subprocesses
-- Mini-terminal panes have smaller font (10px) and reduced scrollback (10k) for better performance with multiple concurrent terminals
-- Wave grouping derived from WAL events on the client side (not a separate API call)
-- Status banner overlays at pane bottom rather than replacing content — user can still see last few log lines
+- Separate `OpenCodeStepRow` and `ClaudeStepRow` components rather than conditional branches inside one — cleaner separation, no risk of Claude path regression
+- `run_meta` SSE event emitted before any chunk/semantic_step events — frontend always knows agent type before first data arrives
+- `output` field capped at 2KB backend-side to avoid sending megabytes of tool output to the browser
+- Error detection: `isError` set on `completion` events with non-zero exit code AND on `error` events
+- Tool output container uses max-h-48 + overflow-y-auto to prevent long outputs from blowing up the semantic view
+
+## Story OC-014: GitHub Copilot Subscription Provider — DONE
+Files touched:
+- backend/src/db/migrations/038_integration_credentials.sql (new)
+- backend/src/routes/copilot.ts (new)
+- backend/src/routes/config.ts (modified — Copilot model + provider map + status fields)
+- backend/src/routes/pipeline.ts (modified — GITHUB_TOKEN injection for Copilot)
+- backend/src/server.ts (modified — mount copilot router)
+- src/panels/SettingsPanel.tsx (modified — Copilot UI section, OAuth flow, status display)
+
+What was built:
+- `integration_credentials` table for OAuth-based provider tokens (distinct from `api_key_vault` for API keys). Fields: encrypted_token (AES-256-GCM), scopes, provider_username, provider_user_id. UNIQUE on (user_id, provider).
+- Full GitHub OAuth flow: `GET /api/copilot/connect` returns OAuth URL with `user:email copilot` scopes → GitHub OAuth → `GET /api/copilot/callback` exchanges code for token, fetches GitHub user profile, upserts encrypted token, emits `copilot_connected` WAL event, redirects to frontend.
+- `GET /api/copilot/status` returns connection state + GitHub username. `DELETE /api/copilot/disconnect` removes credential + emits `copilot_disconnected` WAL event.
+- `getCopilotToken(userId)` exported helper decrypts stored token for pipeline injection.
+- `github/copilot` added to OPENCODE_MODELS catalog with `GitHub Copilot` provider. PROVIDER_KEY_MAP maps it to empty array (uses OAuth, not vault keys).
+- `GET /api/config` returns `copilotConnected` and `copilotUsername` fields. Copilot model validation checks `integration_credentials` instead of `api_key_vault`.
+- `PUT /api/config/agent` validates Copilot requires GitHub connection before allowing model switch.
+- Pipeline trigger injects `GITHUB_TOKEN` env var (decrypted from integration_credentials) into execution subprocess when model is `github/copilot`.
+- Settings UI: GitHub Copilot section with "Sign in with GitHub" button (disconnected state) or "Connected as {username}" with disconnect button (connected state). Purple "Subscription" badge. Info/warning callouts for connection status. `?copilot=connected` URL param handled for OAuth callback redirect.
+
+Key decisions:
+- Separate `integration_credentials` table (not reusing `api_key_vault`) because Copilot uses OAuth tokens with scopes/profile, not raw API keys.
+- Reused `encryptToken`/`decryptToken` from `auth.ts` for consistent AES-256-GCM encryption.
+- OAuth callback redirects to `http://localhost:5210/?copilot=connected` — frontend detects param and refreshes status.
+- `GITHUB_TOKEN` env var injected in both primary trigger path and secondary (single-story) trigger path in pipeline.ts.
+- 2 pre-existing backend type errors (rate-limiter.ts, run-queue.ts) verified not introduced by OC-014.
+
+## Story OC-015: Robust OpenCode Error Handling & Orphan Cleanup — DONE
+Files touched:
+- backend/src/lib/execution-engine.ts (modified — OpenCode error classifier, classified error WAL payloads in both sequential + parallel paths)
+- backend/src/lib/opencode-parser.ts (modified — malformed JSON recovery with counter, rate limit detection from raw text in event stream)
+- backend/src/routes/pipeline.ts (modified — OpenCode server health monitor with restart attempt, orphan process cleanup function)
+- backend/src/server.ts (modified — cleanupOrphanRuns() called at startup)
+
+What was built:
+- **Error classifier** (`classifyOpenCodeError`): Categorizes OpenCode failures into 7 types: `not_installed`, `api_key_invalid`, `model_not_available`, `rate_limited`, `server_crashed`, `malformed_output`, `timeout`, `unknown`. Each has `retryable` flag — non-retryable errors (wrong API key, missing model) skip all retry logic and fail immediately with clear user-facing message in WAL.
+- **Enhanced WAL payloads**: `story_failed` events now include `error_category`, `error_message`, `agent_type`, `exit_code` for OpenCode runs. Enables UI to show "Provider API key invalid" vs generic "max_retries" messages.
+- **Server crash detection**: Pipeline trigger spawns a 5s health check interval that monitors OpenCode server `isAlive()`. On crash: attempts one restart (uses existing `OpenCodeServer.restart()`). On restart failure: kills execution engine process group, emits `opencode_server_crash` WAL event, run fails gracefully.
+- **Malformed JSON recovery**: `OpenCodeStreamParser.parseLine()` now tracks malformed line count, logs first occurrence per burst, and specifically detects rate limit errors in plain text output (429, "rate limit", "too many requests", "quota exceeded"). Rate limit lines emitted as yellow `[Rate Limited]` terminal entries with extracted wait time.
+- **Orphan process cleanup**: `cleanupOrphanRuns()` exported from pipeline.ts, called by server.ts at startup. Scans `pipeline_runs WHERE status IN ('running', 'paused')`, kills engine PIDs (process group SIGTERM) + OpenCode server PIDs, marks runs failed, emits `run_finished` WAL events with `reason: 'orphan_cleanup'`.
+- **Rate limit 429 detection from event stream**: Parser detects `429`, `rate limit`, `too many requests`, `quota exceeded`, `tokens per min` in raw text lines. Extracts `retry-after` seconds when available. Emits semantic + terminal entries for UI display.
+
+Key decisions:
+- Error classification runs ONLY for `agentType === 'opencode'` — Claude path keeps existing generic retry behavior (no regression risk)
+- Non-retryable errors bypass retry counter entirely — prevents 3 wasted retries when API key is wrong
+- `extractProviderHint()` and `extractModelHint()` parse stderr to include provider/model name in error message
+- Server health check interval (5s) is a reasonable balance between detection latency and overhead
+- Orphan cleanup kills process group (-pid SIGTERM) first, falls back to individual PID — handles both detached process groups and direct children
+- Malformed JSON counter resets on first valid JSON line — prevents log spam during recovery
+- Pre-existing type errors (rate-limiter.ts, run-queue.ts) unchanged — verified not introduced by OC-015
+
+## Story OC-017: Comprehensive OpenCode Documentation — DONE
+Files touched:
+- .env.example (modified — added RORCA_AGENT, RORCA_MODEL, OPENCODE_BIN with provider examples)
+- CLAUDE.md (modified — rewrote Environment section with full OpenCode setup instructions, technical advantages comparison, step-by-step provider setup table)
+- README.md (modified — updated architecture diagram to show dual execution engine, updated prerequisites, added Execution Engine section with provider table, updated core services table, updated Ralph Loop section, added OpenCode troubleshooting entries)
+- src/components/OpenCodeSetupGuide.tsx (new — modal component with provider-specific step-by-step setup)
+- src/panels/SettingsPanel.tsx (modified — imported OpenCodeSetupGuide, added "Setup Guide" link in Execution Engine section header)
+
+What was built:
+- CLAUDE.md has complete OpenCode setup documentation: installation steps, provider table (OpenAI/Google/Anthropic/OpenRouter/Ollama/Copilot), technical advantages comparison (claude --print vs opencode run), env var reference, verification steps
+- README.md updated: architecture diagram shows both execution paths, prerequisites list both engines, new Execution Engine section with provider table and auth details, troubleshooting covers OpenCode errors
+- .env.example includes RORCA_AGENT/RORCA_MODEL with commented examples for all 6 provider types
+- In-app Setup Guide modal (OpenCodeSetupGuide.tsx): accessible via "Setup Guide" link in Settings > Execution Engine, shows prerequisites sidebar + provider tabs (OpenAI, Google, Anthropic, OpenRouter, Ollama, GitHub Copilot), each with numbered steps, copyable code blocks, model string chips, provider-specific tips, and test connection section
+- Setup Guide is wired into ExecutionEngineSection via showSetupGuide state + BookOpen icon link
+
+Key decisions:
+- Setup Guide is a modal (not a separate panel/route) — lightweight, accessible from the Execution Engine section without navigation
+- Provider guides are static data (PROVIDER_GUIDES array) — no API calls needed, works offline
+- Code blocks have copy-to-clipboard with visual feedback (CheckCircle2 icon)
+- URL code blocks get ExternalLink icon instead of Copy
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged — verified not introduced by OC-017
+- Pre-existing test failures (39 suites) unchanged — same pattern as documented in OC-006/V2-098
+
+## Story OC-018: Backend Integration Tests for OpenCode Execution Path — DONE
+Files touched:
+- backend/src/__tests__/opencode-integration.test.ts (NEW — 31 tests)
+- backend/src/__tests__/fixtures/mock-opencode.sh (NEW — mock opencode binary for story execution)
+- backend/src/__tests__/fixtures/mock-opencode-specgen.sh (NEW — mock opencode binary for spec generation)
+
+What was built:
+- **Mock opencode binary** (shell script): Supports `--version` (returns v0.2.0), `server --socket <path>` (creates socket file, stays alive), `run --format json` (reads stdin prompt, outputs newline-delimited JSON events matching real OpenCode format). Configurable via env vars: `MOCK_OPENCODE_EXIT_CODE` (override exit code), `MOCK_OPENCODE_STDERR` (inject stderr), `MOCK_OPENCODE_DELAY_MS` (simulate processing time).
+- **Mock opencode specgen binary**: Variant that outputs a valid spec JSON wrapped in assistant events for spec generation tests. `MOCK_OPENCODE_FAIL_SPECGEN=1` simulates failure.
+- **31 integration tests** across 11 describe blocks:
+  1. Mock binary validation (4 tests): `--version` semver, valid JSON events, configurable exit code, stderr injection
+  2. OpenCode detector with mock (1 test): detectOpenCode resolves mock path + parses version
+  3. Server lifecycle (4 tests): start→socket→attach→stop, attach-before-start error, onPidReady callback, restart-once semantics
+  4. Stream parser with mock output (2 tests): structured event parsing, signal aggregation
+  5. Execution engine single story (1 test): engine spawns mock, story passes, spec JSON updated
+  6. Execution engine multiple stories (1 test): sequential dep chain, both marked passed
+  7. SKILL.md lifecycle (3 tests): file creation, cleanup with empty parent dirs, path injection in prompt
+  8. Error classification (5 tests): pattern matching for not_installed, api_key_invalid, model_not_available, rate_limited, server_crashed
+  9. Spec generation (5 tests): valid spec from mock, error on failure, quality validation (empty/missing/valid)
+  10. Agent config (3 tests): opencode config, claude default, invalid type throws
+  11. Retry and failure (1 test): engine retries 3 times on retryable failure then skips (6s sleep per attempt to avoid rate-limit heuristic)
+  12. Full E2E (1 test): SKILL.md instruction in prompt, spec JSON updated, git commit created with feat() prefix
+
+Key decisions:
+- Mock binary uses bash (not Node) for zero-dependency CI compatibility — no opencode installation required
+- Mock sleep 6s in retry test exceeds RATE_LIMIT_FAST_EXIT_THRESHOLD_MS (5000ms) to avoid triggering 450s exponential backoff
+- Tests spawn real execution-engine.ts via tsx (not mocking internals) — true integration coverage
+- RORCA_SKIP_GATE=1 env var bypasses tsc+playwright gates in tests
+- Port 0 for WAL events = no backend needed (fetch to port 0 silently fails per engine's catch block)
+- Temp dirs cleaned up in afterEach for CI isolation
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged
+
+## Story OC-020: Story Escalation Cascade — Model Tier Upgrade on Failure — DONE
+Files touched:
+- backend/src/lib/complexity-scorer.ts (modified — EscalationConfig type, DEFAULT_ESCALATION, config loader, getNextEscalationTier export)
+- backend/src/lib/execution-engine.ts (modified — escalation state tracking, per-tier retry logic, story_escalated WAL event, sequential path refactored to use executeStory)
+- backend/src/lib/__tests__/complexity-scorer.test.ts (modified — 9 new tests for escalation config + getNextEscalationTier)
+- src/panels/PipelineMonitorPanel.tsx (modified — EscalationInfo type on DerivedStory, story_escalated event handler, amber badge UI)
+
+What was built:
+- EscalationConfig in .rorca/config.json: orchestration.escalation.enabled (default: true), orchestration.escalation.maxRetriesOnTier (default: 2), orchestration.escalation.escalateTo mapping (default: haiku→sonnet, sonnet→opus, opus→null)
+- Per-tier retry tracking in execution-engine.ts via EscalationState per story: tracks currentTier, originalTier, retriesOnCurrentTier, and full escalationHistory
+- Escalation logic: When retries on current tier >= maxRetriesOnTier, checks getNextEscalationTier(). If higher tier available: resolves new model ID from provider cascades, resets retry counter, continues execution loop. If at top tier (opus): marks story failed with max_retries_all_tiers reason.
+- WAL event: story_escalated emitted on every tier upgrade with { fromTier, toTier, attemptNumber, model, error_category, error_message, story_id, run_id }
+- Gate failure escalation: Typecheck/E2E gate failures also count toward tier retries and trigger escalation
+- Claude subscription guard: Escalation disabled when agentType === 'claude' — subscription path has fixed model, no mid-story tier switching
+- Run View UI: Amber badge "Escalated: Haiku→Sonnet" in story list with tooltip showing attempt number
+- Sequential path refactor: main() sequential loop now delegates to executeStory() (eliminates ~200 lines of duplicated logic)
+
+Key decisions:
+- Escalation state is per-story per-run (in-memory Map), not persisted — WAL events provide the durable audit trail
+- Provider extracted from model string ("openai/gpt-4o" → "openai") for cascade model resolution
+- Gate failures (typecheck/e2e) count as tier-level failures too — a model that produces code that doesn't compile should be escalated
+- Sequential path refactored to use executeStory() to avoid maintaining escalation logic in two places
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged
+
+## Story OC-021: Orchestration Config in .rorca/config.json — Eject to Config — DONE
+Files touched:
+- backend/src/lib/complexity-scorer.ts (modified — OrchestrationConfig extended with router, taskCascades, tokenBudgetPerStory; RouterMode/TaskType types; loadOrchestrationConfig handles range thresholds + new fields; score() respects router mode)
+- backend/src/lib/config.ts (modified — validateOrchestrationConfig() with descriptive errors for all orchestration fields)
+- backend/src/routes/config.ts (modified — GET/PUT /api/config/orchestration endpoints for workspace-scoped config read/write)
+- backend/src/lib/__tests__/complexity-scorer.test.ts (modified — 15 new tests for router modes, threshold ranges, task cascades, token budget, and validation)
+- .rorca/config.schema.json (new — JSON Schema for .rorca/config.json orchestration section)
+- src/panels/SettingsPanel.tsx (modified — ModelRoutingSection + ThresholdSlider components in Settings > Model & Providers)
+
+What was built:
+- orchestration.router: 'auto' | 'fixed' | 'manual' — auto uses complexity scorer, fixed bypasses scoring, manual uses per-story modelTier field
+- orchestration.thresholds: supports both legacy { haiku: 30 } and range { haiku: [0, 30] } formats; cross-validates haiku < sonnet
+- orchestration.taskCascades: { echolocation, planning, coding, lintFix, testing, documentation } → model IDs per task type
+- orchestration.escalation: existing fields + chain array for UI display
+- orchestration.tokenBudgetPerStory: default 50000, validated as positive number
+- Settings > Model & Providers > Model Routing section: router mode selector, three-tier drag slider with numeric inputs, task cascade model inputs, escalation toggle + max retries, token budget input
+- ThresholdSlider: drag handles for haiku/sonnet boundaries, color-coded regions (green/blue/purple), inline numeric inputs for precise adjustment
+- .rorca/config.schema.json: full JSON Schema with descriptions for IDE autocompletion
+- validateOrchestrationConfig(): returns descriptive { field, message, value } errors for every invalid field
+- PUT /api/config/orchestration: validates → reads existing config.json → merges orchestration → atomic write → clears cache → returns merged config
+- GET /api/config/orchestration: loads merged config (defaults + overrides) for workspace, returns threshold ranges for frontend
+
+Key decisions:
+- Threshold ranges stored internally as single max value (haiku: 30, sonnet: 65) per existing ScoringThresholds type — frontend receives/displays [min, max] ranges computed from the boundary values
+- Router 'fixed' returns tier='sonnet' with score=50 — execution-engine uses the spec model directly, scorer just needs to return a valid tier
+- Router 'manual' checks story.modelTier property, falls through to auto if unset — no breaking change for existing specs
+- Atomic write: config.json written to .tmp then renamed to prevent partial writes
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged from OC-020
+
+## OC-023: FinOps Dashboard — Real-Time Cost Observability — DONE
+Files touched:
+- backend/src/routes/analytics.ts (modified — added ~300 lines: 3 new endpoints)
+- src/components/FinOpsTab.tsx (new — ~340 lines)
+- src/panels/FinOpsDashboardPanel.tsx (new — ~500 lines)
+- src/panels/PipelineMonitorPanel.tsx (modified — added finops tab)
+- src/panels/RunViewPanel.tsx (modified — added finops tab)
+- src/components/Sidebar.tsx (modified — added finops PanelId)
+- src/App.tsx (modified — wired FinOpsDashboardPanel)
+
+What was built:
+- GET /api/analytics/finops/run/:runId — per-run FinOps data: model summary table, savings vs all-Opus baseline, per-story breakdown with tier/tokens/cost, escalation log from WAL events
+- GET /api/analytics/finops/historical — historical FinOps: daily cost trend, by-workspace breakdown, by-spec top 20, monthly aggregation, model distribution, projected monthly cost
+- GET /api/analytics/finops/export — CSV export with computed tier, opus_baseline_usd, savings_usd columns; supports run_id and workspace_id filters
+- FinOpsTab component: per-run tab shown in both PipelineMonitorPanel and RunViewPanel, shows savings banner ("vs All-Opus baseline: $X → Actual: $Y → Saved: $Z (N%)"), summary cards, model distribution bar, run summary table, expandable per-story breakdown, expandable escalation log with from/to tier and additional cost
+- FinOpsDashboardPanel: historical view accessible via sidebar Analytics > FinOps, Recharts LineChart (daily spend), PieChart (model distribution), BarChart (monthly cost), by-workspace and by-spec tables, date range selector (30d/90d/180d/365d), CSV export link
+- Claude subscription path: detects agentType='claude', hides dollar costs, shows token counts only with "Subscription — no per-token billing" notice
+- Tier classification via tierFromModel() helper: haiku (haiku/mini/flash), opus (opus/o3/pro), sonnet (default)
+- Opus baseline: ($15/1M input + $75/1M output) applied to all tokens regardless of actual model
+
+Key decisions:
+- Savings calculation: allOpusCost - actualCost, percentage = savings/allOpusCost × 100
+- Escalation log fetched from wal_events WHERE event_type = 'story_escalated', payload parsed for from_tier/to_tier
+- Historical endpoint detects allSubscription by checking if all runs used agent='claude'
+- Projected monthly = average daily cost × 30
+- Tier colors: haiku=emerald, sonnet=blue, opus=purple (consistent with complexity scorer UI)
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged
+- Pre-existing test infrastructure issue (db.close() TypeError in afterEach across all route tests) unchanged — not caused by OC-023
+
+## Story OC-026: Codex CLI Auth Detection and ChatGPT Login — DONE
+Files touched:
+- backend/src/lib/codex-auth.ts (new — 258 lines)
+- backend/src/routes/config.ts (modified — import + 3 route handlers)
+- backend/src/routes/pipeline.ts (modified — codex auth gate block)
+- src/panels/SettingsPanel.tsx (modified — CodexAuthStatus component + render slot)
+
+What was built:
+- `getCodexAuthState()` reads `~/.codex/auth.json` JWT tokens, extracts email + chatgpt_plan_type from OpenAI JWT claims. Fallback: `codex login status` CLI command
+- `triggerCodexLogin()` spawns `codex login` detached, polls auth.json every 2s for 5 min, fires `codex_auth_connected` SSE event when authenticated
+- `triggerCodexLogout()` spawns `codex logout`, fires `codex_auth_disconnected` SSE event on success
+- 3 API routes: `GET /api/config/codex-auth`, `POST /api/config/codex-auth/login`, `POST /api/config/codex-auth/logout`
+- Pipeline trigger gate: if `RORCA_AGENT=codex` and codex is disconnected, returns 403 `codex_not_authenticated` with settings deep link
+- `CodexAuthStatus` React component in SettingsPanel: green/amber status, email + plan display, Connect/Disconnect buttons, SSE live update (replaces old simple installation badge)
+
+Key decisions:
+- Credential file: `~/.codex/auth.json` — contains `tokens.id_token` (JWT with email, chatgpt_plan_type under `https://api.openai.com/auth` claim)
+- CLI commands: `codex login` (not `codex auth login`), `codex logout`, `codex login status`
+- Plan types from JWT: "plus", "pro", "free" — displayed capitalized (e.g., "ChatGPT Plus")
+- Same polling pattern as OC-025 Claude auth: 2s interval, 5 min max, SSE broadcast on detection
+- Replaced the simple Codex CLI installation status badge with full auth component matching Claude pattern
+
+## Story OC-027: OpenRouter Dedicated Provider Card — DONE
+Files touched:
+- backend/src/routes/config.ts (modified — added /openrouter-models, /openrouter-test endpoints, OpenRouter model display name resolution, OpenRouter key validation)
+- src/panels/SettingsPanel.tsx (modified — added OpenRouter card with key input, test connection, model count badge, model dropdown grouped by provider family with Free badge)
+- src/components/TriggerPopover.tsx (modified — updated engine label to show 'OpenRouter — model-id' for OpenRouter models)
+
+What was built:
+- `GET /api/config/openrouter-models` — fetches live model catalog from OpenRouter API, cached 1h, returns models grouped by provider family (OpenAI, Anthropic, Google, Meta, Mistral, etc.) with free model detection
+- `POST /api/config/openrouter-test` — tests API key against OpenRouter API, returns model count + free model count + latency
+- Dedicated OpenRouter card in Execution Engine section: orange-themed, API key input with `sk-or-...` placeholder, Test Connection button, model count badge (`N models available`), green connected indicator, Browse all models link
+- Model dropdown extended with OpenRouter models grouped by provider family (`OpenRouter — Meta`, `OpenRouter — Mistral`, etc.) with `[Free]` badge on free models with >=8K context
+- TriggerPopover shows `OpenRouter — meta-llama/llama-3.3-70b` format for OpenRouter models
+- API key stored encrypted in vault table via existing `/api/vault/keys` POST endpoint
+- Error handling: invalid key, network error, rate limited — specific error messages for each
+
+Key decisions:
+- Used existing vault infrastructure (AES-256-GCM encryption) for key storage — no new migration needed
+- Cache TTL 1h for model catalog — invalidated on successful test connection
+- Provider family extraction from model ID prefix (e.g., `meta-llama/` → `Meta`)
+- Free model detection: pricing.prompt === 0 AND pricing.completion === 0 AND context_length >= 8192
+- OpenRouter models in dropdown use `openrouter/{model-id}` format to distinguish from hardcoded OPENCODE_MODELS entries
+
+## Story OC-029: Multi-Engine Process Lifecycle Management — DONE
+Files touched:
+- backend/src/lib/execution-engine.ts (modified — per-story agent resolution, engine scanning, rerouting tracking, main() guard for test imports)
+- backend/src/lib/complexity-scorer.ts (modified — added fallbackEngine to OrchestrationConfig + loader)
+- backend/src/lib/config.ts (modified — added fallbackEngine validation)
+- backend/src/routes/pipeline.ts (modified — multi-engine auth validation, conditional OpenCode server start, per-story engine+reroute in runs API)
+- src/panels/PipelineMonitorPanel.tsx (modified — RerouteInfo interface, reroute badge, story_rerouted SSE handling)
+- backend/src/lib/__tests__/multi-engine-lifecycle.test.ts (new — 27 tests)
+
+What was built:
+- `resolveStoryAgent()` — resolves per-story agent from `UserStory.agent` field with fallback to run-level agentType
+- `scanRequiredEngines()` — scans all active stories and returns the set of unique engines needed for a run
+- `countStoriesByEngine()` — counts active stories assigned to each engine (for error messaging)
+- `RerouteInfo` type + `reroutedStories` Map — tracks rate limit reroutes per story (prevents double-reroute)
+- Rate limit rerouting in `executeStory()` — on exhausted retries, checks `orchestration.fallbackEngine`, emits `story_rerouted` WAL event, recursively retries with fallback engine
+- `fallbackEngine` field added to `OrchestrationConfig` (defaults to null = disabled)
+- `validateOrchestrationConfig()` validates fallbackEngine (must be claude/opencode/codex or null)
+- Pipeline trigger validates ALL required engines are authenticated before spawning run (returns 403 with per-engine errors)
+- OpenCode server start is conditional — only starts when at least one story is assigned to opencode
+- GET /api/pipeline/runs/:id returns per-story `agent` and `reroute` fields in `specStories` array
+- Run View shows cyan reroute badge: "Rerouted: Claude→Codex (rate_limit)" with tooltip
+- `deriveStoriesFromEvents()` handles `story_rerouted` SSE events for live UI updates
+- `main()` entry point guarded with `require.main === module` check to prevent auto-execution on test import
+- 27-test integration test suite covering all helpers, config validation, and multi-engine scenarios
+
+Key decisions:
+- Recursive `executeStory()` call for rerouting — reuses all existing retry/escalation logic cleanly
+- `reroutedStories` Map prevents infinite reroute loops (a story can only be rerouted once)
+- Inline union type `'claude' | 'opencode' | 'codex' | null` for fallbackEngine in complexity-scorer.ts to avoid circular dependency (config.ts imports from complexity-scorer.ts)
+- Existing `cleanupOrphanRuns()` already handles mixed engine state (kills both engine PIDs and OpenCode server) — no changes needed
+
+## Story OC-030: Codex CLI Direction Stack Context Injection via AGENTS.md — DONE
+Files touched:
+- backend/src/routes/pipeline.ts (modified — added writeCodexAgentsMd, removeCodexAgentsMd, stripRorcaSection functions; wired into trigger route write and child exit cleanup)
+- backend/src/lib/execution-engine.ts (modified — added codexAgentsInstruction in buildPrompt for all three modes: impl, qa, journey)
+- backend/src/__tests__/opencode-integration.test.ts (modified — added 9 new tests in "Codex AGENTS.md direction stack injection" describe block)
+- CLAUDE.md (modified — documented Codex AGENTS.md injection mechanism under Codex CLI Setup section)
+
+What was built:
+- `writeCodexAgentsMd()` in pipeline.ts synthesizes direction stack (L1-L5) and writes to workspace root AGENTS.md. Codex CLI auto-discovers this file and injects as context before user prompt.
+- If AGENTS.md already exists, appends delimited section using markers (`# === RORCA DIRECTION START ===` / `# === RORCA DIRECTION END ===`); restores original on cleanup
+- If no AGENTS.md exists, creates one with direction stack; deletes on cleanup
+- `removeCodexAgentsMd()` restores original content or deletes file based on pre-run state
+- `stripRorcaSection()` removes marker-delimited section (handles stale sections from previous runs)
+- `buildPrompt()` in execution-engine.ts adds explicit instruction for Codex stories to follow AGENTS.md guidance
+- Direction context written fresh before each run (not cached) to pick up latest direction stack changes
+- 9 unit tests covering: create, append with markers, cleanup (delete vs restore), strip logic, before-spawn/after-cleanup lifecycle, prompt instruction injection, non-cached fresh writes
+
+Key decisions:
+- Used workspace root AGENTS.md (not .codex/AGENTS.md) because Codex CLI discovers AGENTS.md from Git root down — workspace root is the correct location
+- Marker-based append/restore pattern preserves existing AGENTS.md content (unlike OpenCode which uses a separate .opencode/ directory)
+- No --instructions CLI flag exists for Codex — context injection via AGENTS.md auto-discovery is the documented mechanism (verified via OpenAI docs)
+- Cleanup uses original content restoration (not marker stripping) for reliability — stored original content before modification
+- Same synthesize() call as OpenCode path — no code duplication for direction stack assembly

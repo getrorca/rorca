@@ -10,43 +10,32 @@ import Sidebar, { type PanelId } from './components/Sidebar';
 import ErrorBoundary from './components/ErrorBoundary';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
-import { onApiFetchError } from './lib/apiFetch';
-import { HubSkeleton, RunViewTerminalSkeleton, ForgeSkeleton, SettingsSkeleton, GenericPanelSkeleton } from './components/Skeleton';
-import type { SettingsTab } from './panels/SettingsPanel';
-
-// ── Lazy-loaded non-critical components (not needed for initial paint) ──
-const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
-const CommandPalette = lazy(() => import('./components/CommandPalette'));
-const LoginPage = lazy(() => import('./components/LoginPage'));
-const RegisterPage = lazy(() => import('./components/RegisterPage'));
-const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
-const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
-const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
-
-// ── Lazy-loaded panels (code-split into separate chunks) ──
-const HubPanel = lazy(() => import('./panels/HubPanel'));
-const RunViewPanel = lazy(() => import('./panels/RunViewPanel'));
-const SpecForgePanelPage = lazy(() => import('./panels/SpecForgePanelPage'));
-const SettingsPanel = lazy(() => import('./panels/SettingsPanel'));
-const SpecReviewPanel = lazy(() => import('./panels/SpecReviewPanel'));
-const ReviewQueuePanel = lazy(() => import('./panels/ReviewQueuePanel'));
-const PipelineMonitorPanel = lazy(() => import('./panels/PipelineMonitorPanel'));
-const WorktreesPanel = lazy(() => import('./panels/WorktreesPanel'));
-const ArchivePanel = lazy(() => import('./panels/ArchivePanel'));
-const CompareRunsPanel = lazy(() => import('./panels/CompareRunsPanel'));
-const GitHubSettingsPanel = lazy(() => import('./panels/GitHubSettingsPanel'));
-const ActivityFeedPanel = lazy(() => import('./panels/ActivityFeedPanel'));
-const TeamDirectionPanel = lazy(() => import('./panels/TeamDirectionPanel'));
-const TemplateMarketplacePanel = lazy(() => import('./panels/TemplateMarketplacePanel'));
-const UsageDashboardPanel = lazy(() => import('./panels/UsageDashboardPanel'));
-const CostBreakdownPanel = lazy(() => import('./panels/CostBreakdownPanel'));
-const ModelComparisonPanel = lazy(() => import('./panels/ModelComparisonPanel'));
-const VelocityChartPanel = lazy(() => import('./panels/VelocityChartPanel'));
-const CompletionRatePanel = lazy(() => import('./panels/CompletionRatePanel'));
-const HealthDashboardPanel = lazy(() => import('./panels/HealthDashboardPanel'));
-const AuditLogPanel = lazy(() => import('./panels/AuditLogPanel'));
-const RoiCalculatorPanel = lazy(() => import('./panels/RoiCalculatorPanel'));
-const WorkspaceSettingsPanel = lazy(() => import('./panels/WorkspaceSettingsPanel'));
+import { apiFetch, onApiFetchError } from './lib/apiFetch';
+import PublicReviewPage from './pages/PublicReviewPage';
+import SpecForgePanelPage from './panels/SpecForgePanelPage';
+import ReviewQueuePanel from './panels/ReviewQueuePanel';
+import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
+import WorktreesPanel from './panels/WorktreesPanel';
+import ArchivePanel from './panels/ArchivePanel';
+import CompareRunsPanel from './panels/CompareRunsPanel';
+import GitHubSettingsPanel from './panels/GitHubSettingsPanel';
+import ActivityFeedPanel from './panels/ActivityFeedPanel';
+import TeamDirectionPanel from './panels/TeamDirectionPanel';
+import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
+import UsageDashboardPanel from './panels/UsageDashboardPanel';
+import CostBreakdownPanel from './panels/CostBreakdownPanel';
+import ModelComparisonPanel from './panels/ModelComparisonPanel';
+import VelocityChartPanel from './panels/VelocityChartPanel';
+import CompletionRatePanel from './panels/CompletionRatePanel';
+import HealthDashboardPanel from './panels/HealthDashboardPanel';
+import AuditLogPanel from './panels/AuditLogPanel';
+import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
+import FinOpsDashboardPanel from './panels/FinOpsDashboardPanel';
+import SettingsPanel, { type SettingsTab } from './panels/SettingsPanel';
+import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
+import HubPanel from './panels/HubPanel';
+import RunViewPanel from './panels/RunViewPanel';
+import SpecReviewPanel from './panels/SpecReviewPanel';
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
@@ -154,41 +143,30 @@ function GlobalErrorWiring() {
 /** Map PanelId to appropriate skeleton fallback */
 function panelFallback(id: PanelId) {
   switch (id) {
-    case 'hub': return <HubSkeleton />;
-    case 'forge': return <ForgeSkeleton />;
-    case 'stack':
-    case 'settings': return <SettingsSkeleton />;
-    default: return <GenericPanelSkeleton />;
-  }
-}
-
-/** Renders the active panel component with lazy-load Suspense boundary */
-function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, settingsTab }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void; reviewSpecId?: string | null; onNavigateToSpecReview?: (specId: string) => void; forgeBrief?: string | null; settingsTab?: SettingsTab }) {
-  let panel: React.ReactNode;
-  switch (id) {
-    case 'hub': panel = <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />; break;
-    case 'forge': panel = <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief } : {})} />; break;
-    case 'spec-review': panel = <SpecReviewPanel specId={reviewSpecId ?? ''} onBack={() => onNavigate('hub')} onNavigate={onNavigate} />; break;
-    case 'stack': panel = <SettingsPanel initialTab={settingsTab} />; break;
-    case 'team-direction': panel = <TeamDirectionPanel />; break;
-    case 'queue': panel = <ReviewQueuePanel />; break;
-    case 'pipeline': panel = <PipelineMonitorPanel />; break;
-    case 'worktrees': panel = <WorktreesPanel />; break;
-    case 'compare': panel = <CompareRunsPanel onBack={() => onNavigate('pipeline')} />; break;
-    case 'archive': panel = <ArchivePanel onNavigate={onNavigate} />; break;
-    case 'marketplace': panel = <TemplateMarketplacePanel />; break;
-    case 'usage': panel = <UsageDashboardPanel />; break;
-    case 'costs': panel = <CostBreakdownPanel />; break;
-    case 'models': panel = <ModelComparisonPanel />; break;
-    case 'velocity': panel = <VelocityChartPanel />; break;
-    case 'completion': panel = <CompletionRatePanel />; break;
-    case 'roi': panel = <RoiCalculatorPanel />; break;
-    case 'health': panel = <HealthDashboardPanel />; break;
-    case 'audit-log': panel = <AuditLogPanel />; break;
-    case 'activity': panel = <ActivityFeedPanel />; break;
-    case 'github': panel = <GitHubSettingsPanel />; break;
-    case 'workspace-settings': panel = <WorkspaceSettingsPanel />; break;
-    case 'settings': panel = <SettingsPanel initialTab={settingsTab} />; break;
+    case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
+    case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief } : {})} />;
+    case 'spec-review': return <SpecReviewPanel specId={reviewSpecId ?? ''} onBack={() => onNavigate('hub')} onNavigate={onNavigate} />;
+    case 'stack': return <SettingsPanel initialTab={settingsTab} />;
+    case 'team-direction': return <TeamDirectionPanel />;
+    case 'queue': return <ReviewQueuePanel />;
+    case 'pipeline': return <PipelineMonitorPanel />;
+    case 'worktrees': return <WorktreesPanel />;
+    case 'compare': return <CompareRunsPanel onBack={() => onNavigate('pipeline')} />;
+    case 'archive': return <ArchivePanel onNavigate={onNavigate} />;
+    case 'marketplace': return <TemplateMarketplacePanel />;
+    case 'usage': return <UsageDashboardPanel />;
+    case 'costs': return <CostBreakdownPanel />;
+    case 'models': return <ModelComparisonPanel />;
+    case 'velocity': return <VelocityChartPanel />;
+    case 'completion': return <CompletionRatePanel />;
+    case 'roi': return <RoiCalculatorPanel />;
+    case 'finops': return <FinOpsDashboardPanel />;
+    case 'health': return <HealthDashboardPanel />;
+    case 'audit-log': return <AuditLogPanel />;
+    case 'activity': return <ActivityFeedPanel />;
+    case 'github': return <GitHubSettingsPanel />;
+    case 'workspace-settings': return <WorkspaceSettingsPanel />;
+    case 'settings': return <SettingsPanel initialTab={settingsTab} />;
     default: return null;
   }
   return <Suspense fallback={panelFallback(id)}>{panel}</Suspense>;
@@ -212,6 +190,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
   velocity: 'Velocity Chart',
   completion: 'Completion Rates',
   roi: 'ROI Calculator',
+  finops: 'FinOps Dashboard',
   health: 'Health Dashboard',
   'audit-log': 'Audit Log',
   activity: 'Activity Feed',
@@ -225,11 +204,25 @@ function AppContent() {
   const [activePanel, setActivePanel] = useState<PanelId>('hub');
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [reviewSpecId, setReviewSpecId] = useState<string | null>(null);
-  const { workspaces } = useWorkspace();
+  const { workspaces, workspaceId } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
+  const [queueCount, setQueueCount] = useState(0);
+
+  // Poll queue count every 10s for badge
+  useEffect(() => {
+    if (!workspaceId) { setQueueCount(0); return; }
+    const fetchCount = () => {
+      apiFetch<{ queueLength: number }>(`/api/run-queue/status?workspaceId=${workspaceId}`)
+        .then((data) => setQueueCount(data.queueLength))
+        .catch(() => setQueueCount(0));
+    };
+    fetchCount();
+    const interval = setInterval(fetchCount, 10_000);
+    return () => clearInterval(interval);
+  }, [workspaceId]);
 
   // Parse run ID from URL hash on mount (e.g. #/run/42)
   useEffect(() => {
@@ -326,7 +319,7 @@ function AppContent() {
 
   return (
     <Shell
-      sidebar={<Sidebar activePanel={activePanel} onNavigate={handleNavigate} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />}
+      sidebar={<Sidebar activePanel={activePanel} onNavigate={handleNavigate} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} queueCount={queueCount} />}
       showMenuButton
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
       onNavigate={handleNavigate}

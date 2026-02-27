@@ -14,6 +14,8 @@ import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
+import { agentType as configuredAgentType } from '../lib/config';
+import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
 
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
 function resolveVaultCreds(userId: string, model: string): { apiKey?: string; baseUrl?: string } {
@@ -520,63 +522,119 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ].join('\n');
 
-    // 8. Call LLM with selected model (use vault key if available)
-    const user = getEffectiveUser(req);
-    if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-    const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
-    const llmResult = await chatComplete(
-      [{ role: 'user', content: fullPrompt }],
-      { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
-    );
-    const rawResponse = llmResult.text;
-    const tokenUsage = llmResult.usage;
-
-    // 9. Parse JSON — strip markdown fences and preamble text if present
+    // 8. Route by agent type: OpenCode path vs SDK (llm-client) path
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
-    try {
-      // Extract JSON from ```json ... ``` code block if present
-      const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-      const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-      // If there's still leading text before the JSON object, strip it
-      const jsonStart = jsonStr.indexOf('{');
-      parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
-    } catch {
-      res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
-      return;
+    let tokenUsage = { inputTokens: 0, outputTokens: 0 };
+    let usedProvider: string;
+
+    if (configuredAgentType === 'opencode') {
+      // ── OpenCode path: spawn `opencode run` with codebase exploration ──
+      console.log(`[Specs] Generating via OpenCode (model: ${resolvedModel})`);
+      usedProvider = 'opencode';
+
+      const ocResult = await generateSpecViaOpenCode({
+        workspacePath: workspace.path as string,
+        title,
+        brief,
+        storyCount,
+        storyPrefix,
+        directionContext: synthesized,
+        templateContext: templateContext || undefined,
+        diagramTypes: diagramTypes as string[] | undefined,
+        model: resolvedModel,
+      });
+
+      if (isSpecError(ocResult)) {
+        // Fallback to SDK path on OpenCode failure
+        console.warn(`[Specs] OpenCode spec gen failed (${ocResult.error}), falling back to SDK path`);
+
+        const user = getEffectiveUser(req);
+        if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
+        const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+        const llmResult = await chatComplete(
+          [{ role: 'user', content: fullPrompt }],
+          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        );
+        const rawResponse = llmResult.text;
+        tokenUsage = llmResult.usage;
+        usedProvider = getActiveProvider();
+
+        try {
+          const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+          const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
+          const jsonStart = jsonStr.indexOf('{');
+          parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+        } catch {
+          res.status(500).json({ error: 'LLM returned non-JSON (fallback after OpenCode failure)', raw: rawResponse });
+          return;
+        }
+
+        if (!Array.isArray(parsed.stories)) {
+          res.status(500).json({ error: 'Invalid spec structure from LLM (fallback)' });
+          return;
+        }
+      } else {
+        parsed = {
+          stories: ocResult.stories,
+          diagrams: ocResult.diagrams,
+          mermaidDiagram: ocResult.mermaidDiagram,
+        };
+        tokenUsage = ocResult.usage;
+      }
+    } else {
+      // ── SDK path: direct LLM call via chatComplete ──
+      const user = getEffectiveUser(req);
+      if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
+      const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+      const llmResult = await chatComplete(
+        [{ role: 'user', content: fullPrompt }],
+        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+      );
+      const rawResponse = llmResult.text;
+      tokenUsage = llmResult.usage;
+      usedProvider = getActiveProvider();
+
+      try {
+        const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
+        const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
+        const jsonStart = jsonStr.indexOf('{');
+        parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+      } catch {
+        res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
+        return;
+      }
+
+      if (!Array.isArray(parsed.stories)) {
+        res.status(500).json({ error: 'Invalid spec structure from LLM' });
+        return;
+      }
     }
 
-    // 10. Validate structure
-    if (!Array.isArray(parsed.stories)) {
-      res.status(500).json({ error: 'Invalid spec structure from LLM' });
-      return;
-    }
-
-    // 11. Generate algorithmic diagrams
+    // 9. Generate algorithmic diagrams
     const algorithmicDiagrams = generateDiagramBundle(parsed.stories as any, diagramTypes || []);
 
-    // 11b. Resolve mermaidDiagram: prefer LLM-generated, fall back to algorithmic storyDeps
+    // 9b. Resolve mermaidDiagram: prefer LLM-generated, fall back to algorithmic storyDeps
     const mermaidDiagram = (typeof parsed.mermaidDiagram === 'string' && parsed.mermaidDiagram.trim())
       ? parsed.mermaidDiagram
       : algorithmicDiagrams.storyDeps?.mermaid || '';
 
-    // 12. Merge diagrams (algorithmic overwrites LLM for storyDeps)
+    // 10. Merge diagrams (algorithmic overwrites LLM for storyDeps)
     const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
 
-    // 13. Build slug
+    // 11. Build slug
     const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-    // 14. WAL event
-    const provider = getActiveProvider();
+    // 12. WAL event
     const model = resolvedModel;
     db.prepare(
       `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', ?, ?)`
     ).run(slug, JSON.stringify({
-      title, domain, storyCount: parsed.stories.length, provider, model,
+      title, domain, storyCount: parsed.stories.length, provider: usedProvider, model,
       hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
       inputTokens: tokenUsage.inputTokens, outputTokens: tokenUsage.outputTokens,
     }));
 
-    // 15. Snapshot existing spec as a version if regenerating same slug
+    // 13. Snapshot existing spec as a version if regenerating same slug
     const { pendingDir: genPendingDir, approvedDir: genApprovedDir } = specsDirs(workspace.path as string);
     const existingPending = path.join(genPendingDir, `${slug}.json`);
     const existingApproved = path.join(genApprovedDir, `${slug}.json`);
@@ -591,7 +649,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       fs.unlinkSync(existingApproved);
     }
 
-    // 16. Write spec to workspace directory
+    // 14. Write spec to workspace directory
     let specPath: string;
     let diagramsPath: string;
     try {
@@ -610,14 +668,14 @@ router.post('/generate', async (req: Request, res: Response) => {
       return;
     }
 
-    // 17. Return response
+    // 15. Return response
     res.json({
       slug,
       title,
       stories: parsed.stories,
       diagrams: allDiagrams,
       mermaidDiagram,
-      provider,
+      provider: usedProvider,
       model,
       usage: tokenUsage,
       specPath,
@@ -1188,6 +1246,8 @@ interface ArchiveSpecSummary extends SpecSummary {
   repoName: string;
   branchName?: string;
   forkedFrom?: string;
+  agentType?: string;
+  agentModel?: string | null;
   matchSnippets?: MatchSnippet[];
   relevanceScore?: number;
 }
@@ -1205,6 +1265,7 @@ function buildArchiveSummary(
   workspacePath: string,
   branchName?: string,
   workspaceId?: string,
+  agentInfo?: { agentType?: string; agentModel?: string | null },
 ): ArchiveSpecSummary {
   const base = buildSummary(filePath, fileName, status, workspacePath, workspaceId);
   const content = parseSpecFile(filePath);
@@ -1212,7 +1273,15 @@ function buildArchiveSummary(
   const storyTitles = stories.map((s: any) => s.title ?? s.id ?? '').filter(Boolean);
   const repoName = path.basename(workspacePath);
   const forkedFrom = (content as any).forkedFrom as string | undefined;
-  return { ...base, storyTitles, repoName, branchName, ...(forkedFrom ? { forkedFrom } : {}) };
+  return {
+    ...base,
+    storyTitles,
+    repoName,
+    branchName,
+    ...(forkedFrom ? { forkedFrom } : {}),
+    ...(agentInfo?.agentType ? { agentType: agentInfo.agentType } : {}),
+    ...(agentInfo?.agentModel ? { agentModel: agentInfo.agentModel } : {}),
+  };
 }
 
 /** Extract searchable text fields from a parsed spec */
@@ -1427,6 +1496,7 @@ router.get('/archive', (req: Request, res: Response) => {
     const createdBefore = req.query.createdBefore as string | undefined;
     const tagsParam = req.query.tags as string | undefined;
     const filterTags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const agentTypeFilter = (req.query.agentType as string) || '';
 
     if (!workspaceId) {
       res.status(400).json({ error: 'Missing required query param: workspaceId' });
@@ -1454,6 +1524,18 @@ router.get('/archive', (req: Request, res: Response) => {
     for (const row of branchRows) {
       const slug = path.basename(row.spec_path, '.json');
       if (!branchBySlug.has(slug)) branchBySlug.set(slug, row.branch_name);
+    }
+
+    // OC-007: Look up most recent agent_type + agent_model per spec slug from pipeline_runs
+    const agentRows = db.prepare(
+      `SELECT spec_path, COALESCE(agent_type, agent, 'claude') AS agent_type, agent_model FROM pipeline_runs
+       WHERE workspace_id = ?
+       ORDER BY id DESC`
+    ).all(workspaceId) as { spec_path: string; agent_type: string; agent_model: string | null }[];
+    const agentBySlug = new Map<string, { agentType: string; agentModel: string | null }>();
+    for (const row of agentRows) {
+      const slug = path.basename(row.spec_path, '.json');
+      if (!agentBySlug.has(slug)) agentBySlug.set(slug, { agentType: row.agent_type, agentModel: row.agent_model });
     }
 
     // Fall back to current git branch for specs that have no worktree branch
@@ -1485,7 +1567,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId));
+          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
@@ -1498,7 +1580,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId));
+          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
@@ -1554,6 +1636,14 @@ router.get('/archive', (req: Request, res: Response) => {
     // Apply tag filter (must match ALL specified tags)
     if (filterTags.length > 0) {
       filtered = filtered.filter(s => filterTags.every(t => s.tags.includes(t)));
+    }
+
+    // OC-012: Apply agent type filter
+    if (agentTypeFilter && agentTypeFilter !== 'all') {
+      filtered = filtered.filter(s => {
+        const specAgent = (s as any).agentType || 'claude';
+        return specAgent === agentTypeFilter;
+      });
     }
 
     // If searching, generate snippets and rank by relevance

@@ -82,6 +82,19 @@
   animation: slideInLeft 0.2s ease-out;
 }
 
+@keyframes navDrawerIn {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-navDrawerIn {
+  animation: navDrawerIn 150ms ease-out;
+}
+
 @keyframes slideDown {
   from {
     opacity: 0;
