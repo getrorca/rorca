@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
 import { pauseRun, resumeRun, cancelRun, injectContext } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
+import SemanticLogView from '../components/SemanticLogView';
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
 import RunMetadataPanel from '../components/RunMetadataPanel';
@@ -310,6 +311,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [showKillConfirm, setShowKillConfirm] = useState(false);
   const [hitlContext, setHitlContext] = useState('');
   const [hitlSending, setHitlSending] = useState(false);
+  const [terminalMode, setTerminalMode] = useState<'raw' | 'semantic'>('raw');
   const [specModel, setSpecModel] = useState<string | null>(null);
   const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
   const [totalStories, setTotalStories] = useState(0);
@@ -466,7 +468,47 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       case 'terminal':
         return (
           <SplitPane
-            left={<RunTerminal ref={terminalRef} runId={run.id} />}
+            left={
+              <div className="h-full flex flex-col">
+                {/* Raw / Semantic toggle */}
+                <div className="shrink-0 px-3 py-1.5 border-b border-border bg-panel flex items-center gap-1">
+                  <button
+                    onClick={() => setTerminalMode('raw')}
+                    className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+                      terminalMode === 'raw'
+                        ? 'bg-accent/15 text-accent'
+                        : 'text-muted hover:text-[var(--text)]'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1">
+                      <TerminalIcon size={11} />
+                      Raw
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setTerminalMode('semantic')}
+                    className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+                      terminalMode === 'semantic'
+                        ? 'bg-accent/15 text-accent'
+                        : 'text-muted hover:text-[var(--text)]'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1">
+                      <Layers size={11} />
+                      Semantic
+                    </span>
+                  </button>
+                </div>
+                {/* Terminal view */}
+                <div className="flex-1 min-h-0">
+                  {terminalMode === 'raw' ? (
+                    <RunTerminal ref={terminalRef} runId={run.id} />
+                  ) : (
+                    <SemanticLogView runId={run.id} />
+                  )}
+                </div>
+              </div>
+            }
             right={
               <div className="h-full flex flex-col min-h-0">
                 <div className="flex-1 min-h-0 overflow-hidden">
