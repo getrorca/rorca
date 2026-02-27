@@ -1109,7 +1109,8 @@ async function executeStory(
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
   // ── Escalation: determine current model tier ────────────────────────
-  const escalationEnabled = config.agentType !== 'claude' && escalationStates !== undefined;
+  // Escalation only applies to opencode (API-key models). Claude and Codex are subscription-based.
+  const escalationEnabled = config.agentType === 'opencode' && escalationStates !== undefined;
   let currentModel = config.agentModel;
 
   if (escalationEnabled && escalationStates) {

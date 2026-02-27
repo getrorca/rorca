@@ -3,6 +3,7 @@ import { db } from '../db/index';
 import { listBackups } from '../lib/backup';
 import { agentType } from '../lib/config';
 import { detectOpenCode } from '../lib/opencode-detector';
+import { detectCodex } from '../lib/codex-detector';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -54,6 +55,8 @@ router.get('/', (_req: Request, res: Response) => {
 
   // OC-002: Include opencode status when agentType=opencode
   const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
+  // OC-024: Include codex status when agentType=codex
+  const codex = agentType === 'codex' ? detectCodex() : undefined;
 
   res.status(statusCode).json({
     status,
@@ -64,6 +67,10 @@ router.get('/', (_req: Request, res: Response) => {
     ...(agentType === 'opencode' && opencode ? {
       opencodeInstalled: opencode.opencodeInstalled,
       opencodeVersion: opencode.opencodeVersion,
+    } : {}),
+    ...(agentType === 'codex' && codex ? {
+      codexInstalled: codex.codexInstalled,
+      codexVersion: codex.codexVersion,
     } : {}),
   });
 });
@@ -136,6 +143,8 @@ router.get('/detailed', (_req: Request, res: Response) => {
 
   // OC-002: Include opencode status when agentType=opencode
   const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
+  // OC-024: Include codex status when agentType=codex
+  const codex = agentType === 'codex' ? detectCodex() : undefined;
 
   res.status(statusCode).json({
     status,
@@ -150,6 +159,10 @@ router.get('/detailed', (_req: Request, res: Response) => {
     ...(agentType === 'opencode' && opencode ? {
       opencodeInstalled: opencode.opencodeInstalled,
       opencodeVersion: opencode.opencodeVersion,
+    } : {}),
+    ...(agentType === 'codex' && codex ? {
+      codexInstalled: codex.codexInstalled,
+      codexVersion: codex.codexVersion,
     } : {}),
   });
 });
