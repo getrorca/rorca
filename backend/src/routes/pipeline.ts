@@ -562,9 +562,74 @@ router.post('/trigger', async (req: Request, res: Response) => {
       } catch { /* file not yet created or transient read error */ }
     }, 200);
 
+    // 10c. Monitor OpenCode server health during run — detect crashes and attempt one restart
+    let ocHealthInterval: ReturnType<typeof setInterval> | null = null;
+    if (ocServer && resolvedAgentType === 'opencode') {
+      ocHealthInterval = setInterval(async () => {
+        if (!ocServer || ocServer.getState() === 'stopped') {
+          if (ocHealthInterval) clearInterval(ocHealthInterval);
+          return;
+        }
+
+        if (!ocServer.isAlive()) {
+          console.log(`[Pipeline] OpenCode server crashed for run ${runId}, attempting restart...`);
+
+          const restartMsg = `\r\n\x1b[33m[OpenCode server crashed — attempting restart...]\x1b[0m\r\n`;
+          buf.chunks.push(restartMsg);
+          buf.subscribers.forEach(cb => cb(restartMsg));
+          fs.appendFileSync(logPath, restartMsg);
+
+          const restarted = await ocServer.restart();
+          if (restarted) {
+            console.log(`[Pipeline] OpenCode server restarted for run ${runId}`);
+            const successMsg = `\r\n\x1b[32m[OpenCode server restarted successfully]\x1b[0m\r\n`;
+            buf.chunks.push(successMsg);
+            buf.subscribers.forEach(cb => cb(successMsg));
+            fs.appendFileSync(logPath, successMsg);
+
+            // Emit WAL event for restart
+            if (db.open) {
+              const walResult = db.prepare(
+                `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('opencode_server_restarted', ?, ?)`
+              ).run(workspaceId, JSON.stringify({ run_id: runId }));
+              const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+              broadcastAll(walEvent);
+            }
+          } else {
+            console.error(`[Pipeline] OpenCode server restart failed for run ${runId} — killing execution engine`);
+            const failMsg = `\r\n\x1b[31m[OpenCode server restart failed — aborting run]\x1b[0m\r\n`;
+            buf.chunks.push(failMsg);
+            buf.subscribers.forEach(cb => cb(failMsg));
+            fs.appendFileSync(logPath, failMsg);
+
+            if (ocHealthInterval) clearInterval(ocHealthInterval);
+
+            // Kill the execution engine — the exit handler will mark the run failed
+            try { process.kill(-child.pid!, 'SIGTERM'); } catch { /* already dead */ }
+            setTimeout(() => {
+              try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already dead */ }
+            }, 5_000);
+
+            // Emit WAL event
+            if (db.open) {
+              const walResult = db.prepare(
+                `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('opencode_server_crash', ?, ?)`
+              ).run(workspaceId, JSON.stringify({
+                run_id: runId, reason: 'restart_failed',
+                error: 'OpenCode server crashed and could not be restarted. Run aborted.',
+              }));
+              const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+              broadcastAll(walEvent);
+            }
+          }
+        }
+      }, 5_000); // Check every 5 seconds
+    }
+
     // 11. Update status when process exits; stop OpenCode server if running
     child.on('exit', (code) => {
       clearInterval(tailInterval);
+      if (ocHealthInterval) clearInterval(ocHealthInterval);
 
       // Stop OpenCode server — lifecycle tied to this pipeline run
       if (ocServer) {
@@ -2628,5 +2693,88 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ─── OC-015: Orphan Process Cleanup on Backend Startup ──────────────────────
+// Scans pipeline_runs WHERE status='running', kills orphan PIDs (engine + OpenCode server),
+// marks runs as failed. Called once at server startup.
+
+export function cleanupOrphanRuns(): number {
+  const staleRuns = db.prepare(
+    `SELECT id, pid, opencode_server_pid, workspace_id, agent_type FROM pipeline_runs WHERE status IN ('running', 'paused')`
+  ).all() as Array<{
+    id: number;
+    pid: number | null;
+    opencode_server_pid: number | null;
+    workspace_id: string;
+    agent_type: string | null;
+  }>;
+
+  if (staleRuns.length === 0) return 0;
+
+  let cleaned = 0;
+
+  for (const run of staleRuns) {
+    // Kill execution engine process (if alive)
+    if (run.pid) {
+      try {
+        process.kill(run.pid, 0); // Check alive
+        try {
+          process.kill(-run.pid, 'SIGTERM'); // Kill process group
+          console.log(`[Cleanup] Sent SIGTERM to engine PID ${run.pid} (run ${run.id})`);
+        } catch {
+          try { process.kill(run.pid, 'SIGTERM'); } catch { /* already dead */ }
+        }
+      } catch {
+        // Process already dead — expected after backend restart
+      }
+    }
+
+    // Kill OpenCode server process (if alive)
+    if (run.opencode_server_pid) {
+      try {
+        process.kill(run.opencode_server_pid, 0); // Check alive
+        try {
+          process.kill(run.opencode_server_pid, 'SIGTERM');
+          console.log(`[Cleanup] Sent SIGTERM to OpenCode server PID ${run.opencode_server_pid} (run ${run.id})`);
+        } catch { /* already dead */ }
+      } catch {
+        // Process already dead — expected
+      }
+    }
+
+    // Mark run as failed
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'failed', finished_at = datetime('now') WHERE id = ?`
+    ).run(run.id);
+
+    // Emit WAL event
+    try {
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+      ).run(run.workspace_id, JSON.stringify({
+        run_id: run.id,
+        status: 'failed',
+        reason: 'orphan_cleanup',
+        error: 'Run was still marked as running after backend restart — process likely crashed.',
+        agent_type: run.agent_type ?? 'claude',
+      }));
+      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walEvent);
+    } catch {
+      // WAL emit failure is non-fatal during startup cleanup
+    }
+
+    cleaned++;
+    console.log(`[Cleanup] Run ${run.id} (agent: ${run.agent_type ?? 'claude'}) marked as failed (orphan cleanup)`);
+  }
+
+  if (cleaned > 0) {
+    console.log(`[Cleanup] Cleaned up ${cleaned} orphan run(s)`);
+  }
+
+  return cleaned;
+}
 
 export default router;
