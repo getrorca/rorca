@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Search, ArrowRight, Clock, Command, Hammer, Trash2 } from 'lucide-react';
+import { Search, ArrowRight, Clock, Command, Hammer, Trash2, Menu } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { NAV_ITEMS, type PanelId } from './Sidebar';
@@ -247,6 +247,13 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
 
     // Actions
     items.push({
+      id: 'action:toggle-drawer',
+      label: 'Toggle navigation drawer',
+      category: 'action',
+      description: 'Show all 22 panels  ⌘\\',
+      action: () => { window.dispatchEvent(new Event('rorca:toggle-drawer')); onClose(); },
+    });
+    items.push({
       id: 'action:new-spec',
       label: 'New Spec',
       category: 'action',
@@ -285,23 +292,26 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
   // Filter and rank results
   const { items: results, topScore } = useMemo(() => {
     if (!query.trim()) {
-      // Show recents first, then context-boosted, then remaining actions/panels
+      // Show drawer toggle first, then recents, then context-boosted, then remaining actions/panels
+      const drawerItem = allItems.find((item) => item.id === 'action:toggle-drawer');
+      const pinnedIds = new Set(drawerItem ? ['action:toggle-drawer'] : []);
+
       const recent = getRecent();
       const recentItems = recent
         .map((id) => allItems.find((item) => item.id === id))
-        .filter((item): item is CommandItem => !!item);
+        .filter((item): item is CommandItem => !!item && !pinnedIds.has(item.id));
 
       const recentIds = new Set(recent);
       const boostedItems = boostIds
         .map((id) => allItems.find((item) => item.id === id))
-        .filter((item): item is CommandItem => !!item && !recentIds.has(item.id));
+        .filter((item): item is CommandItem => !!item && !recentIds.has(item.id) && !pinnedIds.has(item.id));
 
-      const usedIds = new Set([...recent, ...boostIds]);
+      const usedIds = new Set([...recent, ...boostIds, ...pinnedIds]);
       const otherItems = allItems
         .filter((item) => !usedIds.has(item.id) && (item.category === 'action' || item.category === 'panel'))
         .slice(0, 10 - boostedItems.length);
 
-      return { items: [...recentItems, ...boostedItems, ...otherItems], topScore: Infinity };
+      return { items: [...(drawerItem ? [drawerItem] : []), ...recentItems, ...boostedItems, ...otherItems], topScore: Infinity };
     }
 
     const scored = allItems
@@ -531,6 +541,8 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
                       <Hammer size={14} className="text-accent shrink-0" />
                     ) : isClearHistory ? (
                       <Trash2 size={14} className="text-muted shrink-0" />
+                    ) : item.id === 'action:toggle-drawer' ? (
+                      <Menu size={14} className="text-muted shrink-0" />
                     ) : isRecent && !query.trim() ? (
                       <Clock size={14} className="text-muted shrink-0" />
                     ) : (
