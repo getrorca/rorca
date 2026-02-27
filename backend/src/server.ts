@@ -48,8 +48,15 @@ import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { db } from './db/index';
 import runQueueRouter from './routes/run-queue';
 import configRouter from './routes/config';
+import { agentType } from './lib/config';
+import { requireOpenCode } from './lib/opencode-detector';
 
 dotenv.config();
+
+// OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
+if (agentType === 'opencode') {
+  requireOpenCode();
+}
 
 const app = express();
 const PORT = process.env.PORT || 3030;

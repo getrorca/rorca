@@ -664,3 +664,25 @@ Key decisions:
 - Queue status fetched via /api/run-queue/status endpoint (already built in RQ-001) — returns queueLength + nextSpec
 - SSE handler uses separate QUEUE_EVENTS set to trigger queue refetch independently of run list refetch
 - ListPlus icon from lucide-react for queue section header
+
+## Story OC-002: OpenCode Binary Detection & Startup Guard — DONE
+Files touched:
+- backend/src/lib/opencode-detector.ts (new — detectOpenCode, requireOpenCode, semverGte, MIN_OPENCODE_VERSION)
+- backend/src/server.ts (modified — startup guard: requireOpenCode() when agentType=opencode)
+- backend/src/routes/health.ts (modified — opencodeInstalled + opencodeVersion in health responses when agentType=opencode)
+- backend/src/lib/__tests__/opencode-detector.test.ts (new — 15 tests)
+- backend/src/routes/__tests__/health.test.ts (modified — 3 new tests for opencode health fields)
+- CLAUDE.md (modified — documented minimum supported OpenCode version)
+
+What was built:
+- `detectOpenCode()` resolves binary path (OPENCODE_BIN env → `which opencode`), runs `--version`, parses semver output
+- `requireOpenCode()` called at server startup when RORCA_AGENT=opencode: exits with code 1 + clear error message if binary missing or below minimum version
+- GET /api/health and /api/health/detailed return `{ opencodeInstalled, opencodeVersion }` when agentType=opencode (omitted for claude/codex)
+- Minimum supported version: 0.1.0, enforced at startup
+
+Key decisions:
+- Binary resolution priority: OPENCODE_BIN env var > `which opencode` (allows custom install paths)
+- Startup guard runs BEFORE Express listen() — fail-fast, no half-started server
+- Version comparison strips prerelease suffix for major.minor.patch comparison
+- If binary exists but --version fails, treated as installed with unknown version (no exit, allows graceful degradation)
+- Health endpoint runs detectOpenCode() on each request (not cached) — reflects real-time binary state
