@@ -115,6 +115,78 @@ router.get('/', (_req: Request, res: Response) => {
   });
 });
 
+// ─── Ollama Detection & Dynamic Model Discovery ─────────────────────────────
+
+interface OllamaModel {
+  id: string;
+  name: string;
+  size: number;
+  parameterSize: string;
+}
+
+interface OllamaStatus {
+  available: boolean;
+  models: OllamaModel[];
+  error?: string;
+}
+
+/**
+ * Detect Ollama availability by attempting to reach its API,
+ * then fetch available models from /api/tags.
+ */
+async function detectOllama(): Promise<OllamaStatus> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch('http://localhost:11434/api/tags', {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      return { available: false, models: [], error: 'Ollama API returned non-200' };
+    }
+
+    const data = await res.json() as {
+      models?: Array<{
+        name: string;
+        size: number;
+        details?: { parameter_size?: string };
+      }>;
+    };
+
+    const models: OllamaModel[] = (data.models ?? []).map(m => ({
+      id: `ollama/${m.name}`,
+      name: m.name,
+      size: m.size,
+      parameterSize: m.details?.parameter_size ?? 'unknown',
+    }));
+
+    return { available: true, models };
+  } catch {
+    return {
+      available: false,
+      models: [],
+      error: 'Ollama not detected. Start with: ollama serve',
+    };
+  }
+}
+
+/**
+ * @swagger
+ * /api/config/ollama:
+ *   get:
+ *     summary: Detect Ollama availability and list locally installed models
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Ollama detection result with available models
+ */
+router.get('/ollama', async (_req: Request, res: Response) => {
+  const status = await detectOllama();
+  res.json(status);
+});
+
 /**
  * @swagger
  * /api/config/opencode-models:
@@ -125,13 +197,32 @@ router.get('/', (_req: Request, res: Response) => {
  *       200:
  *         description: Models.dev compatible model list
  */
-router.get('/opencode-models', (_req: Request, res: Response) => {
+router.get('/opencode-models', async (_req: Request, res: Response) => {
+  // Start with hardcoded models (excluding static Ollama entries — they'll be replaced by dynamic ones)
+  const staticModels = OPENCODE_MODELS.filter(m => m.provider !== 'Local');
+
+  // Attempt to discover Ollama models dynamically
+  const ollamaStatus = await detectOllama();
+  const dynamicOllamaModels: OpenCodeModel[] = ollamaStatus.models.map(m => ({
+    id: m.id,
+    name: `${m.name} (Ollama)`,
+    provider: 'Local',
+    contextWindow: 131072, // Conservative default — Ollama doesn't expose this
+  }));
+
+  // If Ollama is down, fall back to hardcoded Ollama models
+  const ollamaModels = dynamicOllamaModels.length > 0
+    ? dynamicOllamaModels
+    : OPENCODE_MODELS.filter(m => m.provider === 'Local');
+
+  const allModels = [...staticModels, ...ollamaModels];
+
   // Group by provider
   const grouped: Record<string, OpenCodeModel[]> = {};
-  for (const m of OPENCODE_MODELS) {
+  for (const m of allModels) {
     (grouped[m.provider] ??= []).push(m);
   }
-  res.json({ models: OPENCODE_MODELS, grouped });
+  res.json({ models: allModels, grouped, ollamaAvailable: ollamaStatus.available });
 });
 
 /**
@@ -157,7 +248,7 @@ router.get('/opencode-models', (_req: Request, res: Response) => {
  *       400:
  *         description: Validation error
  */
-router.put('/agent', (req: Request, res: Response) => {
+router.put('/agent', async (req: Request, res: Response) => {
   const { agentType: newType, agentModel: newModel } = req.body;
 
   // Validate agentType
@@ -186,6 +277,19 @@ router.put('/agent', (req: Request, res: Response) => {
   const effectiveModel = newModel !== undefined ? newModel : currentAgentModel;
 
   if (effectiveType === 'opencode' && effectiveModel) {
+    // Ollama models: validate Ollama is running instead of checking API key
+    if (effectiveModel.startsWith('ollama/')) {
+      const ollamaStatus = await detectOllama();
+      if (!ollamaStatus.available) {
+        res.status(400).json({
+          error: 'Ollama not detected. Start with: ollama serve',
+        });
+        return;
+      }
+    } else {
+      // Non-Ollama models: check API key as before
+    }
+
     const modelEntry = OPENCODE_MODELS.find(m => m.id === effectiveModel);
     if (modelEntry) {
       const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
