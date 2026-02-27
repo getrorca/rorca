@@ -345,6 +345,9 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
 
   return (
     <div className="h-screen flex flex-col bg-bg overflow-x-hidden">
+      <a href="#main-content" className="skip-to-content">
+        Skip to content
+      </a>
       {/* Top Bar — 48px */}
       <header className="h-12 flex items-center justify-between px-3 sm:px-4 bg-panel border-b border-border shrink-0">
         {/* Left: hamburger + wordmark + workspace */}
@@ -377,7 +380,7 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
       {/* Body */}
       <div className="flex flex-1 min-h-0">
         {sidebar}
-        <main className="flex-1 overflow-hidden">
+        <main id="main-content" className="flex-1 overflow-hidden">
           {children}
         </main>
       </div>
