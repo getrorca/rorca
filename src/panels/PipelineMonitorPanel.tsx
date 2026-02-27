@@ -7,6 +7,8 @@ import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 import { HelpTooltip } from '../components/HelpTooltip';
+import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
+import SpecPickerModal from '../components/SpecPickerModal';
 
 type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens';
 
@@ -247,6 +249,8 @@ export default function PipelineMonitorPanel() {
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const dragSrcId = useRef<string | null>(null);
+  const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
+  const [specPickerOpen, setSpecPickerOpen] = useState(false);
 
   // SSE for live updates
   const sseEvents = usePipelineSSE(selectedRunId ? String(selectedRunId) : null);
@@ -263,6 +267,47 @@ export default function PipelineMonitorPanel() {
       })
       .catch(console.error);
   }, [workspaceId]);
+
+  // ─── Queue data ────────────────────────────────────────────────
+  const fetchQueue = useCallback(() => {
+    if (!workspaceId) return;
+    apiFetch<{ items: QueueEntry[] }>(`/api/run-queue?workspaceId=${workspaceId}`)
+      .then((data) => setQueueEntries(data.items))
+      .catch(() => setQueueEntries([]));
+  }, [workspaceId]);
+
+  useEffect(() => { fetchQueue(); }, [fetchQueue]);
+
+  // Refresh queue when SSE delivers a queue-related event
+  useEffect(() => {
+    const queueEvents = sseEvents.filter(
+      (e) => e.event_type === 'run_queued_trigger' || e.event_type === 'run_finished'
+    );
+    if (queueEvents.length > 0) {
+      fetchQueue();
+    }
+  }, [sseEvents, fetchQueue]);
+
+  const handleSpecPicked = useCallback(async (spec: { id: string; specName: string }) => {
+    if (!workspaceId) return;
+    setSpecPickerOpen(false);
+    try {
+      await apiFetch('/api/run-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId: Number(workspaceId),
+          specId: spec.id,
+          specPath: `forge/specs/approved/${spec.id}.json`,
+          parallelism: 1,
+          autoWorktree: false,
+        }),
+      });
+      fetchQueue();
+    } catch (err) {
+      console.error('[RunQueue] Add failed:', err);
+    }
+  }, [workspaceId, fetchQueue]);
 
   // Fetch run detail when selection changes
   useEffect(() => {
@@ -586,7 +631,7 @@ export default function PipelineMonitorPanel() {
 
   if (runs.length === 0 && !selectedRunId) {
     return (
-      <div className="flex items-center justify-center h-full">
+      <div className="flex flex-col items-center justify-center h-full">
         <div className="text-center max-w-md space-y-3">
           <Terminal className="w-10 h-10 mx-auto text-[var(--text-muted)]" />
           <p className="text-[var(--text-muted)] text-sm leading-relaxed">
@@ -618,6 +663,34 @@ export default function PipelineMonitorPanel() {
             </div>
           )}
         </div>
+
+        {/* Queue section in empty state */}
+        <div className="w-full max-w-md mt-6 rounded-lg border border-[var(--border)] bg-[var(--surface)]">
+          <div className="p-3 flex items-center justify-between border-b border-[var(--border)]">
+            <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
+              Queue
+              {queueEntries.length > 0 && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
+                  {queueEntries.length}
+                </span>
+              )}
+            </span>
+          </div>
+          <RunQueueSection
+            entries={queueEntries}
+            onRefresh={fetchQueue}
+            onAddClick={() => setSpecPickerOpen(true)}
+          />
+        </div>
+
+        {workspaceId && (
+          <SpecPickerModal
+            workspaceId={workspaceId}
+            open={specPickerOpen}
+            onClose={() => setSpecPickerOpen(false)}
+            onSelect={handleSpecPicked}
+          />
+        )}
       </div>
     );
   }
@@ -660,7 +733,7 @@ export default function PipelineMonitorPanel() {
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto min-h-0">
           {runs.map((run) => (
             <button
               key={run.id}
@@ -686,7 +759,45 @@ export default function PipelineMonitorPanel() {
             </button>
           ))}
         </div>
+
+        {/* Queue section */}
+        {(queueEntries.length > 0 || !runs.some((r) => r.status === 'running')) && (
+          <div className="border-t border-[var(--border)] shrink-0">
+            <div className="p-3 flex items-center justify-between">
+              <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
+                Queue
+                {queueEntries.length > 0 && (
+                  <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
+                    {queueEntries.length}
+                  </span>
+                )}
+              </span>
+              <button
+                onClick={() => setSpecPickerOpen(true)}
+                className="p-1 rounded hover:bg-[var(--border)] transition-colors"
+                title="Add to Queue"
+              >
+                <List className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+              </button>
+            </div>
+            <RunQueueSection
+              entries={queueEntries}
+              onRefresh={fetchQueue}
+              onAddClick={() => setSpecPickerOpen(true)}
+            />
+          </div>
+        )}
       </div>
+
+      {/* Spec Picker Modal */}
+      {workspaceId && (
+        <SpecPickerModal
+          workspaceId={workspaceId}
+          open={specPickerOpen}
+          onClose={() => setSpecPickerOpen(false)}
+          onSelect={handleSpecPicked}
+        />
+      )}
 
       {/* Main area — Selected run detail */}
       <div className="flex-1 flex flex-col min-w-0">

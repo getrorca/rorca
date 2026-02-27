@@ -136,9 +136,11 @@ interface SidebarProps {
   onNavigate: (panel: PanelId) => void;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
+  /** Number of pending items in the run queue (badge on Hub icon) */
+  queueCount?: number;
 }
 
-export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileClose }: SidebarProps) {
+export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileClose, queueCount = 0 }: SidebarProps) {
   const activeNav = resolveActiveNav(activePanel);
 
   const handleClick = (item: MinimalNavItem) => {
@@ -166,6 +168,11 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
               <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-accent rounded-r" />
             )}
             <Icon size={20} strokeWidth={1.5} />
+            {item.id === 'hub' && queueCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 flex items-center justify-center px-1 text-[10px] font-bold rounded-full bg-[var(--accent)] text-white leading-none">
+                {queueCount > 99 ? '99+' : queueCount}
+              </span>
+            )}
           </button>
         );
       })}
