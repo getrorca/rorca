@@ -5,6 +5,7 @@ import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
 import BatchForge from './BatchForge';
 import DirectionPreviewSidebar from '../components/DirectionPreviewSidebar';
 import SpecForgeProgress from '../components/SpecForgeProgress';
+import SpecForgePreview from '../components/SpecForgePreview';
 
 import type { PanelId } from '../components/Sidebar';
 
@@ -524,7 +525,7 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
                   error={generateError}
                   apiDone={apiDone}
                 />
-              ) : (
+              ) : !generatedSpec ? (
                 <button
                   onClick={handleGenerate}
                   disabled={!canGenerate || isGenerating}
@@ -536,8 +537,24 @@ export default function SpecForgePanelPage({ onNavigate }: { onNavigate?: (panel
                 >
                   Generate Spec
                 </button>
-              )}
+              ) : null}
             </div>
+
+            {/* Inline spec preview after generation */}
+            {generatedSpec && !isGenerating && (
+              <SpecForgePreview
+                spec={generatedSpec}
+                workspaceId={workspaceId}
+                onRegenerate={handleGenerate}
+                onEditBrief={() => {
+                  setGeneratedSpec(null);
+                  setGenerateError(null);
+                  setApiDone(false);
+                  setTimeout(() => briefRef.current?.focus(), 50);
+                }}
+                isRegenerating={isGenerating}
+              />
+            )}
           </div>
         </div>
       </div>
