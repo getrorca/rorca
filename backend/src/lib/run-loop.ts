@@ -441,11 +441,83 @@ function runGate(cwd: string): GateResult {
   return { passed: true };
 }
 
+// ─── Worktree Helpers (parallel isolation) ───────────────────────────────────
+
+interface StoryWorktree {
+  storyId: string;
+  worktreePath: string;
+  branchName: string;
+}
+
+/**
+ * Create a git worktree for a story (parallel mode only).
+ * Returns worktree info or null on failure (emits WAL event on failure).
+ */
+function createStoryWorktree(
+  workspaceCwd: string,
+  specSlug: string,
+  storyId: string,
+): StoryWorktree | null {
+  const ts = Date.now();
+  const branchName = `feat/${specSlug}-${storyId}-${ts}`;
+  const repoName = path.basename(workspaceCwd);
+  const worktreePath = path.resolve(workspaceCwd, '..', `${repoName}-${storyId}-${ts}`);
+
+  try {
+    execSync(
+      `git worktree add -b "${branchName}" "${worktreePath}" HEAD`,
+      { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 },
+    );
+    console.log(`  [worktree] Created ${worktreePath} (${branchName})`);
+    return { storyId, worktreePath, branchName };
+  } catch (err: unknown) {
+    const msg = (err as Error).message ?? String(err);
+    console.error(`  [worktree] FAILED to create worktree for ${storyId}: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Merge a story worktree branch back into the current branch of the main workspace.
+ */
+function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
+  try {
+    execSync(
+      `git merge --no-ff "${wt.branchName}" -m "merge: ${wt.storyId} from worktree"`,
+      { cwd: workspaceCwd, stdio: 'pipe', timeout: 120_000 },
+    );
+    console.log(`  [worktree] Merged ${wt.branchName} into workspace`);
+    return true;
+  } catch (err: unknown) {
+    const msg = (err as Error).message ?? String(err);
+    console.error(`  [worktree] MERGE FAILED for ${wt.branchName}: ${msg}`);
+    // Abort the merge to leave workspace clean
+    try { execSync('git merge --abort', { cwd: workspaceCwd, stdio: 'pipe' }); } catch { /* already clean */ }
+    return false;
+  }
+}
+
+/**
+ * Remove a worktree and delete its branch.
+ */
+function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
+  try {
+    execSync(`git worktree remove --force "${wt.worktreePath}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 });
+  } catch { /* already removed */ }
+  try {
+    execSync(`git branch -D "${wt.branchName}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 10_000 });
+  } catch { /* branch may already be gone */ }
+  console.log(`  [worktree] Removed ${wt.worktreePath}`);
+}
+
 // ─── Parallel Execution Helpers ──────────────────────────────────────────────
 
 /**
  * Run a single story end-to-end: emit WAL events, spawn claude, handle result.
  * Returns 'passed' | 'failed' | 'skipped'.
+ *
+ * @param storyCwd — override cwd for worktree isolation (defaults to config.cwd)
+ * @param worktreeInfo — if running in a worktree, provides path/branch for story_results
  */
 async function executeStory(
   story: UserStory,
@@ -455,14 +527,18 @@ async function executeStory(
   logDir: string,
   workspaceId: string | null,
   retryCounts: Map<string, number>,
+  storyCwd?: string,
+  worktreeInfo?: StoryWorktree,
 ): Promise<'passed' | 'failed' | 'skipped'> {
+  const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
   console.log(`[${mode}] ${story.id}: ${story.title}`);
+  if (worktreeInfo) console.log(`  Worktree: ${worktreeInfo.worktreePath}`);
   console.log(`  Timeout: ${timeoutMin}m`);
 
-  // Build prompt
-  const prompt = buildPrompt(story, mode, config.cwd, playbook);
+  // Build prompt — use worktree cwd so skill files are read from worktree
+  const prompt = buildPrompt(story, mode, effectiveCwd, playbook);
 
   // Write prompt to log file for debugging
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
@@ -478,13 +554,19 @@ async function executeStory(
       run_id: config.runId,
       story_id: story.id,
       story_title: story.title,
+      ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
     }, story.id);
   }
 
-  // Run Claude
+  // Build story-result body with optional worktree fields
+  const storyResultExtra = worktreeInfo
+    ? { worktreePath: worktreeInfo.worktreePath, worktreeBranch: worktreeInfo.branchName }
+    : {};
+
+  // Run Claude — in worktree cwd if provided
   const exitCode = await runClaude(
     prompt,
-    config.cwd,
+    effectiveCwd,
     timeoutMin * 60 * 1000,
     storyLogFile,
   );
@@ -492,9 +574,9 @@ async function executeStory(
   if (exitCode === 0) {
     console.log(`${story.id} completed (exit 0)`);
 
-    // Validation gate
+    // Validation gate — run in the story's own cwd
     const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
-    const gate = skipGate ? { passed: true } as GateResult : runGate(config.cwd);
+    const gate = skipGate ? { passed: true } as GateResult : runGate(effectiveCwd);
 
     if (!gate.passed) {
       console.log(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
@@ -517,7 +599,7 @@ async function executeStory(
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
           });
         } catch { /* backend may be down */ }
       }
@@ -529,12 +611,12 @@ async function executeStory(
       return 'failed';
     }
 
-    // Gate passed
+    // Gate passed — commit in the story's cwd (worktree or main)
     markStoryPassed(config.jsonPath, story.id);
     retryCounts.delete(story.id);
 
     console.log(`Committing ${story.id}...`);
-    gitCommitStory(config.cwd, story.id, story.title, mode);
+    gitCommitStory(effectiveCwd, story.id, story.title, mode);
 
     if (workspaceId) {
       await emitWalEvent(config.port, 'story_passed', workspaceId, {
@@ -547,7 +629,7 @@ async function executeStory(
         await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass' }),
+          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass', ...storyResultExtra }),
         });
       } catch { /* backend may be down */ }
     }
@@ -571,7 +653,7 @@ async function executeStory(
         await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
         });
       } catch { /* backend may be down */ }
     }
@@ -599,7 +681,7 @@ async function executeStory(
         await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+          body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
         });
       } catch { /* backend may be down */ }
     }
@@ -1006,6 +1088,9 @@ async function runParallel(
     });
   }
 
+  // Derive spec slug for worktree branch naming
+  const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
+
   // Track all failed story IDs across waves for transitive blocking
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
@@ -1064,28 +1149,100 @@ async function runParallel(
       continue;
     }
 
-    // Build task functions for bounded concurrency
-    const tasks = executableStories.map(story => () =>
-      executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts)
-        .then(result => ({ storyId: story.id, result }))
-    );
+    // ── Worktree isolation: create one worktree per story ─────────────────
+    const worktreeMap = new Map<string, StoryWorktree>();
+
+    for (const story of executableStories) {
+      const wt = createStoryWorktree(config.cwd, specSlug, story.id);
+      if (wt) {
+        worktreeMap.set(story.id, wt);
+      } else {
+        // Worktree creation failed → treat as story failure
+        failedIds.add(story.id);
+        processedIds.add(story.id);
+        markStorySkipped(config.jsonPath, story.id);
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: 'worktree_create_failed',
+          }, story.id);
+
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
+            });
+          } catch { /* backend may be down */ }
+        }
+      }
+    }
+
+    // Only execute stories that got a worktree
+    const storiesWithWorktrees = executableStories.filter(s => worktreeMap.has(s.id));
+
+    // Build task functions for bounded concurrency — each story runs in its worktree
+    const tasks = storiesWithWorktrees.map(story => {
+      const wt = worktreeMap.get(story.id)!;
+      return () =>
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt)
+          .then(result => ({ storyId: story.id, result }));
+    });
 
     // Run with bounded concurrency — Promise.allSettled semantics
     const results = await runWithBoundedConcurrency(tasks, config.parallelism);
 
-    // Process results
+    // Collect results — track passed/failed for merge decisions
+    const passedInWave: StoryWorktree[] = [];
+    const failedInWave: StoryWorktree[] = [];
+
     for (const settled of results) {
       if (settled.status === 'fulfilled') {
         const { storyId, result } = settled.value;
         processedIds.add(storyId);
+        const wt = worktreeMap.get(storyId);
         if (result === 'failed') {
           failedIds.add(storyId);
+          if (wt) failedInWave.push(wt);
+        } else if (result === 'passed' && wt) {
+          passedInWave.push(wt);
         }
       } else {
         // Should not happen since executeStory handles its own errors,
         // but handle defensively
         console.error(`[run-loop] Unexpected rejection in wave ${wave.index}:`, settled.reason);
       }
+    }
+
+    // ── Post-wave: merge passed worktrees, discard failed ones ────────────
+    if (passedInWave.length > 0) {
+      console.log(`  [worktree] Merging ${passedInWave.length} passed worktree(s)...`);
+      for (const wt of passedInWave) {
+        const merged = mergeStoryWorktree(config.cwd, wt);
+        if (!merged) {
+          // Merge conflict — treat as failure, don't lose the branch
+          console.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
+          failedIds.add(wt.storyId);
+
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId,
+              story_id: wt.storyId,
+              reason: 'merge_conflict',
+              worktree_branch: wt.branchName,
+            }, wt.storyId);
+          }
+        }
+        // Clean up worktree + branch after merge (or failed merge)
+        removeStoryWorktree(config.cwd, wt);
+      }
+    }
+
+    // Clean up failed worktrees — no merge, just remove
+    for (const wt of failedInWave) {
+      removeStoryWorktree(config.cwd, wt);
     }
 
     // After wave settles: compute transitively blocked stories in remaining waves
