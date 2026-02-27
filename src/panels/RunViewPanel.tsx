@@ -8,6 +8,7 @@ import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
+import RunMetadataPanel from '../components/RunMetadataPanel';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
@@ -31,7 +32,9 @@ interface PipelineRun {
 interface RunApiResponse {
   run: PipelineRun;
   stories: unknown[];
-  specStories: unknown[];
+  specStories: { id: string; title: string }[];
+  specModel?: string | null;
+  tokenSummary?: { inputTokens: number; outputTokens: number };
 }
 
 interface CommitEntry {
@@ -307,6 +310,9 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [showKillConfirm, setShowKillConfirm] = useState(false);
   const [hitlContext, setHitlContext] = useState('');
   const [hitlSending, setHitlSending] = useState(false);
+  const [specModel, setSpecModel] = useState<string | null>(null);
+  const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
+  const [totalStories, setTotalStories] = useState(0);
 
   // Sync tab selection to URL hash
   const handleTabChange = useCallback((tab: RunViewTab) => {
@@ -374,6 +380,9 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     try {
       const data = await apiFetch<RunApiResponse>(`/api/pipeline/runs/${runId}`);
       setRun(data.run);
+      if (data.specModel !== undefined) setSpecModel(data.specModel);
+      if (data.tokenSummary) setTokenSummary(data.tokenSummary);
+      if (data.specStories) setTotalStories(data.specStories.length);
     } catch {
       // run not found
     }
@@ -459,11 +468,23 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
           <SplitPane
             left={<RunTerminal ref={terminalRef} runId={run.id} />}
             right={
-              <RunStoryList
-                runId={run.id}
-                walEvents={walEvents}
-                onStoryClick={(storyId) => terminalRef.current?.scrollToStory(storyId)}
-              />
+              <div className="h-full flex flex-col min-h-0">
+                <div className="flex-1 min-h-0 overflow-hidden">
+                  <RunStoryList
+                    runId={run.id}
+                    walEvents={walEvents}
+                    onStoryClick={(storyId) => terminalRef.current?.scrollToStory(storyId)}
+                  />
+                </div>
+                <RunMetadataPanel
+                  run={run}
+                  tokenSummary={tokenSummary}
+                  specModel={specModel}
+                  totalStories={totalStories}
+                  walEvents={walEvents}
+                  onKill={() => setShowKillConfirm(true)}
+                />
+              </div>
             }
           />
         );
