@@ -1505,7 +1505,7 @@ router.get('/finops/run/:runId', (req: Request, res: Response) => {
     }
 
     const agentType = run.agent || 'claude';
-    const isSubscription = agentType === 'claude';
+    const isSubscription = agentType === 'claude' || agentType === 'codex';
 
     // Per-story token usage
     const stories = db.prepare(`
@@ -1793,7 +1793,7 @@ router.get('/finops/historical', (req: Request, res: Response) => {
       WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
     `;
     const agents = db.prepare(agentCheckSql).all(...params) as { agent: string | null }[];
-    const allSubscription = agents.length > 0 && agents.every(a => !a.agent || a.agent === 'claude');
+    const allSubscription = agents.length > 0 && agents.every(a => !a.agent || a.agent === 'claude' || a.agent === 'codex');
 
     res.json({
       dailyTrend: dailyTrend.map(d => ({

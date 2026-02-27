@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { agentType, agentModel, AgentType, VALID_AGENT_TYPES, validateOrchestrationConfig } from '../lib/config';
 import { loadOrchestrationConfig, clearConfigCache } from '../lib/complexity-scorer';
 import { detectOpenCode } from '../lib/opencode-detector';
+import { detectCodex } from '../lib/codex-detector';
 import { db } from '../db';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -86,7 +87,9 @@ const PROVIDER_KEY_MAP: Record<string, string[]> = {
  *         description: Current agent configuration
  */
 router.get('/', (_req: Request, res: Response) => {
-  const opencode = currentAgentType === 'opencode' ? detectOpenCode() : null;
+  // Always detect both — UI needs status to show install badges when user toggles
+  const opencode = detectOpenCode();
+  const codex = detectCodex();
 
   // Determine if user has an API key for the selected model's provider
   let hasApiKey = true; // claude doesn't need one
@@ -140,8 +143,10 @@ router.get('/', (_req: Request, res: Response) => {
     hasApiKey,
     copilotConnected,
     copilotUsername,
-    opencodeInstalled: opencode?.opencodeInstalled ?? null,
-    opencodeVersion: opencode?.opencodeVersion ?? null,
+    opencodeInstalled: opencode.opencodeInstalled,
+    opencodeVersion: opencode.opencodeVersion,
+    codexInstalled: codex.codexInstalled,
+    codexVersion: codex.codexVersion,
   });
 });
 
@@ -269,7 +274,7 @@ router.get('/opencode-models', async (_req: Request, res: Response) => {
  *             properties:
  *               agentType:
  *                 type: string
- *                 enum: [claude, opencode]
+ *                 enum: [claude, opencode, codex]
  *               agentModel:
  *                 type: string
  *     responses:
@@ -296,6 +301,17 @@ router.put('/agent', async (req: Request, res: Response) => {
       if (!status.opencodeInstalled) {
         res.status(400).json({
           error: 'OpenCode binary not found. Install it first: npm i -g opencode',
+        });
+        return;
+      }
+    }
+
+    // OC-024: When switching to codex, verify binary is available
+    if (newType === 'codex') {
+      const status = detectCodex();
+      if (!status.codexInstalled) {
+        res.status(400).json({
+          error: 'Codex CLI not found. Install it first: npm i -g @openai/codex',
         });
         return;
       }

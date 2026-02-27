@@ -286,6 +286,8 @@ interface AgentConfig {
   agentModel: string | null;
   opencodeInstalled: boolean | null;
   opencodeVersion: string | null;
+  codexInstalled: boolean | null;
+  codexVersion: string | null;
   copilotConnected: boolean;
   copilotUsername: string | null;
 }
@@ -323,7 +325,7 @@ function ExecutionEngineSection() {
   const [showSetupGuide, setShowSetupGuide] = useState(false);
 
   // Local form state
-  const [selectedType, setSelectedType] = useState<'claude' | 'opencode'>('claude');
+  const [selectedType, setSelectedType] = useState<'claude' | 'opencode' | 'codex'>('claude');
   const [selectedModel, setSelectedModel] = useState<string>('');
 
   const fetchCopilotStatus = useCallback(async () => {
@@ -340,7 +342,7 @@ function ExecutionEngineSection() {
       apiFetch<OllamaStatus>('/api/config/ollama'),
     ]).then(([cfg, modelData, ollama]) => {
       setConfig(cfg);
-      setSelectedType(cfg.agentType === 'opencode' ? 'opencode' : 'claude');
+      setSelectedType(cfg.agentType === 'opencode' ? 'opencode' : cfg.agentType === 'codex' ? 'codex' : 'claude');
       setSelectedModel(cfg.agentModel ?? '');
       setModels(modelData.models);
       setGrouped(modelData.grouped);
@@ -420,7 +422,7 @@ function ExecutionEngineSection() {
   }
 
   const hasChanges = config && (
-    selectedType !== (config.agentType === 'opencode' ? 'opencode' : 'claude') ||
+    selectedType !== config.agentType ||
     (selectedType === 'opencode' && selectedModel !== (config.agentModel ?? ''))
   );
 
@@ -449,30 +451,41 @@ function ExecutionEngineSection() {
         {/* Status badge */}
         <div className="flex items-center gap-2">
           <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${
-            config?.agentType === 'opencode'
-              ? config?.agentModel === 'github/copilot'
-                ? 'bg-[#24292f]/20 text-[#8b949e] border border-[#30363d]'
-                : config?.agentModel?.startsWith('ollama/')
-                  ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                  : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
-              : 'bg-accent/10 text-accent border border-accent/20'
+            config?.agentType === 'codex'
+              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+              : config?.agentType === 'opencode'
+                ? config?.agentModel === 'github/copilot'
+                  ? 'bg-[#24292f]/20 text-[#8b949e] border border-[#30363d]'
+                  : config?.agentModel?.startsWith('ollama/')
+                    ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                    : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+                : 'bg-accent/10 text-accent border border-accent/20'
           }`}>
             <span className={`w-1.5 h-1.5 rounded-full ${
-              config?.agentType === 'opencode'
-                ? config?.agentModel === 'github/copilot' ? 'bg-[#8b949e]'
-                  : config?.agentModel?.startsWith('ollama/') ? 'bg-green-400' : 'bg-purple-400'
-                : 'bg-accent'
+              config?.agentType === 'codex'
+                ? 'bg-emerald-400'
+                : config?.agentType === 'opencode'
+                  ? config?.agentModel === 'github/copilot' ? 'bg-[#8b949e]'
+                    : config?.agentModel?.startsWith('ollama/') ? 'bg-green-400' : 'bg-purple-400'
+                  : 'bg-accent'
             }`} />
-            {config?.agentType === 'opencode'
-              ? config?.agentModel === 'github/copilot' ? 'GitHub Copilot'
-                : config?.agentModel?.startsWith('ollama/') ? 'Local (Ollama)' : 'OpenCode'
-              : 'Claude'}
+            {config?.agentType === 'codex'
+              ? 'Codex CLI'
+              : config?.agentType === 'opencode'
+                ? config?.agentModel === 'github/copilot' ? 'GitHub Copilot'
+                  : config?.agentModel?.startsWith('ollama/') ? 'Local (Ollama)' : 'OpenCode'
+                : 'Claude'}
             {config?.agentType === 'opencode' && config?.agentModel && config?.agentModel !== 'github/copilot' && (
               <span className="text-muted ml-0.5">
                 {models.find(m => m.id === config.agentModel)?.name ?? config.agentModel}
               </span>
             )}
           </span>
+          {config?.agentType === 'codex' && (
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-500/15 text-emerald-400">
+              Subscription
+            </span>
+          )}
           {config?.agentType === 'opencode' && config?.agentModel === 'github/copilot' && (
             <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400">
               Subscription
@@ -529,7 +542,49 @@ function ExecutionEngineSection() {
             75+ models via API key: OpenAI, Google, Anthropic, OpenRouter, local Ollama.
           </p>
         </button>
+
+        <button
+          onClick={() => setSelectedType('codex')}
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
+            selectedType === 'codex'
+              ? 'border-emerald-500/60 bg-emerald-500/5 ring-1 ring-emerald-500/30'
+              : 'border-border bg-bg hover:border-emerald-500/30'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
+              selectedType === 'codex' ? 'border-emerald-500' : 'border-border'
+            }`}>
+              {selectedType === 'codex' && <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+            </div>
+            <span className="text-sm font-medium text-[var(--text)]">Codex CLI (ChatGPT subscription)</span>
+          </div>
+          <p className="text-[11px] text-muted ml-5">
+            Uses <code className="text-xs bg-panel px-1 rounded">codex --approval-mode auto-edit</code> via your ChatGPT Plus/Pro subscription.
+          </p>
+        </button>
       </div>
+
+      {/* Codex CLI installation status */}
+      {selectedType === 'codex' && config && (
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${
+          config.codexInstalled
+            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+            : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
+        }`}>
+          {config.codexInstalled ? (
+            <>
+              <CheckCircle2 size={14} />
+              Codex CLI installed{config.codexVersion ? ` (v${config.codexVersion})` : ''}
+            </>
+          ) : (
+            <>
+              <AlertTriangle size={14} />
+              Codex CLI not found. Install: <code className="bg-panel px-1 rounded">npm i -g @openai/codex</code>
+            </>
+          )}
+        </div>
+      )}
 
       {/* OpenCode installation status */}
       {selectedType === 'opencode' && config && (
@@ -696,7 +751,7 @@ function ExecutionEngineSection() {
       {/* Save button */}
       <button
         onClick={handleSave}
-        disabled={saving || !hasChanges || (selectedType === 'opencode' && !selectedModel)}
+        disabled={saving || !hasChanges || (selectedType === 'opencode' && !selectedModel) || (selectedType === 'codex' && config?.codexInstalled === false)}
         className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
       >
         {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
