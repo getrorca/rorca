@@ -425,6 +425,15 @@ export function runMigrations() {
   if (!runColsOC006.some(c => c.name === 'agent_model')) {
     db.exec('ALTER TABLE pipeline_runs ADD COLUMN agent_model TEXT');
   }
+
+  // OC-007: Add agent_type column to pipeline_runs (idempotent)
+  // Canonical column for agent type ('claude' | 'opencode'). Supersedes the earlier 'agent' column (EQ-004).
+  const runColsOC007 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsOC007.some(c => c.name === 'agent_type')) {
+    db.exec("ALTER TABLE pipeline_runs ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'claude'");
+    // Backfill from existing 'agent' column so historical rows stay consistent
+    db.exec("UPDATE pipeline_runs SET agent_type = agent WHERE agent IS NOT NULL AND agent != ''");
+  }
 }
 
 runMigrations();

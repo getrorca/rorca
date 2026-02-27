@@ -1188,6 +1188,8 @@ interface ArchiveSpecSummary extends SpecSummary {
   repoName: string;
   branchName?: string;
   forkedFrom?: string;
+  agentType?: string;
+  agentModel?: string | null;
   matchSnippets?: MatchSnippet[];
   relevanceScore?: number;
 }
@@ -1205,6 +1207,7 @@ function buildArchiveSummary(
   workspacePath: string,
   branchName?: string,
   workspaceId?: string,
+  agentInfo?: { agentType?: string; agentModel?: string | null },
 ): ArchiveSpecSummary {
   const base = buildSummary(filePath, fileName, status, workspacePath, workspaceId);
   const content = parseSpecFile(filePath);
@@ -1212,7 +1215,15 @@ function buildArchiveSummary(
   const storyTitles = stories.map((s: any) => s.title ?? s.id ?? '').filter(Boolean);
   const repoName = path.basename(workspacePath);
   const forkedFrom = (content as any).forkedFrom as string | undefined;
-  return { ...base, storyTitles, repoName, branchName, ...(forkedFrom ? { forkedFrom } : {}) };
+  return {
+    ...base,
+    storyTitles,
+    repoName,
+    branchName,
+    ...(forkedFrom ? { forkedFrom } : {}),
+    ...(agentInfo?.agentType ? { agentType: agentInfo.agentType } : {}),
+    ...(agentInfo?.agentModel ? { agentModel: agentInfo.agentModel } : {}),
+  };
 }
 
 /** Extract searchable text fields from a parsed spec */
@@ -1456,6 +1467,18 @@ router.get('/archive', (req: Request, res: Response) => {
       if (!branchBySlug.has(slug)) branchBySlug.set(slug, row.branch_name);
     }
 
+    // OC-007: Look up most recent agent_type + agent_model per spec slug from pipeline_runs
+    const agentRows = db.prepare(
+      `SELECT spec_path, COALESCE(agent_type, agent, 'claude') AS agent_type, agent_model FROM pipeline_runs
+       WHERE workspace_id = ?
+       ORDER BY id DESC`
+    ).all(workspaceId) as { spec_path: string; agent_type: string; agent_model: string | null }[];
+    const agentBySlug = new Map<string, { agentType: string; agentModel: string | null }>();
+    for (const row of agentRows) {
+      const slug = path.basename(row.spec_path, '.json');
+      if (!agentBySlug.has(slug)) agentBySlug.set(slug, { agentType: row.agent_type, agentModel: row.agent_model });
+    }
+
     // Fall back to current git branch for specs that have no worktree branch
     let currentBranch: string | undefined;
     try {
@@ -1485,7 +1508,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId));
+          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
@@ -1498,7 +1521,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId));
+          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
