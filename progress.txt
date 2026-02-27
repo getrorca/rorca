@@ -594,3 +594,26 @@ Key decisions:
 - Used useGlobalToast context instead of local useToast hook for consistency with rest of app
 - Edit Brief clears generatedSpec and auto-focuses the textarea after 50ms RAF delay
 - Story cards use line-clamp-1 for description truncation in collapsed state
+
+## Story RQ-002: Queue Consumer Auto-Trigger — DONE
+Files touched:
+- backend/src/lib/queue-consumer.ts (new — SSE hub subscriber for auto-triggering queued runs)
+- backend/src/db/index.ts (modified — idempotent error_message column on run_queue)
+- backend/src/server.ts (modified — imported and initialized startQueueConsumer)
+
+What was built:
+- `startQueueConsumer()` subscribes to SSE hub via `subscribe()`, listens for `run_finished` WAL events
+- On `run_finished`: queries `run_queue` for next pending entry matching workspace_id, triggers via internal HTTP POST to `/api/pipeline/trigger` (zero code duplication)
+- Status transitions: pending → triggering → triggered (success) or failed (error with error_message)
+- On conflict (active run exists): reverts to pending, retries after 5s delay
+- On trigger failure: marks entry failed with error message, continues to next pending entry after 5s
+- Emits `run_queued_trigger` WAL event with specId, queuePosition, queueEntryId on successful trigger
+- `error_message` TEXT column added to run_queue table (idempotent ALTER TABLE)
+- Zero overhead when queue is empty — early return on missing workspace_id or no pending entries
+
+Key decisions:
+- Internal HTTP request to `POST /api/pipeline/trigger` rather than extracting trigger logic — keeps single code path for all triggers (manual, scheduled, queued)
+- Conflict handling reverts status to pending (not failed) since it's transient — the run will complete and re-trigger
+- 5s delay on failure/conflict before checking next entry prevents tight retry loops
+- `require('http')` used instead of static import to avoid test interference
+- triggerType='queued' passed to pipeline trigger for WAL event differentiation
