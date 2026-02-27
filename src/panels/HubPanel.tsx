@@ -8,6 +8,7 @@ import { ToastContainer } from '../components/Toast';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from '../components/Sidebar';
+import { HubSkeleton } from '../components/Skeleton';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -719,11 +720,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   }
 
   if (!loaded) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <span className="text-sm text-muted">Loading...</span>
-      </div>
-    );
+    return <HubSkeleton />;
   }
 
   const hasActiveRun = !!activeRun;

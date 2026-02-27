@@ -638,3 +638,23 @@ Key decisions:
 - Top-right toast uses separate `ToastContainer` with `position="top-right"` prop rather than modifying global toast position
 - `justCompletedRunIds` Set tracks which runs just finished so slide animation only plays on new arrivals, not existing items
 - RunPill dot animation resets via `dotJustAppeared` state with 600ms timeout to avoid replaying on re-renders
+
+## Story P2-011: Skeleton Placeholder Screens — DONE
+Files touched:
+- src/components/Skeleton.tsx (new — shared skeleton primitives + composite skeletons)
+- src/panels/HubPanel.tsx (modified — replaced "Loading..." text with HubSkeleton)
+- src/panels/RunViewPanel.tsx (modified — replaced "Loading run #X..." text with RunViewTerminalSkeleton)
+- src/components/DirectionPreviewSidebar.tsx (modified — replaced "Loading..." text with DirectionSidebarSkeleton)
+
+What was built:
+- **Skeleton primitives**: SkeletonBlock, SkeletonLine, SkeletonBadge, SkeletonCircle — all use Tailwind `animate-pulse` with `bg-border/50`
+- **HubSkeleton**: 3 sections matching real Hub layout — active run card skeleton (status dot, spec name, progress bar, footer), pending review card skeleton (title, meta, story previews, action buttons), recent runs list skeleton (3 rows with dot, name, badge, timestamps)
+- **RunViewTerminalSkeleton**: Header skeleton + tab bar skeleton + 10 grey bars on dark background (`bg-[#1e1e1e]`) with varying widths via `Math.sin` for natural look
+- **DirectionSidebarSkeleton**: 3 layer rows with status dots, labels, and description lines — rendered inside existing sidebar container (no duplicate wrapper)
+- All transitions from skeleton to content are instant (no flash) since skeletons match exact layout dimensions
+
+Key decisions:
+- Created shared Skeleton.tsx with both primitives and composites (no separate files — all are small)
+- DirectionSidebarSkeleton renders only content rows (not full container) since it's placed inside the existing sidebar `overflow-y-auto` div
+- Terminal skeleton bars use `bg-[#333]` on `bg-[#1e1e1e]` to match the real xterm.js dark theme
+- Skeleton widths match real content widths exactly to prevent layout shift on load
