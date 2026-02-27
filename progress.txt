@@ -985,3 +985,32 @@ Key decisions:
 - Gate failures (typecheck/e2e) count as tier-level failures too — a model that produces code that doesn't compile should be escalated
 - Sequential path refactored to use executeStory() to avoid maintaining escalation logic in two places
 - Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged
+
+## Story OC-021: Orchestration Config in .rorca/config.json — Eject to Config — DONE
+Files touched:
+- backend/src/lib/complexity-scorer.ts (modified — OrchestrationConfig extended with router, taskCascades, tokenBudgetPerStory; RouterMode/TaskType types; loadOrchestrationConfig handles range thresholds + new fields; score() respects router mode)
+- backend/src/lib/config.ts (modified — validateOrchestrationConfig() with descriptive errors for all orchestration fields)
+- backend/src/routes/config.ts (modified — GET/PUT /api/config/orchestration endpoints for workspace-scoped config read/write)
+- backend/src/lib/__tests__/complexity-scorer.test.ts (modified — 15 new tests for router modes, threshold ranges, task cascades, token budget, and validation)
+- .rorca/config.schema.json (new — JSON Schema for .rorca/config.json orchestration section)
+- src/panels/SettingsPanel.tsx (modified — ModelRoutingSection + ThresholdSlider components in Settings > Model & Providers)
+
+What was built:
+- orchestration.router: 'auto' | 'fixed' | 'manual' — auto uses complexity scorer, fixed bypasses scoring, manual uses per-story modelTier field
+- orchestration.thresholds: supports both legacy { haiku: 30 } and range { haiku: [0, 30] } formats; cross-validates haiku < sonnet
+- orchestration.taskCascades: { echolocation, planning, coding, lintFix, testing, documentation } → model IDs per task type
+- orchestration.escalation: existing fields + chain array for UI display
+- orchestration.tokenBudgetPerStory: default 50000, validated as positive number
+- Settings > Model & Providers > Model Routing section: router mode selector, three-tier drag slider with numeric inputs, task cascade model inputs, escalation toggle + max retries, token budget input
+- ThresholdSlider: drag handles for haiku/sonnet boundaries, color-coded regions (green/blue/purple), inline numeric inputs for precise adjustment
+- .rorca/config.schema.json: full JSON Schema with descriptions for IDE autocompletion
+- validateOrchestrationConfig(): returns descriptive { field, message, value } errors for every invalid field
+- PUT /api/config/orchestration: validates → reads existing config.json → merges orchestration → atomic write → clears cache → returns merged config
+- GET /api/config/orchestration: loads merged config (defaults + overrides) for workspace, returns threshold ranges for frontend
+
+Key decisions:
+- Threshold ranges stored internally as single max value (haiku: 30, sonnet: 65) per existing ScoringThresholds type — frontend receives/displays [min, max] ranges computed from the boundary values
+- Router 'fixed' returns tier='sonnet' with score=50 — execution-engine uses the spec model directly, scorer just needs to return a valid tier
+- Router 'manual' checks story.modelTier property, falls through to auto if unset — no breaking change for existing specs
+- Atomic write: config.json written to .tmp then renamed to prevent partial writes
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged from OC-020

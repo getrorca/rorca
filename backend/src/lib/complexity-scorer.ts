@@ -47,10 +47,25 @@ export interface EscalationConfig {
   escalateTo: Record<string, ModelTier | null>;  // e.g. { haiku: 'sonnet', sonnet: 'opus', opus: null }
 }
 
+export type RouterMode = 'auto' | 'fixed' | 'manual';
+
+export type TaskType = 'echolocation' | 'planning' | 'coding' | 'lintFix' | 'testing' | 'documentation';
+
+export const VALID_ROUTER_MODES: RouterMode[] = ['auto', 'fixed', 'manual'];
+export const VALID_TASK_TYPES: TaskType[] = ['echolocation', 'planning', 'coding', 'lintFix', 'testing', 'documentation'];
+
+export interface ThresholdRange {
+  min: number;
+  max: number;
+}
+
 export interface OrchestrationConfig {
+  router: RouterMode;
   thresholds: ScoringThresholds;
   cascades: Record<string, CascadeModelIds>;
+  taskCascades: Record<TaskType, string>;
   escalation: EscalationConfig;
+  tokenBudgetPerStory: number;
 }
 
 // ─── Defaults ───────────────────────────────────────────────────────────────
@@ -92,6 +107,17 @@ const DEFAULT_CASCADES: Record<string, CascadeModelIds> = {
     opus: 'copilot',
   },
 };
+
+const DEFAULT_TASK_CASCADES: Record<TaskType, string> = {
+  echolocation: 'claude-haiku-4-5-20251001',
+  planning: 'claude-sonnet-4-5-20250929',
+  coding: 'claude-sonnet-4-5-20250929',
+  lintFix: 'claude-haiku-4-5-20251001',
+  testing: 'claude-sonnet-4-5-20250929',
+  documentation: 'claude-haiku-4-5-20251001',
+};
+
+const DEFAULT_TOKEN_BUDGET_PER_STORY = 50000;
 
 const DEFAULT_ESCALATION: EscalationConfig = {
   enabled: true,
@@ -189,9 +215,12 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
   }
 
   const defaults: OrchestrationConfig = {
+    router: 'auto',
     thresholds: { ...DEFAULT_THRESHOLDS },
     cascades: { ...DEFAULT_CASCADES },
+    taskCascades: { ...DEFAULT_TASK_CASCADES },
     escalation: { ...DEFAULT_ESCALATION, escalateTo: { ...DEFAULT_ESCALATION.escalateTo } },
+    tokenBudgetPerStory: DEFAULT_TOKEN_BUDGET_PER_STORY,
   };
 
   if (!configPath) return defaults;
@@ -203,17 +232,34 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
     const orch = raw?.orchestration;
     if (!orch) return defaults;
 
+    // Parse router mode
+    const router: RouterMode = typeof orch.router === 'string' && (VALID_ROUTER_MODES as string[]).includes(orch.router)
+      ? orch.router as RouterMode
+      : 'auto';
+
+    // Parse thresholds — support both { haiku: 30 } (legacy) and { haiku: [0, 30] } (range) formats
+    const parseThreshold = (val: unknown, fallback: number): number => {
+      if (typeof val === 'number') return val;
+      if (Array.isArray(val) && val.length === 2 && typeof val[1] === 'number') return val[1];
+      return fallback;
+    };
+
     const config: OrchestrationConfig = {
+      router,
       thresholds: {
-        haiku: typeof orch.thresholds?.haiku === 'number' ? orch.thresholds.haiku : DEFAULT_THRESHOLDS.haiku,
-        sonnet: typeof orch.thresholds?.sonnet === 'number' ? orch.thresholds.sonnet : DEFAULT_THRESHOLDS.sonnet,
+        haiku: parseThreshold(orch.thresholds?.haiku, DEFAULT_THRESHOLDS.haiku),
+        sonnet: parseThreshold(orch.thresholds?.sonnet, DEFAULT_THRESHOLDS.sonnet),
       },
       cascades: { ...DEFAULT_CASCADES },
+      taskCascades: { ...DEFAULT_TASK_CASCADES },
       escalation: {
         enabled: typeof orch.escalation?.enabled === 'boolean' ? orch.escalation.enabled : DEFAULT_ESCALATION.enabled,
         maxRetriesOnTier: typeof orch.escalation?.maxRetriesOnTier === 'number' ? orch.escalation.maxRetriesOnTier : DEFAULT_ESCALATION.maxRetriesOnTier,
         escalateTo: { ...DEFAULT_ESCALATION.escalateTo },
       },
+      tokenBudgetPerStory: typeof orch.tokenBudgetPerStory === 'number' && orch.tokenBudgetPerStory > 0
+        ? orch.tokenBudgetPerStory
+        : DEFAULT_TOKEN_BUDGET_PER_STORY,
     };
 
     // Merge user-provided escalateTo overrides
@@ -225,7 +271,7 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
       }
     }
 
-    // Merge user-provided cascade overrides
+    // Merge user-provided cascade overrides (provider → tier model IDs)
     if (orch.cascades && typeof orch.cascades === 'object') {
       for (const [provider, tiers] of Object.entries(orch.cascades)) {
         if (tiers && typeof tiers === 'object') {
@@ -235,6 +281,15 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
             sonnet: typeof t.sonnet === 'string' ? t.sonnet : (DEFAULT_CASCADES[provider]?.sonnet ?? ''),
             opus: typeof t.opus === 'string' ? t.opus : (DEFAULT_CASCADES[provider]?.opus ?? ''),
           };
+        }
+      }
+    }
+
+    // Merge user-provided task cascade overrides (taskType → model ID)
+    if (orch.taskCascades && typeof orch.taskCascades === 'object') {
+      for (const taskType of VALID_TASK_TYPES) {
+        if (typeof orch.taskCascades[taskType] === 'string') {
+          config.taskCascades[taskType] = orch.taskCascades[taskType];
         }
       }
     }
@@ -301,6 +356,21 @@ export function score(
   cwd?: string,
 ): ScoringResult {
   const config = loadOrchestrationConfig(cwd);
+
+  // router='fixed' → always return sonnet (spec model used directly by execution-engine)
+  if (config.router === 'fixed') {
+    return { tier: 'sonnet', score: 50, signals: ['router:fixed'] };
+  }
+
+  // router='manual' → check story-level modelTier override
+  if (config.router === 'manual') {
+    const storyAny = story as ScorerStory & { modelTier?: string };
+    if (storyAny.modelTier && ['haiku', 'sonnet', 'opus'].includes(storyAny.modelTier)) {
+      return { tier: storyAny.modelTier as ModelTier, score: 50, signals: [`router:manual(${storyAny.modelTier})`] };
+    }
+    // Fall through to auto scoring if no per-story override
+  }
+
   const signals: string[] = [];
   let totalScore = 0;
 
