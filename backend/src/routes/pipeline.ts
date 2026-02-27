@@ -804,12 +804,14 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
 
     // Read spec JSON to return full userStories list (including pending ones)
     let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean }[] = [];
+    let specModel: string | null = null;
     try {
       const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(run.workspace_id) as { path: string } | undefined;
       if (workspace) {
         const absSpecPath = path.join(workspace.path, run.spec_path);
         if (fs.existsSync(absSpecPath)) {
           const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
+          specModel = specJson.model || null;
           if (Array.isArray(specJson.userStories)) {
             specStories = specJson.userStories.map((s: any) => ({
               id: s.id,
@@ -824,7 +826,19 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       // Spec file missing or malformed — specStories stays empty
     }
 
-    res.json({ run, stories, specStories });
+    // Aggregate token counts from story_results
+    const tokenRow = db.prepare(
+      `SELECT COALESCE(SUM(input_tokens), 0) AS total_input, COALESCE(SUM(output_tokens), 0) AS total_output
+       FROM story_results WHERE run_id = ?`
+    ).get(runId) as { total_input: number; total_output: number };
+
+    res.json({
+      run,
+      stories,
+      specStories,
+      specModel,
+      tokenSummary: { inputTokens: tokenRow.total_input, outputTokens: tokenRow.total_output },
+    });
   } catch (error: any) {
     console.error('[Pipeline] Get run error:', error);
     res.status(500).json({ error: error.message });
