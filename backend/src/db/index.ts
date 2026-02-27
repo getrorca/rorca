@@ -283,6 +283,9 @@ export function runMigrations() {
   if (!tplCols.some(c => c.name === 'usage_count')) {
     db.exec('ALTER TABLE templates ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0');
   }
+  if (!tplCols.some(c => c.name === 'last_used_at')) {
+    db.exec('ALTER TABLE templates ADD COLUMN last_used_at TEXT');
+  }
 
   // V2-044: Enhance model_pricing with provider, per-1M costs, effective_date (idempotent)
   const mpCols = db.pragma('table_info(model_pricing)') as { name: string }[];

@@ -34,6 +34,16 @@ export function deleteTemplate(
   });
 }
 
+export function useTemplate(
+  id: string,
+  opts?: ApiOptions,
+): Promise<{ ok: true }> {
+  return apiFetch(`/api/templates/${id}/use`, {
+    method: 'POST',
+    signal: opts?.signal,
+  });
+}
+
 export function rateTemplate(
   id: string,
   rating: number,
