@@ -46,7 +46,8 @@ Browser (React :5210)  ←→  Express API (:3030)  ←→  SQLite (WAL)
                                     ↓
                             Execution Engine (per-story subprocess)
                             ├── claude --print      (Claude subscription)
-                            └── opencode run        (75+ providers via API key)
+                            ├── opencode run        (75+ providers via API key)
+                            └── codex               (ChatGPT subscription)
 
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
@@ -54,7 +55,7 @@ Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 **Stack**:
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + xterm.js
 - Backend: Express.js + TypeScript + SQLite (`better-sqlite3`, WAL mode, FK on)
-- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider)
+- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex --approval-mode auto-edit` (ChatGPT sub)
 - Spec generation: OpenCode (autonomous codebase exploration) OR SDK fallback (`SPEC_PROVIDER` env var)
 - MCP: 5 tools exposing Rorca to Claude Code sessions
 
@@ -71,7 +72,7 @@ Spec (N stories)
   └── Story N  →  ...
 ```
 
-### Two execution paths — both first-class
+### Three execution paths — all first-class
 
 **Claude subscription** (Pro / Max / Max 5x):
 - Binary: `claude --print`
@@ -85,6 +86,13 @@ Spec (N stories)
 - `--format json` outputs structured events → semantic log view gets structured data for free (no xterm parsing)
 - `--attach` reuses a warm server across stories → no cold-start overhead per story
 - Configured via `RORCA_AGENT=opencode` + `RORCA_MODEL=openai/gpt-4o`
+
+**Codex CLI** (ChatGPT Plus/Pro subscription):
+- Binary: `codex --approval-mode auto-edit`
+- Same tool set: file edit, bash, read, write, glob, grep (non-interactive mode)
+- Subscription-based — flat rate, no per-token cost. `RORCA_MODEL` is ignored.
+- No model cascading — single model tied to ChatGPT subscription
+- Configured via `RORCA_AGENT=codex`
 
 **No raw SDK agent path for execution.** OpenCode IS the multi-model execution path. A raw `openai.chat.completions.create()` call cannot replace it — no persistent bash state, no surgical edits, no CLAUDE.md injection.
 
@@ -410,20 +418,152 @@ Multiple workspaces can run simultaneously. Same-workspace parallel runs require
 
 **Backend** (`backend/.env`):
 ```bash
-# Current (pre-opencode-integration spec)
-SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
-ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
-OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
+# Core
 PORT=3030                     # Optional override
 DB_PATH=./rorca.db           # Optional override
 
-# Added by rorca-opencode-integration spec (OC-001 to OC-007)
-RORCA_AGENT=opencode         # Options: claude (default), opencode
-RORCA_MODEL=openai/gpt-4o   # OpenCode model string (provider/model)
+# Execution engine
+RORCA_AGENT=claude           # Options: claude (default), opencode, codex
+RORCA_MODEL=openai/gpt-4o   # OpenCode model string (provider/model) — ignored for codex
 OPENCODE_BIN=/path/to/opencode  # Auto-detected if in PATH
+CODEX_BIN=/path/to/codex        # Auto-detected if in PATH
+
+# Spec generation providers (used when RORCA_AGENT=claude or as SDK fallback)
+SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
+ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
+OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
 ```
-When `RORCA_AGENT=claude` (default), uses `claude --print` via `~/.claude/` auth — no API key needed.
-When `RORCA_AGENT=opencode`, uses `opencode run --format json --attach --model $RORCA_MODEL`.
+
+### Execution Engine: Claude vs OpenCode vs Codex
+
+Rorca supports three first-class execution paths. All use the same tool set (edit, bash, read, write, glob, grep, webfetch, websearch) and produce the same output.
+
+**Claude subscription** (`RORCA_AGENT=claude`, default):
+- Binary: `claude --print --dangerously-skip-permissions --output-format stream-json`
+- Auth: `~/.claude/` — no API key needed, uses your Pro/Max/Max5x subscription
+- Advantages:
+  - **Prompt caching** on tool round trips (~10x lower latency after turn 1)
+  - **Surgical diff edits** (~150 tokens vs ~3000 for full file rewrites)
+  - **Persistent bash shell state** across tool calls within a story
+  - **CLAUDE.md auto-injection** — no manual context loading needed
+  - **Hierarchical subagents** via Task tool for complex research
+  - **Fine-tuned** for agentic coding loops (tool use, error recovery, commit discipline)
+- Recommended for: All implementation runs where Claude subscription is available
+
+**OpenCode** (`RORCA_AGENT=opencode`):
+- Binary: `opencode run --format json --attach --model $RORCA_MODEL`
+- Auth: Per-provider API key (stored in encrypted vault) or GitHub Copilot OAuth
+- Advantages:
+  - **75+ model choices** — OpenAI, Google, Anthropic API, OpenRouter, Ollama, GitHub Copilot
+  - **Model cascading** — auto-tier stories by complexity (Haiku→Sonnet→Opus), saves ~40-60% vs all-Opus
+  - **API arbitrage** — choose cheapest model that meets quality bar per story
+  - **Local execution** via Ollama (free, fully offline, no API key)
+  - **Subscription-based** execution via GitHub Copilot (no per-token billing)
+  - **Structured JSON events** — semantic log view gets structured data natively (no xterm parsing)
+  - **Warm server mode** — `--attach` reuses a warm server across stories, no cold-start per story
+- Recommended for: Multi-model workflows, cost optimization, teams without Claude subscription
+
+**Codex CLI** (`RORCA_AGENT=codex`):
+- Binary: `codex --approval-mode auto-edit`
+- Auth: ChatGPT Plus/Pro subscription — no API key needed
+- Advantages:
+  - **Subscription-based** — flat-rate, no per-token cost (like Claude subscription)
+  - **Same tool set** — file edit, bash, read, write, glob, grep via `--approval-mode auto-edit`
+  - **OpenAI models** — uses the model tied to your ChatGPT subscription
+- Limitations:
+  - `RORCA_MODEL` is ignored — Codex CLI uses the model from your ChatGPT subscription
+  - **No model cascading** — subscription-based, no tier assignment or escalation
+  - **No structured JSON output** — stdout/stderr captured raw (like `claude --print`)
+  - FinOps shows token counts only (no dollar cost — flat-rate subscription)
+- Recommended for: Teams with ChatGPT Plus/Pro subscriptions who prefer OpenAI models
+
+### OpenCode Setup (Step-by-Step)
+
+**1. Install OpenCode CLI**
+```bash
+npm install -g opencode
+opencode --version  # Must be >= 0.1.0
+```
+
+**2. Set execution engine**
+```bash
+# In backend/.env (or via Settings > Model & Providers in the UI)
+RORCA_AGENT=opencode
+```
+
+**3. Choose and configure a provider**
+
+| Provider | Model string | API key | Notes |
+|----------|-------------|---------|-------|
+| OpenAI | `openai/gpt-4o`, `openai/o3` | `OPENAI_API_KEY` or vault | Best all-round, fast |
+| Google | `google/gemini-2.0-flash` | `GOOGLE_API_KEY` or vault | 1M context window |
+| Anthropic API | `anthropic/claude-sonnet-4-5-20250929` | `ANTHROPIC_API_KEY` or vault | Same Claude models, API billing |
+| OpenRouter | `openrouter/auto` | `OPENROUTER_API_KEY` or vault | 200+ models, auto-routing |
+| Ollama | `ollama/llama3`, `ollama/codellama` | None (local) | Free, fully offline |
+| GitHub Copilot | `github/copilot` | OAuth (Settings > Copilot) | Uses Copilot subscription |
+
+**4. Set model and API key**
+```bash
+# In backend/.env
+RORCA_MODEL=openai/gpt-4o
+
+# API keys can be set via:
+# a) Environment variable (e.g. OPENAI_API_KEY=sk-...)
+# b) Settings > Model & Providers > Add Key (encrypted AES-256-GCM vault)
+# c) GitHub OAuth for Copilot (Settings > Execution Engine > Sign in with GitHub)
+```
+
+**5. Verify setup**
+```bash
+# Check health endpoint
+curl http://localhost:3030/api/health
+# Should return: { "opencodeInstalled": true, "opencodeVersion": "0.1.x", ... }
+
+# Or check in UI: Settings > Model & Providers > Execution Engine
+# Green badge = installed, amber = not found
+```
+
+**OpenCode minimum version**: `0.1.0` (enforced at startup via `backend/src/lib/opencode-detector.ts`). Backend exits with code 1 if `RORCA_AGENT=opencode` and binary is missing or below minimum version. Health endpoint (`GET /api/health`) returns `{ opencodeInstalled, opencodeVersion }` when `agentType=opencode`.
+
+### Codex CLI Setup (Step-by-Step)
+
+**1. Install Codex CLI**
+```bash
+npm install -g @openai/codex
+codex --version
+```
+
+**2. Set execution engine**
+```bash
+# In backend/.env (or via Settings > Execution Engine in the UI)
+RORCA_AGENT=codex
+```
+
+**3. Verify setup**
+```bash
+# Check health endpoint
+curl http://localhost:3030/api/health
+# Should return: { "codexInstalled": true, "codexVersion": "0.x.x", ... }
+
+# Or check in UI: Settings > Execution Engine
+# Green badge = installed, amber = not found
+```
+
+**Notes**: `RORCA_MODEL` is ignored when `RORCA_AGENT=codex` — Codex CLI uses the model tied to your ChatGPT subscription. Model cascading and escalation are disabled for codex (subscription-based, no tier assignment). Binary detection via `backend/src/lib/codex-detector.ts`.
+
+### Codex Direction Stack Injection (OC-030)
+Codex CLI auto-discovers `AGENTS.md` files from the Git root directory and injects them as context before the user prompt (see [OpenAI docs](https://developers.openai.com/codex/guides/agents-md/)). Rorca leverages this by writing the synthesized direction stack (L1-L5) to the workspace root `AGENTS.md` before each Codex pipeline run.
+
+**How it works:**
+- `pipeline.ts` calls `writeCodexAgentsMd()` before spawning the execution engine when `RORCA_AGENT=codex`
+- Synthesizes L1-L5 direction layers (same `synthesize()` call used for OpenCode's `.opencode/skills/rorca/SKILL.md`)
+- If workspace already has `AGENTS.md`: appends a delimited section using markers (`# === RORCA DIRECTION START ===` / `# === RORCA DIRECTION END ===`)
+- If no `AGENTS.md` exists: creates one with just the direction stack section
+- Direction context is written fresh before each run (not cached) to pick up latest direction stack changes
+- On run completion (pass or fail), `removeCodexAgentsMd()` restores the original `AGENTS.md` or deletes the file if Rorca created it
+- `execution-engine.ts` `buildPrompt()` adds an explicit instruction for Codex stories to follow AGENTS.md guidance
+
+**Key difference from OpenCode:** OpenCode uses `.opencode/skills/rorca/SKILL.md` (a dedicated skill file in a hidden directory). Codex uses the workspace root `AGENTS.md` because that's what Codex CLI auto-discovers. The marker-based append/restore pattern ensures existing `AGENTS.md` content is preserved.
 
 ## Performance Targets
 - Spec generation: < 60s (LLM call)
@@ -460,7 +600,7 @@ Escalation cascade on failure:
 
 **API arbitrage**: Cascading saves ~40–60% vs all-Opus baseline. FinOps dashboard (OC-023) shows realized savings per run and trend chart.
 
-**Claude subscription path**: Cascading not applicable — `claude --print` uses the same subscription regardless of story complexity. Quality difference is negligible for most stories; Opus is the recommended tier for all implementation runs.
+**Claude/Codex subscription paths**: Cascading not applicable — `claude --print` and `codex --approval-mode auto-edit` use the same subscription regardless of story complexity. Quality difference is negligible for most stories; Opus is the recommended tier for all implementation runs.
 
 ## Spec Pipeline — Run Order
 `rorca-v2-platform` complete (113/117 stories — V2-089–092 excluded). Pending specs in `forge/specs/pending/`:
@@ -594,7 +734,7 @@ Phase 6 — React Native Mobile (after cloud)
 **Core moat (3 layers):**
 1. Direction stack — persistent context cascade across all stories (L1–L5)
 2. Per-story subprocess isolation — infinite effective context, runs to completion
-3. Dual execution engine — `claude --print` (Claude sub) + `opencode run` (75+ providers) — same tool set, same quality, user chooses their model
+3. Triple execution engine — `claude --print` (Claude sub) + `opencode run` (75+ providers) + `codex` (ChatGPT sub) — same tool set, same quality, user chooses their model
 
 **The brand statement**: "Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever. That's the Rorca engine."
 

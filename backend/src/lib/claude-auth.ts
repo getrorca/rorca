@@ -1,0 +1,332 @@
+/**
+ * OC-025: Claude Subscription Auth Detection
+ *
+ * Detects Claude CLI authentication state by:
+ * 1. Reading ~/.claude/.credentials.json (newer CLI versions)
+ * 2. Falling back to ~/Library/Application Support/Claude/config.json (oauth:tokenCache field)
+ * 3. Final fallback: running `claude --version` to check binary availability
+ *
+ * Provides login/logout by delegating to `claude auth login` / `claude auth logout`.
+ * Polls for credential file changes after triggering login, fires SSE event when authenticated.
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { spawn } from 'child_process';
+import { broadcastAll } from './sse-hub';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export interface ClaudeAuthState {
+  connected: boolean;
+  email?: string;
+  tier?: string;
+  expiresAt?: number;
+  cliInstalled: boolean;
+  cliVersion?: string;
+}
+
+// ─── Credential file paths ───────────────────────────────────────────────────
+
+const HOME = os.homedir();
+const CREDENTIALS_PATH = path.join(HOME, '.claude', '.credentials.json');
+const CLAUDE_DESKTOP_CONFIG = path.join(
+  HOME,
+  'Library',
+  'Application Support',
+  'Claude',
+  'config.json'
+);
+
+// ─── JWT decode (minimal, no validation — we just need claims) ───────────────
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = Buffer.from(parts[1], 'base64url').toString('utf8');
+    return JSON.parse(payload);
+  } catch {
+    return null;
+  }
+}
+
+// ─── CLI detection ───────────────────────────────────────────────────────────
+
+let cachedCliVersion: string | null = null;
+
+function detectClaudeCli(): { installed: boolean; version?: string } {
+  if (cachedCliVersion) return { installed: true, version: cachedCliVersion };
+
+  try {
+    const { execFileSync } = require('child_process') as typeof import('child_process');
+    // Must unset CLAUDECODE to avoid "cannot run inside another session" error
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_ENTRYPOINT;
+
+    const output = execFileSync('claude', ['--version'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      env,
+    }).trim();
+
+    // Output format: "2.1.42 (Claude Code)" or similar
+    const version = output.split(/\s/)[0] || output;
+    cachedCliVersion = version;
+    return { installed: true, version };
+  } catch {
+    return { installed: false };
+  }
+}
+
+// ─── Read credentials ────────────────────────────────────────────────────────
+
+interface CredentialsJson {
+  oauthToken?: string;
+  accessToken?: string;
+  email?: string;
+  tier?: string;
+  expiresAt?: number;
+  expires_at?: number;
+}
+
+function readCredentialsFile(): CredentialsJson | null {
+  try {
+    if (fs.existsSync(CREDENTIALS_PATH)) {
+      const raw = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
+      return JSON.parse(raw);
+    }
+  } catch { /* corrupted or unreadable */ }
+  return null;
+}
+
+function readDesktopOAuthToken(): string | null {
+  try {
+    if (fs.existsSync(CLAUDE_DESKTOP_CONFIG)) {
+      const raw = fs.readFileSync(CLAUDE_DESKTOP_CONFIG, 'utf8');
+      const config = JSON.parse(raw);
+      const tokenCache = config['oauth:tokenCache'];
+      if (typeof tokenCache === 'string' && tokenCache.length > 0) {
+        return tokenCache;
+      }
+    }
+  } catch { /* not available */ }
+  return null;
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────────
+
+/**
+ * Get the current Claude auth state without exposing raw tokens.
+ */
+export function getClaudeAuthState(): ClaudeAuthState {
+  const cli = detectClaudeCli();
+
+  // Strategy 1: Read ~/.claude/.credentials.json (newer CLI)
+  const creds = readCredentialsFile();
+  if (creds) {
+    const token = creds.oauthToken || creds.accessToken;
+    let email = creds.email;
+    let tier = creds.tier;
+    let expiresAt = creds.expiresAt ?? creds.expires_at;
+
+    // Try to extract claims from JWT if we have a token
+    if (token && typeof token === 'string') {
+      const claims = decodeJwtPayload(token);
+      if (claims) {
+        if (!email && typeof claims.email === 'string') email = claims.email;
+        if (!tier && typeof claims.tier === 'string') tier = claims.tier;
+        if (!expiresAt && typeof claims.exp === 'number') expiresAt = claims.exp * 1000;
+      }
+    }
+
+    return {
+      connected: true,
+      email,
+      tier,
+      expiresAt,
+      cliInstalled: cli.installed,
+      cliVersion: cli.version,
+    };
+  }
+
+  // Strategy 2: Check desktop config oauth:tokenCache (encrypted, so we can only check existence)
+  const desktopToken = readDesktopOAuthToken();
+  if (desktopToken) {
+    return {
+      connected: true,
+      // Token is encrypted — we can't extract email/tier from it
+      // But we know the user is authenticated via Claude desktop
+      cliInstalled: cli.installed,
+      cliVersion: cli.version,
+    };
+  }
+
+  // Strategy 3: CLI exists = assume connected (Claude CLI requires auth to function)
+  // If `claude --version` succeeds, the binary is installed. The actual auth check
+  // happens when the pipeline tries to spawn `claude --print`.
+  if (cli.installed) {
+    return {
+      connected: true,
+      cliInstalled: true,
+      cliVersion: cli.version,
+    };
+  }
+
+  return {
+    connected: false,
+    cliInstalled: false,
+  };
+}
+
+// ─── Login flow ──────────────────────────────────────────────────────────────
+
+let loginPollTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Spawn `claude auth login` as a detached child process.
+ * This opens the browser for PKCE OAuth flow.
+ * After spawning, polls for credential file changes and fires SSE event when authenticated.
+ */
+export function triggerClaudeLogin(): { spawned: boolean; error?: string } {
+  const cli = detectClaudeCli();
+  if (!cli.installed) {
+    return { spawned: false, error: 'Claude CLI not found. Install it first: npm i -g @anthropic-ai/claude-code' };
+  }
+
+  // Clean env to avoid nested-session errors
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+  delete env.CLAUDE_AGENT_SDK_VERSION;
+  delete env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+
+  try {
+    const child = spawn('claude', ['auth', 'login'], {
+      detached: true,
+      stdio: 'ignore',
+      env,
+    });
+    child.unref();
+  } catch (err: any) {
+    return { spawned: false, error: `Failed to spawn claude auth login: ${err.message}` };
+  }
+
+  // Start polling for credential changes
+  startLoginPoll();
+
+  return { spawned: true };
+}
+
+function startLoginPoll() {
+  // Cancel any existing poll
+  if (loginPollTimer) clearInterval(loginPollTimer);
+
+  const startTime = Date.now();
+  const POLL_INTERVAL = 2000; // 2 seconds
+  const MAX_POLL_DURATION = 5 * 60 * 1000; // 5 minutes max
+
+  // Capture initial state to detect change
+  const initialState = getClaudeAuthState();
+
+  loginPollTimer = setInterval(() => {
+    if (Date.now() - startTime > MAX_POLL_DURATION) {
+      // Give up after 5 minutes
+      if (loginPollTimer) clearInterval(loginPollTimer);
+      loginPollTimer = null;
+      return;
+    }
+
+    const currentState = getClaudeAuthState();
+
+    // Check if we transitioned from disconnected to connected,
+    // OR if new credential info appeared (email/tier)
+    const wasDisconnected = !initialState.connected;
+    const nowConnected = currentState.connected;
+    const newCredInfo = currentState.email && !initialState.email;
+
+    if ((wasDisconnected && nowConnected) || newCredInfo) {
+      // Fire SSE event
+      broadcastAll({
+        id: 0,
+        ts: new Date().toISOString(),
+        event_type: 'claude_auth_connected',
+        workspace_id: null,
+        spec_id: null,
+        story_id: null,
+        actor: 'system',
+        payload: JSON.stringify({
+          email: currentState.email,
+          tier: currentState.tier,
+          cliVersion: currentState.cliVersion,
+        }),
+      });
+
+      if (loginPollTimer) clearInterval(loginPollTimer);
+      loginPollTimer = null;
+    }
+  }, POLL_INTERVAL);
+}
+
+// ─── Logout flow ─────────────────────────────────────────────────────────────
+
+/**
+ * Spawn `claude auth logout` and remove cached credentials.
+ */
+export async function triggerClaudeLogout(): Promise<{ success: boolean; error?: string }> {
+  const cli = detectClaudeCli();
+  if (!cli.installed) {
+    return { success: false, error: 'Claude CLI not found' };
+  }
+
+  // Clean env
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+  delete env.CLAUDE_AGENT_SDK_VERSION;
+  delete env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+
+  return new Promise((resolve) => {
+    const child = spawn('claude', ['auth', 'logout'], {
+      stdio: 'pipe',
+      env,
+    });
+
+    let stderr = '';
+    child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+
+    child.on('close', (code) => {
+      // Clear CLI version cache (might change auth state detection)
+      cachedCliVersion = null;
+
+      if (code === 0) {
+        // Fire SSE event for disconnect
+        broadcastAll({
+          id: 0,
+          ts: new Date().toISOString(),
+          event_type: 'claude_auth_disconnected',
+          workspace_id: null,
+          spec_id: null,
+          story_id: null,
+          actor: 'system',
+          payload: null,
+        });
+        resolve({ success: true });
+      } else {
+        resolve({ success: false, error: stderr.trim() || `Exit code ${code}` });
+      }
+    });
+
+    child.on('error', (err) => {
+      resolve({ success: false, error: err.message });
+    });
+
+    // Timeout after 10s
+    setTimeout(() => {
+      child.kill();
+      resolve({ success: false, error: 'Timed out waiting for claude auth logout' });
+    }, 10_000);
+  });
+}

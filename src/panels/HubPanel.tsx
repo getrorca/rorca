@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, AlertCircle } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, Menu } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
@@ -7,8 +7,9 @@ import AddWorkspaceModal from '../components/AddWorkspaceModal';
 import { ToastContainer } from '../components/Toast';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
+import { useGlobalToast } from '../contexts/ToastContext';
 import type { PanelId } from '../components/Sidebar';
-import { HubSkeleton } from '../components/Skeleton';
+import AgentBadge from '../components/AgentBadge';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,8 @@ interface PipelineRun {
   pid: number | null;
   started_at: string;
   finished_at: string | null;
+  agent_type?: string;
+  agent_model?: string | null;
 }
 
 interface SpecSummary {
@@ -321,10 +324,13 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
         </div>
       </div>
 
-      {/* Spec name */}
-      <p className="text-sm font-medium text-[var(--text)] truncate capitalize mb-1">
-        {specLabel(run.spec_path)}
-      </p>
+      {/* Spec name + agent badge */}
+      <div className="flex items-center gap-2 mb-1">
+        <p className="text-sm font-medium text-[var(--text)] truncate capitalize">
+          {specLabel(run.spec_path)}
+        </p>
+        <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+      </div>
 
       {/* Current story */}
       {currentStoryTitle && (
@@ -449,15 +455,16 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
 
 // ─── Ready-to-Run Card ──────────────────────────────────────────────────────
 
-function ReadyToRunCard({ spec, workspaceId, workspaceName, workspaceBusy, onTriggered }: {
+function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate, onQueueRefresh }: {
   spec: SpecSummary;
   workspaceId: string;
-  workspaceName: string;
-  workspaceBusy: boolean;
-  onTriggered: (specId: string) => void;
+  defaultParallelism: number;
+  onNavigate: (panel: PanelId) => void;
+  onQueueRefresh?: () => void;
 }) {
   const [triggerState, setTriggerState] = useState<'idle' | 'triggering' | 'success' | 'error'>('idle');
-  const specPath = `forge/specs/approved/${spec.id}.json`;
+  const [queueLoading, setQueueLoading] = useState(false);
+  const { show: showToast } = useGlobalToast();
 
   const handleTrigger = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -481,17 +488,57 @@ function ReadyToRunCard({ spec, workspaceId, workspaceName, workspaceBusy, onTri
     }
   };
 
+  const handleAddToQueue = async (parallelism: number, autoWorktree: boolean) => {
+    setQueueLoading(true);
+    try {
+      await apiFetch('/api/run-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId: Number(workspaceId),
+          specId: spec.id,
+          specPath: `forge/specs/approved/${spec.id}.json`,
+          parallelism,
+          autoWorktree,
+        }),
+      });
+      setShowPopover(false);
+      showToast('Added to queue \u2014 will run after current spec completes', 'success');
+      onQueueRefresh?.();
+    } catch {
+      showToast('Failed to add to queue', 'error');
+    } finally {
+      setQueueLoading(false);
+    }
+  };
+
   return (
     <div className="p-4 bg-panel border border-border rounded-lg space-y-3">
       {/* Title + story count badge */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-[var(--text)] truncate">{spec.specName}</p>
-          <div className="flex items-center gap-2 mt-1 text-xs text-muted">
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-accent/10 text-accent text-[10px] font-semibold leading-none">
-              {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
-            </span>
-            <span>Generated {relativeTime(spec.generatedAt)}</span>
+          <p className="text-xs text-muted mt-0.5">{spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}</p>
+        </div>
+      </div>
+      <div className="relative">
+        {showPopover && (
+          <TriggerPopover
+            defaultParallelism={defaultParallelism}
+            loading={triggerState === 'triggering'}
+            queueLoading={queueLoading}
+            onTrigger={handleTrigger}
+            onAddToQueue={handleAddToQueue}
+            onClose={() => setShowPopover(false)}
+            onNavigate={onNavigate}
+            specPath={`forge/specs/approved/${spec.id}.json`}
+            workspaceId={workspaceId}
+          />
+        )}
+        {triggerState === 'success' ? (
+          <div className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+            <CheckCircle size={12} />
+            Launching...
           </div>
         </div>
         {/* Workspace badge */}
@@ -560,7 +607,8 @@ function RecentRunRow({ run, onNavigateToRun, justCompleted }: {
           <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${STATUS_BADGE_STYLES[run.status] || 'bg-gray-500/10 text-gray-400'}`} aria-live="polite">
             {STATUS_BADGE_LABELS[run.status] || run.status}
           </span>
-          <span className="hidden sm:inline text-xs text-muted whitespace-nowrap">
+          <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+          <span className="text-xs text-muted whitespace-nowrap">
             {formatTimestamp(run.started_at)}
           </span>
           <span className="text-xs text-muted font-mono tabular-nums whitespace-nowrap">
@@ -590,25 +638,9 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [recentRuns, setRecentRuns] = useState<PipelineRun[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [completionToasts, setCompletionToasts] = useState<CompletionToast[]>([]);
-  const completionToastId = useRef(0);
-  const [justCompletedRunIds, setJustCompletedRunIds] = useState<Set<number>>(new Set());
-
-  const showCompletionToast = useCallback((status: 'done' | 'failed', specName: string) => {
-    const id = completionToastId.current++;
-    const message = status === 'done'
-      ? `Run completed: ${specName}`
-      : `Run failed: ${specName}`;
-    const type = status === 'done' ? 'success' as const : 'error' as const;
-    setCompletionToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setCompletionToasts(prev => prev.filter(t => t.id !== id));
-    }, 5000);
-  }, []);
-
-  const dismissCompletionToast = useCallback((id: number) => {
-    setCompletionToasts(prev => prev.filter(t => t.id !== id));
-  }, []);
+  const [defaultParallelism, setDefaultParallelism] = useState(1);
+  const [queueLength, setQueueLength] = useState(0);
+  const [nextQueueSpecName, setNextQueueSpecName] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
@@ -668,19 +700,36 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     setLoaded(true);
   }, [workspaceId]);
 
+  const fetchQueueStatus = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const data = await apiFetch<{ queueLength: number; nextSpec: { spec_id: string } | null }>(
+        `/api/run-queue/status?workspaceId=${workspaceId}`,
+      );
+      setQueueLength(data.queueLength);
+      setNextQueueSpecName(
+        data.nextSpec ? data.nextSpec.spec_id.replace(/-/g, ' ') : null,
+      );
+    } catch {
+      setQueueLength(0);
+      setNextQueueSpecName(null);
+    }
+  }, [workspaceId]);
+
   // Poll every 30s, pause when tab is backgrounded
   useEffect(() => {
     fetchData();
+    fetchQueueStatus();
 
-    let interval = setInterval(fetchData, 30_000);
+    const fetchAll = () => { fetchData(); fetchQueueStatus(); };
+    let interval = setInterval(fetchAll, 30_000);
 
     const onVisibilityChange = () => {
       if (document.hidden) {
         clearInterval(interval);
       } else {
-        // Refetch immediately when tab regains focus, then resume 30s polling
-        fetchData();
-        interval = setInterval(fetchData, 30_000);
+        fetchAll();
+        interval = setInterval(fetchAll, 30_000);
       }
     };
 
@@ -689,22 +738,30 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
       clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [fetchData]);
+  }, [fetchData, fetchQueueStatus]);
 
   // SSE: re-fetch immediately when a run completes, fails, or is cancelled
   const fetchRef = useRef(fetchData);
   fetchRef.current = fetchData;
+  const queueRef = useRef(fetchQueueStatus);
+  queueRef.current = fetchQueueStatus;
   useEffect(() => {
     const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
     const RUN_TERMINAL_EVENTS = new Set([
       'run_finished', 'run_failed', 'run_cancelled',
       'run_started', 'run_paused', 'run_resumed',
     ]);
+    const QUEUE_EVENTS = new Set([
+      'run_queued_trigger', 'run_finished',
+    ]);
     es.addEventListener('wal_event', (e) => {
       try {
         const evt = JSON.parse(e.data);
         if (RUN_TERMINAL_EVENTS.has(evt.event_type)) {
           fetchRef.current();
+        }
+        if (QUEUE_EVENTS.has(evt.event_type)) {
+          queueRef.current();
         }
       } catch { /* ignore malformed events */ }
     });
@@ -781,6 +838,13 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
               Set direction
             </button>
           </div>
+          <button
+            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
+            className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors mt-4"
+          >
+            <Menu size={12} />
+            All panels
+          </button>
         </div>
       </div>
     );
@@ -805,6 +869,27 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                 setJustCompletedRunIds(prev => new Set(prev).add(activeRun.id));
               }}
             />
+          </section>
+        )}
+
+        {/* Queue Status */}
+        {queueLength > 0 && (
+          <section>
+            <div className="flex items-center justify-between">
+              <SectionHeader icon={ListPlus} label="Queue" badge={queueLength} noMargin />
+              <button
+                onClick={() => onNavigate('pipeline')}
+                className="flex items-center gap-1 text-xs text-accent hover:underline"
+              >
+                View Queue <ArrowRight size={12} />
+              </button>
+            </div>
+            <p className="text-sm text-muted mt-2">
+              {queueLength} {queueLength === 1 ? 'spec' : 'specs'} queued
+              {nextQueueSpecName && (
+                <> &mdash; next: <span className="text-[var(--text)] font-medium capitalize">{nextQueueSpecName}</span></>
+              )}
+            </p>
           </section>
         )}
 
@@ -840,13 +925,9 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                   key={spec.id}
                   spec={spec}
                   workspaceId={workspaceId!}
-                  workspaceName={selectedWorkspace?.name ?? 'workspace'}
-                  workspaceBusy={hasActiveRun}
-                  onTriggered={() => {
-                    // Remove from ready-to-run immediately; SSE refetch will
-                    // populate the active run section when run_started arrives
-                    setApprovedSpecs((prev) => prev.filter((s) => s.id !== spec.id));
-                  }}
+                  defaultParallelism={defaultParallelism}
+                  onNavigate={onNavigate}
+                  onQueueRefresh={fetchQueueStatus}
                 />
               ))}
             </div>
@@ -873,6 +954,17 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
             <UpdatedFooter lastUpdated={lastUpdated} />
           </section>
         )}
+
+        {/* Footer: subtle link to nav drawer */}
+        <div className="flex justify-center pt-2 pb-4">
+          <button
+            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
+            className="inline-flex items-center gap-1.5 text-xs text-muted/60 hover:text-muted transition-colors"
+          >
+            <Menu size={12} />
+            All panels
+          </button>
+        </div>
       </div>
     </div>
   );

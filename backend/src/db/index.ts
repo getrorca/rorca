@@ -132,6 +132,15 @@ export function runMigrations() {
     db.exec('ALTER TABLE story_results ADD COLUMN output_tokens INTEGER');
   }
 
+  // OC-022: Add model_used and cost_usd columns to story_results (idempotent)
+  const srColsOC022 = db.pragma('table_info(story_results)') as { name: string }[];
+  if (!srColsOC022.some(c => c.name === 'model_used')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN model_used TEXT');
+  }
+  if (!srColsOC022.some(c => c.name === 'cost_usd')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN cost_usd REAL');
+  }
+
   // V2-083: Add 'excluded' to story_results status CHECK (idempotent)
   const storyResultsSqlExcl = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_results'`
@@ -384,6 +393,82 @@ export function runMigrations() {
   const wsColsEQ012 = db.pragma('table_info(workspaces)') as { name: string }[];
   if (!wsColsEQ012.some(c => c.name === 'default_parallelism')) {
     db.exec("ALTER TABLE workspaces ADD COLUMN default_parallelism INTEGER NOT NULL DEFAULT 1");
+  }
+
+  // RQ-001: Create run_queue table (idempotent)
+  const rqExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='run_queue'`
+  ).get();
+  if (!rqExists) {
+    db.exec(`
+      CREATE TABLE run_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+        spec_id TEXT NOT NULL,
+        spec_path TEXT NOT NULL,
+        parallelism INTEGER NOT NULL DEFAULT 1,
+        auto_worktree INTEGER NOT NULL DEFAULT 0,
+        position INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        triggered_at TEXT
+      );
+      CREATE INDEX idx_run_queue_workspace_status ON run_queue(workspace_id, status);
+    `);
+  }
+
+  // RQ-002: Add error_message column to run_queue (idempotent)
+  const rqCols = db.pragma('table_info(run_queue)') as { name: string }[];
+  if (rqCols.length > 0 && !rqCols.some(c => c.name === 'error_message')) {
+    db.exec("ALTER TABLE run_queue ADD COLUMN error_message TEXT");
+  }
+
+  // OC-003: Add opencode_server_pid column to pipeline_runs (idempotent)
+  const runColsOC003 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsOC003.some(c => c.name === 'opencode_server_pid')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN opencode_server_pid INTEGER');
+  }
+
+  // OC-006: Add agent_model column to pipeline_runs (idempotent)
+  const runColsOC006 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsOC006.some(c => c.name === 'agent_model')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN agent_model TEXT');
+  }
+
+  // OC-007: Add agent_type column to pipeline_runs (idempotent)
+  // Canonical column for agent type ('claude' | 'opencode'). Supersedes the earlier 'agent' column (EQ-004).
+  const runColsOC007 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsOC007.some(c => c.name === 'agent_type')) {
+    db.exec("ALTER TABLE pipeline_runs ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'claude'");
+    // Backfill from existing 'agent' column so historical rows stay consistent
+    db.exec("UPDATE pipeline_runs SET agent_type = agent WHERE agent IS NOT NULL AND agent != ''");
+  }
+
+  // OC-022: Add total_input_tokens, total_output_tokens, total_cost_usd to pipeline_runs (idempotent)
+  const runColsOC022 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsOC022.some(c => c.name === 'total_input_tokens')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_input_tokens INTEGER');
+  }
+  if (!runColsOC022.some(c => c.name === 'total_output_tokens')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_output_tokens INTEGER');
+  }
+  if (!runColsOC022.some(c => c.name === 'total_cost_usd')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_cost_usd REAL');
+  }
+
+  // OC-009: agent_config table for persisting execution engine settings (hot-reloadable)
+  const agentConfigExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_config'`
+  ).get();
+  if (!agentConfigExists) {
+    db.exec(`
+      CREATE TABLE agent_config (
+        id TEXT PRIMARY KEY,
+        agent_type TEXT NOT NULL DEFAULT 'claude',
+        agent_model TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
   }
 }
 

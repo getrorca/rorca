@@ -10,6 +10,7 @@ import {
   Check,
   DollarSign,
   Loader2,
+  Zap,
 } from 'lucide-react';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 
@@ -24,6 +25,8 @@ interface RunMetadataPanelProps {
     worktree_path: string | null;
     started_at: string;
     finished_at: string | null;
+    agent_type?: string;
+    agent_model?: string | null;
   };
   tokenSummary: { inputTokens: number; outputTokens: number };
   specModel: string | null;
@@ -219,6 +222,26 @@ export default function RunMetadataPanel({
           )}
         </MetaRow>
       )}
+
+      {/* Engine (agent type) */}
+      <MetaRow icon={Zap} label="Engine">
+        {(() => {
+          const agent = run.agent_type || 'claude';
+          const isCl = agent === 'claude';
+          return (
+            <div className="flex items-center gap-1.5">
+              <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold rounded ${
+                isCl ? 'bg-blue-500/15 text-blue-400' : 'bg-purple-500/15 text-purple-400'
+              }`}>
+                {isCl ? 'Claude CLI' : 'OpenCode'}
+              </span>
+              {run.agent_model && (
+                <span className="text-[10px] text-muted font-mono">{run.agent_model}</span>
+              )}
+            </div>
+          );
+        })()}
+      </MetaRow>
 
       {/* Model */}
       {specModel && (

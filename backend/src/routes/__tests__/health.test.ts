@@ -156,3 +156,88 @@ describe('GET /api/health/detailed', () => {
     expect(res.body.memory_usage.heapTotal).toBeGreaterThan(0);
   });
 });
+
+// OC-002: OpenCode fields in health endpoint
+describe('GET /api/health (agentType=claude)', () => {
+  it('does not include opencode fields when agentType is claude', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.body).not.toHaveProperty('opencodeInstalled');
+    expect(res.body).not.toHaveProperty('opencodeVersion');
+  });
+});
+
+describe('GET /api/health (agentType=opencode)', () => {
+  let ocApp: Express;
+  let ocDb: Database.Database;
+  let ocTmpDir: string;
+
+  beforeEach(() => {
+    jest.resetModules();
+
+    jest.mock('../../lib/llm-client', () => ({
+      chatComplete: jest.fn(),
+      getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+      isValidModel: jest.fn().mockReturnValue(true),
+      DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+      resolveVaultProvider: jest.fn().mockReturnValue(null),
+      getModelInfo: jest.fn().mockReturnValue(undefined),
+      SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
+    }));
+
+    // Mock config to return opencode as agent type
+    jest.mock('../../lib/config', () => ({
+      agentType: 'opencode',
+      agentModel: 'openai/gpt-4o',
+      agentConfig: { agentType: 'opencode', agentModel: 'openai/gpt-4o' },
+      parseAgentConfig: jest.fn(),
+      VALID_AGENT_TYPES: ['claude', 'opencode', 'codex'],
+    }));
+
+    // Mock opencode-detector to return a known status
+    jest.mock('../../lib/opencode-detector', () => ({
+      detectOpenCode: jest.fn().mockReturnValue({
+        opencodeInstalled: true,
+        opencodeVersion: '0.2.0',
+        opencodeBinPath: '/usr/local/bin/opencode',
+      }),
+      requireOpenCode: jest.fn().mockReturnValue({
+        opencodeInstalled: true,
+        opencodeVersion: '0.2.0',
+        opencodeBinPath: '/usr/local/bin/opencode',
+      }),
+      MIN_OPENCODE_VERSION: '0.1.0',
+      semverGte: jest.fn().mockReturnValue(true),
+    }));
+
+    ocTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-oc-test-'));
+    const dbPath = path.join(ocTmpDir, 'test.db');
+    process.env.DB_PATH = dbPath;
+    process.env.NODE_ENV = 'test';
+
+    const serverMod = require('../../server');
+    ocApp = serverMod.default;
+    const dbMod = require('../../db/index');
+    ocDb = dbMod.db;
+  });
+
+  afterEach(() => {
+    if (ocDb) ocDb.close();
+    fs.rmSync(ocTmpDir, { recursive: true, force: true });
+  });
+
+  it('includes opencodeInstalled and opencodeVersion when agentType=opencode', async () => {
+    const res = await request(ocApp).get('/api/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body.opencodeInstalled).toBe(true);
+    expect(res.body.opencodeVersion).toBe('0.2.0');
+  });
+
+  it('includes opencode fields in detailed health too', async () => {
+    const res = await request(ocApp).get('/api/health/detailed');
+
+    expect(res.status).toBe(200);
+    expect(res.body.opencodeInstalled).toBe(true);
+    expect(res.body.opencodeVersion).toBe('0.2.0');
+  });
+});
