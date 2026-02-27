@@ -647,13 +647,15 @@ function PipelineSection({ workspaceId, showToast }: SectionProps) {
   const [autoWorktree, setAutoWorktree] = useState(true);
   const [storyTimeout, setStoryTimeout] = useState(45);
   const [maxRetries, setMaxRetries] = useState(0);
+  const [defaultParallelism, setDefaultParallelism] = useState(1);
 
   useEffect(() => {
-    apiFetch<{ config: { autoWorktree: boolean; storyTimeoutMin: number; maxRetries: number } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
+    apiFetch<{ config: { autoWorktree: boolean; storyTimeoutMin: number; maxRetries: number; defaultParallelism: number } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
       .then(data => {
         setAutoWorktree(data.config.autoWorktree ?? true);
         setStoryTimeout(data.config.storyTimeoutMin ?? 45);
         setMaxRetries(data.config.maxRetries ?? 0);
+        setDefaultParallelism(data.config.defaultParallelism ?? 1);
       })
       .catch(() => { /* Use defaults */ })
       .finally(() => setLoading(false));
@@ -666,7 +668,7 @@ function PipelineSection({ workspaceId, showToast }: SectionProps) {
       await apiFetch(`/api/workspaces/${workspaceId}/pipeline-config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ autoWorktree, storyTimeoutMin: storyTimeout, maxRetries }),
+        body: JSON.stringify({ autoWorktree, storyTimeoutMin: storyTimeout, maxRetries, defaultParallelism }),
       });
       setSaved(true);
       showToast('Pipeline configuration saved');
@@ -720,6 +722,19 @@ function PipelineSection({ workspaceId, showToast }: SectionProps) {
               className="w-32 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
             />
             <p className="text-xs text-muted mt-1">Number of retry attempts for failed stories (0 = no retries)</p>
+          </div>
+
+          <div className="border-t border-border pt-5">
+            <label className="block text-xs text-muted mb-1">Default Parallelism</label>
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={defaultParallelism}
+              onChange={e => setDefaultParallelism(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+              className="w-32 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+            />
+            <p className="text-xs text-muted mt-1">Default number of parallel story workers (1 = sequential, 2–10 = wave parallel)</p>
           </div>
         </div>
       </div>
