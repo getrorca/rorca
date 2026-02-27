@@ -134,6 +134,31 @@ export function compareRuns(
   });
 }
 
+// ─── Story output ─────────────────────────────────────────────────────────────
+
+export interface StoryOutput {
+  storyId: string;
+  runId: number;
+  status: string;
+  retries: number;
+  failureReason: string | null;
+  failureAttempts: number | null;
+  output: string[];
+  lineCount: number;
+}
+
+export function fetchStoryOutput(
+  runId: number,
+  storyId: string,
+  lines?: number,
+  opts?: ApiOptions,
+): Promise<StoryOutput> {
+  const qs = lines ? `?lines=${lines}` : '';
+  return apiFetch(`/api/pipeline/runs/${runId}/stories/${storyId}/output${qs}`, {
+    signal: opts?.signal,
+  });
+}
+
 // ─── Token tracking ───────────────────────────────────────────────────────────
 
 export function reportStoryTokens(
