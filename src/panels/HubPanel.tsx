@@ -93,7 +93,7 @@ const STATUS_BADGE_LABELS: Record<string, string> = {
   running: 'Running',
   paused: 'Paused',
   done: 'Passed',
-  failed: 'Failed',
+  failed: '\u2717 Failed',
   partial_failure: 'Partial',
   cancelled: 'Cancelled',
 };
