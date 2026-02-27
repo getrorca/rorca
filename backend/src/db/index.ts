@@ -308,6 +308,18 @@ export function runMigrations() {
   if (!vaultCols.some(c => c.name === 'base_url')) {
     db.exec('ALTER TABLE api_key_vault ADD COLUMN base_url TEXT');
   }
+
+  // UI-031: Add auto-PR settings columns to workspace_github_webhooks (idempotent)
+  const ghCols = db.pragma('table_info(workspace_github_webhooks)') as { name: string }[];
+  if (!ghCols.some(c => c.name === 'auto_pr_enabled')) {
+    db.exec("ALTER TABLE workspace_github_webhooks ADD COLUMN auto_pr_enabled INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!ghCols.some(c => c.name === 'auto_pr_target_branch')) {
+    db.exec("ALTER TABLE workspace_github_webhooks ADD COLUMN auto_pr_target_branch TEXT NOT NULL DEFAULT 'main'");
+  }
+  if (!ghCols.some(c => c.name === 'auto_pr_reviewers')) {
+    db.exec("ALTER TABLE workspace_github_webhooks ADD COLUMN auto_pr_reviewers TEXT NOT NULL DEFAULT '[]'");
+  }
 }
 
 runMigrations();
