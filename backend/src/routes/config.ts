@@ -6,6 +6,7 @@ import { detectCodex } from '../lib/codex-detector';
 import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../lib/claude-auth';
 import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
 import { db } from '../db';
+import { getVaultKey } from './vault';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -102,7 +103,18 @@ router.get('/', (_req: Request, res: Response) => {
   if (currentAgentType === 'opencode') {
     if (currentAgentModel) {
       const modelEntry = OPENCODE_MODELS.find(m => m.id === currentAgentModel);
-      modelDisplayName = modelEntry?.name ?? currentAgentModel.split('/').pop() ?? currentAgentModel;
+      if (currentAgentModel.startsWith('openrouter/') && !modelEntry) {
+        // OpenRouter model from live catalog — extract provider family and model name
+        const orModelId = currentAgentModel.slice('openrouter/'.length); // e.g. "meta-llama/llama-3.3-70b"
+        modelDisplayName = orModelId;
+        // Check for OpenRouter API key
+        const orKeyRow = db.prepare(
+          `SELECT 1 FROM api_key_vault WHERE provider = 'openrouter' LIMIT 1`
+        ).get();
+        hasApiKey = !!orKeyRow || !!process.env.OPENROUTER_API_KEY;
+      } else {
+        modelDisplayName = modelEntry?.name ?? currentAgentModel.split('/').pop() ?? currentAgentModel;
+      }
       if (modelEntry) {
         if (modelEntry.provider === 'GitHub Copilot') {
           // Copilot uses integration_credentials, not api_key_vault
@@ -262,6 +274,244 @@ router.get('/opencode-models', async (_req: Request, res: Response) => {
   res.json({ models: allModels, grouped, ollamaAvailable: ollamaStatus.available });
 });
 
+// ─── OpenRouter Model Catalog (OC-027) ───────────────────────────────────────
+
+interface OpenRouterModel {
+  id: string;
+  name: string;
+  context_length: number;
+  pricing: { prompt: string; completion: string };
+  top_provider?: { is_moderated: boolean };
+}
+
+interface OpenRouterCatalog {
+  models: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    contextWindow: number;
+    free: boolean;
+    pricingPrompt: number;
+    pricingCompletion: number;
+  }>;
+  modelCount: number;
+  cachedAt: number;
+}
+
+let openRouterCache: OpenRouterCatalog | null = null;
+const OPENROUTER_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+function getOpenRouterProviderFamily(modelId: string): string {
+  const prefix = modelId.split('/')[0];
+  const familyMap: Record<string, string> = {
+    openai: 'OpenAI',
+    anthropic: 'Anthropic',
+    google: 'Google',
+    'meta-llama': 'Meta',
+    mistralai: 'Mistral',
+    deepseek: 'DeepSeek',
+    qwen: 'Qwen',
+    microsoft: 'Microsoft',
+    cohere: 'Cohere',
+    perplexity: 'Perplexity',
+    databricks: 'Databricks',
+    nvidia: 'NVIDIA',
+    nousresearch: 'Nous Research',
+    '01-ai': '01.AI',
+    cognitivecomputations: 'Cognitive Computations',
+  };
+  return familyMap[prefix] ?? prefix.charAt(0).toUpperCase() + prefix.slice(1);
+}
+
+/**
+ * Resolve OpenRouter API key from vault (any user) or env var.
+ */
+function resolveOpenRouterKey(): string | null {
+  // Check vault first (any user — auth is bypassed globally)
+  try {
+    const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+    if (userId) {
+      const vaultResult = getVaultKey(userId, 'openrouter');
+      if (vaultResult) return vaultResult.key;
+    }
+  } catch { /* table may not exist */ }
+
+  // Fall back to env var
+  return process.env.OPENROUTER_API_KEY ?? null;
+}
+
+/**
+ * @swagger
+ * /api/config/openrouter-models:
+ *   get:
+ *     summary: Get OpenRouter model catalog (cached 1h)
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Filtered and sorted OpenRouter model list grouped by provider family
+ *       401:
+ *         description: No OpenRouter API key configured
+ *       502:
+ *         description: Failed to fetch from OpenRouter API
+ */
+router.get('/openrouter-models', async (_req: Request, res: Response) => {
+  // Return cached if fresh
+  if (openRouterCache && Date.now() - openRouterCache.cachedAt < OPENROUTER_CACHE_TTL) {
+    res.json(openRouterCache);
+    return;
+  }
+
+  const apiKey = resolveOpenRouterKey();
+  if (!apiKey) {
+    res.status(401).json({ error: 'No OpenRouter API key configured. Add one in Settings > Provider Configuration.' });
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const response = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://rorca.app',
+        'X-Title': 'Rorca',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const status = response.status;
+      if (status === 401 || status === 403) {
+        res.status(401).json({ error: 'Invalid OpenRouter API key.' });
+        return;
+      }
+      if (status === 429) {
+        res.status(429).json({ error: 'OpenRouter rate limited. Try again later.' });
+        return;
+      }
+      res.status(502).json({ error: `OpenRouter API returned ${status}` });
+      return;
+    }
+
+    const data = await response.json() as { data: OpenRouterModel[] };
+    const rawModels = data.data ?? [];
+
+    // Filter and transform
+    const models = rawModels
+      .filter(m => m.context_length >= 4096) // Skip tiny models
+      .map(m => ({
+        id: m.id,
+        name: m.name,
+        provider: getOpenRouterProviderFamily(m.id),
+        contextWindow: m.context_length,
+        free: parseFloat(m.pricing?.prompt ?? '1') === 0 && parseFloat(m.pricing?.completion ?? '1') === 0,
+        pricingPrompt: parseFloat(m.pricing?.prompt ?? '0'),
+        pricingCompletion: parseFloat(m.pricing?.completion ?? '0'),
+      }))
+      .sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
+
+    // Group by provider family
+    const grouped: Record<string, typeof models> = {};
+    for (const m of models) {
+      (grouped[m.provider] ??= []).push(m);
+    }
+
+    openRouterCache = {
+      models,
+      modelCount: models.length,
+      cachedAt: Date.now(),
+    };
+
+    res.json({ ...openRouterCache, grouped });
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      res.status(504).json({ error: 'OpenRouter API timeout (10s)' });
+      return;
+    }
+    res.status(502).json({ error: err.message || 'Failed to fetch OpenRouter models' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/config/openrouter-test:
+ *   post:
+ *     summary: Test OpenRouter API key connection
+ *     tags: [Config]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               key:
+ *                 type: string
+ *                 description: Optional — test a specific key before saving. If omitted, tests the stored key.
+ *     responses:
+ *       200:
+ *         description: Connection test result with model count
+ */
+router.post('/openrouter-test', async (req: Request, res: Response) => {
+  const { key } = req.body as { key?: string };
+  const apiKey = key || resolveOpenRouterKey();
+
+  if (!apiKey) {
+    res.status(400).json({ ok: false, error: 'No API key provided or stored.' });
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const startMs = Date.now();
+
+    const response = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://rorca.app',
+        'X-Title': 'Rorca',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const latencyMs = Date.now() - startMs;
+
+    if (!response.ok) {
+      const status = response.status;
+      if (status === 401 || status === 403) {
+        res.json({ ok: false, error: 'Invalid API key' });
+        return;
+      }
+      if (status === 429) {
+        res.json({ ok: false, error: 'Rate limited by OpenRouter' });
+        return;
+      }
+      res.json({ ok: false, error: `OpenRouter returned HTTP ${status}` });
+      return;
+    }
+
+    const data = await response.json() as { data: OpenRouterModel[] };
+    const modelCount = (data.data ?? []).filter(m => m.context_length >= 4096).length;
+    const freeCount = (data.data ?? []).filter(m =>
+      m.context_length >= 8192 &&
+      parseFloat(m.pricing?.prompt ?? '1') === 0 &&
+      parseFloat(m.pricing?.completion ?? '1') === 0
+    ).length;
+
+    // Invalidate cache so next GET picks up fresh data
+    openRouterCache = null;
+
+    res.json({ ok: true, latencyMs, modelCount, freeCount });
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      res.json({ ok: false, error: 'Connection timeout (10s)' });
+      return;
+    }
+    res.json({ ok: false, error: err.message || 'Network error' });
+  }
+});
+
 /**
  * @swagger
  * /api/config/agent:
@@ -336,6 +586,17 @@ router.put('/agent', async (req: Request, res: Response) => {
       }
     } else {
       // Non-Ollama models: check API key as before
+    }
+
+    // OC-027: OpenRouter models from live catalog (not in OPENCODE_MODELS) need key validation
+    if (effectiveModel.startsWith('openrouter/') && !OPENCODE_MODELS.find(m => m.id === effectiveModel)) {
+      const orKey = resolveOpenRouterKey();
+      if (!orKey) {
+        res.status(400).json({
+          error: 'OpenRouter models require an API key. Add one in the OpenRouter card above.',
+        });
+        return;
+      }
     }
 
     const modelEntry = OPENCODE_MODELS.find(m => m.id === effectiveModel);
