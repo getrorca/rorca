@@ -1,0 +1,74 @@
+{
+  "title": "rorca-run-queue",
+  "model": "claude-sonnet-4-6",
+  "generatedAt": "2026-02-27T00:00:00.000Z",
+  "userStories": [
+    {
+      "id": "RQ-001",
+      "title": "Run Queue DB Table and API Routes",
+      "description": "Create a run_queue table to persist an ordered list of specs waiting to execute, and expose CRUD API routes for managing queue entries. The queue is per-workspace and stores everything needed to trigger a run (spec path, parallelism, worktrees flag).",
+      "acceptanceCriteria": [
+        "backend/src/db/index.ts pragma table_info check adds run_queue table if not present: id INTEGER PK, workspace_id INTEGER FK, spec_id TEXT, spec_path TEXT, parallelism INTEGER DEFAULT 1, auto_worktree INTEGER DEFAULT 0, position INTEGER, status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')), triggered_at TEXT nullable",
+        "GET /api/run-queue?workspaceId=N returns ordered array of queue entries (position ASC, status=pending only)",
+        "POST /api/run-queue body { workspaceId, specId, specPath, parallelism, autoWorktree } appends entry at end of queue (max position + 1)",
+        "DELETE /api/run-queue/:id removes entry from queue",
+        "PUT /api/run-queue/reorder body { orderedIds: number[] } updates positions of all listed entries in a single transaction",
+        "GET /api/run-queue/status returns { queueLength, nextSpec, runningRunId } for Hub display",
+        "Column/table additions are idempotent — safe on existing DB",
+        "Route file: backend/src/routes/run-queue.ts, mounted at /api/run-queue in server.ts"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "RQ-002",
+      "title": "Queue Consumer — Auto-Trigger on Run Finish",
+      "description": "After each pipeline run completes (status becomes completed or failed), the queue consumer checks if there is a pending entry for the same workspace and automatically triggers the next run. This is the core automation — no manual intervention needed to chain specs.",
+      "acceptanceCriteria": [
+        "backend/src/lib/queue-consumer.ts subscribes to SSE hub (same pattern as agent-hook-runner.ts) and listens for WAL run_finished events",
+        "On run_finished: query run_queue WHERE workspace_id=evt.workspaceId AND status='pending' ORDER BY position ASC LIMIT 1",
+        "If entry found: update entry status to 'triggering', call existing pipeline trigger logic (same code path as POST /api/pipeline/trigger) with stored parallelism and autoWorktree values, update triggered_at",
+        "If pipeline trigger succeeds: mark entry status='triggered' (keep for history)",
+        "If pipeline trigger fails (conflict, error): mark entry status='failed' with error message, continue to next entry after 5s delay",
+        "queue-consumer.ts initialized in backend/src/server.ts alongside other subscribers (agent-hook-runner, notification-dispatcher)",
+        "WAL event emitted on auto-trigger: { type: 'run_queued_trigger', specId, queuePosition, workspaceId }",
+        "Consumer is a no-op when queue is empty — zero overhead on normal runs"
+      ],
+      "dependsOn": ["RQ-001"],
+      "passes": false
+    },
+    {
+      "id": "RQ-003",
+      "title": "Pipeline Panel Queue UI",
+      "description": "Add a Queue section to the Pipeline panel showing pending specs in execution order. Users can add any approved spec to the queue, reorder via drag handles, and remove entries. The queue list updates in real time via the existing WAL SSE stream.",
+      "acceptanceCriteria": [
+        "Pipeline panel has a Queue section below the active run card, visible when queue has entries OR when no run is active",
+        "Queue list shows entries in position order: spec name, parallelism badge (if >1), worktree badge (if enabled), remove (X) button per row",
+        "Drag handle (GripVertical icon) on each row enables drag-to-reorder — calls PUT /api/run-queue/reorder on drop",
+        "Add to Queue button (+ icon) opens a spec picker modal listing all approved specs for the current workspace",
+        "Spec picker shows spec title, story count, last run date — single click adds to end of queue with default parallelism=1",
+        "Queue section shows empty state text: 'Queue is empty — add specs to run sequentially' with an Add button",
+        "When a queued run auto-triggers (WAL run_queued_trigger event): entry animates out and active run card updates",
+        "Queue count badge shown on Pipeline nav icon when queue is non-empty"
+      ],
+      "dependsOn": ["RQ-001"],
+      "passes": false
+    },
+    {
+      "id": "RQ-004",
+      "title": "Trigger Modal Queue Option and Hub Integration",
+      "description": "Surface queue controls at the point of decision — the pipeline trigger modal and the Hub panel. Users can choose Run now or Add to queue from the same trigger modal. Hub shows queue depth and next-up spec.",
+      "acceptanceCriteria": [
+        "Pipeline trigger modal has two action buttons: Run Now (primary, existing behavior) and Add to Queue (secondary)",
+        "Add to Queue captures the same parallelism and worktrees settings from the modal and POSTs to /api/run-queue",
+        "Add to Queue button shown with tooltip 'Will run after the active spec completes' — enabled regardless of whether a run is active (queue can be pre-loaded)",
+        "After Add to Queue: modal closes with toast: 'Added to queue — will run after current spec completes'",
+        "Hub panel shows queue status below the active run card: 'N specs queued — next: <spec name>' with a View Queue link to Pipeline panel",
+        "Hub queue section hidden when queue is empty",
+        "Queue status in Hub updates in real-time via existing WAL SSE stream (run_queued_trigger and run_finished events)"
+      ],
+      "dependsOn": ["RQ-002", "RQ-003"],
+      "passes": false
+    }
+  ]
+}

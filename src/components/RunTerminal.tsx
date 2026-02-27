@@ -85,6 +85,55 @@ const lightTheme = {
   brightWhite: '#1e1e1e',
 };
 
+// ─── Verbose text parser (claude --verbose output format) ────────────────────
+
+/** Strip ANSI escape codes */
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+}
+
+// Patterns ordered by priority — first match wins.
+// Claude --verbose emits lines like "  🔍 Glob: pattern" or "  📖 Read: /path"
+const VERBOSE_PATTERNS: [RegExp, SemanticStep['type']][] = [
+  [/(?:📖\s*)?Read(?:ing)?\s*[:\s]\s*(.+)/i,         'read'],
+  [/(?:📝\s*|✏️\s*|📄\s*)?Writ(?:e|ing)\s*[:\s]\s*(.+)/i, 'write'],
+  [/(?:✏️\s*|📝\s*)?Edit(?:ing)?\s*[:\s]\s*(.+)/i,   'edit'],
+  [/(?:🔧\s*)Bash\s*[:\s]\s*(.*)/i,                   'bash'],
+  [/(?:🔍\s*)Glob\s*[:\s]\s*(.*)/i,                   'search'],
+  [/(?:🔍\s*)Grep\s*[:\s]\s*(.*)/i,                   'search'],
+  [/(?:🔧\s*)Task\s*[:\s]\s*(.*)/i,                   'plan'],
+  [/ULTRATHINK|Let me think|Let me analyze/i,          'plan'],
+  [/(?:feat|fix|chore|test|refactor|style|docs|build)(?:\([^)]*\))?:/i, 'commit'],
+];
+
+/** Parse a single line from claude --verbose output into a SemanticStep, or null. */
+function parseVerboseLine(line: string): SemanticStep | null {
+  const clean = stripAnsi(line).trim();
+  if (!clean || clean.length < 4) return null;
+
+  for (const [pattern, type] of VERBOSE_PATTERNS) {
+    const m = clean.match(pattern);
+    if (m) {
+      // Build a short label from the captured group (path, command, etc.)
+      const captured = m[1]?.trim() ?? '';
+      let label: string;
+      switch (type) {
+        case 'read':    label = `Read ${captured}`.slice(0, 100); break;
+        case 'write':   label = `Write ${captured}`.slice(0, 100); break;
+        case 'edit':    label = `Edit ${captured}`.slice(0, 100); break;
+        case 'bash':    label = captured.slice(0, 100) || 'Bash'; break;
+        case 'search':  label = `${clean.match(/(?:Glob|Grep)/i)?.[0] ?? 'Search'} ${captured}`.slice(0, 100); break;
+        case 'plan':    label = captured ? `Task: ${captured.slice(0, 60)}` : 'Reasoning'; break;
+        case 'commit':  label = clean.slice(0, 80); break;
+        default:        label = clean.slice(0, 80);
+      }
+      return { type, label, ts: new Date().toISOString() };
+    }
+  }
+  return null;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function lsKey(runId: number): string {
@@ -214,16 +263,33 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/output`);
     esRef.current = es;
 
+    // Line buffer for semantic parsing across chunk boundaries
+    let lineBuffer = '';
+
     es.addEventListener('chunk', (e: MessageEvent) => {
       try {
         const binary = atob(e.data);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         term.write(bytes);
+
+        // Client-side semantic parsing from raw verbose output
+        const text = new TextDecoder().decode(bytes);
+        lineBuffer += text;
+        const parts = lineBuffer.split('\n');
+        lineBuffer = parts.pop() ?? '';
+        const newSteps: SemanticStep[] = [];
+        for (const part of parts) {
+          const step = parseVerboseLine(part);
+          if (step) newSteps.push(step);
+        }
+        if (newSteps.length > 0) {
+          setSteps(prev => [...prev, ...newSteps]);
+        }
       } catch { /* ignore malformed chunk */ }
     });
 
-    // Listen for structured semantic_step events from backend
+    // Also accept structured semantic_step events from backend if available
     es.addEventListener('semantic_step', (e: MessageEvent) => {
       try {
         const step: SemanticStep = JSON.parse(e.data);
