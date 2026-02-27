@@ -295,11 +295,18 @@ function buildPrompt(
     ? 'Read .opencode/skills/rorca/SKILL.md before starting work for project context and direction stack.\n'
     : '';
 
+  // Codex auto-reads AGENTS.md from workspace root — instruct it to apply direction context
+  const codexAgentsInstruction = agentType === 'codex'
+    && fs.existsSync(path.join(cwd, 'AGENTS.md'))
+    ? 'AGENTS.md in the workspace root contains the Rorca direction stack with project standards and context. Follow its guidance for all implementation decisions.\n'
+    : '';
+
   if (mode === 'journey') {
     const journeySkill = playbook ? readWorkspaceFile(cwd, playbook) : '';
     return [
       'You are simulating real users navigating the application. Read CLAUDE.md for architecture.',
       openCodeSkillInstruction,
+      codexAgentsInstruction,
       '', journeySkill, '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
@@ -313,6 +320,7 @@ function buildPrompt(
     return [
       'You are writing tests for this project. Read CLAUDE.md for architecture and gotchas.',
       openCodeSkillInstruction,
+      codexAgentsInstruction,
       '', playbookInstruction, '',
       '## Workflow',
       '1. Read the relevant AGENTS.md in each directory you\'ll modify',
@@ -337,6 +345,7 @@ function buildPrompt(
   return [
     'Follow this workflow for implementation:',
     openCodeSkillInstruction,
+    codexAgentsInstruction,
     '', skillContent, '', '---', '',
     `Your task (${story.id}):`,
     story.description, acSection,
