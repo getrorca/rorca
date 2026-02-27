@@ -547,15 +547,19 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     const [runsRes, specsRes, approvedRes, configRes] = await Promise.all([
       apiFetch<{ items: PipelineRun[] }>(
         `/api/pipeline/runs?workspaceId=${workspaceId}&limit=20`,
+        { silent: true },
       ).catch(() => ({ items: [] as PipelineRun[] })),
       apiFetch<{ items: SpecSummary[] }>(
         `/api/specs?workspaceId=${workspaceId}&status=pending`,
+        { silent: true },
       ).catch(() => ({ items: [] as SpecSummary[] })),
       apiFetch<{ items: SpecSummary[] }>(
         `/api/specs?workspaceId=${workspaceId}&status=approved`,
+        { silent: true },
       ).catch(() => ({ items: [] as SpecSummary[] })),
       apiFetch<{ config: { defaultParallelism?: number } }>(
         `/api/workspaces/${workspaceId}/pipeline-config`,
+        { silent: true },
       ).catch(() => ({ config: {} as { defaultParallelism?: number } })),
     ]);
 

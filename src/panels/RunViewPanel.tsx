@@ -31,9 +31,17 @@ interface PipelineRun {
   parallelism?: number;
 }
 
+interface StoryResultSeed {
+  story_id: string;
+  status: string; // 'pass' | 'fail' | 'skip' from DB
+  started_at: string | null;
+  finished_at: string | null;
+  elapsed_seconds: number | null;
+}
+
 interface RunApiResponse {
   run: PipelineRun;
-  stories: unknown[];
+  stories: StoryResultSeed[];
   specStories: { id: string; title: string }[];
   specModel?: string | null;
   tokenSummary?: { inputTokens: number; outputTokens: number };
@@ -316,6 +324,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [specModel, setSpecModel] = useState<string | null>(null);
   const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
   const [totalStories, setTotalStories] = useState(0);
+  // Seed from story_results on initial load so graph colors are correct for in-progress/historical runs
+  const [seedStatuses, setSeedStatuses] = useState<Map<string, DerivedStatus>>(new Map());
 
   // Sync tab selection to URL hash
   const handleTabChange = useCallback((tab: RunViewTab) => {
@@ -351,9 +361,10 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     return status;
   }, [run, walEvents]);
 
-  // Derive per-story live statuses from SSE events for the graph
+  // Derive per-story live statuses: seed from DB results, then overlay live SSE events
   const liveStatuses = useMemo(() => {
-    const map = new Map<string, DerivedStatus>();
+    // Start with DB-seeded statuses (covers stories that ran before we subscribed to SSE)
+    const map = new Map<string, DerivedStatus>(seedStatuses);
     for (const evt of walEvents) {
       if (!evt.story_id) continue;
       const id = evt.story_id;
@@ -376,7 +387,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       }
     }
     return map;
-  }, [walEvents]);
+  }, [walEvents, seedStatuses]);
 
   const fetchRun = useCallback(async () => {
     if (!workspaceId) return;
@@ -386,6 +397,19 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       if (data.specModel !== undefined) setSpecModel(data.specModel);
       if (data.tokenSummary) setTokenSummary(data.tokenSummary);
       if (data.specStories) setTotalStories(data.specStories.length);
+      // Seed graph colors from DB story results so nodes aren't all grey on load
+      if (data.stories?.length) {
+        const seed = new Map<string, DerivedStatus>();
+        const DB_STATUS: Record<string, DerivedStatus['status']> = {
+          pass: 'passed', fail: 'failed', skip: 'skipped',
+        };
+        for (const s of data.stories) {
+          const status = DB_STATUS[s.status] ?? 'running';
+          const elapsed = s.elapsed_seconds != null ? `${s.elapsed_seconds}s` : '';
+          seed.set(s.story_id, { storyId: s.story_id, status, startedAt: s.started_at, elapsed });
+        }
+        setSeedStatuses(seed);
+      }
     } catch {
       // run not found
     }
