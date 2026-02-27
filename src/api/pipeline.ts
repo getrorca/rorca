@@ -16,8 +16,16 @@ export interface TriggerParams extends ApiOptions {
   storyId?: string;
 }
 
+export interface CapabilityWarning {
+  storyId: string;
+  storyTitle: string;
+  engine: string;
+  missingTools: string[];
+  warnings: string[];
+}
+
 export type TriggerResponse =
-  | { ok: true; runId: number; worktreePath?: string; branchName?: string }
+  | { ok: true; runId: number; worktreePath?: string; branchName?: string; capabilityWarnings?: CapabilityWarning[]; capabilityMismatchMode?: string }
   | { dryRun: true; estimate: unknown }
   | { conflict: true; activeRunId: number };
 
@@ -32,6 +40,24 @@ export function triggerPipeline(p: TriggerParams): Promise<TriggerResponse> {
       dryRun: p.dryRun,
       storyId: p.storyId,
     }),
+    signal: p.signal,
+  });
+}
+
+// ─── Preflight ────────────────────────────────────────────────────────────────
+
+export interface PreflightResponse {
+  compatible: boolean;
+  mismatchMode: 'warn' | 'reroute' | 'block';
+  engine: string;
+  stories: CapabilityWarning[];
+}
+
+export function preflightCheck(p: { specPath: string; workspaceId: string; signal?: AbortSignal }): Promise<PreflightResponse> {
+  return apiFetch('/api/pipeline/preflight', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ specPath: p.specPath, workspaceId: p.workspaceId }),
     signal: p.signal,
   });
 }

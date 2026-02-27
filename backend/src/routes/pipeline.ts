@@ -22,6 +22,8 @@ import { agentConfig, type AgentType } from '../lib/config';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
+import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
+import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 
 /** Extract semantic steps from a raw text chunk (may contain multiple lines). */
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
@@ -360,6 +362,71 @@ interface StoryResultRow {
 
 /**
  * @swagger
+ * /api/pipeline/preflight:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Pre-flight capability check for spec stories vs engine
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [specPath, workspaceId]
+ *             properties:
+ *               specPath: { type: string }
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Capability report
+ */
+router.post('/preflight', async (req: Request, res: Response) => {
+  try {
+    const { specPath, workspaceId } = req.body;
+    if (!specPath || !workspaceId) {
+      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      return;
+    }
+
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+      { id: string; path: string } | undefined;
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const absSpecPath = path.join(workspace.path, specPath);
+    if (!fs.existsSync(absSpecPath)) {
+      res.status(404).json({ error: 'Spec file not found' });
+      return;
+    }
+
+    const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+    const stories = (specJson.userStories ?? []) as CapabilityStory[];
+    const resolvedAgent = agentConfig.agentType;
+    const report = checkSpec(stories, resolvedAgent);
+    const orchConfig = loadOrchestrationConfig(workspace.path);
+
+    res.json({
+      compatible: report.compatible,
+      mismatchMode: orchConfig.capabilityMismatch,
+      engine: resolvedAgent,
+      stories: report.stories.map(s => ({
+        storyId: s.storyId,
+        storyTitle: s.storyTitle,
+        engine: s.engine,
+        missingTools: s.result.missingTools,
+        warnings: s.result.warnings,
+      })),
+    });
+  } catch (error: any) {
+    console.error('[Pipeline] Preflight error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
  * /api/pipeline/trigger:
  *   post:
  *     tags: [Pipeline]
@@ -563,6 +630,50 @@ router.post('/trigger', async (req: Request, res: Response) => {
         }
       } catch {
         // Spec parse error — non-fatal for auth scanning, let the trigger proceed
+      }
+    }
+
+    // OC-031: Tool capability check — detect stories requiring tools the engine doesn't support
+    if (fs.existsSync(path.join(workspace.path, specPath))) {
+      try {
+        const specJsonForCap = JSON.parse(fs.readFileSync(path.join(workspace.path, specPath), 'utf8'));
+        const capStories = (specJsonForCap.userStories ?? []) as CapabilityStory[];
+        const capReport = checkSpec(capStories, resolvedAgentType);
+
+        if (!capReport.compatible) {
+          const orchConfig = loadOrchestrationConfig(workspace.path);
+          const mismatchMode: CapabilityMismatchMode = orchConfig.capabilityMismatch;
+
+          if (mismatchMode === 'block') {
+            const incompatible = capReport.stories.map(s => ({
+              storyId: s.storyId,
+              storyTitle: s.storyTitle,
+              engine: s.engine,
+              missingTools: s.result.missingTools,
+              warnings: s.result.warnings,
+            }));
+            res.status(400).json({
+              error: 'capability_mismatch',
+              message: 'Some stories require tools not supported by the assigned engine',
+              mode: mismatchMode,
+              incompatibleStories: incompatible,
+            });
+            return;
+          }
+
+          // For 'warn' and 'reroute', attach warnings to the response (handled at end)
+          // Store in locals for response augmentation
+          (req as any)._capabilityWarnings = capReport.stories.map(s => ({
+            storyId: s.storyId,
+            storyTitle: s.storyTitle,
+            engine: s.engine,
+            missingTools: s.result.missingTools,
+            warnings: s.result.warnings,
+          }));
+          (req as any)._capabilityMismatchMode = mismatchMode;
+        }
+      } catch {
+        // Non-fatal — let the trigger proceed
       }
     }
 
@@ -1080,9 +1191,13 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }, 30 * 60 * 1000);
     });
 
+    // OC-031: Include capability warnings in trigger response
+    const capWarnings = (req as any)._capabilityWarnings;
+    const capMode = (req as any)._capabilityMismatchMode;
     res.status(201).json({
       ok: true, runId, worktreePath, branchName,
       agentType: resolvedAgentType, agentModel: resolvedAgentModel,
+      ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
     });
   } catch (error: any) {
     console.error('[Pipeline] Trigger error:', error);
