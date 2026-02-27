@@ -8,6 +8,7 @@ import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import type { PanelId } from '../components/Sidebar';
+import AgentBadge from '../components/AgentBadge';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -19,6 +20,8 @@ interface PipelineRun {
   pid: number | null;
   started_at: string;
   finished_at: string | null;
+  agent_type?: string;
+  agent_model?: string | null;
 }
 
 interface SpecSummary {
@@ -299,10 +302,13 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
         </div>
       </div>
 
-      {/* Spec name */}
-      <p className="text-sm font-medium text-[var(--text)] truncate capitalize mb-1">
-        {specLabel(run.spec_path)}
-      </p>
+      {/* Spec name + agent badge */}
+      <div className="flex items-center gap-2 mb-1">
+        <p className="text-sm font-medium text-[var(--text)] truncate capitalize">
+          {specLabel(run.spec_path)}
+        </p>
+        <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+      </div>
 
       {/* Current story */}
       {currentStoryTitle && (
@@ -546,6 +552,7 @@ function RecentRunRow({ run, onNavigateToRun }: {
           <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${STATUS_BADGE_STYLES[run.status] || 'bg-gray-500/10 text-gray-400'}`}>
             {STATUS_BADGE_LABELS[run.status] || run.status}
           </span>
+          <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
           <span className="text-xs text-muted whitespace-nowrap">
             {formatTimestamp(run.started_at)}
           </span>
