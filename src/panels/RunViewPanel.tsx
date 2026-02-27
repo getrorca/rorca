@@ -479,6 +479,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
                     runId={run.id}
                     walEvents={walEvents}
                     onStoryClick={(storyId) => terminalRef.current?.scrollToStory(storyId)}
+                    parallelism={run.parallelism}
                   />
                 </div>
                 <RunMetadataPanel
