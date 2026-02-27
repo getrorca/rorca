@@ -831,3 +831,27 @@ Key decisions:
 - hasApiKey check reuses same PROVIDER_KEY_MAP + api_key_vault query as PUT /agent validation
 - onNavigate prop is optional on TriggerPopover — graceful degradation if caller doesn't pass it
 - Agent badge always shown in RunViewPanel (defaults to "Claude" for runs without agentType)
+
+## Story OC-011: Structured Event Renderer for OpenCode — DONE
+Files touched:
+- backend/src/lib/semantic-log-parser.ts (modified — extended SemanticStep with toolName, durationMs, isError, output; added tool_result parsing for OpenCode)
+- backend/src/routes/pipeline.ts (modified — emits run_meta SSE event with agentType at connection)
+- src/components/RunTerminal.tsx (rewritten — dual renderer: OpenCode vs Claude semantic view)
+
+What was built:
+- Backend emits `run_meta` SSE event immediately on connection with `{ agentType, agentModel }` — frontend detects agent type without extra API call
+- SemanticStep extended with optional fields: `toolName` (raw tool name for icon mapping), `durationMs` (tool execution duration), `isError` (error flag), `output` (tool stdout/stderr text up to 2KB)
+- OpenCode `tool_result` events now parsed into SemanticStep (previously returned null) — provides duration + output data for UI
+- OpenCode `completion` events detect non-zero exit codes and set `isError: true`
+- Frontend `RunTerminal.tsx` uses `agentType` from `run_meta` event to select renderer:
+  - `agent_type=opencode`: `OpenCodeStepRow` with tool-specific icons (FilePlus→write, Globe→webfetch/websearch, Terminal→bash, FileText→read, Pencil→edit, Search→glob/grep), tool name badges, Clock+duration display, collapsible bash output (command shown as `$ command`, output in scrollable pre block), error events in red with red background tint and red bordered output container
+  - `agent_type=claude`: `ClaudeStepRow` — identical to previous implementation, no changes
+- "OpenCode" badge shown in toolbar when agent_type is opencode/codex
+- Raw/Semantic toggle continues to work for both paths
+
+Key decisions:
+- Separate `OpenCodeStepRow` and `ClaudeStepRow` components rather than conditional branches inside one — cleaner separation, no risk of Claude path regression
+- `run_meta` SSE event emitted before any chunk/semantic_step events — frontend always knows agent type before first data arrives
+- `output` field capped at 2KB backend-side to avoid sending megabytes of tool output to the browser
+- Error detection: `isError` set on `completion` events with non-zero exit code AND on `error` events
+- Tool output container uses max-h-48 + overflow-y-auto to prevent long outputs from blowing up the semantic view
