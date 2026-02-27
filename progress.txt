@@ -1014,3 +1014,32 @@ Key decisions:
 - Router 'manual' checks story.modelTier property, falls through to auto if unset — no breaking change for existing specs
 - Atomic write: config.json written to .tmp then renamed to prevent partial writes
 - Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged from OC-020
+
+## OC-023: FinOps Dashboard — Real-Time Cost Observability — DONE
+Files touched:
+- backend/src/routes/analytics.ts (modified — added ~300 lines: 3 new endpoints)
+- src/components/FinOpsTab.tsx (new — ~340 lines)
+- src/panels/FinOpsDashboardPanel.tsx (new — ~500 lines)
+- src/panels/PipelineMonitorPanel.tsx (modified — added finops tab)
+- src/panels/RunViewPanel.tsx (modified — added finops tab)
+- src/components/Sidebar.tsx (modified — added finops PanelId)
+- src/App.tsx (modified — wired FinOpsDashboardPanel)
+
+What was built:
+- GET /api/analytics/finops/run/:runId — per-run FinOps data: model summary table, savings vs all-Opus baseline, per-story breakdown with tier/tokens/cost, escalation log from WAL events
+- GET /api/analytics/finops/historical — historical FinOps: daily cost trend, by-workspace breakdown, by-spec top 20, monthly aggregation, model distribution, projected monthly cost
+- GET /api/analytics/finops/export — CSV export with computed tier, opus_baseline_usd, savings_usd columns; supports run_id and workspace_id filters
+- FinOpsTab component: per-run tab shown in both PipelineMonitorPanel and RunViewPanel, shows savings banner ("vs All-Opus baseline: $X → Actual: $Y → Saved: $Z (N%)"), summary cards, model distribution bar, run summary table, expandable per-story breakdown, expandable escalation log with from/to tier and additional cost
+- FinOpsDashboardPanel: historical view accessible via sidebar Analytics > FinOps, Recharts LineChart (daily spend), PieChart (model distribution), BarChart (monthly cost), by-workspace and by-spec tables, date range selector (30d/90d/180d/365d), CSV export link
+- Claude subscription path: detects agentType='claude', hides dollar costs, shows token counts only with "Subscription — no per-token billing" notice
+- Tier classification via tierFromModel() helper: haiku (haiku/mini/flash), opus (opus/o3/pro), sonnet (default)
+- Opus baseline: ($15/1M input + $75/1M output) applied to all tokens regardless of actual model
+
+Key decisions:
+- Savings calculation: allOpusCost - actualCost, percentage = savings/allOpusCost × 100
+- Escalation log fetched from wal_events WHERE event_type = 'story_escalated', payload parsed for from_tier/to_tier
+- Historical endpoint detects allSubscription by checking if all runs used agent='claude'
+- Projected monthly = average daily cost × 30
+- Tier colors: haiku=emerald, sonnet=blue, opus=purple (consistent with complexity scorer UI)
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged
+- Pre-existing test infrastructure issue (db.close() TypeError in afterEach across all route tests) unchanged — not caused by OC-023
