@@ -686,3 +686,29 @@ Key decisions:
 - Version comparison strips prerelease suffix for major.minor.patch comparison
 - If binary exists but --version fails, treated as installed with unknown version (no exit, allows graceful degradation)
 - Health endpoint runs detectOpenCode() on each request (not cached) — reflects real-time binary state
+
+## Story OC-003: OpenCode Warm Server Lifecycle Manager — DONE
+Files touched:
+- backend/src/lib/opencode-server.ts (new — OpenCodeServer class with start/attach/stop/restart)
+- backend/src/db/index.ts (modified — idempotent opencode_server_pid column on pipeline_runs)
+- backend/src/routes/pipeline.ts (modified — PipelineRunRow type updated with opencode_server_pid)
+- backend/src/lib/__tests__/opencode-server.test.ts (new — 21 tests)
+
+What was built:
+- `OpenCodeServer` class manages a warm `opencode server` process lifecycle for reuse across stories via `--attach`
+- `start()`: spawns `opencode server --socket <path>` as detached process, polls for socket file (100ms interval), 10s timeout before giving up
+- `attach()`: returns socket path for `opencode run --attach <socket>` — throws if server not running
+- `stop()`: sends SIGTERM, waits 5s, escalates to SIGKILL, cleans up socket file
+- `restart()`: one restart attempt allowed per instance (per AC). Cleans up old socket, re-spawns
+- `isAlive()`: checks process via `process.kill(pid, 0)` — returns false if ESRCH
+- `onPidReady` callback fires immediately after spawn for DB persistence
+- Server PID stored via `opencode_server_pid` column on `pipeline_runs` table (nullable INTEGER, idempotent ALTER TABLE)
+- Logs server stdout/stderr to `os.tmpdir()/rorca-opencode-server-<timestamp>.log`
+- 21 tests covering: constructor (binary resolution, missing binary, initial state), start (spawn args, PID callback, premature exit, spawn error, timeout, idempotency), attach (running/not running), isAlive (no process, alive, dead), restart (success, single attempt only), stop (SIGTERM+cleanup, no-op, dead process), log path
+
+Key decisions:
+- Socket path uniqueness: includes `process.pid` and `Date.now()` to avoid collisions across concurrent runs
+- Used `setInterval(100ms)` polling for socket file readiness (simpler than stdout parsing, works across opencode versions)
+- Single restart attempt (not infinite retries) — if server crashes twice, the run should fail and notify user
+- `detached: true` + `child.unref()` so server survives backend restarts (same pattern as pipeline run-loop spawn)
+- Log fd passed via `stdio: ['ignore', logFd, logFd]` — same pattern as run-loop.ts (survives parent death, no SIGPIPE)
