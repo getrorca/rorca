@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 
@@ -28,16 +28,17 @@ interface RunStoryListProps {
   parallelism?: number;
 }
 
-type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'excluded' | 'skip' | 'retry';
+type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'excluded' | 'skip' | 'retry' | 'rate_limited';
 
 const STATUS_CONFIG: Record<DerivedStatus, { icon: typeof CheckCircle2; color: string; label: string; rowClass?: string }> = {
-  pending:  { icon: Circle,       color: 'text-gray-400',    label: 'Pending' },
-  running:  { icon: Loader2,      color: 'text-blue-500',    label: 'Running',  rowClass: 'border-l-2 border-l-blue-500 bg-blue-500/5' },
-  pass:     { icon: CheckCircle2, color: 'text-emerald-500', label: 'Passed' },
-  fail:     { icon: XCircle,      color: 'text-red-500',     label: 'Failed' },
-  excluded: { icon: SkipForward,  color: 'text-gray-400',    label: 'Excluded' },
-  skip:     { icon: SkipForward,  color: 'text-gray-400',    label: 'Skipped' },
-  retry:    { icon: Loader2,      color: 'text-yellow-500',  label: 'Retrying', rowClass: 'border-l-2 border-l-yellow-500 bg-yellow-500/5' },
+  pending:      { icon: Circle,       color: 'text-gray-400',    label: 'Pending' },
+  running:      { icon: Loader2,      color: 'text-blue-500',    label: 'Running',      rowClass: 'border-l-2 border-l-blue-500 bg-blue-500/5' },
+  pass:         { icon: CheckCircle2, color: 'text-emerald-500', label: 'Passed' },
+  fail:         { icon: XCircle,      color: 'text-red-500',     label: 'Failed' },
+  excluded:     { icon: SkipForward,  color: 'text-gray-400',    label: 'Excluded' },
+  skip:         { icon: SkipForward,  color: 'text-gray-400',    label: 'Skipped' },
+  retry:        { icon: Loader2,      color: 'text-yellow-500',  label: 'Retrying',     rowClass: 'border-l-2 border-l-yellow-500 bg-yellow-500/5' },
+  rate_limited: { icon: Clock,        color: 'text-amber-500',   label: 'Rate limited', rowClass: 'border-l-2 border-l-amber-500 bg-amber-500/5' },
 };
 
 function formatElapsed(seconds: number | null): string {
@@ -120,6 +121,8 @@ interface MergedStory {
   elapsed: number | null;
   retries: number | null;
   startedAt: number | null; // epoch ms for live timer
+  rateLimitRetryAt: number | null; // epoch ms when rate limit backoff expires
+  rateLimitAttempt: number | null;
 }
 
 // ─── Live elapsed timer ──────────────────────────────────────────────────────
@@ -132,6 +135,23 @@ function LiveElapsed({ startedAt }: { startedAt: number }) {
   }, []);
   const seconds = Math.round((now - startedAt) / 1000);
   return <span className="text-[10px] text-blue-400 shrink-0">{formatElapsed(seconds)}</span>;
+}
+
+// ─── Rate limit countdown timer ──────────────────────────────────────────────
+
+function RateLimitCountdown({ retryAt }: { retryAt: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const remainingMs = Math.max(0, retryAt - now);
+  const seconds = Math.ceil(remainingMs / 1000);
+  return (
+    <span className="text-[10px] text-amber-500 shrink-0">
+      Rate limited — retry in {seconds}s
+    </span>
+  );
 }
 
 // ─── Story row component ─────────────────────────────────────────────────────
@@ -162,6 +182,7 @@ function StoryRow({ story, onStoryClick, indented }: {
         story.status === 'running' ? 'bg-blue-500/10 text-blue-500' :
         story.status === 'pass' ? 'bg-emerald-500/10 text-emerald-500' :
         story.status === 'fail' ? 'bg-red-500/10 text-red-500' :
+        story.status === 'rate_limited' ? 'bg-amber-500/10 text-amber-500' :
         'bg-bg text-muted'
       }`}>
         {story.storyId}
@@ -171,12 +192,16 @@ function StoryRow({ story, onStoryClick, indented }: {
       }`}>
         {story.title}
       </span>
+      {/* Rate limit countdown */}
+      {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
+        <RateLimitCountdown retryAt={story.rateLimitRetryAt} />
+      )}
       {/* Live elapsed timer for running stories */}
       {story.status === 'running' && story.startedAt != null && (
         <LiveElapsed startedAt={story.startedAt} />
       )}
       {/* Static elapsed for completed stories */}
-      {story.status !== 'running' && story.elapsed != null && (
+      {story.status !== 'running' && story.status !== 'rate_limited' && story.elapsed != null && (
         <span className="text-[10px] text-muted shrink-0">
           {formatElapsed(story.elapsed)}
         </span>
@@ -184,6 +209,11 @@ function StoryRow({ story, onStoryClick, indented }: {
       {story.retries != null && story.retries > 0 && (
         <span className="text-[10px] text-yellow-500 shrink-0">
           R{story.retries}
+        </span>
+      )}
+      {story.rateLimitAttempt != null && story.rateLimitAttempt > 0 && (
+        <span className="text-[10px] text-amber-500 shrink-0">
+          RL{story.rateLimitAttempt}
         </span>
       )}
     </div>
@@ -279,6 +309,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
       e.event_type === 'story_passed' ||
       e.event_type === 'story_failed' ||
       e.event_type === 'story_skipped' ||
+      e.event_type === 'story_rate_limited' ||
       e.event_type === 'wave_merged'
     );
     if (relevant.length > 0) fetchData();
@@ -301,7 +332,8 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
       } else if (
         evt.event_type === 'story_passed' ||
         evt.event_type === 'story_failed' ||
-        evt.event_type === 'story_skipped'
+        evt.event_type === 'story_skipped' ||
+        evt.event_type === 'story_rate_limited'
       ) {
         running.delete(evt.story_id);
       }
@@ -315,6 +347,29 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
     for (const evt of walEvents) {
       if (evt.event_type === 'story_started' && evt.story_id) {
         map.set(evt.story_id, new Date(evt.ts).getTime());
+      }
+    }
+    return map;
+  }, [walEvents]);
+
+  // Track rate-limited stories: storyId -> { retryAt (epoch ms), attempt }
+  const rateLimitedStories = useMemo(() => {
+    const map = new Map<string, { retryAt: number; attempt: number }>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_rate_limited' && evt.payload) {
+        try {
+          const payload = JSON.parse(evt.payload);
+          const retryAfterMs = typeof payload.retryAfterMs === 'number' ? payload.retryAfterMs : 30000;
+          const attempt = typeof payload.attempt === 'number' ? payload.attempt : 1;
+          const eventTime = new Date(evt.ts).getTime();
+          map.set(evt.story_id, { retryAt: eventTime + retryAfterMs, attempt });
+        } catch { /* ignore */ }
+      } else if (evt.event_type === 'story_started') {
+        // Story re-started after backoff — no longer rate limited
+        map.delete(evt.story_id);
+      } else if (evt.event_type === 'story_passed' || evt.event_type === 'story_failed') {
+        map.delete(evt.story_id);
       }
     }
     return map;
@@ -354,6 +409,12 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
         else status = result.status as DerivedStatus;
       }
 
+      // SSE override: if this story is currently rate limited
+      const rlInfo = rateLimitedStories.get(spec.id);
+      if (rlInfo) {
+        status = 'rate_limited';
+      }
+
       // SSE override: if this story is currently running
       if (runningStoryIds.has(spec.id) && (!result || result.status === 'retry')) {
         status = 'running';
@@ -366,9 +427,11 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
         elapsed: result?.elapsed_seconds ?? null,
         retries: result?.retries ?? null,
         startedAt: storyStartTimes.get(spec.id) ?? null,
+        rateLimitRetryAt: rlInfo?.retryAt ?? null,
+        rateLimitAttempt: rlInfo?.attempt ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -395,7 +458,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
       for (const s of stories) {
         if (s.status === 'pass' || s.status === 'excluded') passed++;
         else if (s.status === 'fail' || s.status === 'skip') failed++;
-        else if (s.status === 'running' || s.status === 'retry') running++;
+        else if (s.status === 'running' || s.status === 'retry' || s.status === 'rate_limited') running++;
         else pending++;
       }
 
