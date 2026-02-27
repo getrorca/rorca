@@ -30,6 +30,13 @@ export interface OpenCodeEvent {
   [key: string]: unknown;
 }
 
+/** Token usage extracted from OpenCode events */
+export interface OpenCodeTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  model?: string;
+}
+
 /** Signals detected from the event stream */
 export interface StreamSignal {
   completed: boolean;
@@ -47,6 +54,8 @@ export interface ParsedEvent {
   terminal: string;
   /** Signal if this event indicates completion or failure */
   signal: StreamSignal;
+  /** Token usage from this event (null if not a usage-bearing event) */
+  tokenUsage: OpenCodeTokenUsage | null;
 }
 
 // ─── Tool Mapping ────────────────────────────────────────────────────────────
@@ -76,6 +85,43 @@ const ANSI = {
   gray: '\x1b[90m',
 };
 
+// ─── Token Usage Extraction ─────────────────────────────────────────────────
+
+/**
+ * Extract token usage from an OpenCode event, if present.
+ * OpenCode may report usage in completion events, dedicated usage events,
+ * or as nested fields (e.g. event.usage, event.stats, event.tokens).
+ */
+function extractTokenUsage(event: OpenCodeEvent): OpenCodeTokenUsage | null {
+  // Direct fields on the event
+  const usage = (event as Record<string, unknown>).usage as Record<string, unknown> | undefined;
+  const stats = (event as Record<string, unknown>).stats as Record<string, unknown> | undefined;
+  const tokens = (event as Record<string, unknown>).tokens as Record<string, unknown> | undefined;
+
+  const source = usage ?? stats ?? tokens;
+  if (source) {
+    const input = (source.input_tokens ?? source.inputTokens ?? source.prompt_tokens ?? 0) as number;
+    const output = (source.output_tokens ?? source.outputTokens ?? source.completion_tokens ?? 0) as number;
+    const model = (source.model ?? event.model ?? undefined) as string | undefined;
+    if (input > 0 || output > 0) {
+      return { inputTokens: input, outputTokens: output, model };
+    }
+  }
+
+  // Top-level input_tokens / output_tokens (some providers flatten these)
+  const topInput = (event as Record<string, unknown>).input_tokens as number | undefined;
+  const topOutput = (event as Record<string, unknown>).output_tokens as number | undefined;
+  if ((topInput && topInput > 0) || (topOutput && topOutput > 0)) {
+    return {
+      inputTokens: topInput ?? 0,
+      outputTokens: topOutput ?? 0,
+      model: (event as Record<string, unknown>).model as string | undefined,
+    };
+  }
+
+  return null;
+}
+
 // ─── Single Event Parser ─────────────────────────────────────────────────────
 
 /**
@@ -85,6 +131,7 @@ const ANSI = {
 export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
   const ts = event.timestamp ?? new Date().toISOString();
   const noSignal: StreamSignal = { completed: false, failed: false };
+  const tokenUsage = extractTokenUsage(event);
 
   // ── tool_call ──────────────────────────────────────────────────────
   if (event.type === 'tool_call') {
@@ -142,6 +189,7 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
       semantic: { type: stepType, label, detail, ts },
       terminal: terminalLine,
       signal: noSignal,
+      tokenUsage,
     };
   }
 
@@ -156,6 +204,7 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
       semantic: null, // tool_result is not a separate semantic step
       terminal: terminalLine,
       signal: noSignal,
+      tokenUsage,
     };
   }
 
@@ -163,7 +212,7 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
   if (event.type === 'assistant') {
     const content = (event.content ?? event.message ?? '') as string;
     if (content.length <= 10) {
-      return { raw: event, semantic: null, terminal: '', signal: noSignal };
+      return { raw: event, semantic: null, terminal: '', signal: noSignal, tokenUsage };
     }
 
     return {
@@ -176,6 +225,7 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
       },
       terminal: `${ANSI.dim}[Planning]${ANSI.reset} ${content.slice(0, 120)}`,
       signal: noSignal,
+      tokenUsage,
     };
   }
 
@@ -201,6 +251,18 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
         failed: isFailed,
         error: isFailed ? `Exit code: ${exitCode}` : undefined,
       },
+      tokenUsage,
+    };
+  }
+
+  // ── usage (dedicated token usage event) ────────────────────────────
+  if (event.type === 'usage') {
+    return {
+      raw: event,
+      semantic: null,
+      terminal: '',
+      signal: noSignal,
+      tokenUsage,
     };
   }
 
@@ -222,6 +284,7 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
         failed: true,
         error: errMsg,
       },
+      tokenUsage,
     };
   }
 
@@ -233,6 +296,7 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
       semantic: null,
       terminal: `${ANSI.gray}[Status]${ANSI.reset} ${status}`,
       signal: noSignal,
+      tokenUsage,
     };
   }
 
@@ -242,6 +306,7 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
     semantic: null,
     terminal: '',
     signal: noSignal,
+    tokenUsage,
   };
 }
 
@@ -256,6 +321,9 @@ export function parseOpenCodeEvent(event: OpenCodeEvent): ParsedEvent {
  */
 export class OpenCodeStreamParser {
   private buffer = '';
+  private _totalInputTokens = 0;
+  private _totalOutputTokens = 0;
+  private _lastModel: string | undefined;
 
   /**
    * Feed a raw chunk from the OpenCode process stdout.
@@ -272,7 +340,10 @@ export class OpenCodeStreamParser {
       this.buffer = this.buffer.slice(newlineIdx + 1);
 
       const parsed = this.parseLine(line);
-      if (parsed) results.push(parsed);
+      if (parsed) {
+        results.push(parsed);
+        this.accumulateTokens(parsed);
+      }
     }
 
     return results;
@@ -300,6 +371,9 @@ export class OpenCodeStreamParser {
    */
   reset(): void {
     this.buffer = '';
+    this._totalInputTokens = 0;
+    this._totalOutputTokens = 0;
+    this._lastModel = undefined;
   }
 
   /** Count of malformed lines since last valid JSON — for recovery diagnostics */
@@ -308,6 +382,26 @@ export class OpenCodeStreamParser {
   /** Get the count of malformed lines encountered */
   getMalformedCount(): number {
     return this.malformedCount;
+  }
+
+  /** Get accumulated token usage across all parsed events */
+  getTokenUsage(): OpenCodeTokenUsage {
+    return {
+      inputTokens: this._totalInputTokens,
+      outputTokens: this._totalOutputTokens,
+      model: this._lastModel,
+    };
+  }
+
+  /** Accumulate token usage from a parsed event */
+  private accumulateTokens(event: ParsedEvent): void {
+    if (event.tokenUsage) {
+      this._totalInputTokens += event.tokenUsage.inputTokens;
+      this._totalOutputTokens += event.tokenUsage.outputTokens;
+      if (event.tokenUsage.model) {
+        this._lastModel = event.tokenUsage.model;
+      }
+    }
   }
 
   /**
@@ -348,6 +442,7 @@ export class OpenCodeStreamParser {
           },
           terminal: `${ANSI.yellow}${ANSI.bold}[Rate Limited]${ANSI.reset} ${ANSI.yellow}${waitSec ? `Waiting ${waitSec}s...` : trimmed.slice(0, 120)}${ANSI.reset}`,
           signal: { completed: false, failed: false, error: `rate_limit:${waitSec ?? ''}` },
+          tokenUsage: null,
         };
       }
 
@@ -363,6 +458,7 @@ export class OpenCodeStreamParser {
           semantic: null,
           terminal: trimmed,
           signal: { completed: false, failed: false },
+          tokenUsage: null,
         };
       }
       return null;
@@ -403,4 +499,24 @@ export function aggregateSignals(events: ParsedEvent[]): StreamSignal {
   }
 
   return { completed: completed && !failed, failed, error: lastError };
+}
+
+/**
+ * Aggregate token usage from a list of parsed events.
+ * Sums all token counts and takes the last non-null model.
+ */
+export function aggregateTokenUsage(events: ParsedEvent[]): OpenCodeTokenUsage {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let model: string | undefined;
+
+  for (const event of events) {
+    if (event.tokenUsage) {
+      inputTokens += event.tokenUsage.inputTokens;
+      outputTokens += event.tokenUsage.outputTokens;
+      if (event.tokenUsage.model) model = event.tokenUsage.model;
+    }
+  }
+
+  return { inputTokens, outputTokens, model };
 }

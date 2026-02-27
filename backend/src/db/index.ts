@@ -132,6 +132,15 @@ export function runMigrations() {
     db.exec('ALTER TABLE story_results ADD COLUMN output_tokens INTEGER');
   }
 
+  // OC-022: Add model_used and cost_usd columns to story_results (idempotent)
+  const srColsOC022 = db.pragma('table_info(story_results)') as { name: string }[];
+  if (!srColsOC022.some(c => c.name === 'model_used')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN model_used TEXT');
+  }
+  if (!srColsOC022.some(c => c.name === 'cost_usd')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN cost_usd REAL');
+  }
+
   // V2-083: Add 'excluded' to story_results status CHECK (idempotent)
   const storyResultsSqlExcl = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_results'`
@@ -433,6 +442,18 @@ export function runMigrations() {
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'claude'");
     // Backfill from existing 'agent' column so historical rows stay consistent
     db.exec("UPDATE pipeline_runs SET agent_type = agent WHERE agent IS NOT NULL AND agent != ''");
+  }
+
+  // OC-022: Add total_input_tokens, total_output_tokens, total_cost_usd to pipeline_runs (idempotent)
+  const runColsOC022 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsOC022.some(c => c.name === 'total_input_tokens')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_input_tokens INTEGER');
+  }
+  if (!runColsOC022.some(c => c.name === 'total_output_tokens')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_output_tokens INTEGER');
+  }
+  if (!runColsOC022.some(c => c.name === 'total_cost_usd')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_cost_usd REAL');
   }
 
   // OC-009: agent_config table for persisting execution engine settings (hot-reloadable)
