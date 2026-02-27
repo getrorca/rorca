@@ -157,7 +157,15 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone }
 
   return (
     <div className="space-y-3">
-      <div className="rounded-lg border border-border bg-panel/50 overflow-hidden">
+      <div
+        className="rounded-lg border border-border bg-panel/50 overflow-hidden"
+        role="progressbar"
+        aria-valuenow={currentIdx + 1}
+        aria-valuemin={1}
+        aria-valuemax={STAGES.length}
+        aria-valuetext={`${STAGES[currentIdx]?.label ?? 'Processing'} (step ${currentIdx + 1} of ${STAGES.length})`}
+        aria-label="Spec generation progress"
+      >
         {STAGES.map((stage, idx) => {
           const isCompleted = idx < currentIdx || (apiDone && !error);
           const isCurrent = idx === currentIdx && !apiDone;

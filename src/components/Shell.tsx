@@ -28,6 +28,8 @@ function WorkspaceSelector() {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
+        aria-label="Select workspace"
+        aria-expanded={open}
         className="flex items-center gap-2 px-3 py-1.5 rounded text-sm bg-bg border border-border hover:border-accent transition-colors min-h-[44px] sm:min-h-0"
       >
         <span className="truncate max-w-[80px] sm:max-w-[160px]">
@@ -243,6 +245,8 @@ function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
         onClick={() => setOpen(!open)}
         className="flex items-center justify-center w-11 h-11 sm:w-auto sm:h-auto sm:px-2 sm:py-1.5 rounded text-sm text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
         title={user.email}
+        aria-label="User menu"
+        aria-expanded={open}
       >
         <span className="w-7 h-7 sm:w-6 sm:h-6 rounded-full bg-accent/20 text-accent text-xs font-medium flex items-center justify-center">
           {user.displayName.charAt(0).toUpperCase()}
