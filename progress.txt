@@ -642,3 +642,25 @@ Key decisions:
 - Badge on Hub icon (not a separate Pipeline icon) since pipeline maps to hub nav in minimal sidebar
 - Queue count polled every 10s in App.tsx (lightweight — single SQL COUNT query)
 - SpecPickerModal adds with default parallelism=1, autoWorktree=false — user can configure later
+
+## Story RQ-004: Queue Controls in Trigger Modal + Hub Queue Status — DONE
+Files touched:
+- src/components/TriggerPopover.tsx (modified — added onAddToQueue callback, queueLoading prop, secondary "Add to Queue" button with tooltip)
+- src/panels/HubPanel.tsx (modified — queue status section below active run, ReadyToRunCard gains Add to Queue, SSE queue refresh, useGlobalToast)
+
+What was built:
+- TriggerPopover now has two action buttons: "Run Now" (primary, existing behavior) and "Add to Queue" (secondary, border-only style)
+- "Add to Queue" button has tooltip "Will run after the active spec completes" — always enabled (queue can be pre-loaded)
+- ReadyToRunCard passes parallelism + autoWorktree settings to POST /api/run-queue when adding to queue
+- After Add to Queue: modal closes, toast shows "Added to queue — will run after current spec completes"
+- Hub panel shows queue status below active run card: "N specs queued — next: <spec name>" with "View Queue" link to Pipeline panel
+- Queue status section hidden when queue is empty
+- Queue status updates in real-time via SSE (run_queued_trigger and run_finished events trigger refetch)
+- Queue status also polled every 30s alongside existing data
+
+Key decisions:
+- Queue button is optional via onAddToQueue prop — TriggerPopover remains backward-compatible for callers that don't pass it
+- Used useGlobalToast (not local toast) for consistency with rest of app
+- Queue status fetched via /api/run-queue/status endpoint (already built in RQ-001) — returns queueLength + nextSpec
+- SSE handler uses separate QUEUE_EVENTS set to trigger queue refetch independently of run list refetch
+- ListPlus icon from lucide-react for queue section header
