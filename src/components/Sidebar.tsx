@@ -155,6 +155,8 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
           <button
             key={item.id}
             title={item.label}
+            aria-label={item.label}
+            aria-current={isActive ? 'page' : undefined}
             onClick={() => handleClick(item)}
             className={`relative flex items-center justify-center rounded-lg transition-colors ${
               withLabels
@@ -198,6 +200,7 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
               <span className="font-mono font-bold text-accent text-sm tracking-tight select-none">rorca</span>
               <button
                 onClick={onMobileClose}
+                aria-label="Close navigation menu"
                 className="w-11 h-11 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors"
               >
                 <X size={18} />

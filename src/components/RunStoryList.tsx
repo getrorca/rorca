@@ -236,7 +236,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory }: {
       >
         {/* Expand chevron for failed stories */}
         {isFailed ? (
-          <button onClick={handleToggleExpand} className="shrink-0 p-0 bg-transparent border-none">
+          <button onClick={handleToggleExpand} className="shrink-0 p-0 bg-transparent border-none" aria-label={expanded ? 'Collapse failure details' : 'Expand failure details'} aria-expanded={expanded}>
             {expanded ? (
               <ChevronDown size={12} className="text-red-400" />
             ) : (
@@ -254,7 +254,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory }: {
           story.status === 'fail' ? 'bg-red-500/10 text-red-500' :
           story.status === 'rate_limited' ? 'bg-amber-500/10 text-amber-500' :
           'bg-bg text-muted'
-        }`}>
+        }`} aria-live="polite">
           {story.storyId}
         </span>
         <span className={`text-xs truncate flex-1 ${
@@ -367,6 +367,8 @@ function WaveHeader({ waveIndex, storyCount, waveStatus, expanded, onToggle, cou
   return (
     <button
       onClick={onToggle}
+      aria-expanded={expanded}
+      aria-label={`Wave ${waveIndex}: ${storyCount} ${storyCount === 1 ? 'story' : 'stories'}, ${style.label}`}
       className={`w-full flex items-center gap-2 px-3 py-2 border-b border-border bg-panel/80 hover:bg-panel transition-all ${
         isActive ? 'animate-[wave-pulse_2s_ease-in-out_1]' : ''
       }`}
@@ -385,7 +387,7 @@ function WaveHeader({ waveIndex, storyCount, waveStatus, expanded, onToggle, cou
       </span>
 
       {/* Status chip */}
-      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${style.bg} ${style.text}`}>
+      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${style.bg} ${style.text}`} aria-live="polite">
         {isMerging && <GitMerge size={10} className="animate-spin" />}
         {isActive && <Loader2 size={10} className="animate-spin" />}
         {style.label}
