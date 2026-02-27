@@ -318,6 +318,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE api_key_vault ADD COLUMN base_url TEXT');
   }
 
+  // EQ-009: Add parallelism column to pipeline_runs (integer, default 1)
+  const runColsEQ009 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsEQ009.some(c => c.name === 'parallelism')) {
+    db.exec("ALTER TABLE pipeline_runs ADD COLUMN parallelism INTEGER NOT NULL DEFAULT 1");
+  }
+
   // EQ-007: Add author_name column to story_comments for guest reviewers (idempotent)
   const scCols = db.pragma('table_info(story_comments)') as { name: string }[];
   if (!scCols.some(c => c.name === 'author_name')) {
