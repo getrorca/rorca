@@ -246,6 +246,17 @@ export function validateOrchestrationConfig(orch: unknown): OrchestrationValidat
     }
   }
 
+  // fallbackEngine
+  if (o.fallbackEngine !== undefined && o.fallbackEngine !== null) {
+    if (typeof o.fallbackEngine !== 'string' || !VALID_AGENT_TYPES.includes(o.fallbackEngine as AgentType)) {
+      errors.push({
+        field: 'orchestration.fallbackEngine',
+        message: `Must be one of: ${VALID_AGENT_TYPES.join(', ')}, or null to disable`,
+        value: o.fallbackEngine,
+      });
+    }
+  }
+
   return errors;
 }
 

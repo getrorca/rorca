@@ -52,6 +52,12 @@ interface EscalationInfo {
   attemptNumber: number;
 }
 
+interface RerouteInfo {
+  fromEngine: string;
+  toEngine: string;
+  reason: string;
+}
+
 interface DerivedStory {
   storyId: string;
   status: StoryStatus;
@@ -62,6 +68,8 @@ interface DerivedStory {
   inputTokens: number | null;
   outputTokens: number | null;
   escalation: EscalationInfo | null;
+  agent?: string;
+  reroute?: RerouteInfo | null;
 }
 
 const CONTEXT_WINDOW = 200_000; // 200k token context window
@@ -238,6 +246,17 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           existing.status = 'running';
         }
         break;
+      case 'story_rerouted':
+        if (existing) {
+          existing.reroute = {
+            fromEngine: payload.fromEngine || '?',
+            toEngine: payload.toEngine || '?',
+            reason: payload.reason || 'rate_limit',
+          };
+          // Story restarts on the fallback engine — mark as running
+          existing.status = 'running';
+        }
+        break;
       case 'story_skipped':
         storyMap.set(e.story_id, {
           storyId: e.story_id,
@@ -266,6 +285,7 @@ export default function PipelineMonitorPanel() {
   const [selectedRunDetail, setSelectedRunDetail] = useState<{
     run: PipelineRun;
     stories: StoryResult[];
+    specStories?: Array<{ id: string; title: string; agent?: string; reroute?: RerouteInfo }>;
   } | null>(null);
   const [expandedStory, setExpandedStory] = useState<string | null>(null);
   const [logLines, setLogLines] = useState<string[]>([]);
@@ -341,7 +361,7 @@ export default function PipelineMonitorPanel() {
       setSelectedRunDetail(null);
       return;
     }
-    apiFetch<{ run: PipelineRun; stories: StoryResult[] }>(`/api/pipeline/runs/${selectedRunId}`)
+    apiFetch<{ run: PipelineRun; stories: StoryResult[]; specStories?: Array<{ id: string; title: string; agent?: string; reroute?: RerouteInfo }> }>(`/api/pipeline/runs/${selectedRunId}`)
       .then(setSelectedRunDetail)
       .catch(console.error);
   }, [selectedRunId]);
@@ -372,19 +392,35 @@ export default function PipelineMonitorPanel() {
     return map;
   }, [specStories]);
 
+  // Build reroute + agent lookup from run detail's specStories
+  const rerouteMap = useMemo(() => {
+    const map = new Map<string, { agent?: string; reroute?: RerouteInfo }>();
+    for (const s of selectedRunDetail?.specStories ?? []) {
+      if (s.agent || s.reroute) {
+        map.set(s.id, { agent: s.agent, reroute: s.reroute });
+      }
+    }
+    return map;
+  }, [selectedRunDetail]);
+
   // Derive live stories from SSE events, merged with DB story results
   const derivedStories = useMemo(() => {
-    const fromDB: DerivedStory[] = (selectedRunDetail?.stories || []).map((s) => ({
-      storyId: s.story_id,
-      status: s.status === 'pass' ? 'pass' : s.status === 'fail' ? 'fail' : s.status === 'retry' ? 'retry' : s.status === 'skip' ? 'skipped' : 'pending' as StoryStatus,
-      title: s.story_id,
-      elapsed: elapsedTime(s.started_at, s.finished_at),
-      startedAt: s.started_at,
-      priority: priorityMap.get(s.story_id) ?? 3,
-      inputTokens: s.input_tokens,
-      outputTokens: s.output_tokens,
-      escalation: null,
-    }));
+    const fromDB: DerivedStory[] = (selectedRunDetail?.stories || []).map((s) => {
+      const extra = rerouteMap.get(s.story_id);
+      return {
+        storyId: s.story_id,
+        status: s.status === 'pass' ? 'pass' : s.status === 'fail' ? 'fail' : s.status === 'retry' ? 'retry' : s.status === 'skip' ? 'skipped' : 'pending' as StoryStatus,
+        title: s.story_id,
+        elapsed: elapsedTime(s.started_at, s.finished_at),
+        startedAt: s.started_at,
+        priority: priorityMap.get(s.story_id) ?? 3,
+        inputTokens: s.input_tokens,
+        outputTokens: s.output_tokens,
+        escalation: null,
+        agent: extra?.agent,
+        reroute: extra?.reroute ?? null,
+      };
+    });
 
     const fromSSE = deriveStoriesFromEvents(sseEvents);
 
@@ -1095,6 +1131,14 @@ export default function PipelineMonitorPanel() {
                                 title={`Escalated from ${story.escalation.fromTier} to ${story.escalation.toTier} (attempt ${story.escalation.attemptNumber})`}
                               >
                                 Escalated: {story.escalation.fromTier.charAt(0).toUpperCase() + story.escalation.fromTier.slice(1)}&rarr;{story.escalation.toTier.charAt(0).toUpperCase() + story.escalation.toTier.slice(1)}
+                              </span>
+                            )}
+                            {story.reroute && (
+                              <span
+                                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30 flex-shrink-0"
+                                title={`Rerouted from ${story.reroute.fromEngine} to ${story.reroute.toEngine} (${story.reroute.reason})`}
+                              >
+                                Rerouted: {story.reroute.fromEngine.charAt(0).toUpperCase() + story.reroute.fromEngine.slice(1)}&rarr;{story.reroute.toEngine.charAt(0).toUpperCase() + story.reroute.toEngine.slice(1)} ({story.reroute.reason.replace('_', ' ')})
                               </span>
                             )}
                             <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
