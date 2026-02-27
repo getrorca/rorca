@@ -201,6 +201,9 @@ interface PipelineRunRow {
   agent_model: string | null;
   parallelism: number;
   opencode_server_pid: number | null;
+  total_input_tokens: number | null;
+  total_output_tokens: number | null;
+  total_cost_usd: number | null;
 }
 
 interface StoryResultRow {
@@ -215,6 +218,8 @@ interface StoryResultRow {
   elapsed_seconds: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  model_used: string | null;
+  cost_usd: number | null;
 }
 
 /**
@@ -1520,11 +1525,23 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       // Spec file missing or malformed — specStories stays empty
     }
 
-    // Aggregate token counts from story_results
+    // Aggregate token counts and cost from story_results
     const tokenRow = db.prepare(
-      `SELECT COALESCE(SUM(input_tokens), 0) AS total_input, COALESCE(SUM(output_tokens), 0) AS total_output
+      `SELECT COALESCE(SUM(input_tokens), 0) AS total_input,
+              COALESCE(SUM(output_tokens), 0) AS total_output,
+              COALESCE(SUM(cost_usd), 0) AS total_cost
        FROM story_results WHERE run_id = ?`
-    ).get(runId) as { total_input: number; total_output: number };
+    ).get(runId) as { total_input: number; total_output: number; total_cost: number };
+
+    // Per-story token breakdown
+    const storyTokenBreakdown = stories.map((s) => ({
+      storyId: s.story_id,
+      status: s.status,
+      inputTokens: s.input_tokens ?? 0,
+      outputTokens: s.output_tokens ?? 0,
+      modelUsed: s.model_used ?? null,
+      costUsd: s.cost_usd ?? 0,
+    }));
 
     res.json({
       run,
@@ -1533,7 +1550,12 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       specModel,
       agentType: run.agent_type || run.agent || 'claude',
       agentModel: run.agent_model || null,
-      tokenSummary: { inputTokens: tokenRow.total_input, outputTokens: tokenRow.total_output },
+      tokenSummary: {
+        inputTokens: tokenRow.total_input,
+        outputTokens: tokenRow.total_output,
+        totalCostUsd: tokenRow.total_cost,
+      },
+      storyTokenBreakdown,
     });
   } catch (error: any) {
     console.error('[Pipeline] Get run error:', error);
@@ -2453,9 +2475,13 @@ function recordTokenUsage(runId: number, storyId: string, inputTokens: number, o
 
 router.post('/story-result', (req: Request, res: Response) => {
   try {
-    const { runId, storyId, status, worktreePath, worktreeBranch } = req.body as {
+    const {
+      runId, storyId, status, worktreePath, worktreeBranch,
+      inputTokens, outputTokens, modelUsed, costUsd,
+    } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string;
+      inputTokens?: number; outputTokens?: number; modelUsed?: string; costUsd?: number;
     };
 
     if (!runId || !storyId || !status) {
@@ -2469,9 +2495,19 @@ router.post('/story-result', (req: Request, res: Response) => {
     }
 
     db.prepare(
-      `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch)
-       VALUES (?, ?, ?, datetime('now'), ?, ?)`
-    ).run(runId, storyId, status, worktreePath ?? null, worktreeBranch ?? null);
+      `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd)
+       VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)`
+    ).run(
+      runId, storyId, status,
+      worktreePath ?? null, worktreeBranch ?? null,
+      inputTokens ?? null, outputTokens ?? null,
+      modelUsed ?? null, costUsd ?? null,
+    );
+
+    // Also record into token_usage analytics table if tokens are present
+    if ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0)) {
+      recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed);
+    }
 
     res.status(201).json({ ok: true });
   } catch (error: any) {
