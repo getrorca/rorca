@@ -1,8 +1,9 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight,
   Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
   BarChart3, HeartPulse, ScrollText, Calculator, Settings, Settings2,
-  Plus, Hammer, X,
+  Plus, Hammer, X, Menu,
 } from 'lucide-react';
 
 export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'settings' | 'workspace-settings' | 'spec-review';
@@ -140,12 +141,40 @@ interface SidebarProps {
   queueCount?: number;
 }
 
+const DRAWER_STORAGE_KEY = 'rorca:nav-drawer-open';
+
 export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileClose, queueCount = 0 }: SidebarProps) {
   const activeNav = resolveActiveNav(activePanel);
+  const [drawerOpen, setDrawerOpen] = useState(() => {
+    try { return localStorage.getItem(DRAWER_STORAGE_KEY) === '1'; } catch { return false; }
+  });
+  const drawerRef = useRef<HTMLDivElement>(null);
+
+  // Persist drawer state
+  useEffect(() => {
+    try { localStorage.setItem(DRAWER_STORAGE_KEY, drawerOpen ? '1' : '0'); } catch { /* noop */ }
+  }, [drawerOpen]);
+
+  // Close drawer on Escape
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDrawerOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [drawerOpen]);
+
+  const toggleDrawer = useCallback(() => setDrawerOpen((v) => !v), []);
 
   const handleClick = (item: MinimalNavItem) => {
     onNavigate(item.panel);
     onMobileClose?.();
+  };
+
+  const handleDrawerNavigate = (panelId: PanelId) => {
+    onNavigate(panelId);
+    setDrawerOpen(false);
   };
 
   const renderIcons = () => (
@@ -179,12 +208,85 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
     </div>
   );
 
+  const renderMenuButton = (extraClass?: string) => (
+    <button
+      title="Navigation"
+      onClick={toggleDrawer}
+      className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors ${
+        drawerOpen
+          ? 'text-accent bg-accent/10'
+          : 'text-muted hover:text-[var(--text)] hover:bg-bg'
+      } ${extraClass ?? ''}`}
+    >
+      <Menu size={20} strokeWidth={1.5} />
+    </button>
+  );
+
   return (
     <>
       {/* Desktop — always-visible 48px icon rail */}
-      <nav className="hidden md:flex flex-col items-center w-12 bg-panel border-r border-border shrink-0">
+      <nav className="hidden md:flex flex-col items-center justify-between w-12 bg-panel border-r border-border shrink-0">
         {renderIcons()}
+        <div className="flex flex-col items-center pb-3 mt-2">
+          {renderMenuButton()}
+        </div>
       </nav>
+
+      {/* Desktop nav drawer — overlays content, positioned to right of icon rail */}
+      {drawerOpen && (
+        <>
+          <div
+            className="hidden md:block fixed inset-0 bg-black/30 z-40"
+            style={{ left: '48px' }}
+            onClick={() => setDrawerOpen(false)}
+          />
+          <div
+            ref={drawerRef}
+            className="hidden md:flex fixed top-12 bottom-0 flex-col w-[260px] bg-panel border-r border-border z-50 animate-navDrawerIn overflow-y-auto"
+            style={{ left: '48px' }}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+              <span className="text-sm font-semibold text-[var(--text)]">Navigation</span>
+              <button
+                onClick={() => setDrawerOpen(false)}
+                className="w-6 h-6 flex items-center justify-center rounded text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {/* Sections */}
+            <div className="flex-1 overflow-y-auto py-2">
+              {NAV_SECTIONS.map((section) => (
+                <div key={section.id} className="mb-1">
+                  <div className="px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                    {section.label}
+                  </div>
+                  {section.items.map((item) => {
+                    const isActive = item.id === activePanel;
+                    const Icon = item.icon;
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => handleDrawerNavigate(item.id)}
+                        className={`w-full flex items-center gap-2.5 px-4 py-1.5 text-sm transition-colors ${
+                          isActive
+                            ? 'text-accent bg-accent/10'
+                            : 'text-[var(--text)] hover:bg-bg'
+                        }`}
+                      >
+                        <Icon size={16} strokeWidth={1.5} />
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Mobile drawer */}
       {mobileOpen && (
