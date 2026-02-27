@@ -1496,6 +1496,7 @@ router.get('/archive', (req: Request, res: Response) => {
     const createdBefore = req.query.createdBefore as string | undefined;
     const tagsParam = req.query.tags as string | undefined;
     const filterTags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const agentTypeFilter = (req.query.agentType as string) || '';
 
     if (!workspaceId) {
       res.status(400).json({ error: 'Missing required query param: workspaceId' });
@@ -1635,6 +1636,14 @@ router.get('/archive', (req: Request, res: Response) => {
     // Apply tag filter (must match ALL specified tags)
     if (filterTags.length > 0) {
       filtered = filtered.filter(s => filterTags.every(t => s.tags.includes(t)));
+    }
+
+    // OC-012: Apply agent type filter
+    if (agentTypeFilter && agentTypeFilter !== 'all') {
+      filtered = filtered.filter(s => {
+        const specAgent = (s as any).agentType || 'claude';
+        return specAgent === agentTypeFilter;
+      });
     }
 
     // If searching, generate snippets and rank by relevance
