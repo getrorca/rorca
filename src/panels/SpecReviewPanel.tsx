@@ -10,6 +10,8 @@ import {
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { ReadinessRing } from '../components/ReadinessRing';
+import { SpecConfirmDialog } from '../components/SpecConfirmDialog';
+import { useHotkeys, modLabel } from '../hooks/useHotkeys';
 import type { PanelId } from '../components/Sidebar';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -235,7 +237,15 @@ export default function SpecReviewPanel({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
+  const [dialogMode, setDialogMode] = useState<'approve' | 'reject' | 'post-approve' | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const mod = modLabel();
+
+  // Keyboard shortcuts: ⌘↩ approve, ⌘⌫ reject
+  useHotkeys(useMemo(() => [
+    { key: 'mod+enter', handler: () => { if (!dialogMode && spec) setDialogMode('approve'); } },
+    { key: 'mod+backspace', handler: () => { if (!dialogMode && spec) setDialogMode('reject'); } },
+  ], [dialogMode, spec]));
 
   // Fetch spec detail
   useEffect(() => {
@@ -296,7 +306,7 @@ export default function SpecReviewPanel({
       } else if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
         setFocusedIndex((prev) => Math.max(prev - 1, 0));
-      } else if (e.key === 'Enter') {
+      } else if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
         if (stories[focusedIndex]) {
           toggleExpand(stories[focusedIndex].id);
@@ -320,8 +330,8 @@ export default function SpecReviewPanel({
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [focusedIndex, stories]);
 
-  // Actions
-  const handleApprove = async () => {
+  // Actions — called from confirmation dialog
+  const handleConfirmApprove = async () => {
     if (!workspaceId) return;
     setActionLoading('approve');
     try {
@@ -330,26 +340,27 @@ export default function SpecReviewPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspaceId }),
       });
-      onBack();
+      setDialogMode('post-approve');
     } catch {
-      // stay on page
+      setDialogMode(null);
     } finally {
       setActionLoading(null);
     }
   };
 
-  const handleReject = async () => {
+  const handleConfirmReject = async (reason?: string) => {
     if (!workspaceId) return;
     setActionLoading('reject');
     try {
       await apiFetch(`/api/specs/${specId}/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
+        body: JSON.stringify({ workspaceId, reason: reason || undefined }),
       });
+      setDialogMode(null);
       onBack();
     } catch {
-      // stay on page
+      setDialogMode(null);
     } finally {
       setActionLoading(null);
     }
@@ -475,24 +486,46 @@ export default function SpecReviewPanel({
           </div>
           <div className="flex items-center gap-2 ml-auto">
             <button
-              onClick={handleApprove}
+              onClick={() => setDialogMode('approve')}
               disabled={actionLoading !== null}
               className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
             >
               <CheckCircle2 size={14} />
               Approve
+              <kbd className="ml-1 px-1 py-0.5 text-[10px] rounded bg-white/20 font-mono">
+                {mod}↵
+              </kbd>
             </button>
             <button
-              onClick={handleReject}
+              onClick={() => setDialogMode('reject')}
               disabled={actionLoading !== null}
               className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-error border border-error/40 hover:bg-error/10 transition-colors disabled:opacity-50"
             >
               <XCircle size={14} />
               Reject
+              <kbd className="ml-1 px-1 py-0.5 text-[10px] rounded bg-error/15 font-mono">
+                {mod}⌫
+              </kbd>
             </button>
           </div>
         </div>
       </div>
+
+      {/* ─── Confirmation dialogs ─────────────────────────────────────── */}
+      {dialogMode && (
+        <SpecConfirmDialog
+          mode={dialogMode}
+          specName={specTitle}
+          loading={actionLoading !== null}
+          onConfirm={(reason) => {
+            if (dialogMode === 'approve') handleConfirmApprove();
+            else if (dialogMode === 'reject') handleConfirmReject(reason);
+          }}
+          onCancel={() => setDialogMode(null)}
+          onGoToForge={() => { setDialogMode(null); onNavigate('forge'); }}
+          onTriggerRun={() => { setDialogMode(null); onNavigate('pipeline'); }}
+        />
+      )}
     </div>
   );
 }

@@ -46,6 +46,7 @@ function matchesHotkey(e: KeyboardEvent, parsed: ReturnType<typeof parseHotkey>)
   const eventKey = e.key.toLowerCase();
   if (parsed.key === 'escape') return eventKey === 'escape';
   if (parsed.key === 'enter') return eventKey === 'enter';
+  if (parsed.key === 'backspace') return eventKey === 'backspace';
   if (parsed.key === '/') return eventKey === '/';
   if (parsed.key === '?') return eventKey === '?';
   return eventKey === parsed.key;
