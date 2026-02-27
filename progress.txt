@@ -573,3 +573,24 @@ Key decisions:
 - Pipeline trigger tests use bash stub script (exit 0) rather than mocking spawn — tests actual spawn path
 - Analytics tests seed token_usage + story_results directly in DB — faster and more deterministic than going through pipeline
 - Pre-existing test failures (notifications, teams, direction, auth, specs) verified unrelated to V2-098
+
+## Story UI-023: Forge Screen Inline Spec Preview — DONE
+Files touched:
+- src/components/SpecForgePreview.tsx (new)
+- src/panels/SpecForgePanelPage.tsx (modified)
+
+What was built:
+- New SpecForgePreview component renders inline below the brief area after generation completes
+- Story cards with ID badge, title, description excerpt, and AC count badge
+- Expandable cards reveal full acceptance criteria and dependencies
+- Summary banner: "Generated N stories" with spec name
+- "Approve & Queue" button calls POST /api/specs/:specId/approve and shows success toast via useGlobalToast
+- "Regenerate" button re-runs handleGenerate with same form state
+- "Edit Brief" button clears generatedSpec state and focuses the brief textarea
+- Generate button hidden when preview is showing (replaced by action buttons)
+
+Key decisions:
+- Kept SpecForgeOutput (right pane) untouched — the inline preview augments the form pane, not replacing existing tabs
+- Used useGlobalToast context instead of local useToast hook for consistency with rest of app
+- Edit Brief clears generatedSpec and auto-focuses the textarea after 50ms RAF delay
+- Story cards use line-clamp-1 for description truncation in collapsed state
