@@ -137,6 +137,30 @@ function SectionHeader({ icon: Icon, label, badge, noMargin }: { icon: typeof Pl
   );
 }
 
+// ─── Section Footer (Updated timestamp) ─────────────────────────────────────
+
+function UpdatedFooter({ lastUpdated }: { lastUpdated: Date | null }) {
+  const [, tick] = useState(0);
+
+  // Re-render every 15s so relative time stays fresh
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!lastUpdated) return null;
+
+  const secsAgo = Math.floor((Date.now() - lastUpdated.getTime()) / 1000);
+  const label =
+    secsAgo < 10 ? 'Updated just now' :
+    secsAgo < 60 ? `Updated ${secsAgo}s ago` :
+    `Updated ${Math.floor(secsAgo / 60)}m ago`;
+
+  return (
+    <p className="mt-2 text-[11px] text-muted/60 text-right select-none">{label}</p>
+  );
+}
+
 // ─── Border colors by run status ────────────────────────────────────────────
 
 const BORDER_LEFT: Record<string, string> = {
@@ -440,6 +464,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [pendingSpecs, setPendingSpecs] = useState<SpecSummary[]>([]);
   const [recentRuns, setRecentRuns] = useState<PipelineRun[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
@@ -485,13 +510,31 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
       setTotalStories(0);
     }
 
+    setLastUpdated(new Date());
     setLoaded(true);
   }, [workspaceId]);
 
+  // Poll every 30s, pause when tab is backgrounded
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 10_000);
-    return () => clearInterval(interval);
+
+    let interval = setInterval(fetchData, 30_000);
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        clearInterval(interval);
+      } else {
+        // Refetch immediately when tab regains focus, then resume 30s polling
+        fetchData();
+        interval = setInterval(fetchData, 30_000);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [fetchData]);
 
   // SSE: re-fetch immediately when a run completes, fails, or is cancelled
@@ -625,6 +668,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                 />
               ))}
             </div>
+            <UpdatedFooter lastUpdated={lastUpdated} />
           </section>
         )}
 
@@ -645,6 +689,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                 <RecentRunRow key={run.id} run={run} onNavigateToRun={onNavigateToRun} />
               ))}
             </div>
+            <UpdatedFooter lastUpdated={lastUpdated} />
           </section>
         )}
       </div>
