@@ -1,7 +1,10 @@
 import { Router, Request, Response } from 'express';
-import { agentType, agentModel, AgentType, VALID_AGENT_TYPES } from '../lib/config';
+import { agentType, agentModel, AgentType, VALID_AGENT_TYPES, validateOrchestrationConfig } from '../lib/config';
+import { loadOrchestrationConfig, clearConfigCache } from '../lib/complexity-scorer';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { db } from '../db';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const router = Router();
 
@@ -366,6 +369,134 @@ router.put('/agent', async (req: Request, res: Response) => {
   res.json({
     agentType: currentAgentType,
     agentModel: currentAgentModel,
+  });
+});
+
+// ─── Orchestration Config (OC-021) ────────────────────────────────────────────
+
+function resolveWorkspacePath(workspaceId: string | undefined): string | null {
+  if (!workspaceId) return null;
+  try {
+    const row = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined;
+    return row?.path ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @swagger
+ * /api/config/orchestration:
+ *   get:
+ *     summary: Get the full orchestration config for a workspace (merged with defaults)
+ *     tags: [Config]
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: false
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Orchestration config with defaults applied
+ */
+router.get('/orchestration', (req: Request, res: Response) => {
+  const workspaceId = req.query.workspaceId as string | undefined;
+  const cwd = resolveWorkspacePath(workspaceId);
+  const config = loadOrchestrationConfig(cwd ?? undefined);
+
+  // Return threshold ranges for frontend display
+  res.json({
+    router: config.router,
+    thresholds: {
+      haiku: [0, config.thresholds.haiku],
+      sonnet: [config.thresholds.haiku + 1, config.thresholds.sonnet],
+      opus: [config.thresholds.sonnet + 1, 100],
+    },
+    cascades: config.cascades,
+    taskCascades: config.taskCascades,
+    escalation: config.escalation,
+    tokenBudgetPerStory: config.tokenBudgetPerStory,
+  });
+});
+
+/**
+ * @swagger
+ * /api/config/orchestration:
+ *   put:
+ *     summary: Update orchestration config in .rorca/config.json
+ *     tags: [Config]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *               orchestration:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Config saved
+ *       400:
+ *         description: Validation errors
+ *       404:
+ *         description: Workspace not found
+ */
+router.put('/orchestration', (req: Request, res: Response) => {
+  const { workspaceId, orchestration } = req.body;
+
+  const cwd = resolveWorkspacePath(workspaceId);
+  if (!cwd) {
+    res.status(404).json({ error: 'Workspace not found. Select a workspace first.' });
+    return;
+  }
+
+  // Validate
+  const validationErrors = validateOrchestrationConfig(orchestration);
+  if (validationErrors.length > 0) {
+    res.status(400).json({ error: 'Orchestration config validation failed', details: validationErrors });
+    return;
+  }
+
+  // Read existing config.json or start fresh
+  const configDir = path.join(cwd, '.rorca');
+  const configPath = path.join(configDir, 'config.json');
+  let existing: Record<string, unknown> = {};
+  try {
+    if (fs.existsSync(configPath)) {
+      existing = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    }
+  } catch {
+    existing = {};
+  }
+
+  // Merge orchestration section
+  existing.orchestration = orchestration;
+
+  // Write atomically
+  fs.mkdirSync(configDir, { recursive: true });
+  const tmpPath = configPath + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(existing, null, 2) + '\n');
+  fs.renameSync(tmpPath, configPath);
+
+  // Clear cached config so next loadOrchestrationConfig reads fresh
+  clearConfigCache();
+
+  // Return merged config (with defaults applied)
+  const merged = loadOrchestrationConfig(cwd);
+  res.json({
+    router: merged.router,
+    thresholds: {
+      haiku: [0, merged.thresholds.haiku],
+      sonnet: [merged.thresholds.haiku + 1, merged.thresholds.sonnet],
+      opus: [merged.thresholds.sonnet + 1, 100],
+    },
+    cascades: merged.cascades,
+    taskCascades: merged.taskCascades,
+    escalation: merged.escalation,
+    tokenBudgetPerStory: merged.tokenBudgetPerStory,
   });
 });
 

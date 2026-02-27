@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
@@ -268,6 +268,9 @@ function ProvidersAndDisplaySection() {
       <DisplaySection />
       <div className="border-t border-border pt-6">
         <ExecutionEngineSection />
+      </div>
+      <div className="border-t border-border pt-6">
+        <ModelRoutingSection />
       </div>
       <div className="border-t border-border pt-6">
         <ProvidersSection />
@@ -1895,6 +1898,411 @@ function ShortcutsSection() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ─── Model Routing Section (OC-021) ──────────────────────────────────────────
+
+type RouterMode = 'auto' | 'fixed' | 'manual';
+type TaskType = 'echolocation' | 'planning' | 'coding' | 'lintFix' | 'testing' | 'documentation';
+
+interface OrchestrationState {
+  router: RouterMode;
+  thresholds: { haiku: [number, number]; sonnet: [number, number]; opus: [number, number] };
+  taskCascades: Record<TaskType, string>;
+  escalation: { enabled: boolean; maxRetriesOnTier: number; chain: string[]; escalateTo: Record<string, string | null> };
+  tokenBudgetPerStory: number;
+}
+
+const TASK_TYPE_LABELS: Record<TaskType, { label: string; description: string }> = {
+  echolocation: { label: 'Echolocation', description: 'Codebase exploration & context gathering' },
+  planning: { label: 'Planning', description: 'Implementation strategy & architecture decisions' },
+  coding: { label: 'Coding', description: 'Code implementation' },
+  lintFix: { label: 'Lint Fix', description: 'Lint & typecheck error resolution' },
+  testing: { label: 'Testing', description: 'Test writing & validation' },
+  documentation: { label: 'Documentation', description: 'Documentation generation' },
+};
+
+const ROUTER_MODE_INFO: Record<RouterMode, { label: string; description: string }> = {
+  auto: { label: 'Auto (Complexity Scorer)', description: 'Automatically assigns model tier based on story complexity signals' },
+  fixed: { label: 'Fixed', description: 'Uses the spec model for all stories — no tier assignment' },
+  manual: { label: 'Manual', description: 'Per-story modelTier overrides in spec JSON — falls back to auto if unset' },
+};
+
+function ModelRoutingSection() {
+  const { workspaceId } = useWorkspace();
+  const [config, setConfig] = useState<OrchestrationState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    const url = workspaceId
+      ? `/api/config/orchestration?workspaceId=${workspaceId}`
+      : '/api/config/orchestration';
+    apiFetch<OrchestrationState>(url)
+      .then(data => {
+        setConfig(data);
+        setDirty(false);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [workspaceId]);
+
+  const update = <K extends keyof OrchestrationState>(key: K, value: OrchestrationState[K]) => {
+    setConfig(prev => prev ? { ...prev, [key]: value } : prev);
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    if (!config || !workspaceId) return;
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      // Convert threshold ranges to the format backend expects
+      const payload = {
+        router: config.router,
+        thresholds: {
+          haiku: config.thresholds.haiku,
+          sonnet: config.thresholds.sonnet,
+          opus: config.thresholds.opus,
+        },
+        taskCascades: config.taskCascades,
+        escalation: config.escalation,
+        tokenBudgetPerStory: config.tokenBudgetPerStory,
+      };
+      const result = await apiFetch<OrchestrationState>('/api/config/orchestration', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, orchestration: payload }),
+      });
+      setConfig(result);
+      setDirty(false);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to save';
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading model routing config...</div>;
+  }
+
+  if (!config) return null;
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+          <SlidersHorizontal size={16} className="text-accent" />
+          Model Routing
+        </h2>
+        <p className="text-xs text-muted mt-0.5">
+          Configure how stories are assigned to model tiers and which models handle each task type.
+        </p>
+      </div>
+
+      {/* Router mode */}
+      <div>
+        <label className="block text-xs text-muted mb-2">Router Mode</label>
+        <div className="grid grid-cols-3 gap-2">
+          {(['auto', 'fixed', 'manual'] as RouterMode[]).map(mode => {
+            const info = ROUTER_MODE_INFO[mode];
+            return (
+              <button
+                key={mode}
+                onClick={() => update('router', mode)}
+                className={`border rounded-lg p-3 text-left transition-all ${
+                  config.router === mode
+                    ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
+                    : 'border-border bg-bg hover:border-accent/30'
+                }`}
+              >
+                <span className="text-xs font-medium text-[var(--text)]">{info.label}</span>
+                <p className="text-[10px] text-muted mt-0.5 leading-tight">{info.description}</p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Three-tier threshold slider (only shown in auto mode) */}
+      {config.router === 'auto' && (
+        <div>
+          <label className="block text-xs text-muted mb-2">Complexity Thresholds</label>
+          <ThresholdSlider
+            haikuMax={config.thresholds.haiku[1]}
+            sonnetMax={config.thresholds.sonnet[1]}
+            onChange={(haikuMax, sonnetMax) => {
+              update('thresholds', {
+                haiku: [0, haikuMax],
+                sonnet: [haikuMax + 1, sonnetMax],
+                opus: [sonnetMax + 1, 100],
+              });
+            }}
+          />
+        </div>
+      )}
+
+      {/* Task cascades */}
+      <div>
+        <label className="block text-xs text-muted mb-2">Task Type Model Assignments</label>
+        <div className="border border-border rounded overflow-hidden">
+          {(Object.entries(TASK_TYPE_LABELS) as [TaskType, { label: string; description: string }][]).map(([taskType, info]) => (
+            <div key={taskType} className="flex items-center justify-between px-4 py-2.5 border-b border-border last:border-b-0">
+              <div className="min-w-0">
+                <span className="text-sm text-[var(--text)]">{info.label}</span>
+                <p className="text-[10px] text-muted">{info.description}</p>
+              </div>
+              <input
+                type="text"
+                value={config.taskCascades[taskType] ?? ''}
+                onChange={e => {
+                  const newCascades = { ...config.taskCascades, [taskType]: e.target.value };
+                  update('taskCascades', newCascades);
+                }}
+                className="w-64 px-2 py-1.5 text-xs bg-bg border border-border rounded focus:border-accent outline-none font-mono"
+                placeholder="model-id"
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Escalation */}
+      <div>
+        <label className="block text-xs text-muted mb-2">Escalation</label>
+        <div className="border border-border rounded p-4 bg-bg space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-sm text-[var(--text)]">Auto-escalate on failure</span>
+              <p className="text-[10px] text-muted">Upgrade to a higher tier when a story fails repeatedly</p>
+            </div>
+            <ToggleSwitch
+              checked={config.escalation.enabled}
+              onChange={() => update('escalation', { ...config.escalation, enabled: !config.escalation.enabled })}
+            />
+          </div>
+          {config.escalation.enabled && (
+            <div className="flex items-center gap-4 pt-1">
+              <div className="flex-1">
+                <label className="block text-[10px] text-muted mb-1">Max retries per tier</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={config.escalation.maxRetriesOnTier}
+                  onChange={e => update('escalation', { ...config.escalation, maxRetriesOnTier: parseInt(e.target.value) || 0 })}
+                  className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="block text-[10px] text-muted mb-1">Chain</label>
+                <div className="flex items-center gap-1 text-xs text-muted">
+                  <span className="px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">Haiku</span>
+                  <span>&rarr;</span>
+                  <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">Sonnet</span>
+                  <span>&rarr;</span>
+                  <span className="px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">Opus</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Token budget */}
+      <div>
+        <label className="block text-xs text-muted mb-2">Token Budget Per Story</label>
+        <div className="flex items-center gap-3">
+          <input
+            type="number"
+            min={1000}
+            step={5000}
+            value={config.tokenBudgetPerStory}
+            onChange={e => update('tokenBudgetPerStory', parseInt(e.target.value) || 50000)}
+            className="w-40 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+          />
+          <span className="text-xs text-muted">input tokens before warning (default: 50,000)</span>
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+          <XCircle size={14} />
+          {error}
+        </div>
+      )}
+
+      {/* No workspace warning */}
+      {!workspaceId && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-amber-500/10 border border-amber-500/20 text-amber-400">
+          <AlertTriangle size={14} />
+          Select a workspace to save routing configuration to .rorca/config.json
+        </div>
+      )}
+
+      {/* Save */}
+      <button
+        onClick={handleSave}
+        disabled={saving || !dirty || !workspaceId}
+        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+      >
+        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
+        {saved ? 'Saved' : 'Save Routing Configuration'}
+      </button>
+    </div>
+  );
+}
+
+// ─── Three-Tier Threshold Slider ──────────────────────────────────────────────
+
+function ThresholdSlider({
+  haikuMax,
+  sonnetMax,
+  onChange,
+}: {
+  haikuMax: number;
+  sonnetMax: number;
+  onChange: (haikuMax: number, sonnetMax: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef<'haiku' | 'sonnet' | null>(null);
+
+  const getPositionFromEvent = (e: MouseEvent | React.MouseEvent): number => {
+    if (!trackRef.current) return 0;
+    const rect = trackRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    return Math.round((x / rect.width) * 100);
+  };
+
+  const handleMouseDown = (handle: 'haiku' | 'sonnet') => (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = handle;
+
+    const onMove = (ev: MouseEvent) => {
+      const pos = getPositionFromEvent(ev);
+      if (dragging.current === 'haiku') {
+        const clamped = Math.max(1, Math.min(pos, sonnetMax - 1));
+        onChange(clamped, sonnetMax);
+      } else if (dragging.current === 'sonnet') {
+        const clamped = Math.max(haikuMax + 1, Math.min(pos, 99));
+        onChange(haikuMax, clamped);
+      }
+    };
+
+    const onUp = () => {
+      dragging.current = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  return (
+    <div className="space-y-2">
+      {/* Slider track */}
+      <div
+        ref={trackRef}
+        className="relative h-8 rounded-lg overflow-hidden cursor-pointer select-none"
+        style={{ background: 'var(--bg)' }}
+      >
+        {/* Haiku region */}
+        <div
+          className="absolute top-0 bottom-0 bg-green-500/20 border-r-2 border-green-500/60"
+          style={{ left: 0, width: `${haikuMax}%` }}
+        />
+        {/* Sonnet region */}
+        <div
+          className="absolute top-0 bottom-0 bg-blue-500/20 border-r-2 border-blue-500/60"
+          style={{ left: `${haikuMax}%`, width: `${sonnetMax - haikuMax}%` }}
+        />
+        {/* Opus region */}
+        <div
+          className="absolute top-0 bottom-0 bg-purple-500/20"
+          style={{ left: `${sonnetMax}%`, right: 0 }}
+        />
+
+        {/* Haiku handle */}
+        <div
+          className="absolute top-0 bottom-0 w-3 cursor-ew-resize z-10 group"
+          style={{ left: `calc(${haikuMax}% - 6px)` }}
+          onMouseDown={handleMouseDown('haiku')}
+        >
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-6 rounded-sm bg-green-400 border border-green-500 shadow-sm group-hover:bg-green-300 transition-colors" />
+        </div>
+
+        {/* Sonnet handle */}
+        <div
+          className="absolute top-0 bottom-0 w-3 cursor-ew-resize z-10 group"
+          style={{ left: `calc(${sonnetMax}% - 6px)` }}
+          onMouseDown={handleMouseDown('sonnet')}
+        >
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-6 rounded-sm bg-blue-400 border border-blue-500 shadow-sm group-hover:bg-blue-300 transition-colors" />
+        </div>
+
+        {/* Labels inside regions */}
+        <div className="absolute inset-0 flex items-center pointer-events-none text-[10px] font-medium">
+          <span className="text-green-400 flex-none text-center" style={{ width: `${haikuMax}%` }}>
+            Haiku (0–{haikuMax})
+          </span>
+          <span className="text-blue-400 flex-none text-center" style={{ width: `${sonnetMax - haikuMax}%` }}>
+            Sonnet ({haikuMax + 1}–{sonnetMax})
+          </span>
+          <span className="text-purple-400 flex-1 text-center">
+            Opus ({sonnetMax + 1}–100)
+          </span>
+        </div>
+      </div>
+
+      {/* Numeric inputs for precise adjustment */}
+      <div className="flex items-center gap-4 text-xs">
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-green-400" />
+          <span className="text-muted">Haiku max:</span>
+          <input
+            type="number"
+            min={1}
+            max={sonnetMax - 1}
+            value={haikuMax}
+            onChange={e => {
+              const v = parseInt(e.target.value) || 1;
+              onChange(Math.max(1, Math.min(v, sonnetMax - 1)), sonnetMax);
+            }}
+            className="w-14 px-1.5 py-0.5 bg-bg border border-border rounded text-center focus:border-accent outline-none"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-blue-400" />
+          <span className="text-muted">Sonnet max:</span>
+          <input
+            type="number"
+            min={haikuMax + 1}
+            max={99}
+            value={sonnetMax}
+            onChange={e => {
+              const v = parseInt(e.target.value) || (haikuMax + 1);
+              onChange(haikuMax, Math.max(haikuMax + 1, Math.min(v, 99)));
+            }}
+            className="w-14 px-1.5 py-0.5 bg-bg border border-border rounded text-center focus:border-accent outline-none"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-purple-400" />
+          <span className="text-muted">Opus: {sonnetMax + 1}–100</span>
+        </div>
+      </div>
     </div>
   );
 }
