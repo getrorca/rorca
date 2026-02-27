@@ -19,6 +19,7 @@ import ResetPasswordPage from './components/ResetPasswordPage';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { onApiFetchError } from './lib/apiFetch';
+import PublicReviewPage from './pages/PublicReviewPage';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
 import ReviewQueuePanel from './panels/ReviewQueuePanel';
 import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
@@ -52,6 +53,12 @@ function AuthGate() {
     if (window.location.pathname === '/reset-password') return 'reset-password';
     return 'login';
   });
+
+  // EQ-007: Public review page — rendered outside auth gate
+  const reviewMatch = window.location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
+  if (reviewMatch) {
+    return <PublicReviewPage token={reviewMatch[1]} />;
+  }
 
   if (loading) {
     return (

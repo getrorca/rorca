@@ -4397,9 +4397,10 @@ router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) =
     const comments = db.prepare(`
       SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
              sc.created_at, sc.resolved_at,
-             u.display_name, u.avatar_url
+             COALESCE(u.display_name, sc.author_name, 'Guest') as display_name,
+             u.avatar_url
       FROM story_comments sc
-      JOIN users u ON u.id = sc.user_id
+      LEFT JOIN users u ON u.id = sc.user_id
       WHERE sc.spec_id = ? AND sc.story_id = ?
       ORDER BY sc.created_at ASC
     `).all(specId, storyId) as StoryCommentRow[];
@@ -4444,9 +4445,10 @@ router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) 
     const comment = db.prepare(`
       SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
              sc.created_at, sc.resolved_at,
-             u.display_name, u.avatar_url
+             COALESCE(u.display_name, sc.author_name, 'Guest') as display_name,
+             u.avatar_url
       FROM story_comments sc
-      JOIN users u ON u.id = sc.user_id
+      LEFT JOIN users u ON u.id = sc.user_id
       WHERE sc.id = ?
     `).get(id) as StoryCommentRow;
 
@@ -4524,9 +4526,10 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Reque
     const comment = db.prepare(`
       SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
              sc.created_at, sc.resolved_at,
-             u.display_name, u.avatar_url
+             COALESCE(u.display_name, sc.author_name, 'Guest') as display_name,
+             u.avatar_url
       FROM story_comments sc
-      JOIN users u ON u.id = sc.user_id
+      LEFT JOIN users u ON u.id = sc.user_id
       WHERE sc.id = ?
     `).get(commentId) as StoryCommentRow;
 
