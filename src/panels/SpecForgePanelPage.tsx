@@ -6,6 +6,7 @@ import BatchForge from './BatchForge';
 import DirectionPreviewSidebar from '../components/DirectionPreviewSidebar';
 import SpecForgeProgress from '../components/SpecForgeProgress';
 import SpecForgePreview from '../components/SpecForgePreview';
+import TemplatePickerModal from '../components/TemplatePickerModal';
 
 import type { PanelId } from '../components/Sidebar';
 
@@ -130,6 +131,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [apiDone, setApiDone] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
   const validateSpecName = useCallback((value: string) => {
     if (!value) {
@@ -494,9 +496,17 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
             {/* Section 4: Spec Brief (main input) */}
             <section>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted mb-4">
-                Spec Brief
-              </h3>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
+                  Spec Brief
+                </h3>
+                <button
+                  onClick={() => setShowTemplatePicker(true)}
+                  className="text-xs text-accent hover:text-accent-hover transition-colors"
+                >
+                  Start from template &rarr;
+                </button>
+              </div>
               <Field label="What does this spec build?">
                 <textarea
                   ref={briefRef}

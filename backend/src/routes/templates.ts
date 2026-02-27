@@ -22,6 +22,7 @@ interface TemplateRow {
   team_id: string | null;
   author_id: string | null;
   usage_count: number;
+  last_used_at: string | null;
 }
 
 interface RatingRow {
@@ -75,12 +76,15 @@ function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
     authorName,
     authorEmail,
     usageCount: row.usage_count,
+    lastUsedAt: row.last_used_at,
     avgRating,
     ratingCount,
   };
 
+  // Always include brief (needed for template picker in Forge)
+  result.brief = row.brief;
+
   if (includeBody) {
-    result.brief = row.brief;
     result.storyStructure = JSON.parse(row.story_structure);
     result.directionLayers = row.direction_layers ? JSON.parse(row.direction_layers) : null;
   }
@@ -324,6 +328,26 @@ router.post('/:id/rate', (req: Request, res: Response) => {
     res.json({ avgRating, ratingCount, userRating: rating });
   } catch (error: any) {
     console.error('[Templates] Rate error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /:id/use — Increment usage count + update last_used_at ──────────────
+
+router.post('/:id/use', (req: Request, res: Response) => {
+  try {
+    const result = db.prepare(
+      `UPDATE templates SET usage_count = usage_count + 1, last_used_at = datetime('now') WHERE id = ?`
+    ).run(req.params.id);
+
+    if (result.changes === 0) {
+      res.status(404).json({ error: 'Template not found' });
+      return;
+    }
+
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('[Templates] Use error:', error);
     res.status(500).json({ error: error.message });
   }
 });
