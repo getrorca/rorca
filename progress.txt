@@ -929,3 +929,35 @@ Key decisions:
 - URL code blocks get ExternalLink icon instead of Copy
 - Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged — verified not introduced by OC-017
 - Pre-existing test failures (39 suites) unchanged — same pattern as documented in OC-006/V2-098
+
+## Story OC-018: Backend Integration Tests for OpenCode Execution Path — DONE
+Files touched:
+- backend/src/__tests__/opencode-integration.test.ts (NEW — 31 tests)
+- backend/src/__tests__/fixtures/mock-opencode.sh (NEW — mock opencode binary for story execution)
+- backend/src/__tests__/fixtures/mock-opencode-specgen.sh (NEW — mock opencode binary for spec generation)
+
+What was built:
+- **Mock opencode binary** (shell script): Supports `--version` (returns v0.2.0), `server --socket <path>` (creates socket file, stays alive), `run --format json` (reads stdin prompt, outputs newline-delimited JSON events matching real OpenCode format). Configurable via env vars: `MOCK_OPENCODE_EXIT_CODE` (override exit code), `MOCK_OPENCODE_STDERR` (inject stderr), `MOCK_OPENCODE_DELAY_MS` (simulate processing time).
+- **Mock opencode specgen binary**: Variant that outputs a valid spec JSON wrapped in assistant events for spec generation tests. `MOCK_OPENCODE_FAIL_SPECGEN=1` simulates failure.
+- **31 integration tests** across 11 describe blocks:
+  1. Mock binary validation (4 tests): `--version` semver, valid JSON events, configurable exit code, stderr injection
+  2. OpenCode detector with mock (1 test): detectOpenCode resolves mock path + parses version
+  3. Server lifecycle (4 tests): start→socket→attach→stop, attach-before-start error, onPidReady callback, restart-once semantics
+  4. Stream parser with mock output (2 tests): structured event parsing, signal aggregation
+  5. Execution engine single story (1 test): engine spawns mock, story passes, spec JSON updated
+  6. Execution engine multiple stories (1 test): sequential dep chain, both marked passed
+  7. SKILL.md lifecycle (3 tests): file creation, cleanup with empty parent dirs, path injection in prompt
+  8. Error classification (5 tests): pattern matching for not_installed, api_key_invalid, model_not_available, rate_limited, server_crashed
+  9. Spec generation (5 tests): valid spec from mock, error on failure, quality validation (empty/missing/valid)
+  10. Agent config (3 tests): opencode config, claude default, invalid type throws
+  11. Retry and failure (1 test): engine retries 3 times on retryable failure then skips (6s sleep per attempt to avoid rate-limit heuristic)
+  12. Full E2E (1 test): SKILL.md instruction in prompt, spec JSON updated, git commit created with feat() prefix
+
+Key decisions:
+- Mock binary uses bash (not Node) for zero-dependency CI compatibility — no opencode installation required
+- Mock sleep 6s in retry test exceeds RATE_LIMIT_FAST_EXIT_THRESHOLD_MS (5000ms) to avoid triggering 450s exponential backoff
+- Tests spawn real execution-engine.ts via tsx (not mocking internals) — true integration coverage
+- RORCA_SKIP_GATE=1 env var bypasses tsc+playwright gates in tests
+- Port 0 for WAL events = no backend needed (fetch to port 0 silently fails per engine's catch block)
+- Temp dirs cleaned up in afterEach for CI isolation
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged
