@@ -906,3 +906,26 @@ Key decisions:
 - Orphan cleanup kills process group (-pid SIGTERM) first, falls back to individual PID — handles both detached process groups and direct children
 - Malformed JSON counter resets on first valid JSON line — prevents log spam during recovery
 - Pre-existing type errors (rate-limiter.ts, run-queue.ts) unchanged — verified not introduced by OC-015
+
+## Story OC-017: Comprehensive OpenCode Documentation — DONE
+Files touched:
+- .env.example (modified — added RORCA_AGENT, RORCA_MODEL, OPENCODE_BIN with provider examples)
+- CLAUDE.md (modified — rewrote Environment section with full OpenCode setup instructions, technical advantages comparison, step-by-step provider setup table)
+- README.md (modified — updated architecture diagram to show dual execution engine, updated prerequisites, added Execution Engine section with provider table, updated core services table, updated Ralph Loop section, added OpenCode troubleshooting entries)
+- src/components/OpenCodeSetupGuide.tsx (new — modal component with provider-specific step-by-step setup)
+- src/panels/SettingsPanel.tsx (modified — imported OpenCodeSetupGuide, added "Setup Guide" link in Execution Engine section header)
+
+What was built:
+- CLAUDE.md has complete OpenCode setup documentation: installation steps, provider table (OpenAI/Google/Anthropic/OpenRouter/Ollama/Copilot), technical advantages comparison (claude --print vs opencode run), env var reference, verification steps
+- README.md updated: architecture diagram shows both execution paths, prerequisites list both engines, new Execution Engine section with provider table and auth details, troubleshooting covers OpenCode errors
+- .env.example includes RORCA_AGENT/RORCA_MODEL with commented examples for all 6 provider types
+- In-app Setup Guide modal (OpenCodeSetupGuide.tsx): accessible via "Setup Guide" link in Settings > Execution Engine, shows prerequisites sidebar + provider tabs (OpenAI, Google, Anthropic, OpenRouter, Ollama, GitHub Copilot), each with numbered steps, copyable code blocks, model string chips, provider-specific tips, and test connection section
+- Setup Guide is wired into ExecutionEngineSection via showSetupGuide state + BookOpen icon link
+
+Key decisions:
+- Setup Guide is a modal (not a separate panel/route) — lightweight, accessible from the Execution Engine section without navigation
+- Provider guides are static data (PROVIDER_GUIDES array) — no API calls needed, works offline
+- Code blocks have copy-to-clipboard with visual feedback (CheckCircle2 icon)
+- URL code blocks get ExternalLink icon instead of Copy
+- Pre-existing backend type errors (rate-limiter.ts, run-queue.ts) unchanged — verified not introduced by OC-017
+- Pre-existing test failures (39 suites) unchanged — same pattern as documented in OC-006/V2-098

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown } from 'lucide-react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
@@ -7,6 +7,7 @@ import { useDirectionLayer } from '../hooks/useDirectionLayer';
 import { apiFetch, clearTokens } from '../lib/apiFetch';
 import GitHubSettingsPanel from './GitHubSettingsPanel';
 import { modLabel } from '../hooks/useHotkeys';
+import OpenCodeSetupGuide from '../components/OpenCodeSetupGuide';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -316,6 +317,7 @@ function ExecutionEngineSection() {
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
   const [copilotStatus, setCopilotStatus] = useState<CopilotStatus>({ connected: false, githubUsername: null, connectedAt: null });
   const [copilotLoading, setCopilotLoading] = useState(false);
+  const [showSetupGuide, setShowSetupGuide] = useState(false);
 
   // Local form state
   const [selectedType, setSelectedType] = useState<'claude' | 'opencode'>('claude');
@@ -423,13 +425,23 @@ function ExecutionEngineSection() {
 
   return (
     <div className="space-y-5">
+      {showSetupGuide && <OpenCodeSetupGuide onClose={() => setShowSetupGuide(false)} />}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
             <Cpu size={16} className="text-accent" />
             Execution Engine
           </h2>
-          <p className="text-xs text-muted mt-0.5">Choose how Rorca executes pipeline stories</p>
+          <p className="text-xs text-muted mt-0.5">
+            Choose how Rorca executes pipeline stories
+            <button
+              onClick={() => setShowSetupGuide(true)}
+              className="inline-flex items-center gap-1 ml-2 text-accent hover:text-accent/80 transition-colors"
+            >
+              <BookOpen size={11} />
+              <span className="underline underline-offset-2">Setup Guide</span>
+            </button>
+          </p>
         </div>
         {/* Status badge */}
         <div className="flex items-center gap-2">
