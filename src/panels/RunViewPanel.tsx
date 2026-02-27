@@ -202,6 +202,7 @@ function CommitsTab({ runId }: { runId: number }) {
           onClick={fetchCommits}
           className="p-1 rounded hover:bg-bg transition-colors text-muted hover:text-[var(--text)]"
           title="Refresh commits"
+          aria-label="Refresh commits"
         >
           <RefreshCw size={13} />
         </button>
@@ -601,6 +602,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
           onClick={onBack}
           className="p-1.5 rounded-lg hover:bg-bg transition-colors text-muted hover:text-[var(--text)] min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center"
           title="Back to Hub"
+          aria-label="Back to Hub"
         >
           <ArrowLeft size={18} />
         </button>
@@ -610,7 +612,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             {specLabel(run.spec_path)}
           </h1>
           <span className="text-[10px] md:text-xs text-muted font-mono shrink-0">#{run.id}</span>
-          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`}>
+          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`} aria-live="polite">
             {STATUS_BADGE_LABELS[effectiveStatus] || effectiveStatus}
           </span>
           {run.parallelism != null && run.parallelism > 1 && !isMobile && (
@@ -628,6 +630,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             onClick={handlePauseResume}
             disabled={!isActive || pauseLoading}
             title={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
+            aria-label={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
             className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${
               isActive && !pauseLoading
                 ? 'hover:bg-bg text-muted hover:text-[var(--text)]'
@@ -648,6 +651,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             onClick={() => setShowKillConfirm(true)}
             disabled={!isActive || killLoading}
             title="Kill run"
+            aria-label="Kill run"
             className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${
               isActive && !killLoading
                 ? 'hover:bg-red-500/10 text-muted hover:text-red-400'
@@ -680,6 +684,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             <button
               key={tab.id}
               onClick={() => handleTabChange(tab.id)}
+              aria-current={isActiveTab ? 'page' : undefined}
               className={`flex items-center gap-1.5 px-3 py-2.5 md:py-2 text-xs font-medium whitespace-nowrap border-b-2 transition-colors shrink-0 ${
                 isActiveTab
                   ? 'border-accent text-accent'
@@ -695,7 +700,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
 
       {/* HITL blocked banner */}
       {effectiveStatus === 'blocked' && (
-        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10">
+        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10" role="alert" aria-live="assertive">
           <div className="px-4 py-2.5 flex items-center gap-2">
             <AlertTriangle size={16} className="text-amber-500 shrink-0" />
             <span className="text-sm font-medium text-amber-500">
@@ -707,6 +712,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               value={hitlContext}
               onChange={(e) => setHitlContext(e.target.value)}
               placeholder="Type instructions or context for the agent..."
+              aria-label="Instructions or context for the agent"
               className="flex-1 min-h-[60px] max-h-[120px] px-3 py-2 text-sm rounded-lg border border-amber-500/30 bg-bg text-[var(--text)] placeholder:text-muted resize-y focus:outline-none focus:ring-1 focus:ring-amber-500/50"
               disabled={hitlSending}
             />
@@ -714,6 +720,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               onClick={handleSendContext}
               disabled={!hitlContext.trim() || hitlSending}
               title="Send context and resume"
+              aria-label="Send context and resume"
               className={`self-end px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors ${
                 hitlContext.trim() && !hitlSending
                   ? 'bg-amber-500 text-white hover:bg-amber-600'
@@ -733,7 +740,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
 
       {/* Run failed banner */}
       {(effectiveStatus === 'failed' || effectiveStatus === 'partial_failure') && failedStoryCount > 0 && (
-        <div className="shrink-0 border-b border-red-500/30 bg-red-500/10">
+        <div className="shrink-0 border-b border-red-500/30 bg-red-500/10" role="alert" aria-live="assertive">
           <div className="px-3 md:px-4 py-2.5 md:py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-3">
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <XCircle size={18} className="text-red-500 shrink-0" />
