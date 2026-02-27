@@ -282,6 +282,14 @@ interface AgentConfig {
   agentModel: string | null;
   opencodeInstalled: boolean | null;
   opencodeVersion: string | null;
+  copilotConnected: boolean;
+  copilotUsername: string | null;
+}
+
+interface CopilotStatus {
+  connected: boolean;
+  githubUsername: string | null;
+  connectedAt: string | null;
 }
 
 interface OpenCodeModelEntry {
@@ -306,10 +314,19 @@ function ExecutionEngineSection() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
+  const [copilotStatus, setCopilotStatus] = useState<CopilotStatus>({ connected: false, githubUsername: null, connectedAt: null });
+  const [copilotLoading, setCopilotLoading] = useState(false);
 
   // Local form state
   const [selectedType, setSelectedType] = useState<'claude' | 'opencode'>('claude');
   const [selectedModel, setSelectedModel] = useState<string>('');
+
+  const fetchCopilotStatus = useCallback(async () => {
+    try {
+      const status = await apiFetch<CopilotStatus>('/api/copilot/status');
+      setCopilotStatus(status);
+    } catch { /* silent */ }
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -323,9 +340,21 @@ function ExecutionEngineSection() {
       setModels(modelData.models);
       setGrouped(modelData.grouped);
       setOllamaStatus(ollama);
+      setCopilotStatus({ connected: cfg.copilotConnected, githubUsername: cfg.copilotUsername, connectedAt: null });
     }).catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+    fetchCopilotStatus();
+  }, [fetchCopilotStatus]);
+
+  // Check URL params for copilot=connected (OAuth callback redirect)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('copilot') === 'connected') {
+      fetchCopilotStatus();
+      // Clean up URL
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [fetchCopilotStatus]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -354,6 +383,33 @@ function ExecutionEngineSection() {
     }
   };
 
+  const handleCopilotConnect = async () => {
+    setCopilotLoading(true);
+    try {
+      const { url } = await apiFetch<{ url: string }>('/api/copilot/connect');
+      window.location.href = url;
+    } catch (err: any) {
+      setError(err.message || 'Failed to start GitHub Copilot sign-in');
+      setCopilotLoading(false);
+    }
+  };
+
+  const handleCopilotDisconnect = async () => {
+    setCopilotLoading(true);
+    try {
+      await apiFetch('/api/copilot/disconnect', { method: 'DELETE' });
+      setCopilotStatus({ connected: false, githubUsername: null, connectedAt: null });
+      // If currently using copilot model, clear the selection
+      if (selectedModel === 'github/copilot') {
+        setSelectedModel('');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to disconnect GitHub Copilot');
+    } finally {
+      setCopilotLoading(false);
+    }
+  };
+
   if (loading) {
     return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading execution engine config...</div>;
   }
@@ -363,7 +419,7 @@ function ExecutionEngineSection() {
     (selectedType === 'opencode' && selectedModel !== (config.agentModel ?? ''))
   );
 
-  const PROVIDER_ORDER = ['OpenAI', 'Google', 'Anthropic', 'OpenRouter', 'Local'];
+  const PROVIDER_ORDER = ['OpenAI', 'Google', 'Anthropic', 'OpenRouter', 'GitHub Copilot', 'Local'];
 
   return (
     <div className="space-y-5">
@@ -379,25 +435,34 @@ function ExecutionEngineSection() {
         <div className="flex items-center gap-2">
           <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${
             config?.agentType === 'opencode'
-              ? config?.agentModel?.startsWith('ollama/')
-                ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+              ? config?.agentModel === 'github/copilot'
+                ? 'bg-[#24292f]/20 text-[#8b949e] border border-[#30363d]'
+                : config?.agentModel?.startsWith('ollama/')
+                  ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                  : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
               : 'bg-accent/10 text-accent border border-accent/20'
           }`}>
             <span className={`w-1.5 h-1.5 rounded-full ${
               config?.agentType === 'opencode'
-                ? config?.agentModel?.startsWith('ollama/') ? 'bg-green-400' : 'bg-purple-400'
+                ? config?.agentModel === 'github/copilot' ? 'bg-[#8b949e]'
+                  : config?.agentModel?.startsWith('ollama/') ? 'bg-green-400' : 'bg-purple-400'
                 : 'bg-accent'
             }`} />
             {config?.agentType === 'opencode'
-              ? config?.agentModel?.startsWith('ollama/') ? 'Local (Ollama)' : 'OpenCode'
+              ? config?.agentModel === 'github/copilot' ? 'GitHub Copilot'
+                : config?.agentModel?.startsWith('ollama/') ? 'Local (Ollama)' : 'OpenCode'
               : 'Claude'}
-            {config?.agentType === 'opencode' && config?.agentModel && (
+            {config?.agentType === 'opencode' && config?.agentModel && config?.agentModel !== 'github/copilot' && (
               <span className="text-muted ml-0.5">
                 {models.find(m => m.id === config.agentModel)?.name ?? config.agentModel}
               </span>
             )}
           </span>
+          {config?.agentType === 'opencode' && config?.agentModel === 'github/copilot' && (
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400">
+              Subscription
+            </span>
+          )}
           {config?.agentType === 'opencode' && config?.agentModel?.startsWith('ollama/') && (
             <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-green-500/15 text-green-400">
               Free
@@ -508,7 +573,7 @@ function ExecutionEngineSection() {
             >
               <option value="">Select a model...</option>
               {PROVIDER_ORDER.filter(p => grouped[p]).map(provider => (
-                <optgroup key={provider} label={provider === 'Local' ? 'Local (Ollama) — Free' : provider}>
+                <optgroup key={provider} label={provider === 'Local' ? 'Local (Ollama) — Free' : provider === 'GitHub Copilot' ? 'GitHub Copilot — Subscription' : provider}>
                   {grouped[provider].map(m => (
                     <option key={m.id} value={m.id}>
                       {m.name} — {m.contextWindow >= 1000000
@@ -531,6 +596,75 @@ function ExecutionEngineSection() {
                 Local — Free
               </span>
               <span className="text-[11px] text-muted">No API key required. Runs entirely on your machine.</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* GitHub Copilot connection status (shown when OpenCode selected) */}
+      {selectedType === 'opencode' && (
+        <div className={`border rounded-lg p-4 transition-colors ${
+          copilotStatus.connected
+            ? 'border-green-500/30 bg-green-500/5'
+            : 'border-border bg-bg'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Github size={18} className={copilotStatus.connected ? 'text-green-400' : 'text-muted'} />
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-[var(--text)]">GitHub Copilot</span>
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">
+                    Subscription
+                  </span>
+                </div>
+                {copilotStatus.connected ? (
+                  <p className="text-xs text-green-400 mt-0.5 flex items-center gap-1">
+                    <CheckCircle2 size={12} />
+                    Connected as <span className="font-medium">{copilotStatus.githubUsername}</span>
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted mt-0.5">
+                    Sign in with GitHub to use your Copilot subscription for model access
+                  </p>
+                )}
+              </div>
+            </div>
+            <div>
+              {copilotStatus.connected ? (
+                <button
+                  onClick={handleCopilotDisconnect}
+                  disabled={copilotLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-red-500/30 rounded text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                >
+                  {copilotLoading ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />}
+                  Disconnect
+                </button>
+              ) : (
+                <button
+                  onClick={handleCopilotConnect}
+                  disabled={copilotLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[#24292f] text-white rounded hover:bg-[#2f363d] transition-colors disabled:opacity-50"
+                >
+                  {copilotLoading ? <Loader2 size={12} className="animate-spin" /> : <Github size={12} />}
+                  Sign in with GitHub
+                </button>
+              )}
+            </div>
+          </div>
+          {/* Subscription badge when connected and github/copilot selected */}
+          {copilotStatus.connected && selectedModel === 'github/copilot' && (
+            <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded bg-purple-500/10 border border-purple-500/20">
+              <span className="text-xs text-purple-400">
+                Using your GitHub Copilot subscription — no per-token API billing
+              </span>
+            </div>
+          )}
+          {/* Warning when copilot model selected but not connected */}
+          {!copilotStatus.connected && selectedModel === 'github/copilot' && (
+            <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400">
+              <AlertTriangle size={14} />
+              Sign in with GitHub above to use Copilot
             </div>
           )}
         </div>

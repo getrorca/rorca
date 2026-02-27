@@ -12,6 +12,7 @@ import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-cl
 import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
+import { getCopilotToken } from './copilot';
 import type { AuthUser } from './auth';
 import type { AgentProfileRow } from './agent-profiles';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
@@ -324,6 +325,14 @@ router.post('/trigger', async (req: Request, res: Response) => {
     const openrouterVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'openrouter') : null;
     if (openrouterVaultKey) {
       env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
+    }
+
+    // 7c-copilot. Inject GitHub Copilot token when using github/copilot model
+    if (resolvedAgentModel === 'github/copilot' && pipelineUser) {
+      const copilotToken = getCopilotToken(pipelineUser.id);
+      if (copilotToken) {
+        env['GITHUB_TOKEN'] = copilotToken;
+      }
     }
 
     // 7d. Inject active agent profile (system prompt + allowed tools + model override)
@@ -871,6 +880,13 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       }
       const openrouterVaultKey = getVaultKey(user.id, 'openrouter');
       if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
+
+      // Inject Copilot token when using github/copilot model
+      const resolvedModel = agentConfig.agentModel;
+      if (resolvedModel === 'github/copilot') {
+        const copilotToken = getCopilotToken(user.id);
+        if (copilotToken) env['GITHUB_TOKEN'] = copilotToken;
+      }
     }
 
     // Inject agent profile

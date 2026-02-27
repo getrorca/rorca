@@ -54,6 +54,8 @@ const OPENCODE_MODELS: OpenCodeModel[] = [
   { id: 'openrouter/auto', name: 'Auto (Best Available)', provider: 'OpenRouter', contextWindow: 200000 },
   { id: 'openrouter/deepseek/deepseek-r1', name: 'DeepSeek R1', provider: 'OpenRouter', contextWindow: 131072 },
   { id: 'openrouter/meta-llama/llama-4-maverick', name: 'Llama 4 Maverick', provider: 'OpenRouter', contextWindow: 1048576 },
+  // GitHub Copilot (subscription-based — no API key, uses OAuth token)
+  { id: 'github/copilot', name: 'GitHub Copilot', provider: 'GitHub Copilot', contextWindow: 128000 },
   // Local
   { id: 'ollama/llama3.3', name: 'Llama 3.3 (Ollama)', provider: 'Local', contextWindow: 131072 },
   { id: 'ollama/deepseek-r1:14b', name: 'DeepSeek R1 14B (Ollama)', provider: 'Local', contextWindow: 131072 },
@@ -66,6 +68,7 @@ const PROVIDER_KEY_MAP: Record<string, string[]> = {
   Google: ['openai-compat'],
   Anthropic: ['anthropic'],
   OpenRouter: ['openrouter'],
+  'GitHub Copilot': [], // Uses OAuth token from integration_credentials, not vault
   Local: [], // No API key required
 };
 
@@ -85,24 +88,46 @@ router.get('/', (_req: Request, res: Response) => {
   // Determine if user has an API key for the selected model's provider
   let hasApiKey = true; // claude doesn't need one
   let modelDisplayName: string | null = null;
+  let copilotConnected = false;
+  let copilotUsername: string | null = null;
+
   if (currentAgentType === 'opencode') {
     if (currentAgentModel) {
       const modelEntry = OPENCODE_MODELS.find(m => m.id === currentAgentModel);
       modelDisplayName = modelEntry?.name ?? currentAgentModel.split('/').pop() ?? currentAgentModel;
       if (modelEntry) {
-        const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
-        if (requiredProviders.length > 0) {
-          const placeholders = requiredProviders.map(() => '?').join(',');
-          const row = db.prepare(
-            `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`
-          ).get(...requiredProviders);
-          hasApiKey = !!row;
+        if (modelEntry.provider === 'GitHub Copilot') {
+          // Copilot uses integration_credentials, not api_key_vault
+          const copilotRow = db.prepare(
+            `SELECT provider_username FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
+          ).get() as { provider_username: string | null } | undefined;
+          hasApiKey = !!copilotRow;
+          copilotConnected = !!copilotRow;
+          copilotUsername = copilotRow?.provider_username ?? null;
+        } else {
+          const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
+          if (requiredProviders.length > 0) {
+            const placeholders = requiredProviders.map(() => '?').join(',');
+            const row = db.prepare(
+              `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`
+            ).get(...requiredProviders);
+            hasApiKey = !!row;
+          }
+          // Local models don't need a key
         }
-        // Local models don't need a key
       }
     } else {
       hasApiKey = false; // No model configured at all
     }
+  }
+
+  // Always check Copilot connection status for UI display
+  if (!copilotConnected) {
+    const copilotRow = db.prepare(
+      `SELECT provider_username FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
+    ).get() as { provider_username: string | null } | undefined;
+    copilotConnected = !!copilotRow;
+    copilotUsername = copilotRow?.provider_username ?? null;
   }
 
   res.json({
@@ -110,6 +135,8 @@ router.get('/', (_req: Request, res: Response) => {
     agentModel: currentAgentModel,
     modelDisplayName,
     hasApiKey,
+    copilotConnected,
+    copilotUsername,
     opencodeInstalled: opencode?.opencodeInstalled ?? null,
     opencodeVersion: opencode?.opencodeVersion ?? null,
   });
@@ -292,18 +319,31 @@ router.put('/agent', async (req: Request, res: Response) => {
 
     const modelEntry = OPENCODE_MODELS.find(m => m.id === effectiveModel);
     if (modelEntry) {
-      const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
-      if (requiredProviders.length > 0) {
-        // Check if user has any vault key for the required providers
-        const placeholders = requiredProviders.map(() => '?').join(',');
-        const hasKey = db.prepare(
-          `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`
-        ).get(...requiredProviders);
-        if (!hasKey) {
+      if (modelEntry.provider === 'GitHub Copilot') {
+        // Copilot uses integration_credentials, not api_key_vault
+        const copilotRow = db.prepare(
+          `SELECT 1 FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
+        ).get();
+        if (!copilotRow) {
           res.status(400).json({
-            error: `Model "${effectiveModel}" requires a ${modelEntry.provider} API key. Add one in Provider Configuration above.`,
+            error: 'GitHub Copilot requires connecting your GitHub account first. Use "Sign in with GitHub" below.',
           });
           return;
+        }
+      } else {
+        const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
+        if (requiredProviders.length > 0) {
+          // Check if user has any vault key for the required providers
+          const placeholders = requiredProviders.map(() => '?').join(',');
+          const hasKey = db.prepare(
+            `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`
+          ).get(...requiredProviders);
+          if (!hasKey) {
+            res.status(400).json({
+              error: `Model "${effectiveModel}" requires a ${modelEntry.provider} API key. Add one in Provider Configuration above.`,
+            });
+            return;
+          }
         }
       }
     }

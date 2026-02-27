@@ -855,3 +855,30 @@ Key decisions:
 - `output` field capped at 2KB backend-side to avoid sending megabytes of tool output to the browser
 - Error detection: `isError` set on `completion` events with non-zero exit code AND on `error` events
 - Tool output container uses max-h-48 + overflow-y-auto to prevent long outputs from blowing up the semantic view
+
+## Story OC-014: GitHub Copilot Subscription Provider — DONE
+Files touched:
+- backend/src/db/migrations/038_integration_credentials.sql (new)
+- backend/src/routes/copilot.ts (new)
+- backend/src/routes/config.ts (modified — Copilot model + provider map + status fields)
+- backend/src/routes/pipeline.ts (modified — GITHUB_TOKEN injection for Copilot)
+- backend/src/server.ts (modified — mount copilot router)
+- src/panels/SettingsPanel.tsx (modified — Copilot UI section, OAuth flow, status display)
+
+What was built:
+- `integration_credentials` table for OAuth-based provider tokens (distinct from `api_key_vault` for API keys). Fields: encrypted_token (AES-256-GCM), scopes, provider_username, provider_user_id. UNIQUE on (user_id, provider).
+- Full GitHub OAuth flow: `GET /api/copilot/connect` returns OAuth URL with `user:email copilot` scopes → GitHub OAuth → `GET /api/copilot/callback` exchanges code for token, fetches GitHub user profile, upserts encrypted token, emits `copilot_connected` WAL event, redirects to frontend.
+- `GET /api/copilot/status` returns connection state + GitHub username. `DELETE /api/copilot/disconnect` removes credential + emits `copilot_disconnected` WAL event.
+- `getCopilotToken(userId)` exported helper decrypts stored token for pipeline injection.
+- `github/copilot` added to OPENCODE_MODELS catalog with `GitHub Copilot` provider. PROVIDER_KEY_MAP maps it to empty array (uses OAuth, not vault keys).
+- `GET /api/config` returns `copilotConnected` and `copilotUsername` fields. Copilot model validation checks `integration_credentials` instead of `api_key_vault`.
+- `PUT /api/config/agent` validates Copilot requires GitHub connection before allowing model switch.
+- Pipeline trigger injects `GITHUB_TOKEN` env var (decrypted from integration_credentials) into execution subprocess when model is `github/copilot`.
+- Settings UI: GitHub Copilot section with "Sign in with GitHub" button (disconnected state) or "Connected as {username}" with disconnect button (connected state). Purple "Subscription" badge. Info/warning callouts for connection status. `?copilot=connected` URL param handled for OAuth callback redirect.
+
+Key decisions:
+- Separate `integration_credentials` table (not reusing `api_key_vault`) because Copilot uses OAuth tokens with scopes/profile, not raw API keys.
+- Reused `encryptToken`/`decryptToken` from `auth.ts` for consistent AES-256-GCM encryption.
+- OAuth callback redirects to `http://localhost:5210/?copilot=connected` — frontend detects param and refreshes status.
+- `GITHUB_TOKEN` env var injected in both primary trigger path and secondary (single-story) trigger path in pipeline.ts.
+- 2 pre-existing backend type errors (rate-limiter.ts, run-queue.ts) verified not introduced by OC-014.
