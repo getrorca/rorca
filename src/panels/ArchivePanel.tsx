@@ -62,6 +62,8 @@ interface ArchiveSpec {
   forkedFrom?: string;
   reviewStatus?: ReviewStatus;
   source?: string;
+  agentType?: string;
+  agentModel?: string | null;
 }
 
 interface ArchiveResponse {
@@ -448,6 +450,17 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                         <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 border border-accent/20 text-accent font-mono">
                           <GitFork className="w-2.5 h-2.5" />
                           {spec.forkedFrom}
+                        </span>
+                      )}
+                      {spec.agentType && (
+                        <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${
+                          spec.agentType === 'opencode'
+                            ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                            : 'bg-orange-500/15 text-orange-400 border-orange-500/30'
+                        }`}>
+                          {spec.agentType === 'opencode'
+                            ? (spec.agentModel?.split('/').pop() ?? 'OpenCode')
+                            : 'Claude'}
                         </span>
                       )}
                     </div>
