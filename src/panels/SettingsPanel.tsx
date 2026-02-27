@@ -291,6 +291,12 @@ interface OpenCodeModelEntry {
   contextWindow: number;
 }
 
+interface OllamaStatus {
+  available: boolean;
+  models: Array<{ id: string; name: string; size: number; parameterSize: string }>;
+  error?: string;
+}
+
 function ExecutionEngineSection() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [models, setModels] = useState<OpenCodeModelEntry[]>([]);
@@ -299,6 +305,7 @@ function ExecutionEngineSection() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
 
   // Local form state
   const [selectedType, setSelectedType] = useState<'claude' | 'opencode'>('claude');
@@ -307,13 +314,15 @@ function ExecutionEngineSection() {
   useEffect(() => {
     Promise.all([
       apiFetch<AgentConfig>('/api/config'),
-      apiFetch<{ models: OpenCodeModelEntry[]; grouped: Record<string, OpenCodeModelEntry[]> }>('/api/config/opencode-models'),
-    ]).then(([cfg, modelData]) => {
+      apiFetch<{ models: OpenCodeModelEntry[]; grouped: Record<string, OpenCodeModelEntry[]>; ollamaAvailable?: boolean }>('/api/config/opencode-models'),
+      apiFetch<OllamaStatus>('/api/config/ollama'),
+    ]).then(([cfg, modelData, ollama]) => {
       setConfig(cfg);
       setSelectedType(cfg.agentType === 'opencode' ? 'opencode' : 'claude');
       setSelectedModel(cfg.agentModel ?? '');
       setModels(modelData.models);
       setGrouped(modelData.grouped);
+      setOllamaStatus(ollama);
     }).catch(() => {})
       .finally(() => setLoading(false));
   }, []);
@@ -370,19 +379,30 @@ function ExecutionEngineSection() {
         <div className="flex items-center gap-2">
           <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${
             config?.agentType === 'opencode'
-              ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+              ? config?.agentModel?.startsWith('ollama/')
+                ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
               : 'bg-accent/10 text-accent border border-accent/20'
           }`}>
             <span className={`w-1.5 h-1.5 rounded-full ${
-              config?.agentType === 'opencode' ? 'bg-purple-400' : 'bg-accent'
+              config?.agentType === 'opencode'
+                ? config?.agentModel?.startsWith('ollama/') ? 'bg-green-400' : 'bg-purple-400'
+                : 'bg-accent'
             }`} />
-            {config?.agentType === 'opencode' ? 'OpenCode' : 'Claude'}
+            {config?.agentType === 'opencode'
+              ? config?.agentModel?.startsWith('ollama/') ? 'Local (Ollama)' : 'OpenCode'
+              : 'Claude'}
             {config?.agentType === 'opencode' && config?.agentModel && (
               <span className="text-muted ml-0.5">
                 {models.find(m => m.id === config.agentModel)?.name ?? config.agentModel}
               </span>
             )}
           </span>
+          {config?.agentType === 'opencode' && config?.agentModel?.startsWith('ollama/') && (
+            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-green-500/15 text-green-400">
+              Free
+            </span>
+          )}
         </div>
       </div>
 
@@ -452,6 +472,30 @@ function ExecutionEngineSection() {
         </div>
       )}
 
+      {/* Ollama status (shown when OpenCode selected) */}
+      {selectedType === 'opencode' && ollamaStatus && (
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${
+          ollamaStatus.available
+            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+            : 'bg-zinc-500/10 border border-zinc-500/20 text-zinc-400'
+        }`}>
+          {ollamaStatus.available ? (
+            <>
+              <CheckCircle2 size={14} />
+              Ollama running — {ollamaStatus.models.length} model{ollamaStatus.models.length !== 1 ? 's' : ''} available
+              <span className="ml-auto px-1.5 py-0.5 text-[10px] font-semibold rounded bg-green-500/15 text-green-400">
+                Local — Free
+              </span>
+            </>
+          ) : (
+            <>
+              <AlertTriangle size={14} />
+              Ollama not detected. Start with: <code className="bg-panel px-1 rounded">ollama serve</code>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Model selector (only when OpenCode selected) */}
       {selectedType === 'opencode' && (
         <div>
@@ -464,7 +508,7 @@ function ExecutionEngineSection() {
             >
               <option value="">Select a model...</option>
               {PROVIDER_ORDER.filter(p => grouped[p]).map(provider => (
-                <optgroup key={provider} label={provider}>
+                <optgroup key={provider} label={provider === 'Local' ? 'Local (Ollama) — Free' : provider}>
                   {grouped[provider].map(m => (
                     <option key={m.id} value={m.id}>
                       {m.name} — {m.contextWindow >= 1000000
@@ -479,6 +523,15 @@ function ExecutionEngineSection() {
           </div>
           {!selectedModel && (
             <p className="text-[11px] text-amber-400 mt-1.5">Select a model to enable OpenCode execution</p>
+          )}
+          {/* Free tier badge for selected Ollama model */}
+          {selectedModel.startsWith('ollama/') && (
+            <div className="flex items-center gap-2 mt-2">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
+                Local — Free
+              </span>
+              <span className="text-[11px] text-muted">No API key required. Runs entirely on your machine.</span>
+            </div>
           )}
         </div>
       )}
