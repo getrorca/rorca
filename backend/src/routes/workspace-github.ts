@@ -13,6 +13,20 @@ interface GithubWebhookRow {
   encrypted_webhook_secret: string;
   last_webhook_at: string | null;
   created_at: string;
+  auto_pr_enabled: number;
+  auto_pr_target_branch: string;
+  auto_pr_reviewers: string;
+}
+
+interface GitHubConnectionRow {
+  id: string;
+  user_id: string;
+  github_user_id: string;
+  encrypted_token: string;
+  scopes: string;
+  github_username: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // ─── GET /api/workspaces/:id/github — Connection status ──────────────────────
@@ -43,6 +57,11 @@ router.get('/', (req: Request, res: Response) => {
       webhookId: row.webhook_id,
       lastWebhookAt: row.last_webhook_at,
       connectedAt: row.created_at,
+      autoPr: {
+        enabled: !!row.auto_pr_enabled,
+        targetBranch: row.auto_pr_target_branch || 'main',
+        reviewers: JSON.parse(row.auto_pr_reviewers || '[]') as string[],
+      },
     });
   } catch (error: any) {
     console.error('[GitHub] Status error:', error);
@@ -195,6 +214,181 @@ router.post('/disconnect', async (req: Request, res: Response) => {
     res.json({ connected: false });
   } catch (error: any) {
     console.error('[GitHub] Disconnect error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/workspaces/:id/github/account — OAuth account info ──────────────
+
+router.get('/account', (req: Request, res: Response) => {
+  try {
+    // Get first user's GitHub connection (auth is bypassed — single-user local tool)
+    const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+    if (!userId) {
+      res.json({ connected: false });
+      return;
+    }
+
+    const conn = db.prepare(
+      'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id WHERE gc.user_id = ?'
+    ).get(userId) as (GitHubConnectionRow & { avatar_url: string | null }) | undefined;
+
+    if (!conn) {
+      res.json({ connected: false });
+      return;
+    }
+
+    const scopes = conn.scopes ? conn.scopes.split(/[,\s]+/).filter(Boolean) : [];
+
+    res.json({
+      connected: true,
+      username: conn.github_username,
+      avatarUrl: conn.avatar_url || `https://github.com/${conn.github_username}.png`,
+      connectedAt: conn.created_at,
+      scopes,
+    });
+  } catch (error: any) {
+    console.error('[GitHub] Account error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/workspaces/:id/github/test-connection — Verify token validity ─
+
+router.post('/test-connection', async (req: Request, res: Response) => {
+  try {
+    const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+    if (!userId) {
+      res.json({ valid: false, error: 'No user configured' });
+      return;
+    }
+
+    const conn = db.prepare(
+      'SELECT encrypted_token, github_username FROM github_connections WHERE user_id = ?'
+    ).get(userId) as Pick<GitHubConnectionRow, 'encrypted_token' | 'github_username'> | undefined;
+
+    if (!conn) {
+      res.json({ valid: false, error: 'No GitHub connection found' });
+      return;
+    }
+
+    const token = decryptToken(conn.encrypted_token);
+
+    const ghRes = await fetch('https://api.github.com/user', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+
+    if (ghRes.ok) {
+      const user = await ghRes.json() as { login: string; id: number };
+      res.json({ valid: true, username: user.login });
+    } else {
+      res.json({ valid: false, error: `GitHub API returned ${ghRes.status}` });
+    }
+  } catch (error: any) {
+    console.error('[GitHub] Test connection error:', error);
+    res.json({ valid: false, error: error.message });
+  }
+});
+
+// ─── POST /api/workspaces/:id/github/disconnect-oauth — Revoke OAuth token ───
+
+router.post('/disconnect-oauth', async (req: Request, res: Response) => {
+  try {
+    const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+    if (!userId) {
+      res.status(404).json({ error: 'No user configured' });
+      return;
+    }
+
+    const conn = db.prepare(
+      'SELECT id, encrypted_token FROM github_connections WHERE user_id = ?'
+    ).get(userId) as Pick<GitHubConnectionRow, 'id' | 'encrypted_token'> | undefined;
+
+    if (!conn) {
+      res.status(404).json({ error: 'No GitHub connection found' });
+      return;
+    }
+
+    // Attempt to revoke the token via GitHub API (best-effort)
+    const clientId = process.env.GITHUB_CLIENT_ID;
+    const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+    if (clientId && clientSecret) {
+      try {
+        const token = decryptToken(conn.encrypted_token);
+        await fetch(`https://api.github.com/applications/${clientId}/token`, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ access_token: token }),
+        });
+      } catch (revokeErr) {
+        console.warn('[GitHub] Token revocation failed (proceeding with local disconnect):', revokeErr);
+      }
+    }
+
+    // Remove connection from DB
+    db.prepare('DELETE FROM github_connections WHERE id = ?').run(conn.id);
+    db.prepare("UPDATE users SET github_id = NULL, updated_at = datetime('now') WHERE id = ?").run(userId);
+
+    // Emit WAL event
+    db.prepare(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_oauth_disconnected', '', ?)"
+    ).run(JSON.stringify({ userId }));
+
+    res.json({ disconnected: true });
+  } catch (error: any) {
+    console.error('[GitHub] Disconnect OAuth error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── PUT /api/workspaces/:id/github/auto-pr — Update auto-PR settings ────────
+
+router.put('/auto-pr', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.params.id;
+    const { enabled, targetBranch, reviewers } = req.body;
+
+    const row = db.prepare(
+      'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = ?'
+    ).get(workspaceId);
+
+    if (!row) {
+      res.status(404).json({ error: 'No GitHub connection found for this workspace' });
+      return;
+    }
+
+    db.prepare(
+      `UPDATE workspace_github_webhooks
+       SET auto_pr_enabled = ?,
+           auto_pr_target_branch = ?,
+           auto_pr_reviewers = ?
+       WHERE workspace_id = ?`
+    ).run(
+      enabled ? 1 : 0,
+      targetBranch || 'main',
+      JSON.stringify(Array.isArray(reviewers) ? reviewers : []),
+      workspaceId,
+    );
+
+    db.prepare(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_auto_pr_updated', ?, ?)"
+    ).run(workspaceId, JSON.stringify({ enabled, targetBranch, reviewers }));
+
+    res.json({
+      enabled: !!enabled,
+      targetBranch: targetBranch || 'main',
+      reviewers: Array.isArray(reviewers) ? reviewers : [],
+    });
+  } catch (error: any) {
+    console.error('[GitHub] Auto-PR update error:', error);
     res.status(500).json({ error: error.message });
   }
 });
