@@ -257,6 +257,18 @@ export function validateOrchestrationConfig(orch: unknown): OrchestrationValidat
     }
   }
 
+  // capabilityMismatch
+  if (o.capabilityMismatch !== undefined) {
+    const validModes = ['warn', 'reroute', 'block'];
+    if (typeof o.capabilityMismatch !== 'string' || !validModes.includes(o.capabilityMismatch)) {
+      errors.push({
+        field: 'orchestration.capabilityMismatch',
+        message: `Must be one of: ${validModes.join(', ')}`,
+        value: o.capabilityMismatch,
+      });
+    }
+  }
+
   return errors;
 }
 
