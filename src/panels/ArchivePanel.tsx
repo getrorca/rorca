@@ -968,6 +968,7 @@ function SpecPreviewDrawer({
                         loading={runState === 'triggering'}
                         onTrigger={handleRun}
                         onClose={() => setShowTriggerPopover(false)}
+                        onNavigate={onNavigate}
                       />
                     )}
                     <button
