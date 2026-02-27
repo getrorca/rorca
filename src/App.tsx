@@ -128,10 +128,10 @@ function GlobalErrorWiring() {
 }
 
 /** Renders the active panel component */
-function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void; reviewSpecId?: string | null; onNavigateToSpecReview?: (specId: string) => void }) {
+function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void; reviewSpecId?: string | null; onNavigateToSpecReview?: (specId: string) => void; forgeBrief?: string | null }) {
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
-    case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} />;
+    case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief } : {})} />;
     case 'spec-review': return <SpecReviewPanel specId={reviewSpecId ?? ''} onBack={() => onNavigate('hub')} onNavigate={onNavigate} />;
     case 'stack': return <DirectionStackPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
@@ -192,6 +192,7 @@ function AppContent() {
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [forgeBrief, setForgeBrief] = useState<string | null>(null);
 
   // Parse run ID from URL hash on mount (e.g. #/run/42)
   useEffect(() => {
@@ -227,6 +228,13 @@ function AppContent() {
       window.location.hash = '';
     }
   }, [activeRunId]);
+
+  // Send brief from command palette to Forge
+  const handleSendToForge = useCallback((brief: string) => {
+    setForgeBrief(brief);
+    // Clear after a tick so the prop is consumed once
+    setTimeout(() => setForgeBrief(null), 500);
+  }, []);
 
   // Override setActivePanel to clear run view when navigating elsewhere
   const handleNavigate = useCallback((panel: PanelId) => {
@@ -287,7 +295,7 @@ function AppContent() {
         <>
           {/* key={activePanel} resets ErrorBoundary when switching panels */}
           <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel]}>
-            <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} reviewSpecId={reviewSpecId} onNavigateToSpecReview={navigateToSpecReview} />
+            <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} reviewSpecId={reviewSpecId} onNavigateToSpecReview={navigateToSpecReview} forgeBrief={forgeBrief} />
           </ErrorBoundary>
         </>
       )}
@@ -295,6 +303,9 @@ function AppContent() {
         <CommandPalette
           onNavigate={handleNavigate}
           onClose={() => setShowCommandPalette(false)}
+          activePanel={activePanel}
+          activeRunId={activeRunId}
+          onSendToForge={handleSendToForge}
         />
       )}
       {showShortcuts && (
