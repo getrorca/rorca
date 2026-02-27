@@ -41,9 +41,16 @@ export interface CascadeModelIds {
   opus: string;
 }
 
+export interface EscalationConfig {
+  enabled: boolean;
+  maxRetriesOnTier: number;
+  escalateTo: Record<string, ModelTier | null>;  // e.g. { haiku: 'sonnet', sonnet: 'opus', opus: null }
+}
+
 export interface OrchestrationConfig {
   thresholds: ScoringThresholds;
   cascades: Record<string, CascadeModelIds>;
+  escalation: EscalationConfig;
 }
 
 // ─── Defaults ───────────────────────────────────────────────────────────────
@@ -83,6 +90,16 @@ const DEFAULT_CASCADES: Record<string, CascadeModelIds> = {
     haiku: 'copilot',
     sonnet: 'copilot',
     opus: 'copilot',
+  },
+};
+
+const DEFAULT_ESCALATION: EscalationConfig = {
+  enabled: true,
+  maxRetriesOnTier: 2,
+  escalateTo: {
+    haiku: 'sonnet',
+    sonnet: 'opus',
+    opus: null,  // no further escalation
   },
 };
 
@@ -174,6 +191,7 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
   const defaults: OrchestrationConfig = {
     thresholds: { ...DEFAULT_THRESHOLDS },
     cascades: { ...DEFAULT_CASCADES },
+    escalation: { ...DEFAULT_ESCALATION, escalateTo: { ...DEFAULT_ESCALATION.escalateTo } },
   };
 
   if (!configPath) return defaults;
@@ -191,7 +209,21 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
         sonnet: typeof orch.thresholds?.sonnet === 'number' ? orch.thresholds.sonnet : DEFAULT_THRESHOLDS.sonnet,
       },
       cascades: { ...DEFAULT_CASCADES },
+      escalation: {
+        enabled: typeof orch.escalation?.enabled === 'boolean' ? orch.escalation.enabled : DEFAULT_ESCALATION.enabled,
+        maxRetriesOnTier: typeof orch.escalation?.maxRetriesOnTier === 'number' ? orch.escalation.maxRetriesOnTier : DEFAULT_ESCALATION.maxRetriesOnTier,
+        escalateTo: { ...DEFAULT_ESCALATION.escalateTo },
+      },
     };
+
+    // Merge user-provided escalateTo overrides
+    if (orch.escalation?.escalateTo && typeof orch.escalation.escalateTo === 'object') {
+      for (const [fromTier, toTier] of Object.entries(orch.escalation.escalateTo)) {
+        if (toTier === null || (typeof toTier === 'string' && ['haiku', 'sonnet', 'opus'].includes(toTier))) {
+          config.escalation.escalateTo[fromTier] = toTier as ModelTier | null;
+        }
+      }
+    }
 
     // Merge user-provided cascade overrides
     if (orch.cascades && typeof orch.cascades === 'object') {
@@ -362,6 +394,20 @@ export function score(
  * @param cwd - Workspace root for config loading
  * @returns The concrete model ID string
  */
+/**
+ * Get the next escalation tier for a given tier.
+ * Returns null if no further escalation is possible (opus or escalation disabled).
+ */
+export function getNextEscalationTier(
+  currentTier: ModelTier,
+  cwd?: string,
+): ModelTier | null {
+  const config = loadOrchestrationConfig(cwd);
+  if (!config.escalation.enabled) return null;
+  const next = config.escalation.escalateTo[currentTier];
+  return next ?? null;
+}
+
 export function resolveModelId(
   tier: ModelTier,
   provider: string,
