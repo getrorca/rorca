@@ -259,7 +259,7 @@ const PROVIDER_DESCRIPTIONS: Record<string, string> = {
   'claude-cli': 'Uses your Claude subscription via the claude CLI. No API key needed.',
   'anthropic': 'Direct API access to Claude models. Requires an Anthropic API key.',
   'openai-compat': 'Any OpenAI-compatible endpoint (OpenAI, Groq, Together, DeepSeek, Ollama, etc.).',
-  'openrouter': 'Access 200+ models through a single API key.',
+  'openrouter': 'Access 200+ models through a single API key. Configure in Execution Engine above.',
 };
 
 function ProvidersAndDisplaySection() {
@@ -643,6 +643,21 @@ function ExecutionEngineSection() {
   const [copilotLoading, setCopilotLoading] = useState(false);
   const [showSetupGuide, setShowSetupGuide] = useState(false);
 
+  // OpenRouter state (OC-027)
+  const [openRouterConnected, setOpenRouterConnected] = useState(false);
+  const [openRouterModelCount, setOpenRouterModelCount] = useState<number | null>(null);
+  const [openRouterFreeCount, setOpenRouterFreeCount] = useState<number | null>(null);
+  const [openRouterTesting, setOpenRouterTesting] = useState(false);
+  const [openRouterTestError, setOpenRouterTestError] = useState<string | null>(null);
+  const [openRouterKey, setOpenRouterKey] = useState('');
+  const [openRouterSaving, setOpenRouterSaving] = useState(false);
+  const [openRouterModels, setOpenRouterModels] = useState<Array<{
+    id: string; name: string; provider: string; contextWindow: number; free: boolean;
+  }>>([]);
+  const [openRouterGrouped, setOpenRouterGrouped] = useState<Record<string, Array<{
+    id: string; name: string; provider: string; contextWindow: number; free: boolean;
+  }>>>({});
+
   // Local form state
   const [selectedType, setSelectedType] = useState<'claude' | 'opencode' | 'codex'>('claude');
   const [selectedModel, setSelectedModel] = useState<string>('');
@@ -733,6 +748,83 @@ function ExecutionEngineSection() {
       setError(err.message || 'Failed to disconnect GitHub Copilot');
     } finally {
       setCopilotLoading(false);
+    }
+  };
+
+  // ─── OpenRouter handlers (OC-027) ─────────────────────────────────────────
+
+  const fetchOpenRouterModels = useCallback(async () => {
+    try {
+      const data = await apiFetch<{
+        models: Array<{ id: string; name: string; provider: string; contextWindow: number; free: boolean }>;
+        modelCount: number;
+        grouped: Record<string, Array<{ id: string; name: string; provider: string; contextWindow: number; free: boolean }>>;
+      }>('/api/config/openrouter-models');
+      setOpenRouterModels(data.models);
+      setOpenRouterGrouped(data.grouped);
+      setOpenRouterModelCount(data.modelCount);
+      setOpenRouterConnected(true);
+      setOpenRouterTestError(null);
+    } catch {
+      // Key not configured or API error — not connected
+      setOpenRouterConnected(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedType === 'opencode') {
+      fetchOpenRouterModels();
+    }
+  }, [selectedType, fetchOpenRouterModels]);
+
+  const handleOpenRouterTest = async (keyToTest?: string) => {
+    setOpenRouterTesting(true);
+    setOpenRouterTestError(null);
+    try {
+      const result = await apiFetch<{ ok: boolean; latencyMs?: number; modelCount?: number; freeCount?: number; error?: string }>(
+        '/api/config/openrouter-test',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: keyToTest }),
+        },
+      );
+      if (result.ok) {
+        setOpenRouterConnected(true);
+        setOpenRouterModelCount(result.modelCount ?? null);
+        setOpenRouterFreeCount(result.freeCount ?? null);
+        setOpenRouterTestError(null);
+        // Refresh model list
+        fetchOpenRouterModels();
+      } else {
+        setOpenRouterConnected(false);
+        setOpenRouterTestError(result.error ?? 'Connection failed');
+      }
+    } catch (err: any) {
+      setOpenRouterConnected(false);
+      setOpenRouterTestError(err.message || 'Connection failed');
+    } finally {
+      setOpenRouterTesting(false);
+    }
+  };
+
+  const handleOpenRouterSaveKey = async () => {
+    if (!openRouterKey.trim()) return;
+    setOpenRouterSaving(true);
+    setOpenRouterTestError(null);
+    try {
+      await apiFetch('/api/vault/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'openrouter', key: openRouterKey.trim(), label: 'OpenRouter' }),
+      });
+      // Test the saved key
+      await handleOpenRouterTest();
+      setOpenRouterKey('');
+    } catch (err: any) {
+      setOpenRouterTestError(err.message || 'Failed to save key');
+    } finally {
+      setOpenRouterSaving(false);
     }
   };
 
@@ -957,6 +1049,20 @@ function ExecutionEngineSection() {
                   ))}
                 </optgroup>
               ))}
+              {/* OpenRouter models grouped by provider family (OC-027) */}
+              {openRouterConnected && Object.entries(openRouterGrouped)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([family, familyModels]) => (
+                <optgroup key={`or-${family}`} label={`OpenRouter — ${family}`}>
+                  {familyModels.map(m => (
+                    <option key={`or-${m.id}`} value={`openrouter/${m.id}`}>
+                      {m.name}{m.free && m.contextWindow >= 8192 ? ' [Free]' : ''} — {m.contextWindow >= 1000000
+                        ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
+                        : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
             </select>
             <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
           </div>
@@ -1039,6 +1145,142 @@ function ExecutionEngineSection() {
             <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded bg-amber-500/10 border border-amber-500/20 text-xs text-amber-400">
               <AlertTriangle size={14} />
               Sign in with GitHub above to use Copilot
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* OpenRouter provider card (OC-027) */}
+      {selectedType === 'opencode' && (
+        <div className={`border rounded-lg p-4 transition-colors ${
+          openRouterConnected
+            ? 'border-orange-500/30 bg-orange-500/5'
+            : 'border-border bg-bg'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Globe size={18} className={openRouterConnected ? 'text-orange-400' : 'text-muted'} />
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-[var(--text)]">OpenRouter</span>
+                  {openRouterConnected && openRouterModelCount !== null && (
+                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-orange-500/15 text-orange-400 border border-orange-500/20">
+                      {openRouterModelCount} models available
+                    </span>
+                  )}
+                </div>
+                {openRouterConnected ? (
+                  <p className="text-xs text-green-400 mt-0.5 flex items-center gap-1">
+                    <CheckCircle2 size={12} />
+                    Connected
+                    {openRouterFreeCount !== null && openRouterFreeCount > 0 && (
+                      <span className="text-muted ml-1">({openRouterFreeCount} free models)</span>
+                    )}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted mt-0.5">
+                    Access 200+ models through a single API key. Supports OpenAI, Anthropic, Google, Meta, Mistral, and more.
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {openRouterConnected && (
+                <button
+                  onClick={() => handleOpenRouterTest()}
+                  disabled={openRouterTesting}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border rounded hover:border-orange-500/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+                >
+                  {openRouterTesting ? <Loader2 size={12} className="animate-spin" /> : <Globe size={12} />}
+                  Test Connection
+                </button>
+              )}
+              <a
+                href="https://openrouter.ai/models"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 px-3 py-1.5 text-xs text-muted hover:text-[var(--text)] border border-border rounded hover:border-orange-500/40 transition-colors"
+              >
+                Browse all models
+              </a>
+            </div>
+          </div>
+
+          {/* Test result */}
+          {openRouterTestError && (
+            <div className="mt-3 px-3 py-2 rounded text-xs flex items-center gap-2 bg-red-500/10 border border-red-500/20 text-red-400">
+              <XCircle size={14} />
+              {openRouterTestError}
+            </div>
+          )}
+
+          {/* API key input (shown when not connected) */}
+          {!openRouterConnected && (
+            <div className="mt-3 border border-border rounded p-3 space-y-3 bg-panel">
+              <div>
+                <label className="block text-xs text-muted mb-1">OpenRouter API Key</label>
+                <input
+                  type="password"
+                  value={openRouterKey}
+                  onChange={e => setOpenRouterKey(e.target.value)}
+                  placeholder="sk-or-..."
+                  className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-orange-500/60 outline-none font-mono"
+                  autoFocus
+                />
+                <p className="text-[10px] text-muted mt-1">
+                  Get your key at{' '}
+                  <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:underline">
+                    openrouter.ai/keys
+                  </a>
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleOpenRouterTest(openRouterKey.trim())}
+                  disabled={openRouterTesting || !openRouterKey.trim()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border rounded hover:border-orange-500/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+                >
+                  {openRouterTesting ? <Loader2 size={12} className="animate-spin" /> : <Globe size={12} />}
+                  Test Connection
+                </button>
+                <button
+                  onClick={handleOpenRouterSaveKey}
+                  disabled={openRouterSaving || !openRouterKey.trim()}
+                  className="flex items-center gap-2 px-4 py-1.5 text-xs bg-orange-500 text-white rounded hover:bg-orange-500/90 disabled:opacity-50 transition-colors"
+                >
+                  {openRouterSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                  Save Key
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* OpenRouter model selector (shown when connected and an OpenRouter model is selected or browsing) */}
+          {openRouterConnected && openRouterModels.length > 0 && selectedModel.startsWith('openrouter/') && (
+            <div className="mt-3">
+              <label className="block text-xs text-muted mb-1.5">OpenRouter Model</label>
+              <div className="relative">
+                <select
+                  value={selectedModel}
+                  onChange={e => setSelectedModel(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-orange-500/60 outline-none appearance-none pr-8"
+                >
+                  {Object.entries(openRouterGrouped)
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([family, familyModels]) => (
+                    <optgroup key={family} label={family}>
+                      {familyModels.map(m => (
+                        <option key={m.id} value={`openrouter/${m.id}`}>
+                          {m.name}{m.free ? ' [Free]' : ''} — {m.contextWindow >= 1000000
+                            ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
+                            : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+              </div>
             </div>
           )}
         </div>

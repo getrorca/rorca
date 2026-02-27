@@ -1065,3 +1065,25 @@ Key decisions:
 - Plan types from JWT: "plus", "pro", "free" — displayed capitalized (e.g., "ChatGPT Plus")
 - Same polling pattern as OC-025 Claude auth: 2s interval, 5 min max, SSE broadcast on detection
 - Replaced the simple Codex CLI installation status badge with full auth component matching Claude pattern
+
+## Story OC-027: OpenRouter Dedicated Provider Card — DONE
+Files touched:
+- backend/src/routes/config.ts (modified — added /openrouter-models, /openrouter-test endpoints, OpenRouter model display name resolution, OpenRouter key validation)
+- src/panels/SettingsPanel.tsx (modified — added OpenRouter card with key input, test connection, model count badge, model dropdown grouped by provider family with Free badge)
+- src/components/TriggerPopover.tsx (modified — updated engine label to show 'OpenRouter — model-id' for OpenRouter models)
+
+What was built:
+- `GET /api/config/openrouter-models` — fetches live model catalog from OpenRouter API, cached 1h, returns models grouped by provider family (OpenAI, Anthropic, Google, Meta, Mistral, etc.) with free model detection
+- `POST /api/config/openrouter-test` — tests API key against OpenRouter API, returns model count + free model count + latency
+- Dedicated OpenRouter card in Execution Engine section: orange-themed, API key input with `sk-or-...` placeholder, Test Connection button, model count badge (`N models available`), green connected indicator, Browse all models link
+- Model dropdown extended with OpenRouter models grouped by provider family (`OpenRouter — Meta`, `OpenRouter — Mistral`, etc.) with `[Free]` badge on free models with >=8K context
+- TriggerPopover shows `OpenRouter — meta-llama/llama-3.3-70b` format for OpenRouter models
+- API key stored encrypted in vault table via existing `/api/vault/keys` POST endpoint
+- Error handling: invalid key, network error, rate limited — specific error messages for each
+
+Key decisions:
+- Used existing vault infrastructure (AES-256-GCM encryption) for key storage — no new migration needed
+- Cache TTL 1h for model catalog — invalidated on successful test connection
+- Provider family extraction from model ID prefix (e.g., `meta-llama/` → `Meta`)
+- Free model detection: pricing.prompt === 0 AND pricing.completion === 0 AND context_length >= 8192
+- OpenRouter models in dropdown use `openrouter/{model-id}` format to distinguish from hardcoded OPENCODE_MODELS entries

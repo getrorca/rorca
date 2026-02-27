@@ -73,12 +73,19 @@ export default function TriggerPopover({
   const noApiKey = isOpenCode && !noModelConfigured && !agentConfig?.hasApiKey;
   const triggerDisabled = loading || queueLoading || noModelConfigured || noApiKey;
 
+  const isCodex = agentConfig?.agentType === 'codex';
+  const isOpenRouterModel = isOpenCode && agentConfig?.agentModel?.startsWith('openrouter/');
+
   const engineLabel = agentConfig
-    ? isOpenCode
-      ? agentConfig.modelDisplayName
-        ? `OpenCode — ${agentConfig.modelDisplayName}`
-        : 'OpenCode'
-      : 'Claude (Pro/Max)'
+    ? isCodex
+      ? 'Codex CLI (ChatGPT)'
+      : isOpenCode
+        ? isOpenRouterModel && agentConfig.modelDisplayName
+          ? `OpenRouter — ${agentConfig.modelDisplayName}`
+          : agentConfig.modelDisplayName
+            ? `OpenCode — ${agentConfig.modelDisplayName}`
+            : 'OpenCode'
+        : 'Claude (Pro/Max)'
     : null;
 
   return (
