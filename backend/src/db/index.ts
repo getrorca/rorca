@@ -419,6 +419,12 @@ export function runMigrations() {
   if (!runColsOC003.some(c => c.name === 'opencode_server_pid')) {
     db.exec('ALTER TABLE pipeline_runs ADD COLUMN opencode_server_pid INTEGER');
   }
+
+  // OC-006: Add agent_model column to pipeline_runs (idempotent)
+  const runColsOC006 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsOC006.some(c => c.name === 'agent_model')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN agent_model TEXT');
+  }
 }
 
 runMigrations();
