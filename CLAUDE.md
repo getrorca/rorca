@@ -410,20 +410,95 @@ Multiple workspaces can run simultaneously. Same-workspace parallel runs require
 
 **Backend** (`backend/.env`):
 ```bash
-# Current (pre-opencode-integration spec)
-SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
-ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
-OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
+# Core
 PORT=3030                     # Optional override
 DB_PATH=./rorca.db           # Optional override
 
-# Added by rorca-opencode-integration spec (OC-001 to OC-007)
-RORCA_AGENT=opencode         # Options: claude (default), opencode
+# Execution engine
+RORCA_AGENT=claude           # Options: claude (default), opencode
 RORCA_MODEL=openai/gpt-4o   # OpenCode model string (provider/model)
 OPENCODE_BIN=/path/to/opencode  # Auto-detected if in PATH
+
+# Spec generation providers (used when RORCA_AGENT=claude or as SDK fallback)
+SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
+ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
+OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
 ```
-When `RORCA_AGENT=claude` (default), uses `claude --print` via `~/.claude/` auth — no API key needed.
-When `RORCA_AGENT=opencode`, uses `opencode run --format json --attach --model $RORCA_MODEL`.
+
+### Execution Engine: Claude vs OpenCode
+
+Rorca supports two first-class execution paths. Both use the same tool set (edit, bash, read, write, glob, grep, webfetch, websearch) and produce the same output.
+
+**Claude subscription** (`RORCA_AGENT=claude`, default):
+- Binary: `claude --print --dangerously-skip-permissions --output-format stream-json`
+- Auth: `~/.claude/` — no API key needed, uses your Pro/Max/Max5x subscription
+- Advantages:
+  - **Prompt caching** on tool round trips (~10x lower latency after turn 1)
+  - **Surgical diff edits** (~150 tokens vs ~3000 for full file rewrites)
+  - **Persistent bash shell state** across tool calls within a story
+  - **CLAUDE.md auto-injection** — no manual context loading needed
+  - **Hierarchical subagents** via Task tool for complex research
+  - **Fine-tuned** for agentic coding loops (tool use, error recovery, commit discipline)
+- Recommended for: All implementation runs where Claude subscription is available
+
+**OpenCode** (`RORCA_AGENT=opencode`):
+- Binary: `opencode run --format json --attach --model $RORCA_MODEL`
+- Auth: Per-provider API key (stored in encrypted vault) or GitHub Copilot OAuth
+- Advantages:
+  - **75+ model choices** — OpenAI, Google, Anthropic API, OpenRouter, Ollama, GitHub Copilot
+  - **Model cascading** — auto-tier stories by complexity (Haiku→Sonnet→Opus), saves ~40-60% vs all-Opus
+  - **API arbitrage** — choose cheapest model that meets quality bar per story
+  - **Local execution** via Ollama (free, fully offline, no API key)
+  - **Subscription-based** execution via GitHub Copilot (no per-token billing)
+  - **Structured JSON events** — semantic log view gets structured data natively (no xterm parsing)
+  - **Warm server mode** — `--attach` reuses a warm server across stories, no cold-start per story
+- Recommended for: Multi-model workflows, cost optimization, teams without Claude subscription
+
+### OpenCode Setup (Step-by-Step)
+
+**1. Install OpenCode CLI**
+```bash
+npm install -g opencode
+opencode --version  # Must be >= 0.1.0
+```
+
+**2. Set execution engine**
+```bash
+# In backend/.env (or via Settings > Model & Providers in the UI)
+RORCA_AGENT=opencode
+```
+
+**3. Choose and configure a provider**
+
+| Provider | Model string | API key | Notes |
+|----------|-------------|---------|-------|
+| OpenAI | `openai/gpt-4o`, `openai/o3` | `OPENAI_API_KEY` or vault | Best all-round, fast |
+| Google | `google/gemini-2.0-flash` | `GOOGLE_API_KEY` or vault | 1M context window |
+| Anthropic API | `anthropic/claude-sonnet-4-5-20250929` | `ANTHROPIC_API_KEY` or vault | Same Claude models, API billing |
+| OpenRouter | `openrouter/auto` | `OPENROUTER_API_KEY` or vault | 200+ models, auto-routing |
+| Ollama | `ollama/llama3`, `ollama/codellama` | None (local) | Free, fully offline |
+| GitHub Copilot | `github/copilot` | OAuth (Settings > Copilot) | Uses Copilot subscription |
+
+**4. Set model and API key**
+```bash
+# In backend/.env
+RORCA_MODEL=openai/gpt-4o
+
+# API keys can be set via:
+# a) Environment variable (e.g. OPENAI_API_KEY=sk-...)
+# b) Settings > Model & Providers > Add Key (encrypted AES-256-GCM vault)
+# c) GitHub OAuth for Copilot (Settings > Execution Engine > Sign in with GitHub)
+```
+
+**5. Verify setup**
+```bash
+# Check health endpoint
+curl http://localhost:3030/api/health
+# Should return: { "opencodeInstalled": true, "opencodeVersion": "0.1.x", ... }
+
+# Or check in UI: Settings > Model & Providers > Execution Engine
+# Green badge = installed, amber = not found
+```
 
 **OpenCode minimum version**: `0.1.0` (enforced at startup via `backend/src/lib/opencode-detector.ts`). Backend exits with code 1 if `RORCA_AGENT=opencode` and binary is missing or below minimum version. Health endpoint (`GET /api/health`) returns `{ opencodeInstalled, opencodeVersion }` when `agentType=opencode`.
 
