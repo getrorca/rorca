@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { X, Check, Loader2, Zap, Crown, Users } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 const PLANS = [
   {
@@ -49,6 +50,15 @@ interface PricingModalProps {
 export default function PricingModal({ onClose }: PricingModalProps) {
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
 
   const handleCheckout = async (planId: string) => {
     setLoading(planId);
@@ -72,8 +82,18 @@ export default function PricingModal({ onClose }: PricingModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-panel border border-border rounded-lg shadow-xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Upgrade your plan"
+    >
+      <div
+        ref={trapRef}
+        className="bg-panel border border-border rounded-lg shadow-xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-border">
           <div>

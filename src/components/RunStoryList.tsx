@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 
 interface StoryResult {
@@ -25,6 +27,7 @@ interface RunStoryListProps {
   runId: number;
   walEvents: WalEvent[];
   onStoryClick?: (storyId: string) => void;
+  onRetryStory?: (storyId: string, newRunId: number) => void;
   parallelism?: number;
 }
 
@@ -34,12 +37,14 @@ const STATUS_CONFIG: Record<DerivedStatus, { icon: typeof CheckCircle2; color: s
   pending:      { icon: Circle,       color: 'text-gray-400',    label: 'Pending' },
   running:      { icon: Loader2,      color: 'text-blue-500',    label: 'Running',      rowClass: 'border-l-2 border-l-blue-500 bg-blue-500/5' },
   pass:         { icon: CheckCircle2, color: 'text-emerald-500', label: 'Passed' },
-  fail:         { icon: XCircle,      color: 'text-red-500',     label: 'Failed' },
+  fail:         { icon: XCircle,      color: 'text-red-500',     label: 'Failed',       rowClass: 'border-l-2 border-l-red-500 bg-red-500/5' },
   excluded:     { icon: SkipForward,  color: 'text-gray-400',    label: 'Excluded' },
   skip:         { icon: SkipForward,  color: 'text-gray-400',    label: 'Skipped' },
   retry:        { icon: Loader2,      color: 'text-yellow-500',  label: 'Retrying',     rowClass: 'border-l-2 border-l-yellow-500 bg-yellow-500/5' },
   rate_limited: { icon: Clock,        color: 'text-amber-500',   label: 'Rate limited', rowClass: 'border-l-2 border-l-amber-500 bg-amber-500/5' },
 };
+
+const ROW_HEIGHT = 48;
 
 function formatElapsed(seconds: number | null): string {
   if (seconds == null) return '';
@@ -154,67 +159,197 @@ function RateLimitCountdown({ retryAt }: { retryAt: number }) {
   );
 }
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const MAX_RETRIES = 3;
+
 // ─── Story row component ─────────────────────────────────────────────────────
 
-function StoryRow({ story, onStoryClick, indented }: {
+function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused }: {
   story: MergedStory;
   onStoryClick?: (storyId: string) => void;
   indented?: boolean;
+  runId?: number;
+  onRetryStory?: (storyId: string) => void;
+  isFocused?: boolean;
 }) {
   const cfg = STATUS_CONFIG[story.status] || STATUS_CONFIG.pending;
   const Icon = cfg.icon;
   const isAnimated = story.status === 'running' || story.status === 'retry';
   const isExcluded = story.status === 'excluded';
+  const isFailed = story.status === 'fail';
   const isClickable = !!onStoryClick;
 
+  // Expandable detail for failed stories
+  const [expanded, setExpanded] = useState(false);
+  const [outputLines, setOutputLines] = useState<string[]>([]);
+  const [outputLoading, setOutputLoading] = useState(false);
+  const [failureReason, setFailureReason] = useState<string | null>(null);
+  const [retryLoading, setRetryLoading] = useState(false);
+
+  // Track status transitions — animate only when status *changes* to pass
+  const prevStatusRef = useRef<DerivedStatus>(story.status);
+  const [justPassed, setJustPassed] = useState(false);
+
+  useEffect(() => {
+    if (story.status === 'pass' && prevStatusRef.current !== 'pass') {
+      setJustPassed(true);
+      const timer = setTimeout(() => setJustPassed(false), 600);
+      return () => clearTimeout(timer);
+    }
+    prevStatusRef.current = story.status;
+  }, [story.status]);
+
+  // Fetch output when expanding a failed story
+  useEffect(() => {
+    if (expanded && isFailed && runId && outputLines.length === 0 && !outputLoading) {
+      setOutputLoading(true);
+      fetchStoryOutput(runId, story.storyId, 20)
+        .then(data => {
+          setOutputLines(data.output);
+          setFailureReason(data.failureReason);
+        })
+        .catch(() => { /* ignore */ })
+        .finally(() => setOutputLoading(false));
+    }
+  }, [expanded, isFailed, runId, story.storyId, outputLines.length, outputLoading]);
+
+  const handleToggleExpand = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpanded(prev => !prev);
+  }, []);
+
+  const handleRetry = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!runId || !onRetryStory || retryLoading) return;
+    setRetryLoading(true);
+    onRetryStory(story.storyId);
+  }, [runId, onRetryStory, retryLoading, story.storyId]);
+
+  const retriesUsed = story.retries ?? 0;
+  const canRetry = retriesUsed < MAX_RETRIES;
+
   return (
-    <div
-      onClick={isClickable ? () => onStoryClick!(story.storyId) : undefined}
-      className={`flex items-center gap-2 ${indented ? 'pl-6 pr-3' : 'px-3'} py-2 border-b border-border/50 transition-colors ${
-        cfg.rowClass || ''
-      } ${isClickable ? 'cursor-pointer hover:bg-bg/50' : ''}`}
-    >
-      <Icon
-        size={14}
-        className={`shrink-0 ${cfg.color} ${isAnimated ? 'animate-spin' : ''}`}
-      />
-      <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
-        story.status === 'running' ? 'bg-blue-500/10 text-blue-500' :
-        story.status === 'pass' ? 'bg-emerald-500/10 text-emerald-500' :
-        story.status === 'fail' ? 'bg-red-500/10 text-red-500' :
-        story.status === 'rate_limited' ? 'bg-amber-500/10 text-amber-500' :
-        'bg-bg text-muted'
-      }`}>
-        {story.storyId}
-      </span>
-      <span className={`text-xs truncate flex-1 ${
-        isExcluded ? 'line-through text-muted' : 'text-[var(--text)]'
-      }`}>
-        {story.title}
-      </span>
-      {/* Rate limit countdown */}
-      {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
-        <RateLimitCountdown retryAt={story.rateLimitRetryAt} />
-      )}
-      {/* Live elapsed timer for running stories */}
-      {story.status === 'running' && story.startedAt != null && (
-        <LiveElapsed startedAt={story.startedAt} />
-      )}
-      {/* Static elapsed for completed stories */}
-      {story.status !== 'running' && story.status !== 'rate_limited' && story.elapsed != null && (
-        <span className="text-[10px] text-muted shrink-0">
-          {formatElapsed(story.elapsed)}
+    <div className={`${cfg.rowClass || ''} ${justPassed ? 'animate-story-pass' : ''}`}>
+      {/* Main row — fixed 48px height */}
+      <div
+        onClick={isFailed ? handleToggleExpand : (isClickable ? () => onStoryClick!(story.storyId) : undefined)}
+        className={`flex items-center gap-2 ${indented ? 'pl-6 pr-3' : 'px-3'} h-[${ROW_HEIGHT}px] border-b border-border/50 transition-colors ${
+          isFailed || isClickable ? 'cursor-pointer hover:bg-bg/50' : ''
+        } ${isFocused ? 'ring-2 ring-inset ring-accent/50 bg-accent/5' : ''}`}
+        style={{ height: ROW_HEIGHT }}
+      >
+        {/* Expand chevron for failed stories */}
+        {isFailed ? (
+          <button onClick={handleToggleExpand} className="shrink-0 p-0 bg-transparent border-none" aria-label={expanded ? 'Collapse failure details' : 'Expand failure details'} aria-expanded={expanded}>
+            {expanded ? (
+              <ChevronDown size={12} className="text-red-400" />
+            ) : (
+              <ChevronRight size={12} className="text-red-400" />
+            )}
+          </button>
+        ) : null}
+        <Icon
+          size={14}
+          className={`shrink-0 ${cfg.color} ${isAnimated ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
+        />
+        <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
+          story.status === 'running' ? 'bg-blue-500/10 text-blue-500' :
+          story.status === 'pass' ? 'bg-emerald-500/10 text-emerald-500' :
+          story.status === 'fail' ? 'bg-red-500/10 text-red-500' :
+          story.status === 'rate_limited' ? 'bg-amber-500/10 text-amber-500' :
+          'bg-bg text-muted'
+        }`} aria-live="polite">
+          {story.storyId}
         </span>
-      )}
-      {story.retries != null && story.retries > 0 && (
-        <span className="text-[10px] text-yellow-500 shrink-0">
-          R{story.retries}
+        <span className={`text-xs truncate flex-1 ${
+          isExcluded ? 'line-through text-muted' : 'text-[var(--text)]'
+        }`}>
+          {story.title}
         </span>
-      )}
-      {story.rateLimitAttempt != null && story.rateLimitAttempt > 0 && (
-        <span className="text-[10px] text-amber-500 shrink-0">
-          RL{story.rateLimitAttempt}
-        </span>
+        {/* Rate limit countdown */}
+        {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
+          <RateLimitCountdown retryAt={story.rateLimitRetryAt} />
+        )}
+        {/* Live elapsed timer for running stories */}
+        {story.status === 'running' && story.startedAt != null && (
+          <LiveElapsed startedAt={story.startedAt} />
+        )}
+        {/* Static elapsed for completed stories */}
+        {story.status !== 'running' && story.status !== 'rate_limited' && story.elapsed != null && (
+          <span className="text-[10px] text-muted shrink-0">
+            {formatElapsed(story.elapsed)}
+          </span>
+        )}
+        {/* Retry count badge — "N/3 retries used" for failed stories */}
+        {isFailed && retriesUsed > 0 && (
+          <span className="text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded shrink-0 font-mono">
+            {retriesUsed}/{MAX_RETRIES} retries
+          </span>
+        )}
+        {/* Non-failed retry indicator */}
+        {!isFailed && story.retries != null && story.retries > 0 && (
+          <span className="text-[10px] text-yellow-500 shrink-0">
+            R{story.retries}
+          </span>
+        )}
+        {story.rateLimitAttempt != null && story.rateLimitAttempt > 0 && (
+          <span className="text-[10px] text-amber-500 shrink-0">
+            RL{story.rateLimitAttempt}
+          </span>
+        )}
+      </div>
+
+      {/* Expanded failure detail panel */}
+      {isFailed && expanded && (
+        <div className={`${indented ? 'pl-6 pr-3' : 'px-3'} py-2 bg-red-500/5 border-b border-border/50`}>
+          {/* Failure reason */}
+          {failureReason && (
+            <div className="text-[10px] text-red-400 font-medium mb-1.5">
+              Failure: {failureReason.replace(/_/g, ' ')}
+            </div>
+          )}
+
+          {/* Output lines */}
+          {outputLoading ? (
+            <div className="flex items-center gap-2 py-2">
+              <Loader2 size={12} className="animate-spin text-muted" />
+              <span className="text-[10px] text-muted">Loading output...</span>
+            </div>
+          ) : outputLines.length > 0 ? (
+            <pre className="text-[10px] font-mono text-muted bg-[#1e1e1e] rounded p-2 overflow-x-auto max-h-48 leading-relaxed mb-2">
+              {outputLines.join('\n')}
+            </pre>
+          ) : (
+            <div className="text-[10px] text-muted py-1 mb-2">No output available</div>
+          )}
+
+          {/* Retry button + retry count */}
+          <div className="flex items-center gap-2">
+            {canRetry && onRetryStory && (
+              <button
+                onClick={handleRetry}
+                disabled={retryLoading}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+              >
+                {retryLoading ? (
+                  <Loader2 size={10} className="animate-spin" />
+                ) : (
+                  <RotateCcw size={10} />
+                )}
+                Retry this story
+              </button>
+            )}
+            {!canRetry && (
+              <span className="text-[10px] text-red-400/70">
+                Max retries ({MAX_RETRIES}) reached
+              </span>
+            )}
+            <span className="text-[10px] text-muted ml-auto">
+              {retriesUsed}/{MAX_RETRIES} retries used
+            </span>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -237,9 +372,12 @@ function WaveHeader({ waveIndex, storyCount, waveStatus, expanded, onToggle, cou
   return (
     <button
       onClick={onToggle}
-      className={`w-full flex items-center gap-2 px-3 py-2 border-b border-border bg-panel/80 hover:bg-panel transition-all ${
+      aria-expanded={expanded}
+      aria-label={`Wave ${waveIndex}: ${storyCount} ${storyCount === 1 ? 'story' : 'stories'}, ${style.label}`}
+      className={`w-full flex items-center gap-2 px-3 border-b border-border bg-panel/80 hover:bg-panel transition-all ${
         isActive ? 'animate-[wave-pulse_2s_ease-in-out_1]' : ''
       }`}
+      style={{ height: ROW_HEIGHT }}
     >
       {expanded ? (
         <ChevronDown size={12} className="text-muted shrink-0" />
@@ -255,7 +393,7 @@ function WaveHeader({ waveIndex, storyCount, waveStatus, expanded, onToggle, cou
       </span>
 
       {/* Status chip */}
-      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${style.bg} ${style.text}`}>
+      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${style.bg} ${style.text}`} aria-live="polite">
         {isMerging && <GitMerge size={10} className="animate-spin" />}
         {isActive && <Loader2 size={10} className="animate-spin" />}
         {style.label}
@@ -274,15 +412,46 @@ function WaveHeader({ waveIndex, storyCount, waveStatus, expanded, onToggle, cou
   );
 }
 
+// ─── Virtual list item types ─────────────────────────────────────────────────
+
+type VirtualItem =
+  | { type: 'story'; story: MergedStory; indented?: boolean }
+  | { type: 'wave-header'; waveIndex: number; storyCount: number; waveStatus: WaveStatus; counts: { passed: number; failed: number } }
+  | { type: 'excluded-header'; count: number };
+
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function RunStoryList({ runId, walEvents, onStoryClick, parallelism }: RunStoryListProps) {
+export default function RunStoryList({ runId, walEvents, onStoryClick, onRetryStory, parallelism }: RunStoryListProps) {
   const [storyResults, setStoryResults] = useState<StoryResult[]>([]);
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
   const [loading, setLoading] = useState(true);
   const [collapsedWaves, setCollapsedWaves] = useState<Set<number>>(new Set());
+  const [retryingStories, setRetryingStories] = useState<Set<string>>(new Set());
+  const [focusedIndex, setFocusedIndex] = useState<number>(-1);
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const scrollOffsetRef = useRef<number>(0);
 
   const isWaveMode = (parallelism ?? 1) > 1;
+
+  // Handle individual story retry
+  const handleRetryStory = useCallback(async (storyId: string) => {
+    // Immediately show as running in UI
+    setRetryingStories(prev => new Set(prev).add(storyId));
+    try {
+      const result = await retryRun(runId, { storyIds: [storyId] });
+      if (result.runId && onRetryStory) {
+        onRetryStory(storyId, result.runId);
+      }
+    } catch {
+      // Revert on failure
+      setRetryingStories(prev => {
+        const next = new Set(prev);
+        next.delete(storyId);
+        return next;
+      });
+    }
+  }, [runId, onRetryStory]);
 
   const fetchData = useCallback(async () => {
     try {
@@ -366,7 +535,6 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
           map.set(evt.story_id, { retryAt: eventTime + retryAfterMs, attempt });
         } catch { /* ignore */ }
       } else if (evt.event_type === 'story_started') {
-        // Story re-started after backoff — no longer rate limited
         map.delete(evt.story_id);
       } else if (evt.event_type === 'story_passed' || evt.event_type === 'story_failed') {
         map.delete(evt.story_id);
@@ -420,6 +588,11 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
         status = 'running';
       }
 
+      // Local retry override: show as running immediately after retry button click
+      if (retryingStories.has(spec.id)) {
+        status = 'running';
+      }
+
       return {
         storyId: spec.id,
         title: spec.title,
@@ -431,7 +604,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
         rateLimitAttempt: rlInfo?.attempt ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -453,28 +626,24 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
 
     for (const wave of waves) {
       const stories = wave.storyIds.map(id => mergedMap.get(id)).filter(Boolean) as MergedStory[];
-      let passed = 0, failed = 0, running = 0, pending = 0;
+      let passed = 0, failed = 0, running = 0;
 
       for (const s of stories) {
         if (s.status === 'pass' || s.status === 'excluded') passed++;
         else if (s.status === 'fail' || s.status === 'skip') failed++;
         else if (s.status === 'running' || s.status === 'retry' || s.status === 'rate_limited') running++;
-        else pending++;
       }
 
       let waveStatus: WaveStatus = 'waiting';
       const isMerged = mergedWaveIndices.has(wave.index);
 
       if (isMerged) {
-        // Wave has been merged
         waveStatus = failed > 0 ? 'partial-fail' : 'done';
       } else if (running > 0) {
         waveStatus = 'running';
       } else if (passed + failed === stories.length && stories.length > 0 && (passed > 0 || failed > 0)) {
-        // All stories settled but not yet merged
         waveStatus = 'merging';
       } else if (passed > 0 || failed > 0) {
-        // Some settled, some still pending/running
         waveStatus = 'running';
       }
 
@@ -508,13 +677,149 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
 
   // Counts
   const counts = useMemo(() => {
-    let passed = 0, failed = 0, total = mergedStories.length;
+    let passed = 0, failed = 0;
+    const total = mergedStories.length;
     for (const s of mergedStories) {
       if (s.status === 'pass') passed++;
       else if (s.status === 'fail') failed++;
     }
     return { passed, failed, total };
   }, [mergedStories]);
+
+  // ─── Build flat virtual items list ─────────────────────────────────────────
+
+  const virtualItems = useMemo((): VirtualItem[] => {
+    if (isWaveMode && waves && waves.length > 0) {
+      const items: VirtualItem[] = [];
+
+      // Excluded stories (pre-passed)
+      const waveCoveredIds = new Set(waves.flatMap(w => w.storyIds));
+      const excludedStories = mergedStories.filter(s => !waveCoveredIds.has(s.storyId));
+
+      if (excludedStories.length > 0) {
+        items.push({ type: 'excluded-header', count: excludedStories.length });
+        for (const story of excludedStories) {
+          items.push({ type: 'story', story, indented: true });
+        }
+      }
+
+      for (const wave of waves) {
+        const ws = waveStatuses.get(wave.index) ?? { status: 'waiting' as WaveStatus, passed: 0, failed: 0 };
+        items.push({
+          type: 'wave-header',
+          waveIndex: wave.index,
+          storyCount: wave.storyIds.length,
+          waveStatus: ws.status,
+          counts: { passed: ws.passed, failed: ws.failed },
+        });
+
+        // Only include stories if wave is expanded
+        if (!collapsedWaves.has(wave.index)) {
+          for (const storyId of wave.storyIds) {
+            const story = mergedMap.get(storyId);
+            if (story) {
+              items.push({ type: 'story', story, indented: true });
+            }
+          }
+        }
+      }
+
+      return items;
+    }
+
+    // Sequential mode: flat story list
+    return mergedStories.map(story => ({ type: 'story' as const, story }));
+  }, [isWaveMode, waves, waveStatuses, collapsedWaves, mergedMap, mergedStories]);
+
+  // ─── Virtual scroll setup ──────────────────────────────────────────────────
+
+  const virtualizer = useVirtualizer({
+    count: virtualItems.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 10,
+    initialOffset: scrollOffsetRef.current,
+  });
+
+  // Preserve scroll position across re-renders
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      scrollOffsetRef.current = el.scrollTop;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // ─── Auto-scroll running/active story into view ───────────────────────────
+
+  const prevRunningRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    // Find newly started stories (not previously running)
+    const newlyRunning: string[] = [];
+    for (const id of runningStoryIds) {
+      if (!prevRunningRef.current.has(id)) {
+        newlyRunning.push(id);
+      }
+    }
+    prevRunningRef.current = new Set(runningStoryIds);
+
+    if (newlyRunning.length === 0) return;
+
+    // Find the index of the first newly running story in virtualItems
+    const lastNewId = newlyRunning[newlyRunning.length - 1];
+    const idx = virtualItems.findIndex(
+      item => item.type === 'story' && item.story.storyId === lastNewId
+    );
+
+    if (idx >= 0) {
+      virtualizer.scrollToIndex(idx, { align: 'auto', behavior: 'smooth' });
+    }
+  }, [runningStoryIds, virtualItems, virtualizer]);
+
+  // ─── Keyboard navigation ──────────────────────────────────────────────────
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const itemCount = virtualItems.length;
+    if (itemCount === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setFocusedIndex(prev => {
+        const next = Math.min(prev + 1, itemCount - 1);
+        virtualizer.scrollToIndex(next, { align: 'auto', behavior: 'smooth' });
+        return next;
+      });
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setFocusedIndex(prev => {
+        const next = Math.max(prev - 1, 0);
+        virtualizer.scrollToIndex(next, { align: 'auto', behavior: 'smooth' });
+        return next;
+      });
+    } else if (e.key === 'Enter' && focusedIndex >= 0 && focusedIndex < itemCount) {
+      e.preventDefault();
+      const item = virtualItems[focusedIndex];
+      if (item.type === 'story' && onStoryClick) {
+        onStoryClick(item.story.storyId);
+      } else if (item.type === 'wave-header') {
+        toggleWave(item.waveIndex);
+      }
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      setFocusedIndex(0);
+      virtualizer.scrollToIndex(0, { align: 'start', behavior: 'smooth' });
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      const lastIdx = itemCount - 1;
+      setFocusedIndex(lastIdx);
+      virtualizer.scrollToIndex(lastIdx, { align: 'end', behavior: 'smooth' });
+    }
+  }, [virtualItems, focusedIndex, onStoryClick, toggleWave, virtualizer]);
+
+  // ─── Render ────────────────────────────────────────────────────────────────
 
   if (loading) {
     return (
@@ -532,103 +837,89 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, paralleli
     );
   }
 
-  // ─── Wave-grouped layout ────────────────────────────────────────────────────
-  if (isWaveMode && waves && waves.length > 0) {
-    // Collect excluded stories (pre-passed, not in any wave)
-    const waveCoveredIds = new Set(waves.flatMap(w => w.storyIds));
-    const excludedStories = mergedStories.filter(s => !waveCoveredIds.has(s.storyId));
-
-    return (
-      <div className="h-full flex flex-col">
-        {/* Header */}
-        <div className="shrink-0 px-3 py-2 border-b border-border bg-panel flex items-center gap-2">
-          <Layers size={12} className="text-purple-400" />
-          <span className="text-xs font-semibold text-muted uppercase tracking-wider">
-            Stories ({counts.total})
-          </span>
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <div className="shrink-0 px-3 py-2 border-b border-border bg-panel flex items-center gap-2">
+        {isWaveMode && <Layers size={12} className="text-purple-400" />}
+        <span className="text-xs font-semibold text-muted uppercase tracking-wider">
+          Stories ({counts.total})
+        </span>
+        {isWaveMode && waves && (
           <span className="text-[10px] text-muted ml-auto">
             {waves.length} {waves.length === 1 ? 'wave' : 'waves'}
           </span>
-        </div>
+        )}
+      </div>
 
-        {/* Wave groups */}
-        <div className="flex-1 overflow-y-auto">
-          {/* Excluded stories (pre-passed) shown first if any */}
-          {excludedStories.length > 0 && (
-            <>
-              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-panel/50">
-                <SkipForward size={10} className="text-gray-400" />
-                <span className="text-[10px] font-medium text-muted">
-                  {excludedStories.length} pre-passed
-                </span>
-              </div>
-              {excludedStories.map(story => (
-                <StoryRow key={story.storyId} story={story} onStoryClick={onStoryClick} indented />
-              ))}
-            </>
-          )}
-
-          {waves.map((wave) => {
-            const ws = waveStatuses.get(wave.index) ?? { status: 'waiting' as WaveStatus, passed: 0, failed: 0 };
-            const expanded = !collapsedWaves.has(wave.index);
-            const waveStories = wave.storyIds
-              .map(id => mergedMap.get(id))
-              .filter(Boolean) as MergedStory[];
+      {/* Virtual scroll container */}
+      <div
+        ref={scrollContainerRef}
+        className="flex-1 overflow-y-auto outline-none"
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+        role="listbox"
+        aria-label="Story list"
+      >
+        <div
+          style={{
+            height: virtualizer.getTotalSize(),
+            width: '100%',
+            position: 'relative',
+          }}
+        >
+          {virtualizer.getVirtualItems().map((vItem) => {
+            const item = virtualItems[vItem.index];
+            const isFocused = focusedIndex === vItem.index;
 
             return (
-              <div key={wave.index}>
-                <WaveHeader
-                  waveIndex={wave.index}
-                  storyCount={wave.storyIds.length}
-                  waveStatus={ws.status}
-                  expanded={expanded}
-                  onToggle={() => toggleWave(wave.index)}
-                  counts={{ passed: ws.passed, failed: ws.failed }}
-                />
-                {expanded && waveStories.map(story => (
+              <div
+                key={vItem.index}
+                data-index={vItem.index}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: ROW_HEIGHT,
+                  transform: `translateY(${vItem.start}px)`,
+                }}
+                role="option"
+                aria-selected={isFocused}
+              >
+                {item.type === 'story' ? (
                   <StoryRow
-                    key={story.storyId}
-                    story={story}
+                    story={item.story}
                     onStoryClick={onStoryClick}
-                    indented
+                    onRetryStory={handleRetryStory}
+                    runId={runId}
+                    indented={item.indented}
+                    isFocused={isFocused}
                   />
-                ))}
+                ) : item.type === 'wave-header' ? (
+                  <WaveHeader
+                    waveIndex={item.waveIndex}
+                    storyCount={item.storyCount}
+                    waveStatus={item.waveStatus}
+                    expanded={!collapsedWaves.has(item.waveIndex)}
+                    onToggle={() => toggleWave(item.waveIndex)}
+                    counts={item.counts}
+                  />
+                ) : item.type === 'excluded-header' ? (
+                  <div
+                    className="flex items-center gap-2 px-3 border-b border-border bg-panel/50"
+                    style={{ height: ROW_HEIGHT }}
+                  >
+                    <SkipForward size={10} className="text-gray-400" />
+                    <span className="text-[10px] font-medium text-muted">
+                      {item.count} pre-passed
+                    </span>
+                  </div>
+                ) : null}
               </div>
             );
           })}
         </div>
-
-        {/* Summary footer */}
-        <div className="shrink-0 px-3 py-2 border-t border-border bg-panel flex items-center gap-3">
-          <span className="text-[11px] font-medium text-emerald-500">
-            {counts.passed} passed
-          </span>
-          <span className="text-[11px] font-medium text-red-500">
-            {counts.failed} failed
-          </span>
-          <span className="text-[11px] text-muted ml-auto">
-            {counts.passed + counts.failed} / {counts.total}
-          </span>
-        </div>
-      </div>
-    );
-  }
-
-  // ─── Sequential (flat) layout ──────────────────────────────────────────────
-  return (
-    <div className="h-full flex flex-col">
-      {/* Header */}
-      <div className="shrink-0 px-3 py-2 border-b border-border bg-panel">
-        <span className="text-xs font-semibold text-muted uppercase tracking-wider">
-          Stories ({counts.total})
-        </span>
-      </div>
-
-      {/* Story list */}
-      <div className="flex-1 overflow-y-auto">
-        {mergedStories.map((story) => (
-          <StoryRow key={story.storyId} story={story} onStoryClick={onStoryClick} />
-        ))}
       </div>
 
       {/* Summary footer */}

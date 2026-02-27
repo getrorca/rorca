@@ -3,6 +3,7 @@ import { Search, ArrowRight, Clock, Command, Hammer, Trash2 } from 'lucide-react
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { NAV_ITEMS, type PanelId } from './Sidebar';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -140,6 +141,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
   const { workspaceId } = useWorkspace();
 
   // Remote data
@@ -472,8 +474,12 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
     <div
       className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50 backdrop-blur-sm"
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Command palette"
     >
       <div
+        ref={trapRef}
         className="bg-panel border border-border rounded-lg shadow-xl w-full max-w-lg overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
@@ -486,6 +492,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search specs, stories, runs, actions..."
+            aria-label="Search command palette"
             className="flex-1 bg-transparent text-sm text-text placeholder:text-muted focus:outline-none"
           />
           <kbd className="text-[10px] text-muted bg-bg border border-border rounded px-1.5 py-0.5 font-mono">

@@ -146,8 +146,8 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
     onMobileClose?.();
   };
 
-  const renderIcons = () => (
-    <div className="flex flex-col items-center gap-1 pt-3">
+  const renderIcons = (withLabels = false) => (
+    <div className={`flex flex-col items-center gap-1 pt-3${withLabels ? ' w-full px-2' : ''}`}>
       {MINIMAL_NAV.map((item) => {
         const isActive = item.id === activeNav && item.id !== 'new';
         const Icon = item.icon;
@@ -155,8 +155,14 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
           <button
             key={item.id}
             title={item.label}
+            aria-label={item.label}
+            aria-current={isActive ? 'page' : undefined}
             onClick={() => handleClick(item)}
-            className={`relative w-10 h-10 flex items-center justify-center rounded-lg transition-colors ${
+            className={`relative flex items-center justify-center rounded-lg transition-colors ${
+              withLabels
+                ? 'w-full h-11 gap-3 px-3 justify-start'
+                : 'w-10 h-10'
+            } ${
               isActive
                 ? 'text-accent bg-accent/10'
                 : 'text-muted hover:text-[var(--text)] hover:bg-bg'
@@ -166,6 +172,9 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
               <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-accent rounded-r" />
             )}
             <Icon size={20} strokeWidth={1.5} />
+            {withLabels && (
+              <span className="text-sm font-medium">{item.label}</span>
+            )}
           </button>
         );
       })}
@@ -176,26 +185,28 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
     <>
       {/* Desktop — always-visible 48px icon rail */}
       <nav className="hidden md:flex flex-col items-center w-12 bg-panel border-r border-border shrink-0">
-        {renderIcons()}
+        {renderIcons(false)}
       </nav>
 
-      {/* Mobile drawer */}
+      {/* Mobile drawer — slide-in with labels */}
       {mobileOpen && (
         <>
           <div
             className="fixed inset-0 bg-black/50 z-40 md:hidden"
             onClick={onMobileClose}
           />
-          <nav className="fixed top-0 left-0 bottom-0 w-14 bg-panel border-r border-border z-50 md:hidden flex flex-col items-center animate-slideInLeft">
-            <div className="h-12 flex items-center justify-center border-b border-border w-full shrink-0">
+          <nav className="fixed top-0 left-0 bottom-0 w-48 bg-panel border-r border-border z-50 md:hidden flex flex-col animate-slideInLeft">
+            <div className="h-12 flex items-center justify-between px-3 border-b border-border shrink-0">
+              <span className="font-mono font-bold text-accent text-sm tracking-tight select-none">rorca</span>
               <button
                 onClick={onMobileClose}
-                className="w-10 h-10 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors"
+                aria-label="Close navigation menu"
+                className="w-11 h-11 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors"
               >
                 <X size={18} />
               </button>
             </div>
-            {renderIcons()}
+            {renderIcons(true)}
           </nav>
         </>
       )}

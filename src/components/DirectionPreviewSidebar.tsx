@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import { DirectionSidebarSkeleton } from './Skeleton';
 
 interface LayerData {
   content: string | null;
@@ -78,9 +79,7 @@ export default function DirectionPreviewSidebar({ onNavigateToStack }: { onNavig
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         {loading && !layers ? (
-          <div className="flex items-center justify-center py-8 text-muted text-xs">
-            Loading...
-          </div>
+          <DirectionSidebarSkeleton />
         ) : !hasAnyContent ? (
           <div className="px-4 py-6 text-center">
             <p className="text-xs text-muted mb-3">No direction configured</p>

@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { apiFetch } from '../lib/apiFetch';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -511,12 +512,28 @@ export default function BootstrapContextModal({
 // ===========================================================================
 
 function ModalShell({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Bootstrap context"
+    >
       {/* Overlay */}
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
       {/* Modal */}
       <div
+        ref={trapRef}
         className="relative bg-bg border border-border rounded-lg shadow-2xl flex flex-col"
         style={{ width: 780, maxHeight: '85vh' }}
       >
