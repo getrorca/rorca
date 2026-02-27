@@ -50,6 +50,22 @@ interface DisplaySettings {
 interface ModelOption {
   id: string;
   label: string;
+  provider: string;
+  providerType: string;
+  costPer1kInput: number;
+  costPer1kOutput: number;
+  contextWindow: number;
+  speedTier: 'fast' | 'medium' | 'slow';
+  costTier: 'free' | 'low' | 'medium' | 'high' | 'premium';
+  recommended: boolean;
+}
+
+interface ModelTestResult {
+  modelId: string;
+  ok: boolean;
+  latencyMs?: number;
+  response?: string;
+  error?: string;
 }
 
 const EVENT_TYPE_LABELS: Record<string, string> = {
@@ -583,8 +599,105 @@ function ProvidersSection() {
 
 // ─── Display Section ─────────────────────────────────────────────────────────
 
+const SPEED_LABELS: Record<string, { label: string; color: string }> = {
+  fast: { label: 'Fast', color: 'text-green-500' },
+  medium: { label: 'Medium', color: 'text-amber-500' },
+  slow: { label: 'Slow', color: 'text-red-400' },
+};
+
+const COST_LABELS: Record<string, { label: string; color: string }> = {
+  free: { label: 'Free', color: 'text-green-500' },
+  low: { label: 'Low', color: 'text-green-400' },
+  medium: { label: 'Medium', color: 'text-amber-500' },
+  high: { label: 'High', color: 'text-orange-500' },
+  premium: { label: 'Premium', color: 'text-red-400' },
+};
+
+function formatContextWindow(tokens: number): string {
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(tokens % 1000000 === 0 ? 0 : 1)}M`;
+  return `${(tokens / 1000).toFixed(0)}K`;
+}
+
+function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, testResult, isTesting }: {
+  model: ModelOption;
+  isSelected: boolean;
+  isWorkspaceOverride: boolean;
+  onSelect: () => void;
+  onTest: () => void;
+  testResult: ModelTestResult | null;
+  isTesting: boolean;
+}) {
+  const speed = SPEED_LABELS[model.speedTier] ?? SPEED_LABELS.medium;
+  const cost = COST_LABELS[model.costTier] ?? COST_LABELS.medium;
+
+  return (
+    <div
+      className={`border rounded p-3 transition-colors cursor-pointer ${
+        isSelected
+          ? 'border-accent/60 bg-accent/5'
+          : 'border-border bg-bg hover:border-accent/30'
+      }`}
+      onClick={onSelect}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-medium text-[var(--text)]">{model.label}</span>
+            <span className="px-1.5 py-0.5 text-[10px] rounded bg-panel border border-border text-muted">{model.provider}</span>
+            {isSelected && !isWorkspaceOverride && (
+              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-accent/15 text-accent">
+                Default
+              </span>
+            )}
+            {isSelected && isWorkspaceOverride && (
+              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-purple-500/15 text-purple-400">
+                Workspace
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3 mt-1.5 text-[11px] text-muted">
+            <span title="Context window">{formatContextWindow(model.contextWindow)} ctx</span>
+            <span className={speed.color}>{speed.label}</span>
+            <span className={cost.color}>${model.costTier === 'free' ? 'Free' : `${model.costPer1kInput.toFixed(4)}/${model.costPer1kOutput.toFixed(4)}`}</span>
+          </div>
+        </div>
+        <button
+          onClick={e => { e.stopPropagation(); onTest(); }}
+          disabled={isTesting}
+          className="flex items-center gap-1 px-2 py-1 text-[11px] border border-border rounded hover:border-accent/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50 shrink-0"
+          title="Send a test prompt to this model"
+        >
+          {isTesting ? <Loader2 size={10} className="animate-spin" /> : <Zap size={10} />}
+          Test
+        </button>
+      </div>
+      {testResult && testResult.modelId === model.id && (
+        <div className={`mt-2 px-2 py-1.5 rounded text-[11px] flex items-center gap-1.5 ${
+          testResult.ok
+            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+            : 'bg-red-500/10 border border-red-500/20 text-red-400'
+        }`}>
+          {testResult.ok ? (
+            <>
+              <CheckCircle2 size={12} />
+              {testResult.latencyMs}ms
+              {testResult.response && <span className="text-muted ml-1 truncate">— {testResult.response}</span>}
+            </>
+          ) : (
+            <>
+              <XCircle size={12} />
+              <span className="truncate">{testResult.error}</span>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DisplaySection() {
   const { mode, setMode } = useTheme();
+  const { workspaceId } = useWorkspace();
   const [settings, setSettings] = useState<DisplaySettings | null>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -594,18 +707,40 @@ function DisplaySection() {
   const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-5-20250929');
   const [itemsPerPage, setItemsPerPage] = useState(20);
 
+  // Per-workspace preferred model override
+  const [workspaceModel, setWorkspaceModel] = useState<string | null>(null);
+  const [workspaceModelInitial, setWorkspaceModelInitial] = useState<string | null>(null);
+  const [savingWorkspace, setSavingWorkspace] = useState(false);
+  const [savedWorkspace, setSavedWorkspace] = useState(false);
+
+  // Test model state
+  const [testingModel, setTestingModel] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
+
   useEffect(() => {
-    Promise.all([
+    const fetchPromises: Promise<any>[] = [
       apiFetch<DisplaySettings>('/api/settings/display'),
-      apiFetch<{ models: ModelOption[] }>('/api/direction/models'),
-    ]).then(([displayData, modelData]) => {
+      apiFetch<{ models: ModelOption[]; defaultModel: string }>(`/api/direction/models${workspaceId ? `?workspaceId=${workspaceId}` : ''}`),
+    ];
+    // Fetch workspace L3 preferred model if workspace selected
+    if (workspaceId) {
+      fetchPromises.push(
+        apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`)
+      );
+    }
+
+    Promise.all(fetchPromises).then(([displayData, modelData, l3Data]) => {
       setSettings(displayData);
       setDefaultModel(displayData.defaultModel);
       setItemsPerPage(displayData.itemsPerPage);
       setModels(modelData.models);
+      if (l3Data) {
+        setWorkspaceModel(l3Data.preferredModel);
+        setWorkspaceModelInitial(l3Data.preferredModel);
+      }
     }).catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [workspaceId]);
 
   const saveDisplay = async () => {
     setSaving(true);
@@ -616,6 +751,7 @@ function DisplaySection() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ defaultModel, itemsPerPage }),
       });
+      setSettings(prev => prev ? { ...prev, defaultModel, itemsPerPage } : prev);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
@@ -625,14 +761,68 @@ function DisplaySection() {
     }
   };
 
+  const saveWorkspaceModel = async (modelId: string | null) => {
+    if (!workspaceId) return;
+    setSavingWorkspace(true);
+    setSavedWorkspace(false);
+    try {
+      // We need the current L3 content to save alongside
+      const l3 = await apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`);
+      await apiFetch('/api/direction', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          layer: 3,
+          workspaceId,
+          contentYaml: l3.contentYaml || '',
+          preferredModel: modelId,
+          skipValidation: true,
+        }),
+      });
+      setWorkspaceModel(modelId);
+      setWorkspaceModelInitial(modelId);
+      setSavedWorkspace(true);
+      setTimeout(() => setSavedWorkspace(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSavingWorkspace(false);
+    }
+  };
+
+  const testModel = async (modelId: string) => {
+    setTestingModel(modelId);
+    setTestResult(null);
+    try {
+      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/direction/models/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelId }),
+      });
+      setTestResult({ modelId, ok: true, latencyMs: result.latencyMs, response: result.response });
+    } catch (err: any) {
+      setTestResult({ modelId, ok: false, error: err.message || 'Test failed' });
+    } finally {
+      setTestingModel(null);
+    }
+  };
+
   if (loading) {
-    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading display settings...</div>;
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading model settings...</div>;
   }
 
   const hasChanges = settings && (defaultModel !== settings.defaultModel || itemsPerPage !== settings.itemsPerPage);
+  const effectiveModel = workspaceModel ?? defaultModel;
+
+  // Group models by provider
+  const modelsByProvider = models.reduce<Record<string, ModelOption[]>>((acc, m) => {
+    (acc[m.provider] ??= []).push(m);
+    return acc;
+  }, {});
 
   return (
     <div className="space-y-6">
+      {/* Theme */}
       <div>
         <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Theme</h2>
         <div className="flex gap-2">
@@ -652,20 +842,99 @@ function DisplaySection() {
         </div>
       </div>
 
+      {/* Default Model (global) */}
       <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Default Model</h2>
+        <h2 className="text-sm font-semibold text-[var(--text)] mb-1">Default Model</h2>
+        <p className="text-xs text-muted mb-3">Global default when no workspace override is set</p>
         <select
           value={defaultModel}
           onChange={e => setDefaultModel(e.target.value)}
           className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
         >
           {models.map(m => (
-            <option key={m.id} value={m.id}>{m.label}</option>
+            <option key={m.id} value={m.id}>
+              {m.label} ({m.provider}) — {formatContextWindow(m.contextWindow)} ctx, {SPEED_LABELS[m.speedTier]?.label}, {COST_LABELS[m.costTier]?.label} cost
+            </option>
           ))}
         </select>
-        <p className="text-xs text-muted mt-1">Used as the default when generating specs</p>
       </div>
 
+      {/* Per-workspace preferred model override */}
+      {workspaceId && (
+        <div className="border-t border-border pt-6">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-sm font-semibold text-[var(--text)]">Workspace Model Override</h2>
+            {savedWorkspace && (
+              <span className="flex items-center gap-1 text-xs text-green-500"><Check size={12} /> Saved</span>
+            )}
+          </div>
+          <p className="text-xs text-muted mb-3">
+            Override the global default for this workspace. Persists to the Direction Stack L3.
+          </p>
+          <div className="flex gap-2">
+            <select
+              value={workspaceModel ?? ''}
+              onChange={e => {
+                const val = e.target.value || null;
+                setWorkspaceModel(val);
+              }}
+              disabled={savingWorkspace}
+              className="flex-1 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+            >
+              <option value="">Use global default ({models.find(m => m.id === defaultModel)?.label ?? defaultModel})</option>
+              {models.map(m => (
+                <option key={m.id} value={m.id}>
+                  {m.label} ({m.provider}) — {formatContextWindow(m.contextWindow)} ctx
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => saveWorkspaceModel(workspaceModel)}
+              disabled={savingWorkspace || workspaceModel === workspaceModelInitial}
+              className="flex items-center gap-1.5 px-3 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
+            >
+              {savingWorkspace ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              Save
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Model catalog with test buttons */}
+      <div className="border-t border-border pt-6">
+        <h2 className="text-sm font-semibold text-[var(--text)] mb-1">Available Models</h2>
+        <p className="text-xs text-muted mb-3">Click a model to set it as the {workspaceId ? 'workspace' : 'global'} default. Use Test to verify connectivity.</p>
+        <div className="space-y-4">
+          {Object.entries(modelsByProvider).map(([provider, providerModels]) => (
+            <div key={provider}>
+              <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">{provider}</h3>
+              <div className="space-y-1.5">
+                {providerModels.map(m => (
+                  <ModelCard
+                    key={m.id}
+                    model={m}
+                    isSelected={m.id === effectiveModel}
+                    isWorkspaceOverride={m.id === workspaceModel}
+                    onSelect={() => {
+                      if (workspaceId) {
+                        setWorkspaceModel(m.id);
+                        saveWorkspaceModel(m.id);
+                      } else {
+                        setDefaultModel(m.id);
+                      }
+                    }}
+                    onTest={() => testModel(m.id)}
+                    testResult={testResult}
+                    isTesting={testingModel === m.id}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Items per page */}
       <div className="border-t border-border pt-6">
         <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Items Per Page</h2>
         <select
@@ -680,6 +949,7 @@ function DisplaySection() {
         <p className="text-xs text-muted mt-1">Number of items shown per page in lists and archives</p>
       </div>
 
+      {/* Save display settings button */}
       <button
         onClick={saveDisplay}
         disabled={saving || !hasChanges}
