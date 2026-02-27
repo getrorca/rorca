@@ -2101,9 +2101,12 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
   // Resolve agent type for semantic parsing (defaults to 'claude')
-  const runRow = db.prepare('SELECT agent_type, agent FROM pipeline_runs WHERE id = ?')
-    .get(runId) as { agent_type: string; agent: string } | undefined;
+  const runRow = db.prepare('SELECT agent_type, agent, agent_model FROM pipeline_runs WHERE id = ?')
+    .get(runId) as { agent_type: string; agent: string; agent_model: string | null } | undefined;
   const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
+
+  // Emit run metadata so frontend knows which renderer to use
+  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null })}\n\n`);
 
   if (buf) {
     // ── Hot path: in-memory buffer exists ──────────────────────────────────
