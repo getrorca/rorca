@@ -63,7 +63,8 @@
         "Empty state when no templates saved: 'No templates yet \u2014 generate a spec and save it as a template'"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-005",
@@ -78,7 +79,8 @@
         "Filter persists while on this screen, resets on navigation"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-006",
@@ -92,7 +94,8 @@
         "'Dependency chain' button opens a mini DAG modal for the whole spec"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-007",
@@ -107,7 +110,8 @@
         "Cancel subscription flow with confirmation and grace period explanation"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-008",
@@ -121,7 +125,8 @@
         "Animation does not replay on re-render \u2014 only on status change event"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-009",
@@ -135,7 +140,8 @@
         "Hub run card moves to Recent Runs list with smooth slide animation"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-010",
@@ -149,7 +155,8 @@
         "No animation for bulk state restore (e.g., page load populating existing run data)"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-011",
@@ -164,7 +171,8 @@
         "Skeletons use Tailwind animate-pulse"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-012",
@@ -179,7 +187,8 @@
         "WAL run_finished event with status=failed drives this state"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-013",
@@ -194,7 +203,8 @@
         "Story failure writes WAL story_failed event"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-014",
@@ -209,7 +219,8 @@
         "No horizontal scroll on any screen at 375px viewport"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-015",
@@ -226,7 +237,8 @@
       "dependsOn": [
         "P2-014"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-016",
@@ -242,7 +254,8 @@
         "axe-core scan reports zero critical violations on Hub and Run View"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-017",
@@ -259,7 +272,8 @@
       "dependsOn": [
         "P2-016"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-018",
@@ -274,7 +288,8 @@
         "Virtual scroll works with keyboard navigation (arrow keys)"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-019",
@@ -289,7 +304,8 @@
         "Lighthouse performance score > 90 on Hub screen"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-020",
@@ -306,7 +322,8 @@
       "dependsOn": [
         "P2-019"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-021",
@@ -327,7 +344,26 @@
       "dependsOn": [
         "P2-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "P2-022",
+      "title": "Parallel Run Story Mini-Terminals",
+      "description": "When a run executes with parallelism > 1, the Terminal tab switches from a single pane to a live multi-pane grid showing one mini-terminal per concurrently running story. Users can watch multiple claude subprocesses working simultaneously instead of seeing only run-loop orchestration text.",
+      "acceptanceCriteria": [
+        "When parallelism > 1 and 2+ stories have story_started WAL events with no story_passed/failed yet, Terminal tab shows a grid of mini-terminal panes instead of the single RunTerminal",
+        "New backend route GET /api/pipeline/runs/:runId/stories/:storyId/log streams the per-story log file (forge/logs/<storyId>_*.log) as SSE chunks, same protocol as /runs/:runId/output",
+        "Each mini-terminal pane shows: story ID badge, story title (truncated 1 line), Raw/Semantic toggle, live log tail via the new SSE endpoint",
+        "Wave label rendered above each concurrent group: 'Wave 0', 'Wave 1' etc., sourced from wave_index in story_started WAL payload",
+        "When a story finishes (story_passed or story_failed), its pane shows a final status banner (green PASSED / red FAILED) and stops tailing",
+        "Graceful fallback: if story log file does not exist yet, pane shows 'Waiting for story to start...'",
+        "parallelism = 1 (sequential): Terminal tab renders existing single-pane layout unchanged \u2014 zero regression",
+        "Mini-terminal grid is responsive: 2 columns on wide screens, 1 column on < 900px"
+      ],
+      "dependsOn": [],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ],
   "model": "claude-sonnet-4-6",

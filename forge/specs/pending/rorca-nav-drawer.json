@@ -1,0 +1,65 @@
+{
+  "title": "rorca-nav-drawer",
+  "userStories": [
+    {
+      "id": "NAV-001",
+      "title": "Nav Rail Menu Icon and Drawer Shell",
+      "description": "Add a ≡ (menu/hamburger) icon to the bottom of the 4-icon nav rail. Clicking it opens a 260px slide-in drawer from the left edge showing all panels grouped by section (Specs, Pipeline, Direction, Analytics, System). The drawer overlays the main content area without pushing it. Clicking outside or pressing Escape closes it.",
+      "acceptanceCriteria": [
+        "A Menu icon (lucide-react Menu or AlignJustify) appears at the bottom of the icon rail, below the Settings icon, separated by a small gap",
+        "Clicking the Menu icon toggles a 260px wide slide-in drawer that appears to the right of the icon rail, overlaying the main content with a semi-transparent backdrop",
+        "Drawer slides in from the left with a 150ms ease-out transition (translate-x animation)",
+        "Clicking the backdrop or pressing Escape closes the drawer",
+        "Drawer persists last-open state in localStorage key 'rorca:nav-drawer-open' — reopens on next session if it was open",
+        "Menu icon shows an active/filled state when drawer is open",
+        "Drawer has a fixed header 'Navigation' with a close X button in the top right"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "NAV-002",
+      "title": "Drawer Section Content — All 22 Panels",
+      "description": "The nav drawer renders all panels from NAV_SECTIONS in Sidebar.tsx, grouped under their section headers. Each item is a clickable row that navigates to the panel and closes the drawer.",
+      "acceptanceCriteria": [
+        "Drawer renders all 5 sections from NAV_SECTIONS: Specs, Pipeline, Direction, Analytics, System — each with a section label header",
+        "Each nav item shows its icon (from NAV_SECTIONS) and label text in a single row",
+        "Clicking any item calls onNavigate(panelId) and closes the drawer",
+        "The currently active panel is highlighted with accent color background and accent text",
+        "Section headers are styled as uppercase small caps with muted color, not clickable",
+        "Items have hover state (subtle bg-panel/50 background)",
+        "Drawer content is scrollable if it overflows viewport height"
+      ],
+      "dependsOn": ["NAV-001"],
+      "passes": false
+    },
+    {
+      "id": "NAV-003",
+      "title": "Keyboard Shortcut to Toggle Drawer",
+      "description": "Add ⌘\\ (Mac) / Ctrl+\\ (Windows/Linux) as a global keyboard shortcut to toggle the nav drawer open/closed. This mirrors VS Code's sidebar toggle shortcut and gives power users instant access without reaching for the mouse.",
+      "acceptanceCriteria": [
+        "⌘\\ on Mac and Ctrl+\\ on Windows/Linux toggles the nav drawer",
+        "Shortcut works from any panel, including when focus is in an input (unless the input explicitly captures backslash)",
+        "Shortcut is listed in the Settings → Shortcuts tab with label 'Toggle navigation drawer'",
+        "Event listener is registered in Shell.tsx or a global useHotkeys call and cleaned up on unmount"
+      ],
+      "dependsOn": ["NAV-001"],
+      "passes": false
+    },
+    {
+      "id": "NAV-004",
+      "title": "Command Palette Nav Hint",
+      "description": "The existing ⌘K hint in the UI and the command palette itself should surface the nav drawer as a discoverable action, so users who find ⌘K first also learn about the drawer.",
+      "acceptanceCriteria": [
+        "Command palette includes a 'Toggle navigation drawer' action at the top of results when query is empty",
+        "All 22 panel navigation items remain in the command palette as before (no regression)",
+        "A subtle '≡ All panels' link appears in the Hub empty state and Hub footer area pointing to the drawer",
+        "Tooltip on the Menu icon reads 'All panels  ⌘\\'"
+      ],
+      "dependsOn": ["NAV-001", "NAV-003"],
+      "passes": false
+    }
+  ],
+  "model": "claude-sonnet-4-6",
+  "generatedAt": "2026-02-27T00:00:00.000Z"
+}
