@@ -66,6 +66,8 @@ export interface OrchestrationConfig {
   taskCascades: Record<TaskType, string>;
   escalation: EscalationConfig;
   tokenBudgetPerStory: number;
+  /** Secondary engine for rate limit overflow rerouting. null = disabled. */
+  fallbackEngine: 'claude' | 'opencode' | 'codex' | null;
 }
 
 // ─── Defaults ───────────────────────────────────────────────────────────────
@@ -221,6 +223,7 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
     taskCascades: { ...DEFAULT_TASK_CASCADES },
     escalation: { ...DEFAULT_ESCALATION, escalateTo: { ...DEFAULT_ESCALATION.escalateTo } },
     tokenBudgetPerStory: DEFAULT_TOKEN_BUDGET_PER_STORY,
+    fallbackEngine: null,
   };
 
   if (!configPath) return defaults;
@@ -244,6 +247,12 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
       return fallback;
     };
 
+    // Parse fallbackEngine
+    const VALID_ENGINES = ['claude', 'opencode', 'codex'] as const;
+    const parsedFallback = typeof orch.fallbackEngine === 'string' && (VALID_ENGINES as readonly string[]).includes(orch.fallbackEngine)
+      ? orch.fallbackEngine as 'claude' | 'opencode' | 'codex'
+      : null;
+
     const config: OrchestrationConfig = {
       router,
       thresholds: {
@@ -260,6 +269,7 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
       tokenBudgetPerStory: typeof orch.tokenBudgetPerStory === 'number' && orch.tokenBudgetPerStory > 0
         ? orch.tokenBudgetPerStory
         : DEFAULT_TOKEN_BUDGET_PER_STORY,
+      fallbackEngine: parsedFallback,
     };
 
     // Merge user-provided escalateTo overrides
