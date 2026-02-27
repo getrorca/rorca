@@ -725,3 +725,85 @@ describe('GET /api/pipeline/runs/compare', () => {
     expect(res.body.summary.run2PassRate).toBe(100);
   });
 });
+
+// ─── OC-006: Agent type detection, OpenCode server lifecycle, execution-engine ─
+
+describe('OC-006: Pipeline trigger agent integration', () => {
+  test('trigger stores agent_type and agent_model in pipeline_runs', async () => {
+    // Default agent is 'claude' — execution-engine.ts or run-loop.ts will be used
+    seedSpec('approved', 'agent-record');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'ralph/specs/approved/agent-record.json', workspaceId: 'ws-pipe' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.agentType).toBe('claude');
+    expect(res.body.agentModel).toBeNull();
+
+    const run = db.prepare('SELECT agent, agent_model FROM pipeline_runs WHERE id = ?').get(res.body.runId) as any;
+    expect(run.agent).toBe('claude');
+    expect(run.agent_model).toBeNull();
+  });
+
+  test('GET /runs/:runId returns agentType and agentModel fields', async () => {
+    // Seed a run with explicit agent info
+    db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_model)
+       VALUES ('ralph/specs/approved/test.json', 'ws-pipe', 'done', 'opencode', 'openai/gpt-4o')`
+    ).run();
+    const runId = (db.prepare('SELECT last_insert_rowid() AS id').get() as any).id;
+
+    // Add a story result so the query doesn't fail
+    db.prepare(
+      "INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, 'US-001', 'pass', datetime('now'))"
+    ).run(runId);
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentType).toBe('opencode');
+    expect(res.body.agentModel).toBe('openai/gpt-4o');
+    expect(res.body.run.agent).toBe('opencode');
+    expect(res.body.run.agent_model).toBe('openai/gpt-4o');
+  });
+
+  test('GET /runs/:runId defaults agentType to claude when agent column is empty', async () => {
+    // Old runs may not have agent column set
+    db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('ralph/specs/approved/old.json', 'ws-pipe', 'done')`
+    ).run();
+    const runId = (db.prepare('SELECT last_insert_rowid() AS id').get() as any).id;
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.agentType).toBe('claude');
+    expect(res.body.agentModel).toBeNull();
+  });
+
+  test('pipeline_runs table has agent_model column', () => {
+    const cols = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+    expect(cols.some(c => c.name === 'agent_model')).toBe(true);
+    expect(cols.some(c => c.name === 'agent')).toBe(true);
+    expect(cols.some(c => c.name === 'opencode_server_pid')).toBe(true);
+  });
+
+  test('trigger response includes agentType and agentModel', async () => {
+    seedSpec('approved', 'agent-response');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'ralph/specs/approved/agent-response.json', workspaceId: 'ws-pipe' });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toHaveProperty('agentType');
+    expect(res.body).toHaveProperty('agentModel');
+  });
+});

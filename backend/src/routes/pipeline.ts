@@ -17,6 +17,8 @@ import type { AgentProfileRow } from './agent-profiles';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
+import { agentConfig, type AgentType } from '../lib/config';
+import { OpenCodeServer } from '../lib/opencode-server';
 
 /** Extract semantic steps from a raw text chunk (may contain multiple lines). */
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
@@ -88,6 +90,7 @@ interface PipelineRunRow {
   retried_from_run_id: number | null;
   log_path: string | null;
   agent: string;
+  agent_model: string | null;
   parallelism: number;
   opencode_server_pid: number | null;
 }
@@ -228,17 +231,30 @@ router.post('/trigger', async (req: Request, res: Response) => {
       return;
     }
 
-    // 3. Verify run-loop engine is available.
-    //    Priority: bash run-loop.sh in workspace (backward compat + test stubs) → TS run-loop.ts in backend
+    // 3. Resolve agent type and verify execution engine is available.
+    //    Priority: execution-engine.ts (universal) → bash run-loop.sh (legacy fallback)
+    const resolvedAgentType: AgentType = agentConfig.agentType;
+    const resolvedAgentModel: string | null = agentConfig.agentModel;
+
+    const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
     const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
+    const hasExecutionEngine = fs.existsSync(executionEngineTs);
     const hasBashRunLoop = fs.existsSync(runLoopSh);
     const hasTsRunLoop = fs.existsSync(runLoopTs);
-    if (!hasBashRunLoop && !hasTsRunLoop) {
-      res.status(422).json({ error: `run-loop.sh not found at ${runLoopSh}` });
+
+    // When agent is opencode/codex, execution-engine.ts is required (not the legacy loops)
+    if (resolvedAgentType !== 'claude' && !hasExecutionEngine) {
+      res.status(422).json({ error: `execution-engine.ts required for agent type '${resolvedAgentType}' but not found` });
       return;
     }
-    const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
+    if (!hasExecutionEngine && !hasBashRunLoop && !hasTsRunLoop) {
+      res.status(422).json({ error: `No execution engine found` });
+      return;
+    }
+    // Use execution-engine.ts when available, fall back to legacy run-loop
+    const useExecutionEngine = hasExecutionEngine;
+    const useLegacyTsRunLoop = !useExecutionEngine && !hasBashRunLoop && hasTsRunLoop;
 
     // 4. Conflict check — is there already an active run for this workspace?
     const activeRun = db.prepare(
@@ -270,11 +286,11 @@ router.post('/trigger', async (req: Request, res: Response) => {
       cwd = worktreePath;
     }
 
-    // 6. Create pipeline_runs record
+    // 6. Create pipeline_runs record (with agent_type and agent_model)
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     const runResult = db.prepare(
-      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism) VALUES (?, ?, 'running', ?, ?)`
-    ).run(specPath, workspaceId, validTriggerType, parallelism);
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_model) VALUES (?, ?, 'running', ?, ?, ?, ?)`
+    ).run(specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentModel);
     const runId = runResult.lastInsertRowid as number;
 
     // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
@@ -375,14 +391,70 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }
     }
 
-    // 9. Spawn run-loop — detached so it survives backend restarts.
-    //    stdout+stderr go directly to the log file via file descriptor (no pipes).
-    //    Pipes break on parent death (SIGPIPE), but file descriptors don't.
+    // 9. Start OpenCode server if agent type is opencode (server lifecycle tied to run)
+    let ocServer: OpenCodeServer | null = null;
+    let attachAddr: string | null = null;
+
+    if (resolvedAgentType === 'opencode' && useExecutionEngine) {
+      try {
+        ocServer = new OpenCodeServer({
+          runId,
+          onPidReady: (pid) => {
+            db.prepare('UPDATE pipeline_runs SET opencode_server_pid = ? WHERE id = ?').run(pid, runId);
+          },
+        });
+        await ocServer.start();
+        attachAddr = ocServer.attach();
+      } catch (serverErr: any) {
+        // Failed to start OpenCode server — mark run failed
+        db.prepare(
+          `UPDATE pipeline_runs SET status = 'failed', finished_at = datetime('now') WHERE id = ?`
+        ).run(runId);
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+        ).run(workspaceId, JSON.stringify({
+          run_id: runId, status: 'failed', reason: 'opencode_server_start_failed',
+          error: serverErr.message,
+        }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+        broadcastAll(walEvent);
+        res.status(422).json({ error: `Failed to start OpenCode server: ${serverErr.message}`, runId });
+        return;
+      }
+    }
+
+    // 10. Spawn execution engine — detached so it survives backend restarts.
+    //     stdout+stderr go directly to the log file via file descriptor (no pipes).
     const logFd = fs.openSync(logPath, 'a');
     let child: ReturnType<typeof spawn>;
 
-    if (useTypescriptRunLoop) {
-      // TypeScript run-loop (cross-platform, no bash/gtimeout/python dependency)
+    if (useExecutionEngine) {
+      // Universal execution engine (supports claude, opencode, codex)
+      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
+      const backendPort = process.env.PORT || '3030';
+      const engineArgs = [
+        executionEngineTs,
+        '--json', absSpecPath,
+        '--cwd', cwd,
+        '--run-id', String(runId),
+        '--port', backendPort,
+        '--parallelism', String(parallelism),
+        '--agent', resolvedAgentType,
+      ];
+      if (resolvedAgentModel) {
+        engineArgs.push('--model', resolvedAgentModel);
+      }
+      if (attachAddr) {
+        engineArgs.push('--attach', attachAddr);
+      }
+      child = spawn(tsxBin, engineArgs, {
+        cwd,
+        stdio: ['ignore', logFd, logFd],
+        detached: true,
+        env,
+      });
+    } else if (useLegacyTsRunLoop) {
+      // Legacy TypeScript run-loop (fallback when execution-engine.ts doesn't exist)
       const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
       const backendPort = process.env.PORT || '3030';
       const runLoopArgs = [
@@ -412,7 +484,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
     fs.closeSync(logFd);  // parent closes its copy; child keeps its own fd
     child.unref();        // don't keep Node alive waiting for this child
 
-    // 9. Store PID + branch info
+    // 10b. Store PID + branch info
     if (child.pid) {
       db.prepare(`UPDATE pipeline_runs SET pid = ?, branch_name = ?, worktree_path = ? WHERE id = ?`)
         .run(child.pid, branchName, worktreePath, runId);
@@ -480,9 +552,14 @@ router.post('/trigger', async (req: Request, res: Response) => {
       } catch { /* file not yet created or transient read error */ }
     }, 200);
 
-    // 11. Update status when process exits
+    // 11. Update status when process exits; stop OpenCode server if running
     child.on('exit', (code) => {
       clearInterval(tailInterval);
+
+      // Stop OpenCode server — lifecycle tied to this pipeline run
+      if (ocServer) {
+        ocServer.stop().catch(() => { /* best-effort cleanup */ });
+      }
 
       // Flush any remaining bytes not yet picked up by the interval
       try {
@@ -540,7 +617,10 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }, 30 * 60 * 1000);
     });
 
-    res.status(201).json({ ok: true, runId, worktreePath, branchName });
+    res.status(201).json({
+      ok: true, runId, worktreePath, branchName,
+      agentType: resolvedAgentType, agentModel: resolvedAgentModel,
+    });
   } catch (error: any) {
     console.error('[Pipeline] Trigger error:', error);
     res.status(500).json({ error: error.message });
@@ -1239,6 +1319,8 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       stories,
       specStories,
       specModel,
+      agentType: run.agent || 'claude',
+      agentModel: run.agent_model || null,
       tokenSummary: { inputTokens: tokenRow.total_input, outputTokens: tokenRow.total_output },
     });
   } catch (error: any) {
