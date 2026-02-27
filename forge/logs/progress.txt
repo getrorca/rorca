@@ -1,0 +1,41 @@
+## Specs Loaded
+- CLAUDE.md (full architecture)
+- OC-004_prompt.txt
+
+## Story OC-001: RORCA_AGENT Environment Variable and Config Schema — DONE (prior commit)
+Files touched: backend/src/lib/config.ts
+What was built: AgentType union, parseAgentConfig(), singleton agentConfig export
+
+## Story OC-002: OpenCode Binary Detection and Version Check — DONE (prior commit)
+Files touched: backend/src/lib/opencode-detector.ts
+What was built: detectOpenCode(), requireOpenCode(), semverGte(), MIN_OPENCODE_VERSION
+
+## Story OC-003: OpenCode Server Lifecycle Manager — DONE (prior commit)
+Files touched: backend/src/lib/opencode-server.ts
+What was built: OpenCodeServer class (start/stop/attach/restart/isAlive), socket-based readiness polling
+
+## Story OC-004: Execution Engine Multi-Agent Switching — DONE
+Files touched: backend/src/lib/execution-engine.ts (new file, ~1050 lines)
+What was built:
+- Universal execution engine replacing run-loop.ts for all three agent types
+- runAgent() dispatcher: switches on agentType to spawnClaude/spawnOpenCode/spawnCodex
+- spawnClaude: identical to run-loop.ts claude path (--print --verbose --output-format stream-json, prompt as arg)
+- spawnOpenCode: `opencode run --format json --attach <addr> --model <model>`, prompt via stdin
+- spawnCodex: `codex --approval-mode auto-edit`, prompt via stdin
+- ATTACH_ADDR passed via --attach CLI flag (from opencode-server.ts), NOT env var
+- AbortController-style timeout: setTimeout + SIGTERM, escalate to SIGKILL after 10s
+- Exit code captured from child process 'exit' event (null → 124 timeout code)
+- All three paths produce identical WAL events (story_started, story_passed, story_failed) via same emitWalEvent()
+- CLI flags: --agent, --model, --attach (override env vars)
+- Full wave-parallel execution preserved from run-loop.ts
+
+Key decisions:
+- Kept all run-loop.ts behavior (wave merging, worktree isolation, rate limit backoff, validation gate)
+- opencode binary resolved via detectOpenCode() from opencode-detector.ts
+- codex binary resolved via CODEX_BIN env or `which codex`
+- WAL events include agent_type in payload for observability
+- agentModel used only for opencode (--model flag); claude uses subscription model, codex has no model flag
+
+## Gotchas Discovered
+- 2 pre-existing tsc errors in rate-limiter.ts and run-queue.ts (not from OC-004)
+- Backend tests have pre-existing better-sqlite3 native binding failures in CI-like env
