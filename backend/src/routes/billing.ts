@@ -66,25 +66,88 @@ function getOrCreateCustomer(userId: string): SubscriptionRow | null {
   ).get(userId) as SubscriptionRow | undefined || null;
 }
 
+// ─── Seat counting ──────────────────────────────────────────────────────────
+function getSeatsUsed(userId: string): { used: number; limit: number | null } {
+  // Count team members where user is team owner
+  const row = db.prepare(
+    `SELECT COUNT(DISTINCT tm.user_id) as cnt
+     FROM teams t
+     JOIN team_members tm ON tm.team_id = t.id
+     WHERE t.owner_id = ?`
+  ).get(userId) as { cnt: number } | undefined;
+  const used = (row?.cnt ?? 0) + 1; // +1 for owner
+  const plan = getUserPlan(userId);
+  const limits: Record<string, number | null> = { free: 1, solo: 1, pro: 5, team: null };
+  return { used, limit: limits[plan] ?? 1 };
+}
+
 // ─── GET /api/billing/status ─────────────────────────────────────────────────
 router.get('/status', (req: Request, res: Response) => {
   const authReq = req as Request & { user: AuthUser };
   const plan = getUserPlan(authReq.user.id);
   const sub = getOrCreateCustomer(authReq.user.id);
+  const seats = getSeatsUsed(authReq.user.id);
 
   res.json({
     plan,
     subscription: sub ? {
       status: sub.status,
+      plan: sub.plan,
+      currentPeriodStart: sub.current_period_start,
       currentPeriodEnd: sub.current_period_end,
       stripeSubscriptionId: sub.stripe_subscription_id,
     } : null,
+    seats,
     plans: {
-      solo: { name: 'Solo', priceMonthly: 10 },
-      pro: { name: 'Pro', priceMonthly: 25 },
-      team: { name: 'Team', priceMonthly: 59 },
+      free: { name: 'Free', priceMonthly: 0, features: ['Spec generation only', '1 workspace', 'No pipeline execution'] },
+      solo: { name: 'Solo', priceMonthly: 10, features: ['Pipeline execution', '3 workspaces', 'Full spec generation', 'Direction stack'] },
+      pro: { name: 'Pro', priceMonthly: 25, features: ['Everything in Solo', 'Unlimited workspaces', 'Git worktree isolation', 'Priority support', 'Up to 5 seats'] },
+      team: { name: 'Team', priceMonthly: 59, features: ['Everything in Pro', 'Team collaboration', 'Shared direction stack', 'Admin controls', 'Unlimited seats'] },
     },
+    stripeConfigured: !!stripe,
   });
+});
+
+// ─── GET /api/billing/invoices ──────────────────────────────────────────────
+router.get('/invoices', async (req: Request, res: Response) => {
+  if (!stripe) {
+    res.json({ invoices: [], stripeConfigured: false });
+    return;
+  }
+
+  const authReq = req as Request & { user: AuthUser };
+  const sub = getOrCreateCustomer(authReq.user.id);
+
+  if (!sub?.stripe_customer_id) {
+    res.json({ invoices: [] });
+    return;
+  }
+
+  try {
+    const invoices = await stripe.invoices.list({
+      customer: sub.stripe_customer_id,
+      limit: 24,
+    });
+
+    res.json({
+      invoices: invoices.data.map(inv => ({
+        id: inv.id,
+        number: inv.number,
+        status: inv.status,
+        amountDue: inv.amount_due,
+        amountPaid: inv.amount_paid,
+        currency: inv.currency,
+        created: inv.created ? new Date(inv.created * 1000).toISOString() : null,
+        periodStart: inv.period_start ? new Date(inv.period_start * 1000).toISOString() : null,
+        periodEnd: inv.period_end ? new Date(inv.period_end * 1000).toISOString() : null,
+        hostedInvoiceUrl: inv.hosted_invoice_url,
+        invoicePdf: inv.invoice_pdf,
+      })),
+    });
+  } catch (err) {
+    console.error('Failed to fetch invoices:', err);
+    res.status(500).json({ error: 'Failed to fetch invoice history' });
+  }
 });
 
 // ─── POST /api/billing/checkout ──────────────────────────────────────────────
