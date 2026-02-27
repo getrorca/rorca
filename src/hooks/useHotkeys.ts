@@ -52,15 +52,21 @@ function matchesHotkey(e: KeyboardEvent, parsed: ReturnType<typeof parseHotkey>)
   return eventKey === parsed.key;
 }
 
+const MOBILE_BREAKPOINT = 768;
+
 /**
  * Register global keyboard shortcuts. Ignores events from inputs/textareas
- * unless the key includes modifiers.
+ * unless the key includes modifiers. Disabled on mobile (< 768px) where no
+ * hardware keyboard is assumed.
  */
 export function useHotkeys(bindings: HotkeyBinding[]) {
   const bindingsRef = useRef(bindings);
   bindingsRef.current = bindings;
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // Disable all hotkeys on mobile — no hardware keyboard assumed
+    if (window.innerWidth < MOBILE_BREAKPOINT) return;
+
     // Skip if target is an input/textarea/contenteditable (unless modifier key is held)
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;

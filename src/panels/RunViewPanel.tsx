@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, XCircle, RotateCcw, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, XCircle, RotateCcw, ExternalLink, Smartphone } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
+import { useIsMobile } from '../hooks/useIsMobile';
 import { apiFetch } from '../lib/apiFetch';
 import { pauseRun, resumeRun, cancelRun, injectContext, retryRun } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
@@ -304,6 +305,7 @@ interface RunViewPanelProps {
 
 export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanelProps) {
   const { workspaceId } = useWorkspace();
+  const isMobile = useIsMobile();
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<RunViewTab>(getTabFromHash);
@@ -318,6 +320,12 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [specModel, setSpecModel] = useState<string | null>(null);
   const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
   const [totalStories, setTotalStories] = useState(0);
+
+  // Filter tabs for mobile — hide Graph (too complex for small screens)
+  const visibleTabs = useMemo(() => {
+    if (isMobile) return TABS.filter((t) => t.id !== 'graph');
+    return TABS;
+  }, [isMobile]);
 
   // Sync tab selection to URL hash
   const handleTabChange = useCallback((tab: RunViewTab) => {
@@ -549,6 +557,23 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       case 'stories':
         return <TabPlaceholder label="Stories" />;
       case 'graph':
+        if (isMobile) {
+          return (
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center">
+              <Smartphone size={32} className="text-muted opacity-40" />
+              <span className="text-sm font-medium text-muted">Graph view unavailable on mobile</span>
+              <span className="text-xs text-muted/70">
+                The dependency graph requires a larger screen to display interactive node connections. Open Rorca on a desktop browser to use this view.
+              </span>
+              <button
+                onClick={() => handleTabChange('terminal')}
+                className="mt-2 px-3 py-1.5 text-xs font-medium rounded border border-border text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
+              >
+                Switch to Terminal
+              </button>
+            </div>
+          );
+        }
         return (
           <InteractiveDependencyGraph
             specId={extractSpecId(run.spec_path)}
@@ -571,24 +596,24 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   return (
     <div className="h-full flex flex-col">
       {/* Header bar */}
-      <div className="shrink-0 px-4 py-3 border-b border-border bg-panel flex items-center gap-3">
+      <div className="shrink-0 px-3 md:px-4 py-2.5 md:py-3 border-b border-border bg-panel flex items-center gap-2 md:gap-3">
         <button
           onClick={onBack}
-          className="p-1.5 rounded-lg hover:bg-bg transition-colors text-muted hover:text-[var(--text)]"
+          className="p-1.5 rounded-lg hover:bg-bg transition-colors text-muted hover:text-[var(--text)] min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center"
           title="Back to Hub"
         >
           <ArrowLeft size={18} />
         </button>
 
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <h1 className="text-sm font-semibold text-[var(--text)] truncate capitalize">
+        <div className="flex items-center gap-1.5 md:gap-2 min-w-0 flex-1">
+          <h1 className="text-xs md:text-sm font-semibold text-[var(--text)] truncate capitalize">
             {specLabel(run.spec_path)}
           </h1>
-          <span className="text-xs text-muted font-mono shrink-0">#{run.id}</span>
+          <span className="text-[10px] md:text-xs text-muted font-mono shrink-0">#{run.id}</span>
           <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`}>
             {STATUS_BADGE_LABELS[effectiveStatus] || effectiveStatus}
           </span>
-          {run.parallelism != null && run.parallelism > 1 && (
+          {run.parallelism != null && run.parallelism > 1 && !isMobile && (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 bg-purple-500/10 text-purple-500">
               <Layers size={10} />
               Parallelism: {run.parallelism}
@@ -597,13 +622,13 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
         </div>
 
         {/* Pipeline controls */}
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 md:gap-1.5 shrink-0">
           {/* Pause / Resume */}
           <button
             onClick={handlePauseResume}
             disabled={!isActive || pauseLoading}
             title={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
-            className={`p-1.5 rounded-lg transition-colors ${
+            className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${
               isActive && !pauseLoading
                 ? 'hover:bg-bg text-muted hover:text-[var(--text)]'
                 : 'text-muted/30 cursor-not-allowed'
@@ -623,7 +648,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             onClick={() => setShowKillConfirm(true)}
             disabled={!isActive || killLoading}
             title="Kill run"
-            className={`p-1.5 rounded-lg transition-colors ${
+            className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${
               isActive && !killLoading
                 ? 'hover:bg-red-500/10 text-muted hover:text-red-400'
                 : 'text-muted/30 cursor-not-allowed'
@@ -646,17 +671,17 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
         />
       )}
 
-      {/* Tab bar */}
-      <div className="shrink-0 px-4 border-b border-border bg-panel flex items-center gap-0.5 overflow-x-auto">
-        {TABS.map((tab) => {
+      {/* Tab bar — scrollable horizontal strip on mobile */}
+      <div className="shrink-0 px-2 md:px-4 border-b border-border bg-panel flex items-center gap-0.5 overflow-x-auto scrollbar-none [-webkit-overflow-scrolling:touch]">
+        {visibleTabs.map((tab) => {
           const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
+          const isActiveTab = activeTab === tab.id;
           return (
             <button
               key={tab.id}
               onClick={() => handleTabChange(tab.id)}
-              className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium whitespace-nowrap border-b-2 transition-colors ${
-                isActive
+              className={`flex items-center gap-1.5 px-3 py-2.5 md:py-2 text-xs font-medium whitespace-nowrap border-b-2 transition-colors shrink-0 ${
+                isActiveTab
                   ? 'border-accent text-accent'
                   : 'border-transparent text-muted hover:text-[var(--text)]'
               }`}
@@ -709,11 +734,13 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       {/* Run failed banner */}
       {(effectiveStatus === 'failed' || effectiveStatus === 'partial_failure') && failedStoryCount > 0 && (
         <div className="shrink-0 border-b border-red-500/30 bg-red-500/10">
-          <div className="px-4 py-3 flex items-center gap-3">
-            <XCircle size={18} className="text-red-500 shrink-0" />
-            <span className="text-sm font-medium text-red-400 flex-1">
-              Run failed — {failedStoryCount} {failedStoryCount === 1 ? 'story' : 'stories'} did not complete
-            </span>
+          <div className="px-3 md:px-4 py-2.5 md:py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-3">
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <XCircle size={18} className="text-red-500 shrink-0" />
+              <span className="text-xs md:text-sm font-medium text-red-400">
+                Run failed — {failedStoryCount} {failedStoryCount === 1 ? 'story' : 'stories'} did not complete
+              </span>
+            </div>
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={handleViewErrorDetail}
