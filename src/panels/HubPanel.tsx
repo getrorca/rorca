@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2 } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
 import TriggerPopover from '../components/TriggerPopover';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
+import { useGlobalToast } from '../contexts/ToastContext';
 import type { PanelId } from '../components/Sidebar';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -419,14 +420,17 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
 
 // ─── Ready-to-Run Card ──────────────────────────────────────────────────────
 
-function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate }: {
+function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate, onQueueRefresh }: {
   spec: SpecSummary;
   workspaceId: string;
   defaultParallelism: number;
   onNavigate: (panel: PanelId) => void;
+  onQueueRefresh?: () => void;
 }) {
   const [showPopover, setShowPopover] = useState(false);
   const [triggerState, setTriggerState] = useState<'idle' | 'triggering' | 'success' | 'error'>('idle');
+  const [queueLoading, setQueueLoading] = useState(false);
+  const { show: showToast } = useGlobalToast();
 
   const handleTrigger = async (parallelism: number, autoWorktree: boolean) => {
     setShowPopover(false);
@@ -449,6 +453,30 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate }: {
     }
   };
 
+  const handleAddToQueue = async (parallelism: number, autoWorktree: boolean) => {
+    setQueueLoading(true);
+    try {
+      await apiFetch('/api/run-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId: Number(workspaceId),
+          specId: spec.id,
+          specPath: `forge/specs/approved/${spec.id}.json`,
+          parallelism,
+          autoWorktree,
+        }),
+      });
+      setShowPopover(false);
+      showToast('Added to queue \u2014 will run after current spec completes', 'success');
+      onQueueRefresh?.();
+    } catch {
+      showToast('Failed to add to queue', 'error');
+    } finally {
+      setQueueLoading(false);
+    }
+  };
+
   return (
     <div className="p-4 bg-panel border border-border rounded-lg space-y-3">
       <div className="flex items-start justify-between gap-2">
@@ -462,7 +490,9 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate }: {
           <TriggerPopover
             defaultParallelism={defaultParallelism}
             loading={triggerState === 'triggering'}
+            queueLoading={queueLoading}
             onTrigger={handleTrigger}
+            onAddToQueue={handleAddToQueue}
             onClose={() => setShowPopover(false)}
           />
         )}
@@ -540,6 +570,8 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [loaded, setLoaded] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [defaultParallelism, setDefaultParallelism] = useState(1);
+  const [queueLength, setQueueLength] = useState(0);
+  const [nextQueueSpecName, setNextQueueSpecName] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
@@ -597,19 +629,36 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     setLoaded(true);
   }, [workspaceId]);
 
+  const fetchQueueStatus = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const data = await apiFetch<{ queueLength: number; nextSpec: { spec_id: string } | null }>(
+        `/api/run-queue/status?workspaceId=${workspaceId}`,
+      );
+      setQueueLength(data.queueLength);
+      setNextQueueSpecName(
+        data.nextSpec ? data.nextSpec.spec_id.replace(/-/g, ' ') : null,
+      );
+    } catch {
+      setQueueLength(0);
+      setNextQueueSpecName(null);
+    }
+  }, [workspaceId]);
+
   // Poll every 30s, pause when tab is backgrounded
   useEffect(() => {
     fetchData();
+    fetchQueueStatus();
 
-    let interval = setInterval(fetchData, 30_000);
+    const fetchAll = () => { fetchData(); fetchQueueStatus(); };
+    let interval = setInterval(fetchAll, 30_000);
 
     const onVisibilityChange = () => {
       if (document.hidden) {
         clearInterval(interval);
       } else {
-        // Refetch immediately when tab regains focus, then resume 30s polling
-        fetchData();
-        interval = setInterval(fetchData, 30_000);
+        fetchAll();
+        interval = setInterval(fetchAll, 30_000);
       }
     };
 
@@ -618,22 +667,30 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
       clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [fetchData]);
+  }, [fetchData, fetchQueueStatus]);
 
   // SSE: re-fetch immediately when a run completes, fails, or is cancelled
   const fetchRef = useRef(fetchData);
   fetchRef.current = fetchData;
+  const queueRef = useRef(fetchQueueStatus);
+  queueRef.current = fetchQueueStatus;
   useEffect(() => {
     const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
     const RUN_TERMINAL_EVENTS = new Set([
       'run_finished', 'run_failed', 'run_cancelled',
       'run_started', 'run_paused', 'run_resumed',
     ]);
+    const QUEUE_EVENTS = new Set([
+      'run_queued_trigger', 'run_finished',
+    ]);
     es.addEventListener('wal_event', (e) => {
       try {
         const evt = JSON.parse(e.data);
         if (RUN_TERMINAL_EVENTS.has(evt.event_type)) {
           fetchRef.current();
+        }
+        if (QUEUE_EVENTS.has(evt.event_type)) {
+          queueRef.current();
         }
       } catch { /* ignore malformed events */ }
     });
@@ -734,6 +791,27 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
           </section>
         )}
 
+        {/* Queue Status */}
+        {queueLength > 0 && (
+          <section>
+            <div className="flex items-center justify-between">
+              <SectionHeader icon={ListPlus} label="Queue" badge={queueLength} noMargin />
+              <button
+                onClick={() => onNavigate('pipeline')}
+                className="flex items-center gap-1 text-xs text-accent hover:underline"
+              >
+                View Queue <ArrowRight size={12} />
+              </button>
+            </div>
+            <p className="text-sm text-muted mt-2">
+              {queueLength} {queueLength === 1 ? 'spec' : 'specs'} queued
+              {nextQueueSpecName && (
+                <> &mdash; next: <span className="text-[var(--text)] font-medium capitalize">{nextQueueSpecName}</span></>
+              )}
+            </p>
+          </section>
+        )}
+
         {/* Pending Reviews */}
         {hasPending && (
           <section>
@@ -768,6 +846,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                   workspaceId={workspaceId!}
                   defaultParallelism={defaultParallelism}
                   onNavigate={onNavigate}
+                  onQueueRefresh={fetchQueueStatus}
                 />
               ))}
             </div>

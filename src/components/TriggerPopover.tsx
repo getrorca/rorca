@@ -1,13 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, Minus, Plus, GitBranch, Loader2 } from 'lucide-react';
+import { Play, Minus, Plus, GitBranch, Loader2, ListPlus } from 'lucide-react';
 
 interface TriggerPopoverProps {
   /** Default parallelism from workspace settings */
   defaultParallelism?: number;
   /** Whether a trigger is currently in progress */
   loading?: boolean;
-  /** Called when user clicks Trigger */
+  /** Called when user clicks Run Now */
   onTrigger: (parallelism: number, autoWorktree: boolean) => void;
+  /** Called when user clicks Add to Queue */
+  onAddToQueue?: (parallelism: number, autoWorktree: boolean) => void;
+  /** Whether Add to Queue action is loading */
+  queueLoading?: boolean;
   /** Called when popover is dismissed */
   onClose: () => void;
 }
@@ -16,6 +20,8 @@ export default function TriggerPopover({
   defaultParallelism = 1,
   loading = false,
   onTrigger,
+  onAddToQueue,
+  queueLoading = false,
   onClose,
 }: TriggerPopoverProps) {
   const [parallelism, setParallelism] = useState(defaultParallelism);
@@ -95,18 +101,37 @@ export default function TriggerPopover({
         )}
       </label>
 
-      {/* Trigger button */}
-      <button
-        onClick={() => onTrigger(parallelism, autoWorktree)}
-        disabled={loading}
-        className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
-      >
-        {loading ? (
-          <><Loader2 size={14} className="animate-spin" /> Starting run...</>
-        ) : (
-          <><Play size={14} /> Trigger</>
+      {/* Action buttons */}
+      <div className="space-y-2">
+        {/* Run Now — primary */}
+        <button
+          onClick={() => onTrigger(parallelism, autoWorktree)}
+          disabled={loading || queueLoading}
+          className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
+        >
+          {loading ? (
+            <><Loader2 size={14} className="animate-spin" /> Starting run...</>
+          ) : (
+            <><Play size={14} /> Run Now</>
+          )}
+        </button>
+
+        {/* Add to Queue — secondary */}
+        {onAddToQueue && (
+          <button
+            onClick={() => onAddToQueue(parallelism, autoWorktree)}
+            disabled={loading || queueLoading}
+            title="Will run after the active spec completes"
+            className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium border border-border text-[var(--text)] hover:bg-bg disabled:opacity-60 transition-colors"
+          >
+            {queueLoading ? (
+              <><Loader2 size={14} className="animate-spin" /> Adding to queue...</>
+            ) : (
+              <><ListPlus size={14} /> Add to Queue</>
+            )}
+          </button>
         )}
-      </button>
+      </div>
     </div>
   );
 }
