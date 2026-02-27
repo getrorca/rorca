@@ -96,6 +96,7 @@ interface SpecSummary {
   reviewStatus: ReviewStatus;
   assignee?: AssigneeInfo;
   storyTitles?: string[];
+  source?: string;
 }
 
 interface SpecVersionRow {
@@ -139,7 +140,7 @@ function safeReaddir(dir: string): string[] {
   }
 }
 
-function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string; reviewStatus?: ReviewStatus } {
+function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string; reviewStatus?: ReviewStatus; source?: string } {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
 }
@@ -207,6 +208,7 @@ function buildSummary(
     reviewStatus: content.reviewStatus ?? 'draft',
     ...(assignee ? { assignee } : {}),
     storyTitles: stories.slice(0, 2).map((s: any) => s.title || s.id || 'Untitled'),
+    ...(content.source ? { source: content.source } : {}),
   };
 }
 

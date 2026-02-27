@@ -60,6 +60,7 @@ interface ArchiveSpec {
   tags: string[];
   forkedFrom?: string;
   reviewStatus?: ReviewStatus;
+  source?: string;
 }
 
 interface ArchiveResponse {
@@ -401,6 +402,11 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                             {spec.reviewStatus === 'review_requested' ? 'Needs Review' :
                              spec.reviewStatus === 'approved' ? 'Review OK' :
                              'Changes Req.'}
+                          </span>
+                        )}
+                        {spec.source === 'quick-run' && (
+                          <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400 border border-purple-500/30">
+                            Quick Run
                           </span>
                         )}
                       </div>
