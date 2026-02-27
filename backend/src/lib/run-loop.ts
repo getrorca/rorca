@@ -17,7 +17,7 @@
  *   --port <number>     Backend port for WAL events (default: 3030)
  */
 
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -389,6 +389,54 @@ function gitCommitStory(
   }
 }
 
+// ─── Validation Gate ─────────────────────────────────────────────────────────
+
+const GATE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+interface GateResult {
+  passed: boolean;
+  reason?: 'typecheck' | 'e2e';
+  output?: string; // first 2000 chars of stderr/stdout
+}
+
+/**
+ * Objective validation gate — runs tsc and optionally playwright after a story
+ * completes. Uses exit codes, not agent self-assessment.
+ */
+function runGate(cwd: string): GateResult {
+  const env = buildCleanEnv();
+
+  // 1. TypeScript type check
+  console.log('  [gate] Running tsc --noEmit...');
+  try {
+    execSync('npx tsc --noEmit', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
+    console.log('  [gate] tsc passed');
+  } catch (err: unknown) {
+    const stderr = (err as { stderr?: Buffer })?.stderr?.toString('utf8') ?? '';
+    console.log(`  [gate] tsc FAILED`);
+    return { passed: false, reason: 'typecheck', output: stderr.slice(0, 2000) };
+  }
+
+  // 2. Playwright (only if config exists)
+  const hasPlaywrightConfig =
+    fs.existsSync(path.join(cwd, 'playwright.config.ts')) ||
+    fs.existsSync(path.join(cwd, 'playwright.config.js'));
+
+  if (hasPlaywrightConfig) {
+    console.log('  [gate] Running playwright test...');
+    try {
+      execSync('npx playwright test --reporter=line', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
+      console.log('  [gate] playwright passed');
+    } catch (err: unknown) {
+      const stdout = (err as { stdout?: Buffer })?.stdout?.toString('utf8') ?? '';
+      console.log(`  [gate] playwright FAILED`);
+      return { passed: false, reason: 'e2e', output: stdout.slice(0, 2000) };
+    }
+  }
+
+  return { passed: true };
+}
+
 // ─── Main Loop ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -514,33 +562,76 @@ async function main(): Promise<void> {
 
     if (exitCode === 0) {
       console.log(`${story.id} completed (exit 0)`);
-      markStoryPassed(config.jsonPath, story.id);
-      retryCounts.delete(story.id);
 
-      // Git commit and push
-      console.log(`Committing ${story.id}...`);
-      gitCommitStory(config.cwd, story.id, story.title, mode);
+      // Validation gate — skip on dry-run or RORCA_SKIP_GATE=1
+      const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
+      const gate = skipGate ? { passed: true } as GateResult : runGate(config.cwd);
 
-      // Emit story_passed WAL event
-      if (workspaceId) {
-        await emitWalEvent(config.port, 'story_passed', workspaceId, {
-          run_id: config.runId,
-          story_id: story.id,
-          story_title: story.title,
-        }, story.id);
+      if (!gate.passed) {
+        console.log(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
 
-        // Insert story_result via direct DB-compatible endpoint
-        try {
-          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              runId: config.runId,
-              storyId: story.id,
-              status: 'pass',
-            }),
-          });
-        } catch { /* backend may be down */ }
+        // Gate failure counts as a retry attempt
+        const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
+        retryCounts.set(story.id, currentRetries);
+
+        if (currentRetries >= MAX_RETRIES) {
+          markStorySkipped(config.jsonPath, story.id);
+        }
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: gate.reason,
+            ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
+          }, story.id);
+
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                runId: config.runId,
+                storyId: story.id,
+                status: 'fail',
+              }),
+            });
+          } catch { /* backend may be down */ }
+        }
+
+        if (currentRetries >= MAX_RETRIES) {
+          console.log(`${story.id} failed gate after ${MAX_RETRIES} attempts. Skipping.`);
+          console.log(`   Fix manually, then re-run with: --story ${story.id}`);
+        } else {
+          console.log(`${story.id} gate failed (attempt ${currentRetries}/${MAX_RETRIES}). Will retry...`);
+        }
+      } else {
+        // Gate passed — proceed with marking story passed and committing
+        markStoryPassed(config.jsonPath, story.id);
+        retryCounts.delete(story.id);
+
+        console.log(`Committing ${story.id}...`);
+        gitCommitStory(config.cwd, story.id, story.title, mode);
+
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_passed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            story_title: story.title,
+          }, story.id);
+
+          try {
+            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                runId: config.runId,
+                storyId: story.id,
+                status: 'pass',
+              }),
+            });
+          } catch { /* backend may be down */ }
+        }
       }
     } else if (exitCode === 124) {
       // Timeout (mirrors gtimeout exit code 124)
