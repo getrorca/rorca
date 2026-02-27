@@ -793,3 +793,25 @@ Key decisions:
 - Used simple CSS animations (not JS) for skeleton pulse — zero JS overhead for FCP
 - Auth loading shows Shell+skeleton (not blank page) so LCP is the skeleton itself, well under 2.5s
 - CLS prevention via CSS containment on main area + explicit img dimensions
+
+## Story P2-021: Ready to Run Section in HubPanel — DONE
+Files touched:
+- src/panels/HubPanel.tsx (modified — ReadyToRunCard rewritten, fetchData updated)
+
+What was built:
+- "Ready to Run" section between Pending Reviews and Recent Runs showing approved specs without active/recent pipeline runs
+- Each card shows: spec title, story count badge, "Generated N ago" timestamp, workspace name badge
+- Direct "Trigger →" button that calls POST /api/pipeline/trigger (no popover intermediary)
+- On trigger: spinner shown, card removed from Ready to Run; SSE refetch populates Active Run section
+- Conflict detection: when workspace has an active run, button shows "Workspace busy" (disabled, yellow)
+- Tooltip on trigger button shows full spec path for power users
+- Section hidden entirely when no approved specs are ready (no empty header)
+- Cross-references pipeline_runs to filter out specs that already have runs
+- Respects 30s auto-refresh cadence + SSE-driven immediate refetch on run state changes
+
+Key decisions:
+- Removed TriggerPopover dependency — Hub cards use direct trigger for speed (popover still exists for other panels)
+- Removed defaultParallelism state/fetch since it's no longer used after removing popover
+- Filtering uses specSlug matching between approved specs and pipeline_runs spec_paths
+- Card removal is optimistic (immediate on trigger success), with SSE providing eventual consistency
+- Pre-existing backend test infrastructure broken (jest config parse error) — not introduced by this change

@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2 } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, AlertCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
-import TriggerPopover from '../components/TriggerPopover';
+// TriggerPopover removed — Ready-to-Run cards now trigger directly
 import { ToastContainer } from '../components/Toast';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
@@ -449,72 +449,86 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
 
 // ─── Ready-to-Run Card ──────────────────────────────────────────────────────
 
-function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate }: {
+function ReadyToRunCard({ spec, workspaceId, workspaceName, workspaceBusy, onTriggered }: {
   spec: SpecSummary;
   workspaceId: string;
-  defaultParallelism: number;
-  onNavigate: (panel: PanelId) => void;
+  workspaceName: string;
+  workspaceBusy: boolean;
+  onTriggered: (specId: string) => void;
 }) {
-  const [showPopover, setShowPopover] = useState(false);
   const [triggerState, setTriggerState] = useState<'idle' | 'triggering' | 'success' | 'error'>('idle');
+  const specPath = `forge/specs/approved/${spec.id}.json`;
 
-  const handleTrigger = async (parallelism: number, autoWorktree: boolean) => {
-    setShowPopover(false);
+  const handleTrigger = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (workspaceBusy || triggerState === 'triggering') return;
     setTriggerState('triggering');
     try {
-      await apiFetch('/api/pipeline/trigger', {
+      const result = await apiFetch<{ conflict?: boolean }>('/api/pipeline/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          specPath: `forge/specs/approved/${spec.id}.json`,
-          workspaceId,
-          autoWorktree,
-          parallelism,
-        }),
+        body: JSON.stringify({ specPath, workspaceId }),
       });
+      if (result.conflict) {
+        setTriggerState('error');
+        return;
+      }
       setTriggerState('success');
-      setTimeout(() => onNavigate('pipeline'), 1200);
+      onTriggered(spec.id);
     } catch {
       setTriggerState('error');
+      setTimeout(() => setTriggerState('idle'), 3000);
     }
   };
 
   return (
     <div className="p-4 bg-panel border border-border rounded-lg space-y-3">
+      {/* Title + story count badge */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-[var(--text)] truncate">{spec.specName}</p>
-          <p className="text-xs text-muted mt-0.5">{spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}</p>
-        </div>
-      </div>
-      <div className="relative">
-        {showPopover && (
-          <TriggerPopover
-            defaultParallelism={defaultParallelism}
-            loading={triggerState === 'triggering'}
-            onTrigger={handleTrigger}
-            onClose={() => setShowPopover(false)}
-          />
-        )}
-        {triggerState === 'success' ? (
-          <div className="flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
-            <CheckCircle size={14} />
-            Launching...
+          <div className="flex items-center gap-2 mt-1 text-xs text-muted">
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-accent/10 text-accent text-[10px] font-semibold leading-none">
+              {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
+            </span>
+            <span>Generated {relativeTime(spec.generatedAt)}</span>
           </div>
-        ) : (
-          <button
-            onClick={() => setShowPopover(true)}
-            disabled={triggerState === 'triggering'}
-            className="flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
-          >
-            {triggerState === 'triggering' ? (
-              <><Loader2 size={14} className="animate-spin" /> Starting...</>
-            ) : (
-              <><Rocket size={14} /> Run</>
-            )}
-          </button>
-        )}
+        </div>
+        {/* Workspace badge */}
+        <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-bg text-muted border border-border">
+          <FolderGit2 size={10} />
+          {workspaceName}
+        </span>
       </div>
+
+      {/* Trigger button */}
+      {triggerState === 'success' ? (
+        <div className="flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+          <CheckCircle size={14} />
+          Launching...
+        </div>
+      ) : (
+        <button
+          onClick={handleTrigger}
+          disabled={workspaceBusy || triggerState === 'triggering'}
+          title={workspaceBusy ? 'A run is already active for this workspace' : specPath}
+          className={`flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium transition-opacity ${
+            workspaceBusy
+              ? 'bg-yellow-500/10 text-yellow-600 border border-yellow-500/30 cursor-not-allowed'
+              : 'bg-accent text-white hover:opacity-90 disabled:opacity-60'
+          }`}
+        >
+          {workspaceBusy ? (
+            <><AlertCircle size={14} /> Workspace busy</>
+          ) : triggerState === 'triggering' ? (
+            <><Loader2 size={14} className="animate-spin" /> Starting...</>
+          ) : triggerState === 'error' ? (
+            <><XCircle size={14} /> Failed — retry</>
+          ) : (
+            <>Trigger <ArrowRight size={14} /></>
+          )}
+        </button>
+      )}
     </div>
   );
 }
@@ -567,7 +581,7 @@ interface CompletionToast {
 }
 
 export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview }: { onNavigate: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; onNavigateToSpecReview?: (specId: string) => void }) {
-  const { workspaceId, workspaces, addWorkspace } = useWorkspace();
+  const { workspaceId, workspaces, selectedWorkspace, addWorkspace } = useWorkspace();
   const [showAddWorkspace, setShowAddWorkspace] = useState(false);
   const [activeRun, setActiveRun] = useState<PipelineRun | null>(null);
   const [totalStories, setTotalStories] = useState(0);
@@ -576,7 +590,6 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [recentRuns, setRecentRuns] = useState<PipelineRun[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [defaultParallelism, setDefaultParallelism] = useState(1);
   const [completionToasts, setCompletionToasts] = useState<CompletionToast[]>([]);
   const completionToastId = useRef(0);
   const [justCompletedRunIds, setJustCompletedRunIds] = useState<Set<number>>(new Set());
@@ -600,7 +613,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
 
-    const [runsRes, specsRes, approvedRes, configRes] = await Promise.all([
+    const [runsRes, specsRes, approvedRes] = await Promise.all([
       apiFetch<{ items: PipelineRun[] }>(
         `/api/pipeline/runs?workspaceId=${workspaceId}&limit=20`,
       ).catch(() => ({ items: [] as PipelineRun[] })),
@@ -610,19 +623,18 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
       apiFetch<{ items: SpecSummary[] }>(
         `/api/specs?workspaceId=${workspaceId}&status=approved`,
       ).catch(() => ({ items: [] as SpecSummary[] })),
-      apiFetch<{ config: { defaultParallelism?: number } }>(
-        `/api/workspaces/${workspaceId}/pipeline-config`,
-      ).catch(() => ({ config: {} as { defaultParallelism?: number } })),
     ]);
 
     const runs = runsRes.items;
     const active = runs.find((r) => r.status === 'running' || r.status === 'paused') ?? null;
     setActiveRun(active);
     setPendingSpecs(specsRes.items);
-    setApprovedSpecs(approvedRes.items);
-    setDefaultParallelism(configRes.config.defaultParallelism ?? 1);
     // Recent = completed runs (not active), most recent first
     setRecentRuns(runs.filter((r) => r.status !== 'running' && r.status !== 'paused').slice(0, 10));
+
+    // Filter approved specs: exclude any that have an active or completed run
+    const runSpecSlugs = new Set(runs.map((r) => specSlug(r.spec_path)));
+    setApprovedSpecs(approvedRes.items.filter((s) => !runSpecSlugs.has(s.id)));
 
     // Fetch total story count from spec for the active run
     if (active) {
@@ -825,8 +837,13 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                   key={spec.id}
                   spec={spec}
                   workspaceId={workspaceId!}
-                  defaultParallelism={defaultParallelism}
-                  onNavigate={onNavigate}
+                  workspaceName={selectedWorkspace?.name ?? 'workspace'}
+                  workspaceBusy={hasActiveRun}
+                  onTriggered={() => {
+                    // Remove from ready-to-run immediately; SSE refetch will
+                    // populate the active run section when run_started arrives
+                    setApprovedSpecs((prev) => prev.filter((s) => s.id !== spec.id));
+                  }}
                 />
               ))}
             </div>
