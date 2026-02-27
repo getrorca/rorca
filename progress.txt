@@ -617,3 +617,24 @@ Key decisions:
 - Invoice amounts divided by 100 (Stripe stores in cents)
 - Seats derived from teams + team_members tables (existing schema, no new tables)
 - BillingSection is a sibling section to AccountSection, not nested within it — billing is its own tab for discoverability
+
+## Story P2-009: Run Lifecycle Animations — DONE
+Files touched:
+- src/styles/index.css (modified — 4 new keyframes + 4 utility classes)
+- src/components/Shell.tsx (modified — RunPill dot fade-in pulse animation on run start)
+- src/components/Toast.tsx (modified — position prop for top-right slide-in)
+- src/panels/HubPanel.tsx (modified — ActiveRunCard slide-down, border transition, completion toast, RecentRunRow slide)
+
+What was built:
+- **Run pill dot**: Fades in with scale-pulse animation (`dotFadeInPulse`) when a new run starts, using `animate-dot-fade-pulse` class with 500ms bounce easing
+- **ActiveRunCard slide-down**: Card uses `animate-slide-down-in` (400ms ease-out from -16px) when appearing in the Running section
+- **Border transition on completion**: Card border transitions from blue to emerald (success) or red (failure) over 1s using `transition-[border-color] duration-1000`, driven by SSE `run_finished`/`run_failed` events
+- **Completion toast**: Top-right slide-in toast (`animate-slide-in-top-right`, 350ms) shows "Run completed: <spec>" or "Run failed: <spec>" on run end, auto-dismisses after 5s
+- **Recent Runs slide**: When a run moves to Recent Runs list, the row plays `animate-slide-to-recent` (400ms ease-out from -12px with scale 0.98→1)
+
+Key decisions:
+- All animations use CSS keyframes (no JS animation libraries) — consistent with existing P2-008 animation system
+- Completion detection via SSE events in ActiveRunCard useMemo → useEffect, fires `onRunCompleted` callback once per run
+- Top-right toast uses separate `ToastContainer` with `position="top-right"` prop rather than modifying global toast position
+- `justCompletedRunIds` Set tracks which runs just finished so slide animation only plays on new arrivals, not existing items
+- RunPill dot animation resets via `dotJustAppeared` state with 600ms timeout to avoid replaying on re-renders

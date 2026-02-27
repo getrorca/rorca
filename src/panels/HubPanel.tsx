@@ -4,6 +4,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
 import TriggerPopover from '../components/TriggerPopover';
+import { ToastContainer } from '../components/Toast';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from '../components/Sidebar';
@@ -175,13 +176,16 @@ const BORDER_LEFT: Record<string, string> = {
 
 // ─── Active Run Section ─────────────────────────────────────────────────────
 
-function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
+function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
   run: PipelineRun;
   totalStories: number;
   onNavigateToRun?: (runId: number) => void;
+  onRunCompleted?: (status: 'done' | 'failed') => void;
 }) {
   const walEvents = usePipelineSSE(String(run.id));
   const [actionLoading, setActionLoading] = useState<'pause' | 'kill' | null>(null);
+  const [completionBorder, setCompletionBorder] = useState<'none' | 'success' | 'failure'>('none');
+  const completionFired = useRef(false);
 
   // Derive live story progress from SSE events + initial story_results
   const { passed, failed, currentStoryTitle, currentRunStatus } = useMemo(() => {
@@ -224,6 +228,16 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
     };
   }, [walEvents, run.status]);
 
+  // Detect run completion and trigger border transition
+  useEffect(() => {
+    if (completionFired.current) return;
+    if (currentRunStatus === 'done' || currentRunStatus === 'failed' || currentRunStatus === 'cancelled') {
+      completionFired.current = true;
+      setCompletionBorder(currentRunStatus === 'done' ? 'success' : 'failure');
+      onRunCompleted?.(currentRunStatus === 'done' ? 'done' : 'failed');
+    }
+  }, [currentRunStatus, onRunCompleted]);
+
   // Use SSE-derived status if events have come in, otherwise fall back to polled status
   const effectiveStatus = walEvents.length > 0 ? currentRunStatus : run.status;
   const completed = passed + failed;
@@ -253,10 +267,16 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun }: {
     setActionLoading(null);
   };
 
+  const borderTransitionClass = completionBorder === 'success'
+    ? 'border-emerald-500 border-l-emerald-500'
+    : completionBorder === 'failure'
+    ? 'border-red-500 border-l-red-500'
+    : `border-border ${BORDER_LEFT[effectiveStatus] || 'border-l-gray-500'}`;
+
   return (
     <button
       onClick={() => onNavigateToRun?.(run.id)}
-      className={`w-full text-left p-4 bg-panel border border-border border-l-4 ${BORDER_LEFT[effectiveStatus] || 'border-l-gray-500'} rounded-lg hover:border-accent/50 transition-colors group`}
+      className={`w-full text-left p-4 bg-panel border border-l-4 ${borderTransitionClass} rounded-lg hover:border-accent/50 transition-[border-color] duration-1000 group animate-slide-down-in`}
     >
       {/* Header row: status + run ID + actions */}
       <div className="flex items-center justify-between mb-2">
@@ -491,14 +511,15 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate }: {
 
 // ─── Recent Runs Section ────────────────────────────────────────────────────
 
-function RecentRunRow({ run, onNavigateToRun }: {
+function RecentRunRow({ run, onNavigateToRun, justCompleted }: {
   run: PipelineRun;
   onNavigateToRun?: (runId: number) => void;
+  justCompleted?: boolean;
 }) {
   return (
     <button
       onClick={() => onNavigateToRun?.(run.id)}
-      className="w-full text-left px-3 py-2.5 hover:bg-bg transition-colors group"
+      className={`w-full text-left px-3 py-2.5 hover:bg-bg transition-colors group${justCompleted ? ' animate-slide-to-recent' : ''}`}
     >
       <div className="flex items-center justify-between gap-3">
         {/* Left: spec name + run ID */}
@@ -529,6 +550,12 @@ function RecentRunRow({ run, onNavigateToRun }: {
 
 // ─── HubPanel ───────────────────────────────────────────────────────────────
 
+interface CompletionToast {
+  id: number;
+  message: string;
+  type: 'success' | 'error';
+}
+
 export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview }: { onNavigate: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; onNavigateToSpecReview?: (specId: string) => void }) {
   const { workspaceId, workspaces, addWorkspace } = useWorkspace();
   const [showAddWorkspace, setShowAddWorkspace] = useState(false);
@@ -540,6 +567,25 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [loaded, setLoaded] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [defaultParallelism, setDefaultParallelism] = useState(1);
+  const [completionToasts, setCompletionToasts] = useState<CompletionToast[]>([]);
+  const completionToastId = useRef(0);
+  const [justCompletedRunIds, setJustCompletedRunIds] = useState<Set<number>>(new Set());
+
+  const showCompletionToast = useCallback((status: 'done' | 'failed', specName: string) => {
+    const id = completionToastId.current++;
+    const message = status === 'done'
+      ? `Run completed: ${specName}`
+      : `Run failed: ${specName}`;
+    const type = status === 'done' ? 'success' as const : 'error' as const;
+    setCompletionToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setCompletionToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  }, []);
+
+  const dismissCompletionToast = useCallback((id: number) => {
+    setCompletionToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
 
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
@@ -721,6 +767,9 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
 
   return (
     <div className="h-full overflow-y-auto">
+      {/* Completion toast — top-right slide-in */}
+      <ToastContainer toasts={completionToasts} onDismiss={dismissCompletionToast} position="top-right" />
+
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8">
         {/* Active Run */}
         {hasActiveRun && (
@@ -730,6 +779,10 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
               run={activeRun}
               totalStories={totalStories}
               onNavigateToRun={onNavigateToRun}
+              onRunCompleted={(status) => {
+                showCompletionToast(status, specLabel(activeRun.spec_path));
+                setJustCompletedRunIds(prev => new Set(prev).add(activeRun.id));
+              }}
             />
           </section>
         )}
@@ -788,7 +841,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
             </div>
             <div className="bg-panel border border-border rounded-lg divide-y divide-border">
               {recentRuns.map((run) => (
-                <RecentRunRow key={run.id} run={run} onNavigateToRun={onNavigateToRun} />
+                <RecentRunRow key={run.id} run={run} onNavigateToRun={onNavigateToRun} justCompleted={justCompletedRunIds.has(run.id)} />
               ))}
             </div>
             <UpdatedFooter lastUpdated={lastUpdated} />
