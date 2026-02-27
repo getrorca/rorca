@@ -18,7 +18,7 @@ import ForgotPasswordPage from './components/ForgotPasswordPage';
 import ResetPasswordPage from './components/ResetPasswordPage';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
-import { onApiFetchError } from './lib/apiFetch';
+import { apiFetch, onApiFetchError } from './lib/apiFetch';
 import PublicReviewPage from './pages/PublicReviewPage';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
 import ReviewQueuePanel from './panels/ReviewQueuePanel';
@@ -194,11 +194,25 @@ function AppContent() {
   const [activePanel, setActivePanel] = useState<PanelId>('hub');
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [reviewSpecId, setReviewSpecId] = useState<string | null>(null);
-  const { workspaces } = useWorkspace();
+  const { workspaces, workspaceId } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
+  const [queueCount, setQueueCount] = useState(0);
+
+  // Poll queue count every 10s for badge
+  useEffect(() => {
+    if (!workspaceId) { setQueueCount(0); return; }
+    const fetchCount = () => {
+      apiFetch<{ queueLength: number }>(`/api/run-queue/status?workspaceId=${workspaceId}`)
+        .then((data) => setQueueCount(data.queueLength))
+        .catch(() => setQueueCount(0));
+    };
+    fetchCount();
+    const interval = setInterval(fetchCount, 10_000);
+    return () => clearInterval(interval);
+  }, [workspaceId]);
 
   // Parse run ID from URL hash on mount (e.g. #/run/42)
   useEffect(() => {
@@ -293,7 +307,7 @@ function AppContent() {
 
   return (
     <Shell
-      sidebar={<Sidebar activePanel={activePanel} onNavigate={handleNavigate} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} />}
+      sidebar={<Sidebar activePanel={activePanel} onNavigate={handleNavigate} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} queueCount={queueCount} />}
       showMenuButton
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
       onNavigate={handleNavigate}
