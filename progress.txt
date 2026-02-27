@@ -807,3 +807,27 @@ Key decisions:
 - Model catalog is static (hardcoded in config.ts) — matches current Models.dev popular models
 - Provider-to-vault-key mapping validates API key presence before allowing save (e.g. OpenAI models need 'openai-compat' vault key)
 - Local/Ollama models skip API key validation (no key required)
+
+## Story OC-010: Trigger Modal Engine Display + Run View Agent Badge — DONE
+Files touched:
+- backend/src/routes/config.ts (modified — GET /api/config now returns modelDisplayName + hasApiKey)
+- src/components/TriggerPopover.tsx (rewritten — fetches agent config, shows Engine row, warnings, disables trigger when misconfigured)
+- src/panels/HubPanel.tsx (modified — passes onNavigate to TriggerPopover)
+- src/panels/ArchivePanel.tsx (modified — passes onNavigate to TriggerPopover)
+- src/panels/RunViewPanel.tsx (modified — agentType/agentModel on PipelineRun interface, agent badge in header)
+
+What was built:
+- TriggerPopover fetches GET /api/config on mount, displays "Engine" row showing "Claude (Pro/Max)" or "OpenCode — <model name>"
+- Engine label links to Settings panel via onNavigate prop for quick reconfiguration
+- Warning when RORCA_AGENT=opencode but no model configured: "No model configured — go to Settings"
+- Warning when model set but no API key for provider: "No API key for this provider — go to Settings"
+- Run Now + Add to Queue buttons disabled when engine is misconfigured (no model or no API key)
+- GET /api/config extended with `modelDisplayName` (human-readable model name) and `hasApiKey` (checks api_key_vault for provider)
+- RunViewPanel header shows agent badge: orange "Claude" or cyan "<model name>" next to status badge
+- Badge shows the model's short name (e.g. "GPT-4o") extracted from agentModel field
+
+Key decisions:
+- Single fetch to GET /api/config (not a new endpoint) — extended existing endpoint with two new fields
+- hasApiKey check reuses same PROVIDER_KEY_MAP + api_key_vault query as PUT /agent validation
+- onNavigate prop is optional on TriggerPopover — graceful degradation if caller doesn't pass it
+- Agent badge always shown in RunViewPanel (defaults to "Claude" for runs without agentType)

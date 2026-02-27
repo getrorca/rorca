@@ -494,6 +494,7 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate, onQ
             onTrigger={handleTrigger}
             onAddToQueue={handleAddToQueue}
             onClose={() => setShowPopover(false)}
+            onNavigate={onNavigate}
           />
         )}
         {triggerState === 'success' ? (
