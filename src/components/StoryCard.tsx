@@ -63,6 +63,7 @@ export function StoryCard({
   assignee,
   onAssignStory,
   onCriteriaAccepted,
+  modified,
 }: {
   story: Story;
   onToggleExclude?: () => void;
@@ -77,6 +78,8 @@ export function StoryCard({
   assignee?: Assignee | null;
   onAssignStory?: (userId: string | null) => Promise<void>;
   onCriteriaAccepted?: () => void;
+  /** Show a 'Modified' badge when this story has been edited */
+  modified?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [commitsExpanded, setCommitsExpanded] = useState(false);
@@ -270,6 +273,12 @@ export function StoryCard({
                 <span className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-success/15 text-success">
                   <CheckCircle2 size={9} />
                   DONE
+                </span>
+              )}
+              {modified && (
+                <span className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
+                  <Pencil size={9} />
+                  Modified
                 </span>
               )}
               {story.mergedVia && (
