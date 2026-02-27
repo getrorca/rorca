@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { ChevronDown, ChevronRight, CheckCircle2, RefreshCw, PenLine, Loader2, Play, X, GitBranch, ExternalLink } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2, RefreshCw, PenLine, Loader2, Play, X, GitBranch, ExternalLink, MinusCircle, PlusCircle } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -47,6 +47,14 @@ export default function SpecForgePreview({
   const [autoWorktree, setAutoWorktree] = useState(false);
   const [triggering, setTriggering] = useState(false);
 
+  // Excluded stories tracking (local state synced to spec JSON via API)
+  const [excludedIds, setExcludedIds] = useState<Set<string>>(
+    () => new Set(spec.stories.filter(s => s.excluded).map(s => s.id))
+  );
+
+  const excludedCount = excludedIds.size;
+  const activeCount = spec.stories.length - excludedCount;
+
   const toggleStory = useCallback((id: string) => {
     setExpandedStories(prev => {
       const next = new Set(prev);
@@ -55,6 +63,33 @@ export default function SpecForgePreview({
       return next;
     });
   }, []);
+
+  const handleToggleExclude = useCallback(async (storyId: string) => {
+    const willExclude = !excludedIds.has(storyId);
+    // Optimistic update
+    setExcludedIds(prev => {
+      const next = new Set(prev);
+      if (willExclude) next.add(storyId);
+      else next.delete(storyId);
+      return next;
+    });
+    try {
+      await apiFetch(`/api/specs/${spec.specName}/stories/${storyId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, excluded: willExclude }),
+      });
+    } catch {
+      // Revert on failure
+      setExcludedIds(prev => {
+        const next = new Set(prev);
+        if (willExclude) next.delete(storyId);
+        else next.add(storyId);
+        return next;
+      });
+      show('Failed to update story exclusion', 'error');
+    }
+  }, [excludedIds, spec.specName, workspaceId, show]);
 
   const handleApprove = async () => {
     if (approving || approved) return;
@@ -119,6 +154,11 @@ export default function SpecForgePreview({
           <span className="text-sm font-medium text-text">
             Generated {spec.stories.length} {spec.stories.length === 1 ? 'story' : 'stories'}
           </span>
+          {excludedCount > 0 && (
+            <span className="text-xs text-warning font-medium">
+              ({excludedCount} excluded)
+            </span>
+          )}
         </div>
         <span className="text-xs text-muted font-mono">{spec.specName}</span>
       </div>
@@ -127,24 +167,34 @@ export default function SpecForgePreview({
       <div className="space-y-2">
         {spec.stories.map((story) => {
           const isExpanded = expandedStories.has(story.id);
+          const isExcluded = excludedIds.has(story.id);
           return (
             <div
               key={story.id}
-              className="border border-border rounded bg-panel"
+              className={`border rounded bg-panel transition-opacity ${
+                isExcluded ? 'border-border/50 opacity-50' : 'border-border'
+              }`}
             >
               {/* Card header */}
-              <button
-                onClick={() => toggleStory(story.id)}
-                className="w-full px-3 py-2.5 flex items-start gap-2 text-left"
-              >
-                <span className="shrink-0 mt-0.5 text-muted">
+              <div className="w-full px-3 py-2.5 flex items-start gap-2">
+                <button
+                  onClick={() => toggleStory(story.id)}
+                  className="shrink-0 mt-0.5 text-muted"
+                >
                   {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </span>
-                <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-accent/15 text-accent mt-0.5">
+                </button>
+                <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded mt-0.5 ${
+                  isExcluded ? 'bg-muted/15 text-muted' : 'bg-accent/15 text-accent'
+                }`}>
                   {story.id}
                 </span>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold text-text truncate">
+                <button
+                  onClick={() => toggleStory(story.id)}
+                  className="flex-1 min-w-0 text-left"
+                >
+                  <div className={`text-sm font-semibold truncate ${
+                    isExcluded ? 'text-muted line-through' : 'text-text'
+                  }`}>
                     {story.title}
                   </div>
                   {story.description && !isExpanded && (
@@ -152,11 +202,27 @@ export default function SpecForgePreview({
                       {story.description}
                     </p>
                   )}
-                </div>
+                </button>
+                {isExcluded && (
+                  <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-muted/15 text-muted mt-0.5">
+                    EXCLUDED
+                  </span>
+                )}
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted mt-0.5">
                   {story.acceptanceCriteria.length} AC
                 </span>
-              </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleToggleExclude(story.id); }}
+                  title={isExcluded ? 'Include in run' : 'Exclude from run'}
+                  className={`shrink-0 mt-0.5 transition-colors ${
+                    isExcluded
+                      ? 'text-muted hover:text-success'
+                      : 'text-muted/40 hover:text-warning'
+                  }`}
+                >
+                  {isExcluded ? <PlusCircle size={14} /> : <MinusCircle size={14} />}
+                </button>
+              </div>
 
               {/* Expanded content */}
               {isExpanded && (
@@ -313,7 +379,10 @@ export default function SpecForgePreview({
 
               {/* Spec summary */}
               <div className="px-3 py-2 bg-panel/50 border border-border/50 rounded text-xs text-muted">
-                {spec.stories.length} {spec.stories.length === 1 ? 'story' : 'stories'} will be executed sequentially
+                {activeCount} {activeCount === 1 ? 'story' : 'stories'} will be executed sequentially
+                {excludedCount > 0 && (
+                  <span className="text-warning"> ({excludedCount} excluded)</span>
+                )}
               </div>
             </div>
 
