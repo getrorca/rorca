@@ -712,3 +712,25 @@ Key decisions:
 - Single restart attempt (not infinite retries) — if server crashes twice, the run should fail and notify user
 - `detached: true` + `child.unref()` so server survives backend restarts (same pattern as pipeline run-loop spawn)
 - Log fd passed via `stdio: ['ignore', logFd, logFd]` — same pattern as run-loop.ts (survives parent death, no SIGPIPE)
+
+## Story OC-005: OpenCode JSON Event Stream Parser — DONE
+Files touched:
+- backend/src/lib/opencode-parser.ts (new — streaming JSON parser for OpenCode --format json output)
+- backend/src/lib/__tests__/opencode-parser.test.ts (new — 49 tests)
+
+What was built:
+- `OpenCodeStreamParser` class: streaming parser that buffers partial/chunked JSON lines, emits `ParsedEvent` objects containing semantic log entries + human-readable terminal output + completion/error signals
+- `parseOpenCodeEvent()`: maps individual OpenCode JSON events to `SemanticStep` (reusing type from semantic-log-parser.ts) + ANSI-colored terminal text for xterm.js + `StreamSignal` for story pass/fail detection
+- Tool mapping: read, write, edit, bash, glob, grep, webfetch, websearch → same semantic types as existing parser
+- Terminal output with ANSI color codes: `[Read]` cyan, `[Write]` green, `[Edit]` yellow, `[Bash]` magenta, `[Search]` blue, `[Error]` red, `[Planning]` dim
+- `aggregateSignals()`: scans parsed events for completion/error signals, failure overrides completion
+- `parseOpenCodeStream()`: convenience function for bulk parsing (log replay / testing)
+- Handles: tool_call, tool_result, assistant, completion, error, status, raw text, heartbeat, empty lines, SSE comments
+
+Key decisions:
+- Separate file from semantic-log-parser.ts — opencode-parser.ts handles streaming + terminal rendering + signals, while semantic-log-parser.ts remains the simple per-line semantic extractor
+- `ParsedEvent` combines semantic + terminal + signal in one object — execution-engine.ts can use all three outputs from a single parse
+- Non-JSON lines emitted as raw terminal output (type='raw') — some opencode versions emit plain text mixed with JSON
+- flush() method for stream end — ensures final partial line is processed
+- Error signals propagated immediately (no buffering) — execution-engine can react to failures in real-time
+- 49 tests covering: all event types, partial chunking (2-chunk, 3-chunk), mixed JSON/text, SSE comments, signal aggregation, edge cases
