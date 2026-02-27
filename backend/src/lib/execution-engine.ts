@@ -41,6 +41,9 @@ import {
   type ModelTier,
   type ScorerStory,
 } from './complexity-scorer';
+import { parseClaudeLogTokens } from './claude-token-parser';
+import { parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
+import { calculateCost } from './model-pricing';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -700,6 +703,55 @@ function isRateLimited(result: AgentResult): boolean {
   return false;
 }
 
+// ─── Token Usage Extraction ─────────────────────────────────────────────────
+
+interface StoryTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+  costUsd: number;
+}
+
+/**
+ * Extract token usage from a story's log file based on agent type.
+ * Reads the log file and parses tokens from the agent's output format.
+ */
+function extractTokenUsage(
+  logFile: string,
+  agentType: AgentType,
+  agentModel: string | null,
+  stderrTail: string,
+  cwd: string,
+): StoryTokenUsage {
+  const fallbackModel = agentModel ?? 'unknown';
+  const empty: StoryTokenUsage = { inputTokens: 0, outputTokens: 0, model: fallbackModel, costUsd: 0 };
+
+  try {
+    if (!fs.existsSync(logFile)) return empty;
+    const logContent = fs.readFileSync(logFile, 'utf8');
+
+    if (agentType === 'claude') {
+      const usage = parseClaudeLogTokens(logContent + '\n' + stderrTail);
+      const model = usage.model ?? fallbackModel;
+      const costUsd = calculateCost(usage.inputTokens, usage.outputTokens, model, cwd);
+      return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model, costUsd };
+    }
+
+    if (agentType === 'opencode') {
+      const events = parseOpenCodeStream(logContent);
+      const usage = aggregateTokenUsage(events);
+      const model = usage.model ?? fallbackModel;
+      const costUsd = calculateCost(usage.inputTokens, usage.outputTokens, model, cwd);
+      return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model, costUsd };
+    }
+
+    // codex — no known token output format yet
+    return empty;
+  } catch {
+    return empty;
+  }
+}
+
 // ─── Spec File Mutations ────────────────────────────────────────────────────
 
 function markStoryPassed(jsonPath: string, storyId: string): void {
@@ -1138,6 +1190,17 @@ async function executeStory(
       config.attachAddr,
     );
 
+    // Extract token usage from log file after agent exits
+    const tokenUsage = extractTokenUsage(
+      storyLogFile, config.agentType, currentModel, result.stderrTail, config.cwd,
+    );
+    const tokenPayload = {
+      inputTokens: tokenUsage.inputTokens,
+      outputTokens: tokenUsage.outputTokens,
+      modelUsed: tokenUsage.model,
+      costUsd: tokenUsage.costUsd,
+    };
+
     // ── Rate limit detection ──────────────────────────────────────────
     if (result.exitCode !== 0 && result.exitCode !== 124 && isRateLimited(result)) {
       rateLimitAttempts++;
@@ -1155,7 +1218,7 @@ async function executeStory(
           try {
             await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
             });
           } catch { /* backend may be down */ }
         }
@@ -1244,7 +1307,7 @@ async function executeStory(
           try {
             await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
             });
           } catch { /* backend may be down */ }
         }
@@ -1271,7 +1334,7 @@ async function executeStory(
         try {
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass', ...storyResultExtra }),
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass', ...storyResultExtra, ...tokenPayload }),
           });
         } catch { /* backend may be down */ }
       }
@@ -1292,7 +1355,7 @@ async function executeStory(
         try {
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
           });
         } catch { /* backend may be down */ }
       }
@@ -1319,7 +1382,7 @@ async function executeStory(
         try {
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
           });
         } catch { /* backend may be down */ }
       }
@@ -1392,7 +1455,7 @@ async function executeStory(
           try {
             await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
             });
           } catch { /* backend may be down */ }
         }
@@ -1426,7 +1489,7 @@ async function executeStory(
         try {
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra }),
+            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
           });
         } catch { /* backend may be down */ }
       }
