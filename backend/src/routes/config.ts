@@ -3,6 +3,7 @@ import { agentType, agentModel, AgentType, VALID_AGENT_TYPES, validateOrchestrat
 import { loadOrchestrationConfig, clearConfigCache } from '../lib/complexity-scorer';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
+import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../lib/claude-auth';
 import { db } from '../db';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -514,6 +515,65 @@ router.put('/orchestration', (req: Request, res: Response) => {
     escalation: merged.escalation,
     tokenBudgetPerStory: merged.tokenBudgetPerStory,
   });
+});
+
+// ─── Claude Auth Detection (OC-025) ──────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/config/claude-auth:
+ *   get:
+ *     summary: Get Claude subscription auth state (no raw token exposed)
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Claude auth state
+ */
+router.get('/claude-auth', (_req: Request, res: Response) => {
+  const state = getClaudeAuthState();
+  res.json(state);
+});
+
+/**
+ * @swagger
+ * /api/config/claude-auth/login:
+ *   post:
+ *     summary: Trigger Claude CLI auth login (opens browser for PKCE OAuth)
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Login spawned, polling for credential changes
+ *       400:
+ *         description: CLI not found
+ */
+router.post('/claude-auth/login', (_req: Request, res: Response) => {
+  const result = triggerClaudeLogin();
+  if (!result.spawned) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, message: 'Claude auth login triggered. Complete sign-in in your browser.' });
+});
+
+/**
+ * @swagger
+ * /api/config/claude-auth/logout:
+ *   post:
+ *     summary: Trigger Claude CLI auth logout
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Logout completed
+ *       400:
+ *         description: Logout failed
+ */
+router.post('/claude-auth/logout', async (_req: Request, res: Response) => {
+  const result = await triggerClaudeLogout();
+  if (!result.success) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, message: 'Claude account disconnected.' });
 });
 
 export default router;

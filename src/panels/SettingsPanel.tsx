@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
 import { useDirectionLayer } from '../hooks/useDirectionLayer';
-import { apiFetch, clearTokens } from '../lib/apiFetch';
+import { apiFetch, clearTokens, BASE_URL } from '../lib/apiFetch';
 import GitHubSettingsPanel from './GitHubSettingsPanel';
 import { modLabel } from '../hooks/useHotkeys';
 import OpenCodeSetupGuide from '../components/OpenCodeSetupGuide';
@@ -311,6 +311,171 @@ interface OllamaStatus {
   error?: string;
 }
 
+// ─── Claude Auth Status (OC-025) ────────────────────────────────────────────
+
+interface ClaudeAuthState {
+  connected: boolean;
+  email?: string;
+  tier?: string;
+  expiresAt?: number;
+  cliInstalled: boolean;
+  cliVersion?: string;
+}
+
+function ClaudeAuthStatus() {
+  const [auth, setAuth] = useState<ClaudeAuthState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchAuth = useCallback(async () => {
+    try {
+      const state = await apiFetch<ClaudeAuthState>('/api/config/claude-auth');
+      setAuth(state);
+    } catch { /* silent */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchAuth();
+  }, [fetchAuth]);
+
+  // Listen for SSE events for auth changes
+  useEffect(() => {
+    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
+    const handler = (e: MessageEvent) => {
+      try {
+        const event = JSON.parse(e.data);
+        if (event.event_type === 'claude_auth_connected' || event.event_type === 'claude_auth_disconnected') {
+          fetchAuth();
+        }
+      } catch { /* ignore parse errors */ }
+    };
+    es.addEventListener('wal_event', handler);
+    return () => { es.close(); };
+  }, [fetchAuth]);
+
+  const handleLogin = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await apiFetch('/api/config/claude-auth/login', { method: 'POST' });
+    } catch (err: any) {
+      setError(err.message || 'Failed to trigger Claude login');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    setActionLoading(true);
+    setError(null);
+    try {
+      await apiFetch('/api/config/claude-auth/logout', { method: 'POST' });
+      setAuth(prev => prev ? { ...prev, connected: false, email: undefined, tier: undefined, expiresAt: undefined } : prev);
+    } catch (err: any) {
+      setError(err.message || 'Failed to disconnect Claude');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-muted text-xs">
+        <Loader2 size={12} className="animate-spin" /> Checking Claude auth...
+      </div>
+    );
+  }
+
+  if (!auth) return null;
+
+  // Token expiry warning: within 24h
+  const expiringWarning = auth.expiresAt && (auth.expiresAt - Date.now()) < 24 * 60 * 60 * 1000 && auth.expiresAt > Date.now();
+
+  return (
+    <div className={`border rounded-lg p-4 transition-colors ${
+      auth.connected
+        ? expiringWarning
+          ? 'border-amber-500/30 bg-amber-500/5'
+          : 'border-green-500/30 bg-green-500/5'
+        : 'border-amber-500/30 bg-amber-500/5'
+    }`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={`w-2.5 h-2.5 rounded-full ${
+            auth.connected
+              ? expiringWarning ? 'bg-amber-400' : 'bg-green-400'
+              : 'bg-amber-400'
+          }`} />
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-[var(--text)]">Claude Account</span>
+              {auth.cliVersion && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent border border-accent/20">
+                  CLI v{auth.cliVersion}
+                </span>
+              )}
+              {!auth.cliInstalled && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-red-500/15 text-red-400 border border-red-500/20">
+                  CLI not found
+                </span>
+              )}
+            </div>
+            {auth.connected ? (
+              <p className="text-xs text-green-400 mt-0.5 flex items-center gap-1">
+                <CheckCircle2 size={12} />
+                {auth.email
+                  ? <>Connected as <span className="font-medium">{auth.email}</span>{auth.tier ? ` (Claude ${auth.tier})` : ''}</>
+                  : 'Connected via Claude CLI'
+                }
+              </p>
+            ) : (
+              <p className="text-xs text-amber-400 mt-0.5 flex items-center gap-1">
+                <AlertTriangle size={12} />
+                Not connected — sign in to enable pipeline execution
+              </p>
+            )}
+            {expiringWarning && (
+              <p className="text-[11px] text-amber-400 mt-1 flex items-center gap-1">
+                <AlertTriangle size={11} />
+                Session expiring soon — reconnect to avoid pipeline failures
+              </p>
+            )}
+          </div>
+        </div>
+        <div>
+          {auth.connected ? (
+            <button
+              onClick={handleLogout}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-red-500/30 rounded text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />}
+              Disconnect
+            </button>
+          ) : (
+            <button
+              onClick={handleLogin}
+              disabled={actionLoading || !auth.cliInstalled}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+              Connect Claude Account
+            </button>
+          )}
+        </div>
+      </div>
+      {error && (
+        <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+          <XCircle size={14} />
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ExecutionEngineSection() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [models, setModels] = useState<OpenCodeModelEntry[]>([]);
@@ -564,6 +729,9 @@ function ExecutionEngineSection() {
           </p>
         </button>
       </div>
+
+      {/* Claude auth status (OC-025) */}
+      {selectedType === 'claude' && <ClaudeAuthStatus />}
 
       {/* Codex CLI installation status */}
       {selectedType === 'codex' && config && (
