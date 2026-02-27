@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { HelpTipsProvider } from './contexts/HelpTipsContext';
@@ -7,42 +7,46 @@ import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
-import OnboardingWizard from './components/OnboardingWizard';
-import CommandPalette from './components/CommandPalette';
-// KeyboardShortcutsPanel modal replaced by Settings > Shortcuts tab (UI-032)
 import ErrorBoundary from './components/ErrorBoundary';
-// NetworkBanner is now inline in Shell.tsx top bar (useNetworkOffline + NetworkIndicator)
-import LoginPage from './components/LoginPage';
-import RegisterPage from './components/RegisterPage';
-import ForgotPasswordPage from './components/ForgotPasswordPage';
-import ResetPasswordPage from './components/ResetPasswordPage';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { onApiFetchError } from './lib/apiFetch';
-import PublicReviewPage from './pages/PublicReviewPage';
-import SpecForgePanelPage from './panels/SpecForgePanelPage';
-import ReviewQueuePanel from './panels/ReviewQueuePanel';
-import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
-import WorktreesPanel from './panels/WorktreesPanel';
-import ArchivePanel from './panels/ArchivePanel';
-import CompareRunsPanel from './panels/CompareRunsPanel';
-import GitHubSettingsPanel from './panels/GitHubSettingsPanel';
-import ActivityFeedPanel from './panels/ActivityFeedPanel';
-import TeamDirectionPanel from './panels/TeamDirectionPanel';
-import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
-import UsageDashboardPanel from './panels/UsageDashboardPanel';
-import CostBreakdownPanel from './panels/CostBreakdownPanel';
-import ModelComparisonPanel from './panels/ModelComparisonPanel';
-import VelocityChartPanel from './panels/VelocityChartPanel';
-import CompletionRatePanel from './panels/CompletionRatePanel';
-import HealthDashboardPanel from './panels/HealthDashboardPanel';
-import AuditLogPanel from './panels/AuditLogPanel';
-import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
-import SettingsPanel, { type SettingsTab } from './panels/SettingsPanel';
-import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
-import HubPanel from './panels/HubPanel';
-import RunViewPanel from './panels/RunViewPanel';
-import SpecReviewPanel from './panels/SpecReviewPanel';
+import { HubSkeleton, RunViewTerminalSkeleton, ForgeSkeleton, SettingsSkeleton, GenericPanelSkeleton } from './components/Skeleton';
+import type { SettingsTab } from './panels/SettingsPanel';
+
+// ── Lazy-loaded non-critical components (not needed for initial paint) ──
+const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
+const CommandPalette = lazy(() => import('./components/CommandPalette'));
+const LoginPage = lazy(() => import('./components/LoginPage'));
+const RegisterPage = lazy(() => import('./components/RegisterPage'));
+const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
+const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
+const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
+
+// ── Lazy-loaded panels (code-split into separate chunks) ──
+const HubPanel = lazy(() => import('./panels/HubPanel'));
+const RunViewPanel = lazy(() => import('./panels/RunViewPanel'));
+const SpecForgePanelPage = lazy(() => import('./panels/SpecForgePanelPage'));
+const SettingsPanel = lazy(() => import('./panels/SettingsPanel'));
+const SpecReviewPanel = lazy(() => import('./panels/SpecReviewPanel'));
+const ReviewQueuePanel = lazy(() => import('./panels/ReviewQueuePanel'));
+const PipelineMonitorPanel = lazy(() => import('./panels/PipelineMonitorPanel'));
+const WorktreesPanel = lazy(() => import('./panels/WorktreesPanel'));
+const ArchivePanel = lazy(() => import('./panels/ArchivePanel'));
+const CompareRunsPanel = lazy(() => import('./panels/CompareRunsPanel'));
+const GitHubSettingsPanel = lazy(() => import('./panels/GitHubSettingsPanel'));
+const ActivityFeedPanel = lazy(() => import('./panels/ActivityFeedPanel'));
+const TeamDirectionPanel = lazy(() => import('./panels/TeamDirectionPanel'));
+const TemplateMarketplacePanel = lazy(() => import('./panels/TemplateMarketplacePanel'));
+const UsageDashboardPanel = lazy(() => import('./panels/UsageDashboardPanel'));
+const CostBreakdownPanel = lazy(() => import('./panels/CostBreakdownPanel'));
+const ModelComparisonPanel = lazy(() => import('./panels/ModelComparisonPanel'));
+const VelocityChartPanel = lazy(() => import('./panels/VelocityChartPanel'));
+const CompletionRatePanel = lazy(() => import('./panels/CompletionRatePanel'));
+const HealthDashboardPanel = lazy(() => import('./panels/HealthDashboardPanel'));
+const AuditLogPanel = lazy(() => import('./panels/AuditLogPanel'));
+const RoiCalculatorPanel = lazy(() => import('./panels/RoiCalculatorPanel'));
+const WorkspaceSettingsPanel = lazy(() => import('./panels/WorkspaceSettingsPanel'));
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
@@ -57,14 +61,23 @@ function AuthGate() {
   // EQ-007: Public review page — rendered outside auth gate
   const reviewMatch = window.location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
   if (reviewMatch) {
-    return <PublicReviewPage token={reviewMatch[1]} />;
+    return (
+      <Suspense fallback={<GenericPanelSkeleton />}>
+        <PublicReviewPage token={reviewMatch[1]} />
+      </Suspense>
+    );
   }
 
   if (loading) {
+    // Render shell + skeleton instead of blocking — top bar and sidebar paint immediately
     return (
-      <div className="min-h-screen flex items-center justify-center bg-bg">
-        <div className="text-muted text-sm">Loading...</div>
-      </div>
+      <NotificationProvider>
+        <WorkspaceProvider>
+          <Shell>
+            <HubSkeleton />
+          </Shell>
+        </WorkspaceProvider>
+      </NotificationProvider>
     );
   }
 
@@ -73,14 +86,19 @@ function AuthGate() {
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token') || '';
     if (!token) {
-      // No token provided — go to forgot password
-      return <ForgotPasswordPage onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }} />;
+      return (
+        <Suspense fallback={<GenericPanelSkeleton />}>
+          <ForgotPasswordPage onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }} />
+        </Suspense>
+      );
     }
     return (
-      <ResetPasswordPage
-        token={token}
-        onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }}
-      />
+      <Suspense fallback={<GenericPanelSkeleton />}>
+        <ResetPasswordPage
+          token={token}
+          onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }}
+        />
+      </Suspense>
     );
   }
 
@@ -133,34 +151,47 @@ function GlobalErrorWiring() {
   return null;
 }
 
-/** Renders the active panel component */
-function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, settingsTab }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void; reviewSpecId?: string | null; onNavigateToSpecReview?: (specId: string) => void; forgeBrief?: string | null; settingsTab?: SettingsTab }) {
+/** Map PanelId to appropriate skeleton fallback */
+function panelFallback(id: PanelId) {
   switch (id) {
-    case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
-    case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief } : {})} />;
-    case 'spec-review': return <SpecReviewPanel specId={reviewSpecId ?? ''} onBack={() => onNavigate('hub')} onNavigate={onNavigate} />;
-    case 'stack': return <SettingsPanel initialTab={settingsTab} />;
-    case 'team-direction': return <TeamDirectionPanel />;
-    case 'queue': return <ReviewQueuePanel />;
-    case 'pipeline': return <PipelineMonitorPanel />;
-    case 'worktrees': return <WorktreesPanel />;
-    case 'compare': return <CompareRunsPanel onBack={() => onNavigate('pipeline')} />;
-    case 'archive': return <ArchivePanel onNavigate={onNavigate} />;
-    case 'marketplace': return <TemplateMarketplacePanel />;
-    case 'usage': return <UsageDashboardPanel />;
-    case 'costs': return <CostBreakdownPanel />;
-    case 'models': return <ModelComparisonPanel />;
-    case 'velocity': return <VelocityChartPanel />;
-    case 'completion': return <CompletionRatePanel />;
-    case 'roi': return <RoiCalculatorPanel />;
-    case 'health': return <HealthDashboardPanel />;
-    case 'audit-log': return <AuditLogPanel />;
-    case 'activity': return <ActivityFeedPanel />;
-    case 'github': return <GitHubSettingsPanel />;
-    case 'workspace-settings': return <WorkspaceSettingsPanel />;
-    case 'settings': return <SettingsPanel initialTab={settingsTab} />;
+    case 'hub': return <HubSkeleton />;
+    case 'forge': return <ForgeSkeleton />;
+    case 'stack':
+    case 'settings': return <SettingsSkeleton />;
+    default: return <GenericPanelSkeleton />;
+  }
+}
+
+/** Renders the active panel component with lazy-load Suspense boundary */
+function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, settingsTab }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void; reviewSpecId?: string | null; onNavigateToSpecReview?: (specId: string) => void; forgeBrief?: string | null; settingsTab?: SettingsTab }) {
+  let panel: React.ReactNode;
+  switch (id) {
+    case 'hub': panel = <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />; break;
+    case 'forge': panel = <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief } : {})} />; break;
+    case 'spec-review': panel = <SpecReviewPanel specId={reviewSpecId ?? ''} onBack={() => onNavigate('hub')} onNavigate={onNavigate} />; break;
+    case 'stack': panel = <SettingsPanel initialTab={settingsTab} />; break;
+    case 'team-direction': panel = <TeamDirectionPanel />; break;
+    case 'queue': panel = <ReviewQueuePanel />; break;
+    case 'pipeline': panel = <PipelineMonitorPanel />; break;
+    case 'worktrees': panel = <WorktreesPanel />; break;
+    case 'compare': panel = <CompareRunsPanel onBack={() => onNavigate('pipeline')} />; break;
+    case 'archive': panel = <ArchivePanel onNavigate={onNavigate} />; break;
+    case 'marketplace': panel = <TemplateMarketplacePanel />; break;
+    case 'usage': panel = <UsageDashboardPanel />; break;
+    case 'costs': panel = <CostBreakdownPanel />; break;
+    case 'models': panel = <ModelComparisonPanel />; break;
+    case 'velocity': panel = <VelocityChartPanel />; break;
+    case 'completion': panel = <CompletionRatePanel />; break;
+    case 'roi': panel = <RoiCalculatorPanel />; break;
+    case 'health': panel = <HealthDashboardPanel />; break;
+    case 'audit-log': panel = <AuditLogPanel />; break;
+    case 'activity': panel = <ActivityFeedPanel />; break;
+    case 'github': panel = <GitHubSettingsPanel />; break;
+    case 'workspace-settings': panel = <WorkspaceSettingsPanel />; break;
+    case 'settings': panel = <SettingsPanel initialTab={settingsTab} />; break;
     default: return null;
   }
+  return <Suspense fallback={panelFallback(id)}>{panel}</Suspense>;
 }
 
 /** Panel label for ErrorBoundary fallback */
@@ -283,7 +314,9 @@ function AppContent() {
   if (workspaces.length === 0) {
     return (
       <Shell>
-        <OnboardingWizard />
+        <Suspense fallback={<GenericPanelSkeleton />}>
+          <OnboardingWizard />
+        </Suspense>
       </Shell>
     );
   }
@@ -301,11 +334,13 @@ function AppContent() {
       <EmailVerificationBanner />
       {showRunView ? (
         <ErrorBoundary key={`run-${activeRunId}`} label={`Run #${activeRunId}`}>
-          <RunViewPanel
-            runId={activeRunId}
-            onBack={navigateBackFromRun}
-            onNavigate={handleNavigate}
-          />
+          <Suspense fallback={<RunViewTerminalSkeleton />}>
+            <RunViewPanel
+              runId={activeRunId}
+              onBack={navigateBackFromRun}
+              onNavigate={handleNavigate}
+            />
+          </Suspense>
         </ErrorBoundary>
       ) : (
         <>
@@ -316,13 +351,15 @@ function AppContent() {
         </>
       )}
       {showCommandPalette && (
-        <CommandPalette
-          onNavigate={handleNavigate}
-          onClose={() => setShowCommandPalette(false)}
-          activePanel={activePanel}
-          activeRunId={activeRunId}
-          onSendToForge={handleSendToForge}
-        />
+        <Suspense fallback={null}>
+          <CommandPalette
+            onNavigate={handleNavigate}
+            onClose={() => setShowCommandPalette(false)}
+            activePanel={activePanel}
+            activeRunId={activeRunId}
+            onSendToForge={handleSendToForge}
+          />
+        </Suspense>
       )}
     </Shell>
   );

@@ -291,6 +291,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
           <button
             key={mode}
             onClick={() => setForgeMode(mode)}
+            aria-current={forgeMode === mode ? 'page' : undefined}
             className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 ${
               forgeMode === mode
                 ? 'text-text border-accent'
@@ -348,6 +349,8 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
             <section>
               <button
                 onClick={() => setOverridesOpen(!overridesOpen)}
+                aria-expanded={overridesOpen}
+                aria-label="Toggle direction stack overrides"
                 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-text transition-colors w-full"
               >
                 <svg
@@ -652,6 +655,18 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
         <SpecForgeOutput spec={generatedSpec} />
       </div>
     </div>
+      )}
+
+      {showTemplatePicker && (
+        <TemplatePickerModal
+          onClose={() => setShowTemplatePicker(false)}
+          onSelect={(tpl) => {
+            setSpecBrief(tpl.brief);
+            setStoryCount(tpl.storyCount);
+            setShowTemplatePicker(false);
+            setTimeout(() => briefRef.current?.focus(), 50);
+          }}
+        />
       )}
     </div>
   );

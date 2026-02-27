@@ -2225,6 +2225,304 @@ router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response
   }
 });
 
+// ─── GET /api/pipeline/runs/:runId/stories/:storyId/output — Last N lines of story output ─
+// Extracts the story's log section from the run log file or returns WAL failure info.
+
+router.get('/runs/:runId/stories/:storyId/output', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    const storyId = String(req.params.storyId);
+    const lines = Math.min(parseInt(String(req.query.lines ?? '20'), 10) || 20, 100);
+
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    // 1. Check story_result exists
+    const storyResult = db.prepare(
+      `SELECT * FROM story_results WHERE run_id = ? AND story_id = ? ORDER BY id DESC LIMIT 1`
+    ).get(runId, storyId) as StoryResultRow | undefined;
+
+    if (!storyResult) {
+      res.status(404).json({ error: 'Story result not found' });
+      return;
+    }
+
+    // 2. Try to get failure details from WAL events
+    const walEvent = db.prepare(
+      `SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = ? AND payload LIKE ? ORDER BY id DESC LIMIT 1`
+    ).get(storyId, `%"run_id":${runId}%`) as { payload: string } | undefined;
+
+    let failureReason: string | null = null;
+    let failureAttempts: number | null = null;
+    if (walEvent?.payload) {
+      try {
+        const payload = JSON.parse(walEvent.payload);
+        failureReason = payload.reason ?? null;
+        failureAttempts = payload.attempts ?? null;
+      } catch { /* ignore */ }
+    }
+
+    // 3. Try to extract story output from the run log file
+    let outputLines: string[] = [];
+    const logPath = resolveLogPath(runId);
+    if (logPath) {
+      try {
+        const content = fs.readFileSync(logPath, 'utf-8');
+        const allLines = content.split('\n');
+
+        // Find the section for this story by searching for story start/end markers
+        const storyStartPattern = new RegExp(`(^|\\s)${storyId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$|:)`);
+        let startIdx = -1;
+        let endIdx = allLines.length;
+
+        for (let i = 0; i < allLines.length; i++) {
+          if (storyStartPattern.test(allLines[i])) {
+            startIdx = i;
+          }
+        }
+
+        if (startIdx >= 0) {
+          // Find next story start after this one
+          for (let i = startIdx + 1; i < allLines.length; i++) {
+            // Next story starts with a different US-XXX or story ID pattern
+            if (/^(US-\d+|[A-Z]+-\d+)\s/.test(allLines[i]) && !storyStartPattern.test(allLines[i])) {
+              endIdx = i;
+              break;
+            }
+          }
+          const storySection = allLines.slice(startIdx, endIdx);
+          outputLines = storySection.slice(-lines);
+        } else {
+          // Fallback: return last N lines of the entire log
+          outputLines = allLines.slice(-lines);
+        }
+      } catch { /* log read error */ }
+    }
+
+    // 4. If no log output, try in-memory buffer
+    if (outputLines.length === 0) {
+      const buf = outputBuffers.get(runId);
+      if (buf) {
+        const fullText = buf.chunks.join('');
+        const allLines = fullText.split('\n');
+        // Try to find story section in buffer too
+        const storyStartPattern = new RegExp(`(^|\\s)${storyId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$|:)`);
+        let startIdx = -1;
+        for (let i = 0; i < allLines.length; i++) {
+          if (storyStartPattern.test(allLines[i])) {
+            startIdx = i;
+          }
+        }
+        if (startIdx >= 0) {
+          outputLines = allLines.slice(startIdx).slice(-lines);
+        } else {
+          outputLines = allLines.slice(-lines);
+        }
+      }
+    }
+
+    res.json({
+      storyId,
+      runId,
+      status: storyResult.status,
+      retries: storyResult.retries,
+      failureReason,
+      failureAttempts,
+      output: outputLines,
+      lineCount: outputLines.length,
+    });
+  } catch (error: any) {
+    console.error('[Pipeline] Story output error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/pipeline/runs/:runId/stories/:storyId/log — SSE per-story log stream ─
+// Streams a per-story log file as SSE chunks (same protocol as /runs/:runId/output).
+// Used by the multi-pane terminal grid when parallelism > 1.
+
+router.get('/runs/:runId/stories/:storyId/log', (req: Request, res: Response) => {
+  const runId = parseInt(String(req.params.runId), 10);
+  const storyId = String(req.params.storyId);
+  if (isNaN(runId)) {
+    res.status(400).json({ error: 'Invalid runId' });
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(': connected\n\n');
+
+  const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
+
+  // Resolve agent type for semantic parsing
+  const runRow = db.prepare('SELECT agent, workspace_id FROM pipeline_runs WHERE id = ?')
+    .get(runId) as { agent: string; workspace_id: string } | undefined;
+  const agent = runRow?.agent ?? 'claude';
+
+  // Find story log file: check WAL event payload first, then scan forge/logs/
+  let storyLogPath: string | null = null;
+
+  // 1. Check story_started WAL event for log_file path
+  const walRow = db.prepare(
+    `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = ? AND payload LIKE ? ORDER BY id DESC LIMIT 1`
+  ).get(storyId, `%"run_id":${runId}%`) as { payload: string } | undefined;
+  if (walRow?.payload) {
+    try {
+      const payload = JSON.parse(walRow.payload);
+      if (payload.log_file && fs.existsSync(payload.log_file)) {
+        storyLogPath = payload.log_file;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 2. Fallback: scan forge/logs/ for <storyId>_*.log pattern
+  if (!storyLogPath && runRow?.workspace_id) {
+    const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(runRow.workspace_id) as { path: string } | undefined;
+    if (workspace) {
+      const logDir = path.join(workspace.path, 'forge', 'logs');
+      if (fs.existsSync(logDir)) {
+        try {
+          const files = fs.readdirSync(logDir)
+            .filter(f => f.startsWith(`${storyId}_`) && f.endsWith('.log'))
+            .sort()
+            .reverse(); // most recent first
+          if (files.length > 0) {
+            storyLogPath = path.join(logDir, files[0]);
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  }
+
+  if (!storyLogPath) {
+    // No log file yet — send waiting status, then poll until it appears or story finishes
+    res.write(`event: status\ndata: waiting\n\n`);
+
+    // Poll every 500ms for the log file to appear
+    const pollForLog = setInterval(() => {
+      // Re-check WAL event
+      const freshWal = db.prepare(
+        `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = ? AND payload LIKE ? ORDER BY id DESC LIMIT 1`
+      ).get(storyId, `%"run_id":${runId}%`) as { payload: string } | undefined;
+      if (freshWal?.payload) {
+        try {
+          const payload = JSON.parse(freshWal.payload);
+          if (payload.log_file && fs.existsSync(payload.log_file)) {
+            storyLogPath = payload.log_file;
+            clearInterval(pollForLog);
+            startTailing(storyLogPath!, agent, res, hb, runId, storyId);
+            return;
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Check if story already finished (no log will come)
+      const finishEvent = db.prepare(
+        `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = ? AND payload LIKE ? LIMIT 1`
+      ).get(storyId, `%"run_id":${runId}%`);
+      if (finishEvent) {
+        clearInterval(pollForLog);
+        clearInterval(hb);
+        res.write('event: done\ndata: \n\n');
+        res.end();
+      }
+    }, 500);
+
+    req.on('close', () => {
+      clearInterval(pollForLog);
+      clearInterval(hb);
+    });
+    return;
+  }
+
+  // Log file exists — start tailing
+  startTailing(storyLogPath, agent, res, hb, runId, storyId);
+
+  req.on('close', () => {
+    clearInterval(hb);
+  });
+});
+
+/** Tail a story log file and stream as SSE chunks. */
+function startTailing(logPath: string, agent: string, res: Response, hb: ReturnType<typeof setInterval>, runId: number, storyId: string): void {
+  // Replay existing content
+  let offset = 0;
+  try {
+    const existing = fs.readFileSync(logPath);
+    if (existing.length > 0) {
+      res.write(`event: chunk\ndata: ${existing.toString('base64')}\n\n`);
+      emitSemanticSteps(existing.toString('utf8'), agent, res);
+    }
+    offset = existing.length;
+  } catch { /* file may have disappeared */ }
+
+  // Check if story already finished
+  const finishEvent = db.prepare(
+    `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = ? AND payload LIKE ? LIMIT 1`
+  ).get(storyId, `%"run_id":${runId}%`);
+  if (finishEvent) {
+    clearInterval(hb);
+    res.write('event: done\ndata: \n\n');
+    res.end();
+    return;
+  }
+
+  // Tail the log file — poll for new bytes every 200 ms
+  const tailInterval = setInterval(() => {
+    try {
+      const stat = fs.statSync(logPath);
+      if (stat.size > offset) {
+        const newBytes = Buffer.alloc(stat.size - offset);
+        const fd = fs.openSync(logPath, 'r');
+        fs.readSync(fd, newBytes, 0, newBytes.length, offset);
+        fs.closeSync(fd);
+        offset = stat.size;
+        const text = newBytes.toString('utf8');
+        res.write(`event: chunk\ndata: ${newBytes.toString('base64')}\n\n`);
+        emitSemanticSteps(text, agent, res);
+      }
+
+      // Check if story finished
+      const done = db.prepare(
+        `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = ? AND payload LIKE ? LIMIT 1`
+      ).get(storyId, `%"run_id":${runId}%`);
+      if (done) {
+        // Read any final bytes
+        const finalStat = fs.statSync(logPath);
+        if (finalStat.size > offset) {
+          const finalBytes = Buffer.alloc(finalStat.size - offset);
+          const fd = fs.openSync(logPath, 'r');
+          fs.readSync(fd, finalBytes, 0, finalBytes.length, offset);
+          fs.closeSync(fd);
+          res.write(`event: chunk\ndata: ${finalBytes.toString('base64')}\n\n`);
+          emitSemanticSteps(finalBytes.toString('utf8'), agent, res);
+        }
+        clearInterval(tailInterval);
+        clearInterval(hb);
+        res.write('event: done\ndata: \n\n');
+        res.end();
+      }
+    } catch {
+      clearInterval(tailInterval);
+      clearInterval(hb);
+      res.write('event: done\ndata: \n\n');
+      res.end();
+    }
+  }, 200);
+
+  res.req?.on('close', () => {
+    clearInterval(tailInterval);
+    clearInterval(hb);
+  });
+}
+
 // ─── GET /api/pipeline/stream — SSE event stream ─────────────────────────────
 
 const HEARTBEAT_INTERVAL_MS = 15_000;

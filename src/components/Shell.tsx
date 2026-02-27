@@ -20,15 +20,23 @@ function WorkspaceSelector() {
   const [showAddModal, setShowAddModal] = useState(false);
 
   const selected = workspaces.find((w) => w.id === workspaceId);
+  // On mobile (<640px), truncate to first word of workspace name
+  const fullName = selected?.name ?? 'Select workspace';
+  const shortName = fullName.split(/[\s-]/)[0] || fullName;
 
   return (
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 px-3 py-1.5 rounded text-sm bg-bg border border-border hover:border-accent transition-colors"
+        aria-label="Select workspace"
+        aria-expanded={open}
+        className="flex items-center gap-2 px-3 py-1.5 rounded text-sm bg-bg border border-border hover:border-accent transition-colors min-h-[44px] sm:min-h-0"
       >
-        <span className="truncate max-w-[100px] sm:max-w-[160px]">{selected?.name ?? 'Select workspace'}</span>
-        <svg className="w-3 h-3 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <span className="truncate max-w-[80px] sm:max-w-[160px]">
+          <span className="sm:hidden">{shortName}</span>
+          <span className="hidden sm:inline">{fullName}</span>
+        </span>
+        <svg className="w-3 h-3 text-muted shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
@@ -36,7 +44,7 @@ function WorkspaceSelector() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 mt-1 w-56 bg-panel border border-border rounded shadow-lg z-50">
+          <div className="fixed left-3 right-3 top-14 sm:absolute sm:left-0 sm:right-auto sm:top-auto sm:mt-1 sm:w-56 bg-panel border border-border rounded shadow-lg z-50">
             {workspaces.map((w) => (
               <button
                 key={w.id}
@@ -154,17 +162,27 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     }
   }, [events, refreshActiveRuns]);
 
+  // Track whether the dot just appeared (for fade-in animation)
+  const [dotJustAppeared, setDotJustAppeared] = useState(false);
+  const dotAnimTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Sync visibility with activeRun presence
   useEffect(() => {
     if (activeRun && pillState === 'idle') {
       setPillState('running');
       setVisible(true);
+      setDotJustAppeared(true);
+      if (dotAnimTimer.current) clearTimeout(dotAnimTimer.current);
+      dotAnimTimer.current = setTimeout(() => setDotJustAppeared(false), 600);
     }
   }, [activeRun, pillState]);
 
-  // Cleanup timer on unmount
+  // Cleanup timers on unmount
   useEffect(() => {
-    return () => { if (hideTimer.current) clearTimeout(hideTimer.current); };
+    return () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+      if (dotAnimTimer.current) clearTimeout(dotAnimTimer.current);
+    };
   }, []);
 
   // Nothing to show
@@ -172,10 +190,10 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     return (
       <button
         onClick={() => onNavigate?.('forge')}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium text-accent bg-accent/10 border border-accent/30 hover:bg-accent/20 transition-colors"
+        className="flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] sm:min-h-0 rounded text-sm font-medium text-accent bg-accent/10 border border-accent/30 hover:bg-accent/20 transition-colors"
       >
         <Plus size={14} />
-        New Spec
+        <span className="hidden sm:inline">New Spec</span>
       </button>
     );
   }
@@ -190,7 +208,7 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
   return (
     <button
       onClick={() => activeRunId ? onNavigate?.('pipeline') : undefined}
-      className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+      className={`flex items-center gap-2 px-3 py-1.5 min-h-[44px] sm:min-h-0 rounded text-sm font-medium transition-colors ${
         isDone
           ? 'text-green-600 bg-green-500/10 border border-green-500/30 hover:bg-green-500/20'
           : 'text-[var(--text)] bg-accent/10 border border-accent/30 hover:bg-accent/20'
@@ -199,10 +217,10 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     >
       {isDone ? (
         <span className="relative flex h-2.5 w-2.5">
-          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500" />
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500 animate-dot-fade-pulse" />
         </span>
       ) : (
-        <span className="relative flex h-2.5 w-2.5">
+        <span className={`relative flex h-2.5 w-2.5${dotJustAppeared ? ' animate-dot-fade-pulse' : ''}`}>
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
           <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-accent" />
         </span>
@@ -225,10 +243,12 @@ function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 px-2 py-1.5 rounded text-sm text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
+        className="flex items-center justify-center w-11 h-11 sm:w-auto sm:h-auto sm:px-2 sm:py-1.5 rounded text-sm text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
         title={user.email}
+        aria-label="User menu"
+        aria-expanded={open}
       >
-        <span className="w-6 h-6 rounded-full bg-accent/20 text-accent text-xs font-medium flex items-center justify-center">
+        <span className="w-7 h-7 sm:w-6 sm:h-6 rounded-full bg-accent/20 text-accent text-xs font-medium flex items-center justify-center">
           {user.displayName.charAt(0).toUpperCase()}
         </span>
       </button>
@@ -236,7 +256,7 @@ function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 mt-1 w-48 bg-panel border border-border rounded shadow-lg z-50">
+          <div className="fixed right-3 top-14 sm:absolute sm:right-0 sm:top-auto sm:mt-1 w-48 bg-panel border border-border rounded shadow-lg z-50">
             <div className="px-3 py-2 border-b border-border">
               <p className="text-sm text-[var(--text)] truncate">{user.displayName}</p>
               <p className="text-xs text-muted truncate">{user.email}</p>
@@ -324,31 +344,34 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
   const offline = useNetworkOffline();
 
   return (
-    <div className="h-screen flex flex-col bg-bg">
+    <div className="h-screen flex flex-col bg-bg overflow-x-hidden">
+      <a href="#main-content" className="skip-to-content">
+        Skip to content
+      </a>
       {/* Top Bar — 48px */}
       <header className="h-12 flex items-center justify-between px-3 sm:px-4 bg-panel border-b border-border shrink-0">
         {/* Left: hamburger + wordmark + workspace */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           {showMenuButton && (
             <button
               onClick={onMenuToggle}
-              className="md:hidden w-8 h-8 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors"
+              className="md:hidden w-11 h-11 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors -ml-1"
               aria-label="Open navigation menu"
             >
               <Menu size={20} />
             </button>
           )}
-          <span className="font-mono font-bold text-accent text-sm tracking-tight select-none">rorca</span>
+          <span className="font-mono font-bold text-accent text-sm tracking-tight select-none shrink-0">rorca</span>
           <WorkspaceSelector />
         </div>
 
         {/* Right: network + plan + tips + notifications + theme + run pill + user */}
-        <div className="flex items-center gap-1.5 sm:gap-2">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           <NetworkIndicator offline={offline} />
-          <PlanBadge />
-          <ShowTipsToggle />
+          <div className="hidden sm:block"><PlanBadge /></div>
+          <div className="hidden sm:block"><ShowTipsToggle /></div>
           <NotificationBell onNavigate={onNavigate} />
-          <ThemeToggle />
+          <div className="hidden sm:block"><ThemeToggle /></div>
           <RunPill onNavigate={onNavigate} />
           <UserMenu onNavigate={onNavigate} />
         </div>
@@ -357,7 +380,7 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
       {/* Body */}
       <div className="flex flex-1 min-h-0">
         {sidebar}
-        <main className="flex-1 overflow-hidden">
+        <main id="main-content" className="flex-1 overflow-hidden contain-layout">
           {children}
         </main>
       </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { listTemplates, useTemplate } from '../api/templates';
 import type { Template } from '../api/types';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface TemplatePickerModalProps {
   onClose: () => void;
@@ -11,6 +12,7 @@ export default function TemplatePickerModal({ onClose, onSelect }: TemplatePicke
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -54,8 +56,14 @@ export default function TemplatePickerModal({ onClose, onSelect }: TemplatePicke
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Start from template"
     >
-      <div className="bg-panel border border-border rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+      <div
+        ref={trapRef}
+        className="bg-panel border border-border rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col"
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <h2 className="text-sm font-semibold text-text">Start from Template</h2>

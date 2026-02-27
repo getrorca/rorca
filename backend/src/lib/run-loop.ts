@@ -808,6 +808,7 @@ async function executeStory(
   retryCounts: Map<string, number>,
   storyCwd?: string,
   worktreeInfo?: StoryWorktree,
+  waveIndex?: number,
 ): Promise<'passed' | 'failed' | 'skipped'> {
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
@@ -833,6 +834,8 @@ async function executeStory(
       run_id: config.runId,
       story_id: story.id,
       story_title: story.title,
+      log_file: storyLogFile,
+      ...(waveIndex != null ? { wave_index: waveIndex } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
     }, story.id);
   }
@@ -908,6 +911,8 @@ async function executeStory(
           run_id: config.runId,
           story_id: story.id,
           story_title: story.title,
+          log_file: storyLogFile,
+          ...(waveIndex != null ? { wave_index: waveIndex } : {}),
           ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
         }, story.id);
       }
@@ -1222,6 +1227,7 @@ async function main(): Promise<void> {
         run_id: config.runId,
         story_id: story.id,
         story_title: story.title,
+        log_file: storyLogFile,
       }, story.id);
     }
 
@@ -1577,7 +1583,7 @@ async function runParallel(
     const tasks = storiesWithWorktrees.map(story => {
       const wt = worktreeMap.get(story.id)!;
       return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt)
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, wave.index)
           .then(result => ({ storyId: story.id, result }));
     });
 

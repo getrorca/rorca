@@ -1,5 +1,6 @@
-import { useState, type FormEvent } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { apiFetch } from '../lib/apiFetch';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface AddWorkspaceModalProps {
   onClose: () => void;
@@ -12,6 +13,15 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
   const [domains, setDomains] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
 
   function validate(): Record<string, string> {
     const errs: Record<string, string> = {};
@@ -68,8 +78,15 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add workspace"
+    >
       <div
+        ref={trapRef}
         className="bg-panel border border-border rounded-lg shadow-xl w-full max-w-md p-6"
         onClick={(e) => e.stopPropagation()}
       >
@@ -88,7 +105,7 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
               onChange={(e) => setLabel(e.target.value)}
               maxLength={64}
               placeholder="CashflowAI"
-              className="w-full px-3 py-2 rounded border border-border bg-bg text-sm focus:outline-none focus:border-accent"
+              className="w-full px-3 py-2 rounded border border-border bg-bg text-sm focus:border-accent"
             />
             {errors.label && <p className="text-red-500 text-xs mt-1">{errors.label}</p>}
           </div>
@@ -104,7 +121,7 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
               value={path}
               onChange={(e) => setPath(e.target.value)}
               placeholder="/Users/me/my-project"
-              className="w-full px-3 py-2 rounded border border-border bg-bg text-sm font-mono focus:outline-none focus:border-accent"
+              className="w-full px-3 py-2 rounded border border-border bg-bg text-sm font-mono focus:border-accent"
             />
             {errors.path && <p className="text-red-500 text-xs mt-1">{errors.path}</p>}
           </div>
@@ -120,7 +137,7 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
               value={domains}
               onChange={(e) => setDomains(e.target.value)}
               placeholder="fintech, react, typescript"
-              className="w-full px-3 py-2 rounded border border-border bg-bg text-sm focus:outline-none focus:border-accent"
+              className="w-full px-3 py-2 rounded border border-border bg-bg text-sm focus:border-accent"
             />
             <p className="text-xs text-muted mt-1">Comma-separated tags</p>
           </div>
