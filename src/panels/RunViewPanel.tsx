@@ -7,6 +7,7 @@ import { apiFetch } from '../lib/apiFetch';
 import { pauseRun, resumeRun, cancelRun, injectContext, retryRun } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
+import MultiPaneTerminal from '../components/MultiPaneTerminal';
 
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
@@ -409,6 +410,24 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
 
   const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused' || effectiveStatus === 'blocked';
 
+  // Detect if we should show multi-pane terminal (parallelism > 1 with 2+ concurrent stories)
+  const useMultiPane = useMemo(() => {
+    if (!run || (run.parallelism ?? 1) <= 1) return false;
+    // Count stories that have started but not finished
+    const started = new Set<string>();
+    const finished = new Set<string>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_started') started.add(evt.story_id);
+      if (evt.event_type === 'story_passed' || evt.event_type === 'story_failed' || evt.event_type === 'story_skipped') {
+        finished.add(evt.story_id);
+      }
+    }
+    // Check if at any point 2+ stories were concurrently running
+    // (once we detect multi-pane mode, we stay in it for the duration of the run)
+    return started.size >= 2;
+  }, [run, walEvents]);
+
   const handlePauseResume = useCallback(async () => {
     if (!isActive) return;
     setPauseLoading(true);
@@ -531,7 +550,9 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
         return (
           <SplitPane
             left={
-              <RunTerminal ref={terminalRef} runId={run.id} />
+              useMultiPane
+                ? <MultiPaneTerminal runId={run.id} walEvents={walEvents} />
+                : <RunTerminal ref={terminalRef} runId={run.id} />
             }
             right={
               <div className="h-full flex flex-col min-h-0">
@@ -539,7 +560,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
                   <RunStoryList
                     runId={run.id}
                     walEvents={walEvents}
-                    onStoryClick={(storyId) => terminalRef.current?.scrollToStory(storyId)}
+                    onStoryClick={useMultiPane ? undefined : (storyId) => terminalRef.current?.scrollToStory(storyId)}
                     parallelism={run.parallelism}
                   />
                 </div>
