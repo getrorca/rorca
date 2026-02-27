@@ -1,13 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, Bell, Key, Monitor, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle } from 'lucide-react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
+import { useDirectionLayer } from '../hooks/useDirectionLayer';
 import { apiFetch, clearTokens } from '../lib/apiFetch';
+import GitHubSettingsPanel from './GitHubSettingsPanel';
+import { modLabel } from '../hooks/useHotkeys';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type SettingsTab = 'profile' | 'notifications' | 'providers' | 'display' | 'account';
+type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account';
 
 interface ProfileData {
   id: string;
@@ -49,14 +52,6 @@ interface ModelOption {
   label: string;
 }
 
-const TABS: { id: SettingsTab; label: string; icon: typeof User }[] = [
-  { id: 'profile', label: 'Profile', icon: User },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'providers', label: 'Providers', icon: Zap },
-  { id: 'display', label: 'Display', icon: Monitor },
-  { id: 'account', label: 'Account', icon: AlertTriangle },
-];
-
 const EVENT_TYPE_LABELS: Record<string, string> = {
   review_request: 'Review Requests',
   spec_approved: 'Spec Approved',
@@ -66,23 +61,51 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   mention: 'Mentions',
 };
 
-const PROVIDER_OPTIONS = [
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'openrouter', label: 'OpenRouter' },
-  { value: 'openai-compat', label: 'OpenAI Compatible' },
-];
+// ─── Direction Stack Layer Config ────────────────────────────────────────────
+
+const LAYER_INFO: Record<1 | 2 | 3, { title: string; description: string; placeholder: string }> = {
+  1: {
+    title: 'L1 — Global Standards',
+    description: 'Engineering principles, coding style, and preferences that apply to all projects.',
+    placeholder: 'e.g. "Always use TypeScript strict mode. Prefer functional components. Use Tailwind for styling."',
+  },
+  2: {
+    title: 'L2 — Domain Knowledge',
+    description: 'Industry concepts, business rules, and domain-specific patterns.',
+    placeholder: 'e.g. "This is a fintech product. Follow PCI-DSS compliance. Use cents for monetary values."',
+  },
+  3: {
+    title: 'L3 — Project Context',
+    description: 'Tech stack, architecture, and key constraints for this specific project.',
+    placeholder: 'e.g. "React + Express app. PostgreSQL database. Deployed on Vercel."',
+  },
+};
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function SettingsPanel() {
-  const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
+  const { workspaceId } = useWorkspace();
+  const [activeTab, setActiveTab] = useState<SettingsTab>('direction');
+
+  // Direction layer hooks — always call (hooks can't be conditional)
+  const l1 = useDirectionLayer(workspaceId, 1, { skipValidation: true });
+  const l2 = useDirectionLayer(workspaceId, 2, { skipValidation: true });
+  const l3 = useDirectionLayer(workspaceId, 3, { skipValidation: true });
+  const directionDirty = l1.isDirty || l2.isDirty || l3.isDirty;
+
+  const TABS: { id: SettingsTab; label: string; icon: typeof Layers }[] = [
+    { id: 'direction', label: 'Direction Stack', icon: Layers },
+    { id: 'providers', label: 'Model & Providers', icon: Zap },
+    { id: 'github', label: 'GitHub', icon: Github },
+    { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
+    { id: 'account', label: 'Account', icon: User },
+  ];
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <div className="p-4 sm:p-6 border-b border-border shrink-0">
         <h1 className="text-lg font-semibold text-[var(--text)]">Settings</h1>
-        <p className="text-xs text-muted mt-1">Manage your profile, notifications, API keys, and display preferences</p>
+        <p className="text-xs text-muted mt-1">Direction stack, providers, integrations, and account</p>
       </div>
 
       <div className="flex flex-1 min-h-0">
@@ -99,18 +122,23 @@ export default function SettingsPanel() {
               }`}
             >
               <Icon size={16} />
-              {label}
+              <span className="flex-1 text-left">{label}</span>
+              {id === 'direction' && directionDirty && (
+                <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
+                  Unsaved
+                </span>
+              )}
             </button>
           ))}
         </nav>
 
         {/* Mobile tab bar */}
-        <div className="sm:hidden flex border-b border-border bg-panel shrink-0">
+        <div className="sm:hidden flex border-b border-border bg-panel shrink-0 overflow-x-auto">
           {TABS.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setActiveTab(id)}
-              className={`flex-1 flex items-center justify-center gap-1 py-2 text-xs transition-colors ${
+              className={`flex items-center justify-center gap-1 px-3 py-2 text-xs whitespace-nowrap transition-colors ${
                 activeTab === id
                   ? 'text-accent border-b-2 border-accent'
                   : 'text-muted'
@@ -118,18 +146,563 @@ export default function SettingsPanel() {
             >
               <Icon size={14} />
               {label}
+              {id === 'direction' && directionDirty && (
+                <span className="ml-1 px-1 py-0.5 text-[9px] font-medium rounded bg-warning/15 text-warning">
+                  Unsaved
+                </span>
+              )}
             </button>
           ))}
         </div>
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-          {activeTab === 'profile' && <ProfileSection />}
-          {activeTab === 'notifications' && <NotificationsSection />}
-          {activeTab === 'providers' && <ProvidersSection />}
-          {activeTab === 'display' && <DisplaySection />}
-          {activeTab === 'account' && <AccountDeletionSection />}
+          {activeTab === 'direction' && <DirectionStackSection l1={l1} l2={l2} l3={l3} />}
+          {activeTab === 'providers' && <ProvidersAndDisplaySection />}
+          {activeTab === 'github' && <GitHubSettingsPanel />}
+          {activeTab === 'shortcuts' && <ShortcutsSection />}
+          {activeTab === 'account' && <AccountSection />}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Direction Stack Section ─────────────────────────────────────────────────
+
+interface DirectionLayerHook {
+  content: string;
+  setContent: (v: string) => void;
+  isSaving: boolean;
+  isDirty: boolean;
+}
+
+function DirectionStackSection({ l1, l2, l3 }: { l1: DirectionLayerHook; l2: DirectionLayerHook; l3: DirectionLayerHook }) {
+  const layers = [
+    { n: 1 as const, hook: l1 },
+    { n: 2 as const, hook: l2 },
+    { n: 3 as const, hook: l3 },
+  ];
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      {/* Cascade explanation */}
+      <div className="border border-border rounded p-3 bg-panel">
+        <p className="text-xs text-muted">
+          <span className="font-medium text-[var(--text)]">Direction Stack</span> — Context flows from L1 (global) through L3 (project-specific). Lower layers override higher ones, like CSS specificity. L4 (spec brief) and L5 (story annotations) are injected at runtime.
+        </p>
+      </div>
+
+      {/* Layer editors */}
+      {layers.map(({ n, hook }) => {
+        const info = LAYER_INFO[n];
+        return (
+          <div key={n} className="border border-border rounded bg-bg">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+              <div>
+                <h3 className="text-sm font-medium text-[var(--text)]">{info.title}</h3>
+                <p className="text-xs text-muted mt-0.5">{info.description}</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 ml-3">
+                {hook.isDirty && (
+                  <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
+                    Unsaved
+                  </span>
+                )}
+                {hook.isSaving && (
+                  <Loader2 size={14} className="animate-spin text-accent" />
+                )}
+                {!hook.isDirty && !hook.isSaving && hook.content.trim() && (
+                  <Check size={14} className="text-green-500" />
+                )}
+              </div>
+            </div>
+            <textarea
+              value={hook.content}
+              onChange={(e) => hook.setContent(e.target.value)}
+              className="w-full p-4 text-sm bg-bg text-[var(--text)] border-none outline-none resize-none min-h-[120px]"
+              placeholder={info.placeholder}
+              rows={6}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Providers & Display Section (merged) ────────────────────────────────────
+
+const PROVIDER_DESCRIPTIONS: Record<string, string> = {
+  'claude-cli': 'Uses your Claude subscription via the claude CLI. No API key needed.',
+  'anthropic': 'Direct API access to Claude models. Requires an Anthropic API key.',
+  'openai-compat': 'Any OpenAI-compatible endpoint (OpenAI, Groq, Together, DeepSeek, Ollama, etc.).',
+  'openrouter': 'Access 200+ models through a single API key.',
+};
+
+function ProvidersAndDisplaySection() {
+  return (
+    <div className="max-w-2xl space-y-8">
+      <DisplaySection />
+      <div className="border-t border-border pt-6">
+        <ProvidersSection />
+      </div>
+    </div>
+  );
+}
+
+// ─── Providers Section ──────────────────────────────────────────────────────
+
+function ProvidersSection() {
+  const { workspaceId } = useWorkspace();
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [defaultProvider, setDefaultProvider] = useState('claude-cli');
+  const [savingDefault, setSavingDefault] = useState(false);
+  const [savedDefault, setSavedDefault] = useState(false);
+
+  // Add key form per provider
+  const [addingFor, setAddingFor] = useState<string | null>(null);
+  const [addKey, setAddKey] = useState('');
+  const [addBaseUrl, setAddBaseUrl] = useState('');
+  const [addLabel, setAddLabel] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  // Test connection state
+  const [testingProvider, setTestingProvider] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ provider: string; ok: boolean; latencyMs?: number; response?: string; error?: string } | null>(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [provData, keyData, defaultData] = await Promise.all([
+        apiFetch<{ providers: ProviderStatus[] }>('/api/vault/keys/providers'),
+        apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+        workspaceId
+          ? apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`)
+          : Promise.resolve({ provider: 'claude-cli' }),
+      ]);
+      setProviders(provData.providers);
+      setKeys(keyData.keys);
+      setDefaultProvider(defaultData.provider);
+    } catch {
+      // silent
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  const handleAddKey = async (providerId: string) => {
+    setAdding(true);
+    setAddError(null);
+    try {
+      await apiFetch('/api/vault/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: providerId,
+          key: addKey,
+          label: addLabel,
+          base_url: providerId === 'openai-compat' && addBaseUrl ? addBaseUrl : undefined,
+        }),
+      });
+      setAddKey('');
+      setAddBaseUrl('');
+      setAddLabel('');
+      setAddingFor(null);
+      fetchData();
+    } catch (err: any) {
+      setAddError(err.message || 'Failed to add key');
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const removeKey = async (id: string) => {
+    try {
+      await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
+      fetchData();
+    } catch {
+      // silent
+    }
+  };
+
+  const testConnection = async (providerId: string) => {
+    setTestingProvider(providerId);
+    setTestResult(null);
+    try {
+      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/vault/keys/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: providerId }),
+      });
+      setTestResult({ provider: providerId, ok: true, latencyMs: result.latencyMs, response: result.response });
+    } catch (err: any) {
+      setTestResult({ provider: providerId, ok: false, error: err.message || 'Connection failed' });
+    } finally {
+      setTestingProvider(null);
+    }
+  };
+
+  const saveDefaultProvider = async (provider: string) => {
+    if (!workspaceId) return;
+    setSavingDefault(true);
+    setSavedDefault(false);
+    try {
+      await apiFetch('/api/vault/keys/default-provider', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, provider }),
+      });
+      setDefaultProvider(provider);
+      setSavedDefault(true);
+      setTimeout(() => setSavedDefault(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSavingDefault(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading provider configuration...</div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-sm font-semibold text-[var(--text)]">Provider Configuration</h2>
+        <p className="text-xs text-muted mt-0.5">
+          Configure LLM providers for spec generation. Keys are AES-256-GCM encrypted at rest.
+        </p>
+      </div>
+
+      {/* Default provider selector */}
+      {workspaceId && (
+        <div className="border border-border rounded p-4 bg-bg">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-medium text-[var(--text)]">Default Provider</h3>
+              <p className="text-xs text-muted mt-0.5">Used when no per-spec model override is set</p>
+            </div>
+            {savedDefault && (
+              <span className="flex items-center gap-1 text-xs text-green-500">
+                <Check size={12} /> Saved
+              </span>
+            )}
+          </div>
+          <select
+            value={defaultProvider}
+            onChange={e => saveDefaultProvider(e.target.value)}
+            disabled={savingDefault}
+            className="mt-3 w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
+          >
+            {providers.map(p => (
+              <option key={p.id} value={p.id} disabled={p.id !== 'claude-cli' && !p.configured}>
+                {p.name}{!p.configured && p.id !== 'claude-cli' ? ' (not configured)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* Provider cards */}
+      <div className="space-y-3">
+        {providers.map(p => {
+          const providerKeys = keys.filter(k => k.provider === p.id);
+          const isDefault = defaultProvider === p.id;
+
+          return (
+            <div key={p.id} className={`border rounded p-4 transition-colors ${
+              isDefault ? 'border-accent/40 bg-accent/5' : 'border-border bg-bg'
+            }`}>
+              {/* Provider header */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={`w-2 h-2 rounded-full ${p.configured ? 'bg-green-500' : 'bg-zinc-500'}`} />
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-[var(--text)]">{p.name}</span>
+                      {isDefault && (
+                        <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-accent/15 text-accent">
+                          Default
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted mt-0.5">{PROVIDER_DESCRIPTIONS[p.id]}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {p.configured && (
+                    <button
+                      onClick={() => testConnection(p.id)}
+                      disabled={testingProvider === p.id}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border rounded hover:border-accent/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+                    >
+                      {testingProvider === p.id ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <Globe size={12} />
+                      )}
+                      Test
+                    </button>
+                  )}
+                  {p.id !== 'claude-cli' && (
+                    <button
+                      onClick={() => {
+                        setAddingFor(addingFor === p.id ? null : p.id);
+                        setAddKey('');
+                        setAddBaseUrl('');
+                        setAddLabel('');
+                        setAddError(null);
+                      }}
+                      className="flex items-center gap-1 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 transition-colors"
+                    >
+                      <Plus size={12} /> {providerKeys.length > 0 ? 'Replace' : 'Add'} Key
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Test result */}
+              {testResult && testResult.provider === p.id && (
+                <div className={`mt-3 px-3 py-2 rounded text-xs flex items-center gap-2 ${
+                  testResult.ok
+                    ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+                    : 'bg-red-500/10 border border-red-500/20 text-red-400'
+                }`}>
+                  {testResult.ok ? (
+                    <>
+                      <CheckCircle2 size={14} />
+                      Connected ({testResult.latencyMs}ms)
+                      {testResult.response && <span className="text-muted ml-1 truncate">— {testResult.response}</span>}
+                    </>
+                  ) : (
+                    <>
+                      <XCircle size={14} />
+                      {testResult.error}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Existing keys */}
+              {providerKeys.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {providerKeys.map(k => (
+                    <div key={k.id} className="flex items-center justify-between px-3 py-2 rounded border border-border bg-panel">
+                      <div className="min-w-0 flex items-center gap-3">
+                        <Key size={12} className="text-muted shrink-0" />
+                        <span className="font-mono text-xs text-muted">{k.masked_key}</span>
+                        {k.label && <span className="text-xs text-[var(--text)] truncate">{k.label}</span>}
+                        {k.base_url && (
+                          <span className="text-xs text-muted truncate" title={k.base_url}>
+                            {k.base_url}
+                          </span>
+                        )}
+                        {k.spend_total_usd > 0 && <span className="text-xs text-muted">${k.spend_total_usd.toFixed(2)}</span>}
+                      </div>
+                      <button
+                        onClick={() => removeKey(k.id)}
+                        className="p-1 text-muted hover:text-red-500 transition-colors shrink-0"
+                        title="Remove key"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Add key form */}
+              {addingFor === p.id && (
+                <div className="mt-3 border border-border rounded p-3 space-y-3 bg-panel">
+                  <div>
+                    <label className="block text-xs text-muted mb-1">API Key</label>
+                    <input
+                      type="password"
+                      value={addKey}
+                      onChange={e => setAddKey(e.target.value)}
+                      placeholder="sk-..."
+                      className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none font-mono"
+                      autoFocus
+                    />
+                  </div>
+                  {p.id === 'openai-compat' && (
+                    <div>
+                      <label className="block text-xs text-muted mb-1">Base URL</label>
+                      <input
+                        type="url"
+                        value={addBaseUrl}
+                        onChange={e => setAddBaseUrl(e.target.value)}
+                        placeholder="https://api.openai.com/v1"
+                        className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none font-mono"
+                      />
+                      <p className="text-[10px] text-muted mt-1">Custom endpoint for Groq, Together, DeepSeek, Ollama, etc.</p>
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-xs text-muted mb-1">Label (optional)</label>
+                    <input
+                      type="text"
+                      value={addLabel}
+                      onChange={e => setAddLabel(e.target.value)}
+                      placeholder="e.g. Personal, Work"
+                      className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+                    />
+                  </div>
+                  {addError && <p className="text-xs text-red-500">{addError}</p>}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleAddKey(p.id)}
+                      disabled={adding || !addKey}
+                      className="flex items-center gap-2 px-4 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+                    >
+                      {adding ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                      Save Key
+                    </button>
+                    <button
+                      onClick={() => { setAddingFor(null); setAddError(null); }}
+                      className="px-4 py-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Display Section ─────────────────────────────────────────────────────────
+
+function DisplaySection() {
+  const { mode, setMode } = useTheme();
+  const [settings, setSettings] = useState<DisplaySettings | null>(null);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-5-20250929');
+  const [itemsPerPage, setItemsPerPage] = useState(20);
+
+  useEffect(() => {
+    Promise.all([
+      apiFetch<DisplaySettings>('/api/settings/display'),
+      apiFetch<{ models: ModelOption[] }>('/api/direction/models'),
+    ]).then(([displayData, modelData]) => {
+      setSettings(displayData);
+      setDefaultModel(displayData.defaultModel);
+      setItemsPerPage(displayData.itemsPerPage);
+      setModels(modelData.models);
+    }).catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const saveDisplay = async () => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      await apiFetch('/api/settings/display', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ defaultModel, itemsPerPage }),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading display settings...</div>;
+  }
+
+  const hasChanges = settings && (defaultModel !== settings.defaultModel || itemsPerPage !== settings.itemsPerPage);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Theme</h2>
+        <div className="flex gap-2">
+          {(['light', 'dark', 'system'] as ThemeMode[]).map(m => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={`px-4 py-2 text-sm rounded border transition-colors capitalize ${
+                mode === m
+                  ? 'bg-accent/10 border-accent text-accent'
+                  : 'border-border text-muted hover:text-[var(--text)] hover:border-accent/50'
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="border-t border-border pt-6">
+        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Default Model</h2>
+        <select
+          value={defaultModel}
+          onChange={e => setDefaultModel(e.target.value)}
+          className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+        >
+          {models.map(m => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
+        </select>
+        <p className="text-xs text-muted mt-1">Used as the default when generating specs</p>
+      </div>
+
+      <div className="border-t border-border pt-6">
+        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Items Per Page</h2>
+        <select
+          value={itemsPerPage}
+          onChange={e => setItemsPerPage(Number(e.target.value))}
+          className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+        >
+          {[10, 20, 30, 50, 100].map(n => (
+            <option key={n} value={n}>{n} items</option>
+          ))}
+        </select>
+        <p className="text-xs text-muted mt-1">Number of items shown per page in lists and archives</p>
+      </div>
+
+      <button
+        onClick={saveDisplay}
+        disabled={saving || !hasChanges}
+        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+      >
+        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
+        {saved ? 'Saved' : 'Save Display Settings'}
+      </button>
+    </div>
+  );
+}
+
+// ─── Account Section (Profile + Notifications + Danger Zone) ─────────────────
+
+function AccountSection() {
+  return (
+    <div className="max-w-lg space-y-8">
+      <ProfileSection />
+      <div className="border-t border-border pt-6">
+        <NotificationsSection />
+      </div>
+      <div className="border-t border-border pt-6">
+        <AccountDeletionSection />
       </div>
     </div>
   );
@@ -219,7 +792,7 @@ function ProfileSection() {
   const hasProfileChanges = profile && (displayName !== profile.displayName || (avatarUrl || '') !== (profile.avatarUrl ?? ''));
 
   return (
-    <div className="max-w-lg space-y-6">
+    <div className="space-y-6">
       <div>
         <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Profile</h2>
 
@@ -405,7 +978,7 @@ function NotificationsSection() {
   }
 
   return (
-    <div className="max-w-lg space-y-4">
+    <div className="space-y-4">
       <h2 className="text-sm font-semibold text-[var(--text)]">Notification Preferences</h2>
       <p className="text-xs text-muted">Choose which events trigger notifications and how they are delivered.</p>
 
@@ -449,456 +1022,6 @@ function NotificationsSection() {
   );
 }
 
-// ─── Providers Section ──────────────────────────────────────────────────────
-
-const PROVIDER_DESCRIPTIONS: Record<string, string> = {
-  'claude-cli': 'Uses your Claude subscription via the claude CLI. No API key needed.',
-  'anthropic': 'Direct API access to Claude models. Requires an Anthropic API key.',
-  'openai-compat': 'Any OpenAI-compatible endpoint (OpenAI, Groq, Together, DeepSeek, Ollama, etc.).',
-  'openrouter': 'Access 200+ models through a single API key.',
-};
-
-function ProvidersSection() {
-  const { workspaceId } = useWorkspace();
-  const [providers, setProviders] = useState<ProviderStatus[]>([]);
-  const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [defaultProvider, setDefaultProvider] = useState('claude-cli');
-  const [savingDefault, setSavingDefault] = useState(false);
-  const [savedDefault, setSavedDefault] = useState(false);
-
-  // Add key form per provider
-  const [addingFor, setAddingFor] = useState<string | null>(null);
-  const [addKey, setAddKey] = useState('');
-  const [addBaseUrl, setAddBaseUrl] = useState('');
-  const [addLabel, setAddLabel] = useState('');
-  const [addError, setAddError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
-
-  // Test connection state
-  const [testingProvider, setTestingProvider] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<{ provider: string; ok: boolean; latencyMs?: number; response?: string; error?: string } | null>(null);
-
-  const fetchData = useCallback(async () => {
-    try {
-      const [provData, keyData, defaultData] = await Promise.all([
-        apiFetch<{ providers: ProviderStatus[] }>('/api/vault/keys/providers'),
-        apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
-        workspaceId
-          ? apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`)
-          : Promise.resolve({ provider: 'claude-cli' }),
-      ]);
-      setProviders(provData.providers);
-      setKeys(keyData.keys);
-      setDefaultProvider(defaultData.provider);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceId]);
-
-  useEffect(() => { fetchData(); }, [fetchData]);
-
-  const handleAddKey = async (providerId: string) => {
-    setAdding(true);
-    setAddError(null);
-    try {
-      await apiFetch('/api/vault/keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: providerId,
-          key: addKey,
-          label: addLabel,
-          base_url: providerId === 'openai-compat' && addBaseUrl ? addBaseUrl : undefined,
-        }),
-      });
-      setAddKey('');
-      setAddBaseUrl('');
-      setAddLabel('');
-      setAddingFor(null);
-      fetchData();
-    } catch (err: any) {
-      setAddError(err.message || 'Failed to add key');
-    } finally {
-      setAdding(false);
-    }
-  };
-
-  const removeKey = async (id: string) => {
-    try {
-      await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
-      fetchData();
-    } catch {
-      // silent
-    }
-  };
-
-  const testConnection = async (providerId: string) => {
-    setTestingProvider(providerId);
-    setTestResult(null);
-    try {
-      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/vault/keys/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: providerId }),
-      });
-      setTestResult({ provider: providerId, ok: true, latencyMs: result.latencyMs, response: result.response });
-    } catch (err: any) {
-      setTestResult({ provider: providerId, ok: false, error: err.message || 'Connection failed' });
-    } finally {
-      setTestingProvider(null);
-    }
-  };
-
-  const saveDefaultProvider = async (provider: string) => {
-    if (!workspaceId) return;
-    setSavingDefault(true);
-    setSavedDefault(false);
-    try {
-      await apiFetch('/api/vault/keys/default-provider', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, provider }),
-      });
-      setDefaultProvider(provider);
-      setSavedDefault(true);
-      setTimeout(() => setSavedDefault(false), 2000);
-    } catch {
-      // silent
-    } finally {
-      setSavingDefault(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading provider configuration...</div>;
-  }
-
-  return (
-    <div className="max-w-2xl space-y-6">
-      <div>
-        <h2 className="text-sm font-semibold text-[var(--text)]">Provider Configuration</h2>
-        <p className="text-xs text-muted mt-0.5">
-          Configure LLM providers for spec generation. Keys are AES-256-GCM encrypted at rest.
-        </p>
-      </div>
-
-      {/* Default provider selector */}
-      {workspaceId && (
-        <div className="border border-border rounded p-4 bg-bg">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-medium text-[var(--text)]">Default Provider</h3>
-              <p className="text-xs text-muted mt-0.5">Used when no per-spec model override is set</p>
-            </div>
-            {savedDefault && (
-              <span className="flex items-center gap-1 text-xs text-green-500">
-                <Check size={12} /> Saved
-              </span>
-            )}
-          </div>
-          <select
-            value={defaultProvider}
-            onChange={e => saveDefaultProvider(e.target.value)}
-            disabled={savingDefault}
-            className="mt-3 w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
-          >
-            {providers.map(p => (
-              <option key={p.id} value={p.id} disabled={p.id !== 'claude-cli' && !p.configured}>
-                {p.name}{!p.configured && p.id !== 'claude-cli' ? ' (not configured)' : ''}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      {/* Provider cards */}
-      <div className="space-y-3">
-        {providers.map(p => {
-          const providerKeys = keys.filter(k => k.provider === p.id);
-          const isDefault = defaultProvider === p.id;
-
-          return (
-            <div key={p.id} className={`border rounded p-4 transition-colors ${
-              isDefault ? 'border-accent/40 bg-accent/5' : 'border-border bg-bg'
-            }`}>
-              {/* Provider header */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className={`w-2 h-2 rounded-full ${p.configured ? 'bg-green-500' : 'bg-zinc-500'}`} />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-[var(--text)]">{p.name}</span>
-                      {isDefault && (
-                        <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-accent/15 text-accent">
-                          Default
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted mt-0.5">{PROVIDER_DESCRIPTIONS[p.id]}</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  {/* Test button */}
-                  {p.configured && (
-                    <button
-                      onClick={() => testConnection(p.id)}
-                      disabled={testingProvider === p.id}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-border rounded hover:border-accent/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
-                    >
-                      {testingProvider === p.id ? (
-                        <Loader2 size={12} className="animate-spin" />
-                      ) : (
-                        <Globe size={12} />
-                      )}
-                      Test
-                    </button>
-                  )}
-                  {/* Add key button (not for claude-cli) */}
-                  {p.id !== 'claude-cli' && (
-                    <button
-                      onClick={() => {
-                        setAddingFor(addingFor === p.id ? null : p.id);
-                        setAddKey('');
-                        setAddBaseUrl('');
-                        setAddLabel('');
-                        setAddError(null);
-                      }}
-                      className="flex items-center gap-1 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 transition-colors"
-                    >
-                      <Plus size={12} /> {providerKeys.length > 0 ? 'Replace' : 'Add'} Key
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Test result */}
-              {testResult && testResult.provider === p.id && (
-                <div className={`mt-3 px-3 py-2 rounded text-xs flex items-center gap-2 ${
-                  testResult.ok
-                    ? 'bg-green-500/10 border border-green-500/20 text-green-400'
-                    : 'bg-red-500/10 border border-red-500/20 text-red-400'
-                }`}>
-                  {testResult.ok ? (
-                    <>
-                      <CheckCircle2 size={14} />
-                      Connected ({testResult.latencyMs}ms)
-                      {testResult.response && <span className="text-muted ml-1 truncate">— {testResult.response}</span>}
-                    </>
-                  ) : (
-                    <>
-                      <XCircle size={14} />
-                      {testResult.error}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* Existing keys */}
-              {providerKeys.length > 0 && (
-                <div className="mt-3 space-y-2">
-                  {providerKeys.map(k => (
-                    <div key={k.id} className="flex items-center justify-between px-3 py-2 rounded border border-border bg-panel">
-                      <div className="min-w-0 flex items-center gap-3">
-                        <Key size={12} className="text-muted shrink-0" />
-                        <span className="font-mono text-xs text-muted">{k.masked_key}</span>
-                        {k.label && <span className="text-xs text-[var(--text)] truncate">{k.label}</span>}
-                        {k.base_url && (
-                          <span className="text-xs text-muted truncate" title={k.base_url}>
-                            {k.base_url}
-                          </span>
-                        )}
-                        {k.spend_total_usd > 0 && <span className="text-xs text-muted">${k.spend_total_usd.toFixed(2)}</span>}
-                      </div>
-                      <button
-                        onClick={() => removeKey(k.id)}
-                        className="p-1 text-muted hover:text-red-500 transition-colors shrink-0"
-                        title="Remove key"
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Add key form */}
-              {addingFor === p.id && (
-                <div className="mt-3 border border-border rounded p-3 space-y-3 bg-panel">
-                  <div>
-                    <label className="block text-xs text-muted mb-1">API Key</label>
-                    <input
-                      type="password"
-                      value={addKey}
-                      onChange={e => setAddKey(e.target.value)}
-                      placeholder="sk-..."
-                      className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none font-mono"
-                      autoFocus
-                    />
-                  </div>
-                  {p.id === 'openai-compat' && (
-                    <div>
-                      <label className="block text-xs text-muted mb-1">Base URL</label>
-                      <input
-                        type="url"
-                        value={addBaseUrl}
-                        onChange={e => setAddBaseUrl(e.target.value)}
-                        placeholder="https://api.openai.com/v1"
-                        className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none font-mono"
-                      />
-                      <p className="text-[10px] text-muted mt-1">Custom endpoint for Groq, Together, DeepSeek, Ollama, etc.</p>
-                    </div>
-                  )}
-                  <div>
-                    <label className="block text-xs text-muted mb-1">Label (optional)</label>
-                    <input
-                      type="text"
-                      value={addLabel}
-                      onChange={e => setAddLabel(e.target.value)}
-                      placeholder="e.g. Personal, Work"
-                      className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-                    />
-                  </div>
-                  {addError && <p className="text-xs text-red-500">{addError}</p>}
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleAddKey(p.id)}
-                      disabled={adding || !addKey}
-                      className="flex items-center gap-2 px-4 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
-                    >
-                      {adding ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                      Save Key
-                    </button>
-                    <button
-                      onClick={() => { setAddingFor(null); setAddError(null); }}
-                      className="px-4 py-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ─── Display Section ─────────────────────────────────────────────────────────
-
-function DisplaySection() {
-  const { mode, setMode } = useTheme();
-  const [settings, setSettings] = useState<DisplaySettings | null>(null);
-  const [models, setModels] = useState<ModelOption[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-
-  const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-5-20250929');
-  const [itemsPerPage, setItemsPerPage] = useState(20);
-
-  useEffect(() => {
-    Promise.all([
-      apiFetch<DisplaySettings>('/api/settings/display'),
-      apiFetch<{ models: ModelOption[] }>('/api/direction/models'),
-    ]).then(([displayData, modelData]) => {
-      setSettings(displayData);
-      setDefaultModel(displayData.defaultModel);
-      setItemsPerPage(displayData.itemsPerPage);
-      setModels(modelData.models);
-    }).catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
-
-  const saveDisplay = async () => {
-    setSaving(true);
-    setSaved(false);
-    try {
-      await apiFetch('/api/settings/display', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ defaultModel, itemsPerPage }),
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // silent
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading display settings...</div>;
-  }
-
-  const hasChanges = settings && (defaultModel !== settings.defaultModel || itemsPerPage !== settings.itemsPerPage);
-
-  return (
-    <div className="max-w-lg space-y-6">
-      <div>
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Theme</h2>
-        <div className="flex gap-2">
-          {(['light', 'dark', 'system'] as ThemeMode[]).map(m => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className={`px-4 py-2 text-sm rounded border transition-colors capitalize ${
-                mode === m
-                  ? 'bg-accent/10 border-accent text-accent'
-                  : 'border-border text-muted hover:text-[var(--text)] hover:border-accent/50'
-              }`}
-            >
-              {m}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Default Model</h2>
-        <select
-          value={defaultModel}
-          onChange={e => setDefaultModel(e.target.value)}
-          className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-        >
-          {models.map(m => (
-            <option key={m.id} value={m.id}>{m.label}</option>
-          ))}
-        </select>
-        <p className="text-xs text-muted mt-1">Used as the default when generating specs</p>
-      </div>
-
-      <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Items Per Page</h2>
-        <select
-          value={itemsPerPage}
-          onChange={e => setItemsPerPage(Number(e.target.value))}
-          className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-        >
-          {[10, 20, 30, 50, 100].map(n => (
-            <option key={n} value={n}>{n} items</option>
-          ))}
-        </select>
-        <p className="text-xs text-muted mt-1">Number of items shown per page in lists and archives</p>
-      </div>
-
-      <button
-        onClick={saveDisplay}
-        disabled={saving || !hasChanges}
-        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
-      >
-        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
-        {saved ? 'Saved' : 'Save Display Settings'}
-      </button>
-    </div>
-  );
-}
-
 // ─── Account Deletion Section ─────────────────────────────────────────────────
 
 function AccountDeletionSection() {
@@ -920,7 +1043,6 @@ function AccountDeletionSection() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password }),
       });
-      // Account deleted — clear local state and redirect
       clearTokens();
       window.location.href = '/';
     } catch (err: any) {
@@ -931,7 +1053,7 @@ function AccountDeletionSection() {
   };
 
   return (
-    <div className="max-w-lg space-y-6">
+    <div className="space-y-6">
       <div>
         <h2 className="text-sm font-semibold text-red-500 mb-2">Danger Zone</h2>
         <p className="text-xs text-muted">
@@ -1008,6 +1130,83 @@ function AccountDeletionSection() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ─── Shortcuts Section ───────────────────────────────────────────────────────
+
+const SHORTCUT_GROUPS = (() => {
+  const mod = modLabel();
+  return [
+    {
+      category: 'Global',
+      shortcuts: [
+        { keys: [`${mod}`, 'K'], description: 'Open command palette' },
+        { keys: ['?'], description: 'Show keyboard shortcuts' },
+        { keys: [`${mod}`, '/'], description: 'Show keyboard shortcuts' },
+        { keys: ['Esc'], description: 'Close panel / modal' },
+      ],
+    },
+    {
+      category: 'Navigation',
+      shortcuts: [
+        { keys: [`${mod}`, '1'], description: 'Go to Spec Forge' },
+        { keys: [`${mod}`, '2'], description: 'Go to Direction Stack' },
+        { keys: [`${mod}`, '3'], description: 'Go to Review Queue' },
+        { keys: [`${mod}`, '4'], description: 'Go to Pipeline Monitor' },
+        { keys: [`${mod}`, '5'], description: 'Go to Archive' },
+      ],
+    },
+    {
+      category: 'Spec Actions',
+      shortcuts: [
+        { keys: [`${mod}`, 'Enter'], description: 'Approve selected spec' },
+        { keys: [`${mod}`, 'Backspace'], description: 'Reject selected spec' },
+        { keys: [`${mod}`, 'N'], description: 'New spec in Spec Forge' },
+      ],
+    },
+    {
+      category: 'Pipeline Actions',
+      shortcuts: [
+        { keys: [`${mod}`, 'Shift', 'R'], description: 'Trigger pipeline run' },
+        { keys: [`${mod}`, '.'], description: 'Cancel active run' },
+      ],
+    },
+  ];
+})();
+
+function ShortcutsSection() {
+  return (
+    <div className="max-w-lg space-y-5">
+      <h2 className="text-sm font-semibold text-[var(--text)]">Keyboard Shortcuts</h2>
+      {SHORTCUT_GROUPS.map((group) => (
+        <div key={group.category}>
+          <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">
+            {group.category}
+          </h3>
+          <div className="space-y-1">
+            {group.shortcuts.map((shortcut, i) => (
+              <div
+                key={i}
+                className="flex items-center justify-between py-1.5 px-2 rounded hover:bg-bg/50"
+              >
+                <span className="text-sm text-[var(--text)]">{shortcut.description}</span>
+                <div className="flex items-center gap-0.5 shrink-0 ml-4">
+                  {shortcut.keys.map((key, ki) => (
+                    <kbd
+                      key={ki}
+                      className="inline-flex items-center justify-center min-w-[24px] h-6 px-1.5 text-[11px] font-mono text-muted bg-bg border border-border rounded"
+                    >
+                      {key}
+                    </kbd>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
