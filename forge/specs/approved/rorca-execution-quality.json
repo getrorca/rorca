@@ -109,7 +109,8 @@
         "`PATCH /api/specs/:id/stories/:storyId` validates that the spec is in `pending/` \u2014 editing approved specs is not allowed via this endpoint"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "EQ-007",

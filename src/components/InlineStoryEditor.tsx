@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Check, X, Sparkles, Loader2, Eye, EyeOff, Plus, Trash2, Timer } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import type { Story } from './StoryCard';
@@ -9,6 +9,10 @@ interface InlineStoryEditorProps {
   workspaceId: string;
   onSave: (updated: Story) => void;
   onCancel: () => void;
+  /** Use PATCH (pending-only) instead of PUT. Default: false (PUT). */
+  usePatch?: boolean;
+  /** Called when the user has unsaved edits (true) or reverts to saved state (false). */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 export function InlineStoryEditor({
@@ -17,6 +21,8 @@ export function InlineStoryEditor({
   workspaceId,
   onSave,
   onCancel,
+  usePatch = false,
+  onDirtyChange,
 }: InlineStoryEditorProps) {
   const [title, setTitle] = useState(story.title);
   const [description, setDescription] = useState(story.description ?? '');
@@ -30,23 +36,33 @@ export function InlineStoryEditor({
   const [preview, setPreview] = useState(false);
   const [error, setError] = useState('');
 
+  // Track dirty state for unsaved changes confirmation
+  const isDirty = title !== story.title
+    || description !== (story.description ?? '')
+    || JSON.stringify(criteria.filter(c => c.trim())) !== JSON.stringify(story.acceptanceCriteria);
+
+  useEffect(() => { onDirtyChange?.(isDirty); }, [isDirty, onDirtyChange]);
+
   const handleSave = useCallback(async () => {
     setSaving(true);
     setError('');
     try {
-      const res = await apiFetch<{ ok: boolean; story: Story; version: number }>(
-        `/api/specs/${specId}/stories/${story.id}`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+      const body = usePatch
+        ? { workspaceId, title, description, acceptanceCriteria: criteria.filter(c => c.trim()) }
+        : {
             workspaceId,
             title,
             description,
             acceptanceCriteria: criteria.filter(c => c.trim()),
             ...(complexity != null ? { complexity } : {}),
             timeoutMinutes,
-          }),
+          };
+      const res = await apiFetch<{ ok: boolean; story: Story; version: number }>(
+        `/api/specs/${specId}/stories/${story.id}`,
+        {
+          method: usePatch ? 'PATCH' : 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
         }
       );
       if (res.ok) {
@@ -57,7 +73,7 @@ export function InlineStoryEditor({
     } finally {
       setSaving(false);
     }
-  }, [specId, story.id, workspaceId, title, description, criteria, complexity, timeoutMinutes, onSave]);
+  }, [specId, story.id, workspaceId, title, description, criteria, complexity, timeoutMinutes, usePatch, onSave]);
 
   const handleRewrite = useCallback(async () => {
     setRewriting(true);

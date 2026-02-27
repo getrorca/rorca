@@ -127,6 +127,7 @@ export default function ReviewQueuePanel() {
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState('');
   const [dialogMode, setDialogMode] = useState<'approve' | 'reject' | 'post-approve' | null>(null);
+  const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
 
   // ⌘↩ approve, ⌘⌫ reject — only when a spec is selected
   useHotkeys(useMemo(() => [
@@ -181,6 +182,10 @@ export default function ReviewQueuePanel() {
 
   // ─── Actions ───────────────────────────────────────────────────────
   const handleApprove = async (specId: string) => {
+    if (hasUnsavedEdits) {
+      if (!window.confirm('You have unsaved story edits. Approve without saving?')) return;
+      setHasUnsavedEdits(false);
+    }
     setActionLoading(true);
     try {
       await apiFetch(`/api/specs/${specId}/approve`, {
@@ -204,6 +209,10 @@ export default function ReviewQueuePanel() {
   // Dialog-driven approve (with post-approve prompt)
   const handleDialogApprove = async () => {
     if (!selectedId) return;
+    if (hasUnsavedEdits) {
+      if (!window.confirm('You have unsaved story edits. Approve without saving?')) return;
+      setHasUnsavedEdits(false);
+    }
     setActionLoading(true);
     try {
       await apiFetch(`/api/specs/${selectedId}/approve`, {
@@ -410,7 +419,13 @@ export default function ReviewQueuePanel() {
           {filteredSpecs.map((spec) => (
             <button
               key={spec.id}
-              onClick={() => setSelectedId(spec.id === selectedId ? null : spec.id)}
+              onClick={() => {
+                if (hasUnsavedEdits && spec.id !== selectedId) {
+                  if (!window.confirm('You have unsaved story edits. Discard them?')) return;
+                  setHasUnsavedEdits(false);
+                }
+                setSelectedId(spec.id === selectedId ? null : spec.id);
+              }}
               className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${
                 spec.id === selectedId
                   ? 'bg-accent/10'
@@ -499,6 +514,7 @@ export default function ReviewQueuePanel() {
             onConfirmReview={(action) => handleReview(selectedId, action)}
             workspaceId={workspaceId!}
             onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
+            onDirtyChange={setHasUnsavedEdits}
           />
         )}
       </div>
@@ -508,7 +524,13 @@ export default function ReviewQueuePanel() {
         <div className="xl:hidden fixed inset-0 z-40 bg-bg flex flex-col">
           <div className="flex items-center px-4 py-3 border-b border-border shrink-0">
             <button
-              onClick={() => { setSelectedId(null); setRejectingId(null); setRejectReason(''); setReviewingId(null); setReviewComment(''); }}
+              onClick={() => {
+                if (hasUnsavedEdits) {
+                  if (!window.confirm('You have unsaved story edits. Discard them?')) return;
+                  setHasUnsavedEdits(false);
+                }
+                setSelectedId(null); setRejectingId(null); setRejectReason(''); setReviewingId(null); setReviewComment('');
+              }}
               className="text-xs text-accent hover:text-accent-hover transition-colors mr-3"
             >
               &larr; Back
@@ -538,6 +560,7 @@ export default function ReviewQueuePanel() {
               onConfirmReview={(action) => handleReview(selectedId, action)}
               workspaceId={workspaceId!}
               onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
+              onDirtyChange={setHasUnsavedEdits}
             />
           </div>
         </div>
@@ -588,6 +611,7 @@ function SpecPreview({
   onConfirmReview,
   workspaceId,
   onAssignSpec,
+  onDirtyChange,
 }: {
   spec: SpecDetail;
   summary: SpecSummary;
@@ -610,6 +634,7 @@ function SpecPreview({
   onConfirmReview: (action: 'approve' | 'request_changes') => void;
   workspaceId: string;
   onAssignSpec?: (assignee: Assignee | null) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const stories = spec.userStories ?? spec.stories ?? [];
   const diagram = extractDiagramText(spec);
@@ -699,6 +724,7 @@ function SpecPreview({
             stories={stories}
             specId={summary.id}
             workspaceId={workspaceId}
+            onDirtyChange={onDirtyChange}
           />
         )}
         {activeTab === 'graph' && <DependencyGraph specId={summary.id} workspaceId={workspaceId} />}
@@ -883,10 +909,13 @@ function PreviewStoriesTab({
   stories,
   specId,
   workspaceId,
+  onDirtyChange,
 }: {
   stories: Story[];
   specId: string;
   workspaceId: string;
+  /** Called when any story editor has unsaved changes */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
   const [localStories, setLocalStories] = useState(stories);
@@ -897,6 +926,8 @@ function PreviewStoriesTab({
   const [commentCounts, setCommentCounts] = useState<Record<string, number>>({});
   const [commentsOpenFor, setCommentsOpenFor] = useState<string | null>(null);
   const [storyAssignees, setStoryAssignees] = useState<Record<string, Assignee>>({});
+  const [modifiedIds, setModifiedIds] = useState<Set<string>>(new Set());
+  const [editorDirty, setEditorDirty] = useState(false);
 
   // Fetch assignments for this spec
   useEffect(() => {
@@ -1107,18 +1138,37 @@ function PreviewStoriesTab({
             story={story}
             specId={specId}
             workspaceId={workspaceId}
+            usePatch
+            onDirtyChange={(dirty) => {
+              setEditorDirty(dirty);
+              onDirtyChange?.(dirty);
+            }}
             onSave={(updated) => {
               setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s));
+              setModifiedIds(prev => new Set([...prev, updated.id]));
               setEditingStoryId(null);
+              setEditorDirty(false);
+              onDirtyChange?.(false);
             }}
-            onCancel={() => setEditingStoryId(null)}
+            onCancel={() => {
+              setEditingStoryId(null);
+              setEditorDirty(false);
+              onDirtyChange?.(false);
+            }}
           />
         ) : (
           <div key={story.id}>
             <StoryCard
               story={story}
               allStoryIds={allStoryIds}
-              onEdit={() => setEditingStoryId(story.id)}
+              onEdit={() => {
+                if (editorDirty) {
+                  if (!window.confirm('You have unsaved changes. Discard them?')) return;
+                }
+                setEditorDirty(false);
+                onDirtyChange?.(false);
+                setEditingStoryId(story.id);
+              }}
               selected={selectedIds.has(story.id)}
               onToggleSelect={() => toggleSelect(story.id)}
               specId={specId}
@@ -1126,6 +1176,7 @@ function PreviewStoriesTab({
               commentCount={commentCounts[story.id] ?? 0}
               onOpenComments={() => setCommentsOpenFor(commentsOpenFor === story.id ? null : story.id)}
               assignee={storyAssignees[story.id] ?? null}
+              modified={modifiedIds.has(story.id)}
               onAssignStory={async (userId) => {
                 const result = await apiFetch<{ ok: boolean; assignee?: Assignee }>(`/api/specs/${specId}/stories/${story.id}/assign`, {
                   method: 'PUT',
