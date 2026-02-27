@@ -746,3 +746,23 @@ Key decisions:
 - `estimateSize` returns fixed 48px — no `measureElement` needed since AC explicitly says "no dynamic height required"
 - Failed story expansion renders inline below the 48px row (outside virtualizer measurement) — works naturally since expansion is a rare interaction
 - Keyboard focus ring uses `ring-inset` to avoid layout shift from outline width
+
+## Story P2-019: Code Splitting for Lazy-Loaded Panels — DONE
+Files touched:
+- src/App.tsx (modified — React.lazy + Suspense for all 23 panels)
+- src/components/Skeleton.tsx (modified — added ForgeSkeleton, SettingsSkeleton, GenericPanelSkeleton)
+- vite.config.ts (modified — manualChunks for react, charts, xterm, cmdk)
+
+What was built:
+- All 23 panel imports converted from static `import` to `React.lazy(() => import(...))` — each panel is now a separate Vite chunk
+- `Suspense` wrapper in `ActivePanel` with panel-specific skeleton fallbacks: HubSkeleton, ForgeSkeleton, SettingsSkeleton, RunViewTerminalSkeleton, GenericPanelSkeleton
+- RunViewPanel also wrapped in its own `Suspense` boundary with `RunViewTerminalSkeleton`
+- Vite `manualChunks` splits vendor libs: `react` (45kb gz), `charts/recharts+d3` (127kb gz), `xterm` (84kb gz), `cmdk`
+- Initial JS bundle: index (32kb gz) + react (45kb gz) = ~78kb gzipped (target: <200kb)
+- No single chunk exceeds 500kb raw (largest: treemap 452kb, cytoscape 442kb, mermaid 442kb)
+- `SettingsTab` type imported separately via `import type` to avoid pulling SettingsPanel into initial bundle
+
+Key decisions:
+- Used skeleton screens (not spinners) as Suspense fallback — matches AC requirement
+- Kept `SettingsTab` as type-only import since lazy-loading SettingsPanel means its module isn't available at import time
+- manualChunks only for heavy vendor deps — let Vite auto-chunk panel components (produces cleaner per-panel chunks)
