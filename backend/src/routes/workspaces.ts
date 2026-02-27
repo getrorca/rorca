@@ -511,7 +511,7 @@ router.patch('/:id', (req, res) => {
 
 // GET /api/workspaces/:id/pipeline-config — Get pipeline configuration
 router.get('/:id/pipeline-config', (req, res) => {
-  const row = db.prepare('SELECT pipeline_config FROM workspaces WHERE id = ?').get(req.params.id) as { pipeline_config: string } | undefined;
+  const row = db.prepare('SELECT pipeline_config, default_parallelism FROM workspaces WHERE id = ?').get(req.params.id) as { pipeline_config: string; default_parallelism: number } | undefined;
   if (!row) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -522,6 +522,7 @@ router.get('/:id/pipeline-config', (req, res) => {
       autoWorktree: config.autoWorktree ?? true,
       storyTimeoutMin: config.storyTimeoutMin ?? 45,
       maxRetries: config.maxRetries ?? 0,
+      defaultParallelism: row.default_parallelism ?? 1,
     },
   });
 });
@@ -533,9 +534,14 @@ router.put('/:id/pipeline-config', (req, res) => {
     res.status(404).json({ error: 'Workspace not found' });
     return;
   }
-  const { autoWorktree, storyTimeoutMin, maxRetries } = req.body;
+  const { autoWorktree, storyTimeoutMin, maxRetries, defaultParallelism } = req.body;
   const config = JSON.stringify({ autoWorktree, storyTimeoutMin, maxRetries });
-  db.prepare('UPDATE workspaces SET pipeline_config = ? WHERE id = ?').run(config, req.params.id);
+  if (defaultParallelism !== undefined) {
+    const p = Math.max(1, Math.min(10, Math.floor(Number(defaultParallelism) || 1)));
+    db.prepare('UPDATE workspaces SET pipeline_config = ?, default_parallelism = ? WHERE id = ?').run(config, p, req.params.id);
+  } else {
+    db.prepare('UPDATE workspaces SET pipeline_config = ? WHERE id = ?').run(config, req.params.id);
+  }
   res.json({ ok: true });
 });
 
