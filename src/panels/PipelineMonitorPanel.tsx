@@ -9,6 +9,7 @@ import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph
 import { HelpTooltip } from '../components/HelpTooltip';
 import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
 import SpecPickerModal from '../components/SpecPickerModal';
+import AgentBadge from '../components/AgentBadge';
 
 type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens';
 
@@ -23,6 +24,8 @@ interface PipelineRun {
   started_at: string;
   finished_at: string | null;
   retried_from_run_id: number | null;
+  agent_type?: string;
+  agent_model?: string | null;
 }
 
 type RunStatus = PipelineRun['status'];
@@ -753,8 +756,11 @@ export default function PipelineMonitorPanel() {
                   </span>
                 )}
               </div>
-              <div className="mt-1 text-xs text-[var(--text-muted)] pl-4">
-                {elapsedTime(run.started_at, run.finished_at)}
+              <div className="mt-1 flex items-center gap-2 pl-4">
+                <span className="text-xs text-[var(--text-muted)]">
+                  {elapsedTime(run.started_at, run.finished_at)}
+                </span>
+                <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
               </div>
             </button>
           ))}
@@ -826,6 +832,7 @@ export default function PipelineMonitorPanel() {
                 >
                   {liveRun.status === 'partial_failure' ? 'partial failure' : liveRun.status}
                 </span>
+                <AgentBadge agentType={liveRun.agent_type} agentModel={liveRun.agent_model} size="md" />
                 {liveRun.retried_from_run_id != null && (
                   <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-500/20 text-purple-400 flex items-center gap-1">
                     <RotateCcw className="w-3 h-3" />
