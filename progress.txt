@@ -594,3 +594,26 @@ Key decisions:
 - Used useGlobalToast context instead of local useToast hook for consistency with rest of app
 - Edit Brief clears generatedSpec and auto-focuses the textarea after 50ms RAF delay
 - Story cards use line-clamp-1 for description truncation in collapsed state
+
+## Story P2-007: Settings Billing Tab — DONE
+Files touched:
+- backend/src/routes/billing.ts (modified — enhanced /status with seats+features+stripeConfigured, added GET /invoices endpoint)
+- src/panels/SettingsPanel.tsx (modified — added 'billing' tab type, CreditCard icon, full BillingSection component)
+
+What was built:
+- **Current Plan Badge**: Colored card showing plan name (Free/Solo/Pro/Team) with icon, price, status badge (Active/Past Due/Canceled), renewal date, and seats used/limit
+- **Subscription Details**: Period dates and seat counts from DB, displayed in a 2-column grid
+- **Plan Comparison Table**: 4-column grid showing all plans with features list, prices, and upgrade/switch buttons
+- **Manage Billing**: Opens Stripe customer portal (new tab) for payment method, address, etc.
+- **Invoice History**: Table showing invoice number, amount, date, status, with PDF download links from Stripe API. Collapsible to 5 items with "Show all" toggle
+- **Cancel Subscription**: Two-step confirmation with grace period explanation (access until billing period end), routes to Stripe portal for actual cancellation
+- **Stripe-not-configured fallback**: Warning message when STRIPE_SECRET_KEY is absent, all checkout/portal buttons hidden
+- **GET /api/billing/invoices**: Fetches up to 24 invoices from Stripe API, returns normalized invoice data with hosted_invoice_url and invoice_pdf
+- **GET /api/billing/status** enriched: now returns seats (used + limit), full plan features array, stripeConfigured boolean, period start date
+- **Seat counting**: Counts team_members where user is team owner, applies plan-based limits (free/solo=1, pro=5, team=unlimited)
+
+Key decisions:
+- Cancel flow redirects to Stripe portal (not direct API cancellation) — Stripe handles proration, reactivation, and grace period logic
+- Invoice amounts divided by 100 (Stripe stores in cents)
+- Seats derived from teams + team_members tables (existing schema, no new tables)
+- BillingSection is a sibling section to AccountSection, not nested within it — billing is its own tab for discoverability
