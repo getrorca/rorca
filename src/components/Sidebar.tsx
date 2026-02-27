@@ -7,7 +7,7 @@ import {
   Plus, Hammer, X, Menu,
 } from 'lucide-react';
 
-export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'settings' | 'workspace-settings' | 'spec-review';
+export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review';
 
 interface NavItem {
   id: PanelId;
@@ -60,6 +60,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: 'velocity',   label: 'Velocity Chart',     icon: TrendingUp },
       { id: 'completion', label: 'Completion Rates',   icon: BarChart3  },
       { id: 'roi',        label: 'ROI Calculator',     icon: Calculator },
+      { id: 'finops',     label: 'FinOps',             icon: DollarSign },
       { id: 'health',     label: 'Health',             icon: HeartPulse },
     ],
   },

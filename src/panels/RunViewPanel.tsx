@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
@@ -14,6 +14,7 @@ import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph
 import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
 import WorktreesPanel from './WorktreesPanel';
+import FinOpsTab from '../components/FinOpsTab';
 import type { PanelId } from '../components/Sidebar';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -50,12 +51,13 @@ interface CommitEntry {
   author: string;
 }
 
-type RunViewTab = 'terminal' | 'stories' | 'graph' | 'compare' | 'worktrees' | 'commits';
+type RunViewTab = 'terminal' | 'stories' | 'graph' | 'finops' | 'compare' | 'worktrees' | 'commits';
 
 const TABS: { id: RunViewTab; label: string; icon: typeof TerminalIcon }[] = [
   { id: 'terminal',  label: 'Terminal',  icon: TerminalIcon },
   { id: 'stories',   label: 'Stories',   icon: List },
   { id: 'graph',     label: 'Graph',     icon: GitBranch },
+  { id: 'finops',    label: 'FinOps',    icon: DollarSign },
   { id: 'compare',   label: 'Compare',   icon: ArrowLeftRight },
   { id: 'worktrees', label: 'Worktrees', icon: FolderGit2 },
   { id: 'commits',   label: 'Commits',   icon: GitCommitHorizontal },
@@ -509,6 +511,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             liveStatuses={liveStatuses}
           />
         );
+      case 'finops':
+        return <FinOpsTab runId={run.id} />;
       case 'compare':
         return <CompareRunsPanel onBack={() => handleTabChange('terminal')} />;
       case 'worktrees':

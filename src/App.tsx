@@ -38,6 +38,7 @@ import CompletionRatePanel from './panels/CompletionRatePanel';
 import HealthDashboardPanel from './panels/HealthDashboardPanel';
 import AuditLogPanel from './panels/AuditLogPanel';
 import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
+import FinOpsDashboardPanel from './panels/FinOpsDashboardPanel';
 import SettingsPanel, { type SettingsTab } from './panels/SettingsPanel';
 import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
 import HubPanel from './panels/HubPanel';
@@ -153,6 +154,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'velocity': return <VelocityChartPanel />;
     case 'completion': return <CompletionRatePanel />;
     case 'roi': return <RoiCalculatorPanel />;
+    case 'finops': return <FinOpsDashboardPanel />;
     case 'health': return <HealthDashboardPanel />;
     case 'audit-log': return <AuditLogPanel />;
     case 'activity': return <ActivityFeedPanel />;
@@ -181,6 +183,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
   velocity: 'Velocity Chart',
   completion: 'Completion Rates',
   roi: 'ROI Calculator',
+  finops: 'FinOps Dashboard',
   health: 'Health Dashboard',
   'audit-log': 'Audit Log',
   activity: 'Activity Feed',
