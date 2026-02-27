@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useHotkeys, type HotkeyBinding } from '../hooks/useHotkeys';
 import {
   Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight,
   Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
@@ -166,6 +167,12 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
   }, [drawerOpen]);
 
   const toggleDrawer = useCallback(() => setDrawerOpen((v) => !v), []);
+
+  // Global shortcut: Cmd+\ (Mac) / Ctrl+\ (Win/Linux) to toggle nav drawer
+  const drawerHotkeys = useMemo<HotkeyBinding[]>(() => [
+    { key: 'mod+\\', handler: toggleDrawer },
+  ], [toggleDrawer]);
+  useHotkeys(drawerHotkeys);
 
   const handleClick = (item: MinimalNavItem) => {
     onNavigate(item.panel);
