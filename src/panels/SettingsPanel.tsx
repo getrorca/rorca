@@ -137,6 +137,7 @@ export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab
             <button
               key={id}
               onClick={() => setActiveTab(id)}
+              aria-current={activeTab === id ? 'page' : undefined}
               className={`w-full flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors ${
                 activeTab === id
                   ? 'bg-accent/10 text-accent'
@@ -160,6 +161,7 @@ export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab
             <button
               key={id}
               onClick={() => setActiveTab(id)}
+              aria-current={activeTab === id ? 'page' : undefined}
               className={`flex items-center justify-center gap-1 px-3 py-2 text-xs whitespace-nowrap transition-colors ${
                 activeTab === id
                   ? 'text-accent border-b-2 border-accent'
@@ -532,6 +534,7 @@ function ProvidersSection() {
                         onClick={() => removeKey(k.id)}
                         className="p-1 text-muted hover:text-red-500 transition-colors shrink-0"
                         title="Remove key"
+                        aria-label="Remove API key"
                       >
                         <Trash2 size={12} />
                       </button>
@@ -1285,6 +1288,7 @@ function BillingSection() {
                       rel="noopener noreferrer"
                       className="p-1 text-muted hover:text-accent transition-colors"
                       title="Download PDF"
+                      aria-label="Download invoice PDF"
                     >
                       <Download size={14} />
                     </a>
@@ -1296,6 +1300,7 @@ function BillingSection() {
                       rel="noopener noreferrer"
                       className="p-1 text-muted hover:text-accent transition-colors"
                       title="View invoice"
+                      aria-label="View invoice"
                     >
                       <ExternalLink size={14} />
                     </a>
@@ -1568,6 +1573,7 @@ function ProfileSection() {
             <button
               type="button"
               onClick={() => setShowPasswords(!showPasswords)}
+              aria-label={showPasswords ? 'Hide passwords' : 'Show passwords'}
               className="absolute right-2 top-6 p-1 text-muted hover:text-[var(--text)]"
             >
               {showPasswords ? <EyeOff size={14} /> : <Eye size={14} />}
@@ -1886,6 +1892,8 @@ function ShortcutsSection() {
 function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () => void }) {
   return (
     <button
+      role="switch"
+      aria-checked={checked}
       onClick={onChange}
       className={`relative w-9 h-5 rounded-full transition-colors ${
         checked ? 'bg-accent' : 'bg-border'

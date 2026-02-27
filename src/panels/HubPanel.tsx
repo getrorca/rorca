@@ -281,7 +281,7 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
     >
       {/* Header row: status + run ID + actions */}
       <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" aria-live="polite">
           <span className={`w-2 h-2 rounded-full ${STATUS_DOTS[effectiveStatus] || 'bg-gray-500'}`} />
           <span className="text-sm font-semibold text-[var(--text)] capitalize">{effectiveStatus}</span>
           <span className="text-xs text-muted font-mono">#{run.id}</span>
@@ -296,6 +296,7 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
                 onKeyDown={(e) => { if (e.key === 'Enter') handlePause(e as unknown as React.MouseEvent); }}
                 className={`w-11 h-11 sm:w-8 sm:h-8 flex items-center justify-center rounded hover:bg-bg transition-colors ${actionLoading === 'pause' ? 'opacity-50' : ''}`}
                 title={effectiveStatus === 'paused' ? 'Resume' : 'Pause'}
+                aria-label={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
               >
                 {effectiveStatus === 'paused' ? (
                   <Play size={16} className="text-yellow-500" />
@@ -310,6 +311,7 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
                 onKeyDown={(e) => { if (e.key === 'Enter') handleKill(e as unknown as React.MouseEvent); }}
                 className={`w-11 h-11 sm:w-8 sm:h-8 flex items-center justify-center rounded hover:bg-bg transition-colors ${actionLoading === 'kill' ? 'opacity-50' : ''}`}
                 title="Kill"
+                aria-label="Kill run"
               >
                 <Square size={16} className="text-red-500" />
               </span>
@@ -332,7 +334,14 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
       )}
 
       {/* Progress bar */}
-      <div className="w-full h-1.5 bg-border rounded-full overflow-hidden mb-2">
+      <div
+        className="w-full h-1.5 bg-border rounded-full overflow-hidden mb-2"
+        role="progressbar"
+        aria-valuenow={progressPct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`Run progress: ${passed} of ${total} stories passed`}
+      >
         <div
           className={`h-full rounded-full transition-all duration-500 ${
             effectiveStatus === 'failed' ? 'bg-red-500' :
@@ -534,7 +543,7 @@ function RecentRunRow({ run, onNavigateToRun, justCompleted }: {
 
         {/* Right: status badge + timestamp + duration */}
         <div className="flex items-center gap-2 shrink-0">
-          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${STATUS_BADGE_STYLES[run.status] || 'bg-gray-500/10 text-gray-400'}`}>
+          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded ${STATUS_BADGE_STYLES[run.status] || 'bg-gray-500/10 text-gray-400'}`} aria-live="polite">
             {STATUS_BADGE_LABELS[run.status] || run.status}
           </span>
           <span className="hidden sm:inline text-xs text-muted whitespace-nowrap">

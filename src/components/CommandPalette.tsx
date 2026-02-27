@@ -486,6 +486,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search specs, stories, runs, actions..."
+            aria-label="Search command palette"
             className="flex-1 bg-transparent text-sm text-text placeholder:text-muted focus:outline-none"
           />
           <kbd className="text-[10px] text-muted bg-bg border border-border rounded px-1.5 py-0.5 font-mono">

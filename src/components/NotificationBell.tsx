@@ -65,7 +65,7 @@ export default function NotificationBell({ onNavigate }: NotificationBellProps) 
       >
         <Bell size={16} />
         {unreadCount > 0 && (
-          <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 text-[10px] font-bold leading-4 text-white bg-red-500 rounded-full flex items-center justify-center">
+          <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 text-[10px] font-bold leading-4 text-white bg-red-500 rounded-full flex items-center justify-center" aria-live="polite" aria-atomic="true">
             {unreadCount > 99 ? '99+' : unreadCount}
           </span>
         )}
@@ -91,6 +91,7 @@ export default function NotificationBell({ onNavigate }: NotificationBellProps) 
                   onClick={() => { setOpen(false); setShowPrefs(true); }}
                   className="text-muted hover:text-[var(--text)] transition-colors"
                   title="Notification settings"
+                  aria-label="Notification settings"
                 >
                   <Settings size={14} />
                 </button>
