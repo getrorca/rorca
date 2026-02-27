@@ -1118,3 +1118,27 @@ Key decisions:
 - `reroutedStories` Map prevents infinite reroute loops (a story can only be rerouted once)
 - Inline union type `'claude' | 'opencode' | 'codex' | null` for fallbackEngine in complexity-scorer.ts to avoid circular dependency (config.ts imports from complexity-scorer.ts)
 - Existing `cleanupOrphanRuns()` already handles mixed engine state (kills both engine PIDs and OpenCode server) — no changes needed
+
+## Story OC-030: Codex CLI Direction Stack Context Injection via AGENTS.md — DONE
+Files touched:
+- backend/src/routes/pipeline.ts (modified — added writeCodexAgentsMd, removeCodexAgentsMd, stripRorcaSection functions; wired into trigger route write and child exit cleanup)
+- backend/src/lib/execution-engine.ts (modified — added codexAgentsInstruction in buildPrompt for all three modes: impl, qa, journey)
+- backend/src/__tests__/opencode-integration.test.ts (modified — added 9 new tests in "Codex AGENTS.md direction stack injection" describe block)
+- CLAUDE.md (modified — documented Codex AGENTS.md injection mechanism under Codex CLI Setup section)
+
+What was built:
+- `writeCodexAgentsMd()` in pipeline.ts synthesizes direction stack (L1-L5) and writes to workspace root AGENTS.md. Codex CLI auto-discovers this file and injects as context before user prompt.
+- If AGENTS.md already exists, appends delimited section using markers (`# === RORCA DIRECTION START ===` / `# === RORCA DIRECTION END ===`); restores original on cleanup
+- If no AGENTS.md exists, creates one with direction stack; deletes on cleanup
+- `removeCodexAgentsMd()` restores original content or deletes file based on pre-run state
+- `stripRorcaSection()` removes marker-delimited section (handles stale sections from previous runs)
+- `buildPrompt()` in execution-engine.ts adds explicit instruction for Codex stories to follow AGENTS.md guidance
+- Direction context written fresh before each run (not cached) to pick up latest direction stack changes
+- 9 unit tests covering: create, append with markers, cleanup (delete vs restore), strip logic, before-spawn/after-cleanup lifecycle, prompt instruction injection, non-cached fresh writes
+
+Key decisions:
+- Used workspace root AGENTS.md (not .codex/AGENTS.md) because Codex CLI discovers AGENTS.md from Git root down — workspace root is the correct location
+- Marker-based append/restore pattern preserves existing AGENTS.md content (unlike OpenCode which uses a separate .opencode/ directory)
+- No --instructions CLI flag exists for Codex — context injection via AGENTS.md auto-discovery is the documented mechanism (verified via OpenAI docs)
+- Cleanup uses original content restoration (not marker stripping) for reliability — stored original content before modification
+- Same synthesize() call as OpenCode path — no code duplication for direction stack assembly
