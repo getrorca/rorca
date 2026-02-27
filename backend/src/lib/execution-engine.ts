@@ -61,6 +61,8 @@ interface UserStory {
   notes?: string;
   priority?: number;
   timeoutMinutes?: number;
+  /** Per-story agent override. If unset, uses the run-level agentType. */
+  agent?: AgentType;
 }
 
 interface SpecJson {
@@ -104,6 +106,48 @@ function extractProvider(modelString: string | null): string {
   if (slashIdx > 0) return modelString.substring(0, slashIdx);
   return 'anthropic';
 }
+
+// ─── Per-Story Agent Resolution ──────────────────────────────────────────────
+
+/** Resolve the effective agent type for a story. Falls back to run-level config. */
+function resolveStoryAgent(story: UserStory, runAgent: AgentType): AgentType {
+  if (story.agent && (['claude', 'opencode', 'codex'] as AgentType[]).includes(story.agent)) {
+    return story.agent;
+  }
+  return runAgent;
+}
+
+/** Scan stories and return the set of unique engines needed for this run. */
+function scanRequiredEngines(stories: UserStory[], runAgent: AgentType): Set<AgentType> {
+  const engines = new Set<AgentType>();
+  for (const story of stories) {
+    if (story.excluded || story.skipped || isPassed(story)) continue;
+    engines.add(resolveStoryAgent(story, runAgent));
+  }
+  return engines;
+}
+
+/** Count stories assigned to each engine. */
+function countStoriesByEngine(stories: UserStory[], runAgent: AgentType): Map<AgentType, number> {
+  const counts = new Map<AgentType, number>();
+  for (const story of stories) {
+    if (story.excluded || story.skipped || isPassed(story)) continue;
+    const engine = resolveStoryAgent(story, runAgent);
+    counts.set(engine, (counts.get(engine) ?? 0) + 1);
+  }
+  return counts;
+}
+
+// ─── Rate Limit Rerouting Tracking ──────────────────────────────────────────
+
+interface RerouteInfo {
+  storyId: string;
+  fromEngine: AgentType;
+  toEngine: AgentType;
+  reason: string;
+}
+
+const reroutedStories = new Map<string, RerouteInfo>();
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1104,13 +1148,19 @@ async function executeStory(
   worktreeInfo?: StoryWorktree,
   escalationStates?: Map<string, EscalationState>,
   allStories?: UserStory[],
+  storyAgentOverride?: AgentType,
+  storyAttachAddr?: string | null,
 ): Promise<'passed' | 'failed' | 'skipped'> {
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
+  // Per-story agent resolution: explicit override > story.agent field > run-level config
+  const effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);
+  const effectiveAttach = effectiveAgent === 'opencode' ? (storyAttachAddr ?? config.attachAddr) : null;
+
   // ── Escalation: determine current model tier ────────────────────────
   // Escalation only applies to opencode (API-key models). Claude and Codex are subscription-based.
-  const escalationEnabled = config.agentType === 'opencode' && escalationStates !== undefined;
+  const escalationEnabled = effectiveAgent === 'opencode' && escalationStates !== undefined;
   let currentModel = config.agentModel;
 
   if (escalationEnabled && escalationStates) {
@@ -1146,11 +1196,11 @@ async function executeStory(
     }
   }
 
-  console.log(`[${mode}] ${story.id}: ${story.title} (agent: ${config.agentType})`);
+  console.log(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
   if (worktreeInfo) console.log(`  Worktree: ${worktreeInfo.worktreePath}`);
   console.log(`  Timeout: ${timeoutMin}m`);
 
-  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, config.agentType);
+  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent);
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
   fs.writeFileSync(promptLogFile, prompt);
@@ -1165,7 +1215,7 @@ async function executeStory(
       run_id: config.runId,
       story_id: story.id,
       story_title: story.title,
-      agent_type: config.agentType,
+      agent_type: effectiveAgent,
       ...(currentModel !== config.agentModel ? { model_override: currentModel, model_tier: escState?.currentTier } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
     }, story.id);
@@ -1182,18 +1232,18 @@ async function executeStory(
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const result = await runAgent(
-      config.agentType,
+      effectiveAgent,
       prompt,
       effectiveCwd,
       timeoutMin * 60 * 1000,
       storyLogFile,
       currentModel,
-      config.attachAddr,
+      effectiveAttach,
     );
 
     // Extract token usage from log file after agent exits
     const tokenUsage = extractTokenUsage(
-      storyLogFile, config.agentType, currentModel, result.stderrTail, config.cwd,
+      storyLogFile, effectiveAgent, currentModel, result.stderrTail, config.cwd,
     );
     const tokenPayload = {
       inputTokens: tokenUsage.inputTokens,
@@ -1208,6 +1258,40 @@ async function executeStory(
       retryCounts.set(rateLimitKey, rateLimitAttempts);
 
       if (rateLimitAttempts > MAX_RATE_LIMIT_RETRIES) {
+        // ── Fallback engine rerouting: before failing, check if a secondary engine is configured ──
+        const orchConfig = loadOrchestrationConfig(config.cwd);
+        const fallback = orchConfig.fallbackEngine;
+        if (fallback && fallback !== effectiveAgent && !reroutedStories.has(story.id)) {
+          console.log(`${story.id} rate limited ${rateLimitAttempts} times on ${effectiveAgent} — rerouting to ${fallback}`);
+
+          reroutedStories.set(story.id, {
+            storyId: story.id,
+            fromEngine: effectiveAgent,
+            toEngine: fallback,
+            reason: 'rate_limit',
+          });
+
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_rerouted', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              fromEngine: effectiveAgent,
+              toEngine: fallback,
+              reason: 'rate_limit',
+              attempts: rateLimitAttempts,
+            }, story.id);
+          }
+
+          // Reset retry counts and recurse with fallback engine
+          retryCounts.delete(story.id);
+          retryCounts.delete(rateLimitKey);
+          return executeStory(
+            story, config, mode, playbook, logDir, workspaceId, retryCounts,
+            storyCwd, worktreeInfo, escalationStates, allStories,
+            fallback, fallback === 'opencode' ? config.attachAddr : null,
+          );
+        }
+
         console.log(`${story.id} rate limited ${rateLimitAttempts} times — exhausted. Marking failed.`);
         markStorySkipped(config.jsonPath, story.id);
 
@@ -1241,7 +1325,7 @@ async function executeStory(
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_started', workspaceId, {
           run_id: config.runId, story_id: story.id, story_title: story.title,
-          agent_type: config.agentType,
+          agent_type: effectiveAgent,
           ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
         }, story.id);
       }
@@ -1330,7 +1414,7 @@ async function executeStory(
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_passed', workspaceId, {
           run_id: config.runId, story_id: story.id, story_title: story.title,
-          agent_type: config.agentType,
+          agent_type: effectiveAgent,
         }, story.id);
         try {
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
@@ -1364,7 +1448,7 @@ async function executeStory(
     }
 
     // ── Non-zero exit: classify error and retry ────────────────────────
-    const classified = config.agentType === 'opencode'
+    const classified = effectiveAgent === 'opencode'
       ? classifyOpenCodeError(result)
       : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
 
@@ -1378,7 +1462,7 @@ async function executeStory(
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
           reason: classified.category, error_message: classified.message,
-          agent_type: config.agentType, exit_code: result.exitCode,
+          agent_type: effectiveAgent, exit_code: result.exitCode,
         }, story.id);
         try {
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
@@ -1451,7 +1535,7 @@ async function executeStory(
             final_tier: escState.currentTier,
             escalation_history: escState.escalationHistory,
             error_category: classified.category, error_message: classified.message,
-            agent_type: config.agentType,
+            agent_type: effectiveAgent,
           }, story.id);
           try {
             await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
@@ -1485,7 +1569,7 @@ async function executeStory(
           run_id: config.runId, story_id: story.id,
           reason: 'max_retries', attempts: currentRetries,
           error_category: classified.category, error_message: classified.message,
-          agent_type: config.agentType,
+          agent_type: effectiveAgent,
         }, story.id);
         try {
           await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
@@ -1503,6 +1587,11 @@ async function executeStory(
     return 'failed';
   }
 }
+
+// ─── Exported helpers for pipeline.ts ────────────────────────────────────────
+
+export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories };
+export type { UserStory as EngineUserStory, RerouteInfo };
 
 // ─── Bounded Concurrency ────────────────────────────────────────────────────
 
@@ -1585,6 +1674,10 @@ async function main(): Promise<void> {
   const modeLabel = mode === 'qa' ? 'QA Testing' : mode === 'journey' ? 'User Journey' : 'Implementation';
   const progress = getProgress(stories);
 
+  // ── Scan per-story agent assignments ────────────────────────────────
+  const requiredEngines = scanRequiredEngines(stories, config.agentType);
+  const engineCounts = countStoriesByEngine(stories, config.agentType);
+
   console.log('========================================');
   console.log(`  Rorca Engine — ${modeLabel}`);
   console.log('========================================');
@@ -1594,6 +1687,14 @@ async function main(): Promise<void> {
   console.log(`Parallelism: ${config.parallelism}`);
   console.log(`JSON: ${config.jsonPath}`);
   if (playbook) console.log(`Playbook: ${playbook}`);
+  if (requiredEngines.size > 1) {
+    const breakdown = [...engineCounts.entries()].map(([e, n]) => `${e}:${n}`).join(', ');
+    console.log(`Engines: ${breakdown} (multi-engine run)`);
+  }
+  const orchConfig = loadOrchestrationConfig(config.cwd);
+  if (orchConfig.fallbackEngine) {
+    console.log(`Fallback engine: ${orchConfig.fallbackEngine} (rate limit overflow)`);
+  }
   console.log('');
 
   const workspaceId = await resolveWorkspaceId(config.port, config.cwd);
@@ -1643,8 +1744,9 @@ async function main(): Promise<void> {
     const currentProgress = getProgress(currentStories);
     const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
+    const storyAgent = resolveStoryAgent(story, config.agentType);
     console.log('------------------------------------------');
-    console.log(`[${mode}] Iteration ${iteration} | ${story.id}: ${story.title} (agent: ${config.agentType})`);
+    console.log(`[${mode}] Iteration ${iteration} | ${story.id}: ${story.title} (agent: ${storyAgent})`);
     console.log(`  Progress: ${currentProgress.passed}/${currentProgress.total}`);
     console.log('------------------------------------------');
 
@@ -2001,7 +2103,11 @@ function parseArgs(): EngineConfig {
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
-main().catch((err) => {
-  console.error('[engine] Fatal error:', err);
-  process.exit(1);
-});
+// Guard: only run main() when executed directly (not when imported by tests)
+const _isDirectRun = require.main === module || process.argv[1]?.endsWith('execution-engine.ts');
+if (_isDirectRun) {
+  main().catch((err) => {
+    console.error('[engine] Fatal error:', err);
+    process.exit(1);
+  });
+}

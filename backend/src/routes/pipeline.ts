@@ -21,6 +21,7 @@ import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
 import { agentConfig, type AgentType } from '../lib/config';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { synthesize } from '../lib/direction-stack';
+import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
 
 /** Extract semantic steps from a raw text chunk (may contain multiple lines). */
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
@@ -377,6 +378,59 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }
     }
 
+    // OC-029: Scan per-story agent assignments and validate ALL required engines
+    const absSpecPathForScan = path.join(workspace.path, specPath);
+    if (fs.existsSync(absSpecPathForScan)) {
+      try {
+        const specJsonForScan = JSON.parse(fs.readFileSync(absSpecPathForScan, 'utf8'));
+        const specStories = (specJsonForScan.userStories ?? []) as EngineUserStory[];
+        const requiredEngines = scanRequiredEngines(specStories, resolvedAgentType);
+        const engineCounts = countStoriesByEngine(specStories, resolvedAgentType);
+
+        // Validate each required engine is authenticated
+        const authErrors: string[] = [];
+
+        if (requiredEngines.has('claude')) {
+          const { getClaudeAuthState } = await import('../lib/claude-auth');
+          const authState = getClaudeAuthState();
+          if (!authState.connected) {
+            const count = engineCounts.get('claude') ?? 0;
+            authErrors.push(`Claude not authenticated — ${count} ${count === 1 ? 'story' : 'stories'} assigned`);
+          }
+        }
+
+        if (requiredEngines.has('codex')) {
+          const { getCodexAuthState } = await import('../lib/codex-auth');
+          const authState = getCodexAuthState();
+          if (!authState.connected) {
+            const count = engineCounts.get('codex') ?? 0;
+            authErrors.push(`Codex not authenticated — ${count} ${count === 1 ? 'story' : 'stories'} assigned`);
+          }
+        }
+
+        if (requiredEngines.has('opencode')) {
+          const { detectOpenCode } = await import('../lib/opencode-detector');
+          const ocStatus = detectOpenCode();
+          if (!ocStatus.opencodeInstalled) {
+            const count = engineCounts.get('opencode') ?? 0;
+            authErrors.push(`OpenCode not installed — ${count} ${count === 1 ? 'story' : 'stories'} assigned`);
+          }
+        }
+
+        if (authErrors.length > 0) {
+          res.status(403).json({
+            error: 'engine_auth_required',
+            message: 'Some execution engines are not ready',
+            details: authErrors,
+            settingsDeepLink: '/settings?tab=providers',
+          });
+          return;
+        }
+      } catch {
+        // Spec parse error — non-fatal for auth scanning, let the trigger proceed
+      }
+    }
+
     const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
     const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
@@ -540,11 +594,23 @@ router.post('/trigger', async (req: Request, res: Response) => {
       }
     }
 
-    // 9. Start OpenCode server if agent type is opencode (server lifecycle tied to run)
+    // 9. Start OpenCode server if ANY story is assigned to opencode (OC-029: conditional start)
+    //    Server reused across all opencode-assigned stories; stopped after last one completes.
     let ocServer: OpenCodeServer | null = null;
     let attachAddr: string | null = null;
 
-    if (resolvedAgentType === 'opencode' && useExecutionEngine) {
+    // Determine if any story needs opencode — check per-story assignments
+    let hasOpencodeStories = resolvedAgentType === 'opencode';
+    if (!hasOpencodeStories) {
+      try {
+        const specJson2 = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+        const stories2 = (specJson2.userStories ?? []) as EngineUserStory[];
+        const engines = scanRequiredEngines(stories2, resolvedAgentType);
+        hasOpencodeStories = engines.has('opencode');
+      } catch { /* non-fatal */ }
+    }
+
+    if (hasOpencodeStories && useExecutionEngine) {
       try {
         ocServer = new OpenCodeServer({
           runId,
@@ -1530,7 +1596,9 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
     ).all(runId) as StoryResultRow[];
 
     // Read spec JSON to return full userStories list (including pending ones)
-    let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean }[] = [];
+    // OC-029: Include per-story engine assignment in response
+    const runAgentType = (run.agent_type || run.agent || 'claude') as AgentType;
+    let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean; agent?: string; reroute?: { fromEngine: string; toEngine: string; reason: string } }[] = [];
     let specModel: string | null = null;
     try {
       const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(run.workspace_id) as { path: string } | undefined;
@@ -1540,17 +1608,41 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
           const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
           specModel = specJson.model || null;
           if (Array.isArray(specJson.userStories)) {
-            specStories = specJson.userStories.map((s: any) => ({
-              id: s.id,
-              title: s.title,
-              dependsOn: s.dependsOn,
-              passes: s.passes,
-            }));
+            specStories = specJson.userStories.map((s: any) => {
+              const storyAgent = resolveStoryAgent(s, runAgentType);
+              const reroute = reroutedStories.get(s.id);
+              return {
+                id: s.id,
+                title: s.title,
+                dependsOn: s.dependsOn,
+                passes: s.passes,
+                agent: storyAgent,
+                ...(reroute ? { reroute: { fromEngine: reroute.fromEngine, toEngine: reroute.toEngine, reason: reroute.reason } } : {}),
+              };
+            });
           }
         }
       }
     } catch {
       // Spec file missing or malformed — specStories stays empty
+    }
+
+    // OC-029: Enrich specStories with reroute data from WAL events (for historical runs)
+    if (specStories.length > 0) {
+      try {
+        const rerouteEvents = db.prepare(
+          `SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND payload LIKE '%"run_id":' || ? || '%' ORDER BY id ASC`
+        ).all(runId) as Array<{ story_id: string; payload: string }>;
+        for (const evt of rerouteEvents) {
+          const story = specStories.find(s => s.id === evt.story_id);
+          if (story && !story.reroute) {
+            try {
+              const p = JSON.parse(evt.payload);
+              story.reroute = { fromEngine: p.fromEngine, toEngine: p.toEngine, reason: p.reason };
+            } catch { /* malformed payload */ }
+          }
+        }
+      } catch { /* WAL query error — non-fatal */ }
     }
 
     // Aggregate token counts and cost from story_results

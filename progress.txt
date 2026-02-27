@@ -1087,3 +1087,34 @@ Key decisions:
 - Provider family extraction from model ID prefix (e.g., `meta-llama/` → `Meta`)
 - Free model detection: pricing.prompt === 0 AND pricing.completion === 0 AND context_length >= 8192
 - OpenRouter models in dropdown use `openrouter/{model-id}` format to distinguish from hardcoded OPENCODE_MODELS entries
+
+## Story OC-029: Multi-Engine Process Lifecycle Management — DONE
+Files touched:
+- backend/src/lib/execution-engine.ts (modified — per-story agent resolution, engine scanning, rerouting tracking, main() guard for test imports)
+- backend/src/lib/complexity-scorer.ts (modified — added fallbackEngine to OrchestrationConfig + loader)
+- backend/src/lib/config.ts (modified — added fallbackEngine validation)
+- backend/src/routes/pipeline.ts (modified — multi-engine auth validation, conditional OpenCode server start, per-story engine+reroute in runs API)
+- src/panels/PipelineMonitorPanel.tsx (modified — RerouteInfo interface, reroute badge, story_rerouted SSE handling)
+- backend/src/lib/__tests__/multi-engine-lifecycle.test.ts (new — 27 tests)
+
+What was built:
+- `resolveStoryAgent()` — resolves per-story agent from `UserStory.agent` field with fallback to run-level agentType
+- `scanRequiredEngines()` — scans all active stories and returns the set of unique engines needed for a run
+- `countStoriesByEngine()` — counts active stories assigned to each engine (for error messaging)
+- `RerouteInfo` type + `reroutedStories` Map — tracks rate limit reroutes per story (prevents double-reroute)
+- Rate limit rerouting in `executeStory()` — on exhausted retries, checks `orchestration.fallbackEngine`, emits `story_rerouted` WAL event, recursively retries with fallback engine
+- `fallbackEngine` field added to `OrchestrationConfig` (defaults to null = disabled)
+- `validateOrchestrationConfig()` validates fallbackEngine (must be claude/opencode/codex or null)
+- Pipeline trigger validates ALL required engines are authenticated before spawning run (returns 403 with per-engine errors)
+- OpenCode server start is conditional — only starts when at least one story is assigned to opencode
+- GET /api/pipeline/runs/:id returns per-story `agent` and `reroute` fields in `specStories` array
+- Run View shows cyan reroute badge: "Rerouted: Claude→Codex (rate_limit)" with tooltip
+- `deriveStoriesFromEvents()` handles `story_rerouted` SSE events for live UI updates
+- `main()` entry point guarded with `require.main === module` check to prevent auto-execution on test import
+- 27-test integration test suite covering all helpers, config validation, and multi-engine scenarios
+
+Key decisions:
+- Recursive `executeStory()` call for rerouting — reuses all existing retry/escalation logic cleanly
+- `reroutedStories` Map prevents infinite reroute loops (a story can only be rerouted once)
+- Inline union type `'claude' | 'opencode' | 'codex' | null` for fallbackEngine in complexity-scorer.ts to avoid circular dependency (config.ts imports from complexity-scorer.ts)
+- Existing `cleanupOrphanRuns()` already handles mixed engine state (kills both engine PIDs and OpenCode server) — no changes needed
