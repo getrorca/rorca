@@ -380,7 +380,7 @@ export default function Shell({ sidebar, children, onMenuToggle, showMenuButton,
       {/* Body */}
       <div className="flex flex-1 min-h-0">
         {sidebar}
-        <main id="main-content" className="flex-1 overflow-hidden">
+        <main id="main-content" className="flex-1 overflow-hidden contain-layout">
           {children}
         </main>
       </div>

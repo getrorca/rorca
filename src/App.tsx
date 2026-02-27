@@ -7,21 +7,21 @@ import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
-import OnboardingWizard from './components/OnboardingWizard';
-import CommandPalette from './components/CommandPalette';
-// KeyboardShortcutsPanel modal replaced by Settings > Shortcuts tab (UI-032)
 import ErrorBoundary from './components/ErrorBoundary';
-// NetworkBanner is now inline in Shell.tsx top bar (useNetworkOffline + NetworkIndicator)
-import LoginPage from './components/LoginPage';
-import RegisterPage from './components/RegisterPage';
-import ForgotPasswordPage from './components/ForgotPasswordPage';
-import ResetPasswordPage from './components/ResetPasswordPage';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { onApiFetchError } from './lib/apiFetch';
-import PublicReviewPage from './pages/PublicReviewPage';
 import { HubSkeleton, RunViewTerminalSkeleton, ForgeSkeleton, SettingsSkeleton, GenericPanelSkeleton } from './components/Skeleton';
 import type { SettingsTab } from './panels/SettingsPanel';
+
+// ── Lazy-loaded non-critical components (not needed for initial paint) ──
+const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
+const CommandPalette = lazy(() => import('./components/CommandPalette'));
+const LoginPage = lazy(() => import('./components/LoginPage'));
+const RegisterPage = lazy(() => import('./components/RegisterPage'));
+const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
+const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
+const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
 
 // ── Lazy-loaded panels (code-split into separate chunks) ──
 const HubPanel = lazy(() => import('./panels/HubPanel'));
@@ -61,14 +61,23 @@ function AuthGate() {
   // EQ-007: Public review page — rendered outside auth gate
   const reviewMatch = window.location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
   if (reviewMatch) {
-    return <PublicReviewPage token={reviewMatch[1]} />;
+    return (
+      <Suspense fallback={<GenericPanelSkeleton />}>
+        <PublicReviewPage token={reviewMatch[1]} />
+      </Suspense>
+    );
   }
 
   if (loading) {
+    // Render shell + skeleton instead of blocking — top bar and sidebar paint immediately
     return (
-      <div className="min-h-screen flex items-center justify-center bg-bg">
-        <div className="text-muted text-sm">Loading...</div>
-      </div>
+      <NotificationProvider>
+        <WorkspaceProvider>
+          <Shell>
+            <HubSkeleton />
+          </Shell>
+        </WorkspaceProvider>
+      </NotificationProvider>
     );
   }
 
@@ -77,14 +86,19 @@ function AuthGate() {
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token') || '';
     if (!token) {
-      // No token provided — go to forgot password
-      return <ForgotPasswordPage onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }} />;
+      return (
+        <Suspense fallback={<GenericPanelSkeleton />}>
+          <ForgotPasswordPage onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }} />
+        </Suspense>
+      );
     }
     return (
-      <ResetPasswordPage
-        token={token}
-        onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }}
-      />
+      <Suspense fallback={<GenericPanelSkeleton />}>
+        <ResetPasswordPage
+          token={token}
+          onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }}
+        />
+      </Suspense>
     );
   }
 
@@ -300,7 +314,9 @@ function AppContent() {
   if (workspaces.length === 0) {
     return (
       <Shell>
-        <OnboardingWizard />
+        <Suspense fallback={<GenericPanelSkeleton />}>
+          <OnboardingWizard />
+        </Suspense>
       </Shell>
     );
   }
@@ -335,13 +351,15 @@ function AppContent() {
         </>
       )}
       {showCommandPalette && (
-        <CommandPalette
-          onNavigate={handleNavigate}
-          onClose={() => setShowCommandPalette(false)}
-          activePanel={activePanel}
-          activeRunId={activeRunId}
-          onSendToForge={handleSendToForge}
-        />
+        <Suspense fallback={null}>
+          <CommandPalette
+            onNavigate={handleNavigate}
+            onClose={() => setShowCommandPalette(false)}
+            activePanel={activePanel}
+            activeRunId={activeRunId}
+            onSendToForge={handleSendToForge}
+          />
+        </Suspense>
       )}
     </Shell>
   );
