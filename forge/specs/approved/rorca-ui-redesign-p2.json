@@ -47,7 +47,8 @@
         "Unknown output lines shown in [Output] group"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "P2-004",
