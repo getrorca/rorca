@@ -260,7 +260,7 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
             <div className="flex-1 overflow-y-auto py-2">
               {NAV_SECTIONS.map((section) => (
                 <div key={section.id} className="mb-1">
-                  <div className="px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                  <div className="px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted" style={{ fontVariant: 'small-caps' }}>
                     {section.label}
                   </div>
                   {section.items.map((item) => {
@@ -273,7 +273,7 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
                         className={`w-full flex items-center gap-2.5 px-4 py-1.5 text-sm transition-colors ${
                           isActive
                             ? 'text-accent bg-accent/10'
-                            : 'text-[var(--text)] hover:bg-bg'
+                            : 'text-[var(--text)] hover:bg-panel/50'
                         }`}
                       >
                         <Icon size={16} strokeWidth={1.5} />
