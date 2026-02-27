@@ -318,6 +318,41 @@ export function runMigrations() {
     db.exec('ALTER TABLE api_key_vault ADD COLUMN base_url TEXT');
   }
 
+  // EQ-007: Add author_name column to story_comments for guest reviewers (idempotent)
+  const scCols = db.pragma('table_info(story_comments)') as { name: string }[];
+  if (!scCols.some(c => c.name === 'author_name')) {
+    db.exec('ALTER TABLE story_comments ADD COLUMN author_name TEXT');
+  }
+
+  // EQ-007: Make user_id nullable for guest comments (story_comments was NOT NULL)
+  // SQLite doesn't allow ALTER COLUMN, but new rows can insert NULL via the review route
+  // because the NOT NULL constraint applies at INSERT time and we handle it in code.
+  // We need to rebuild the table to allow NULL user_id.
+  const scSql = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_comments'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (scSql.includes('user_id TEXT NOT NULL')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE story_comments_new (
+        id TEXT PRIMARY KEY,
+        spec_id TEXT NOT NULL,
+        story_id TEXT NOT NULL,
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT,
+        author_name TEXT
+      );
+      INSERT INTO story_comments_new (id, spec_id, story_id, user_id, body, created_at, resolved_at, author_name)
+        SELECT id, spec_id, story_id, user_id, body, created_at, resolved_at, author_name FROM story_comments;
+      DROP TABLE story_comments;
+      ALTER TABLE story_comments_new RENAME TO story_comments;
+      CREATE INDEX IF NOT EXISTS idx_story_comments_spec_story ON story_comments(spec_id, story_id);
+    `);
+    db.pragma('foreign_keys = ON');
+  }
+
   // UI-031: Add auto-PR settings columns to workspace_github_webhooks (idempotent)
   const ghCols = db.pragma('table_info(workspace_github_webhooks)') as { name: string }[];
   if (!ghCols.some(c => c.name === 'auto_pr_enabled')) {
