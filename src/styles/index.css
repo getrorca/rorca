@@ -59,3 +59,22 @@
   75% { background-color: rgba(59, 130, 246, 0.05); }
   100% { background-color: transparent; }
 }
+
+@keyframes story-pass-flash {
+  0% { background-color: rgba(16, 185, 129, 0.18); }
+  100% { background-color: transparent; }
+}
+
+@keyframes checkmark-pop {
+  0% { transform: scale(0); opacity: 0; }
+  60% { transform: scale(1.2); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.animate-story-pass {
+  animation: story-pass-flash 600ms ease-out forwards;
+}
+
+.animate-checkmark-pop {
+  animation: checkmark-pop 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}

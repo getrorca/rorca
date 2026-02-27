@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import type { WalEvent } from '../hooks/usePipelineSSE';
@@ -167,16 +167,29 @@ function StoryRow({ story, onStoryClick, indented }: {
   const isExcluded = story.status === 'excluded';
   const isClickable = !!onStoryClick;
 
+  // Track status transitions — animate only when status *changes* to pass
+  const prevStatusRef = useRef<DerivedStatus>(story.status);
+  const [justPassed, setJustPassed] = useState(false);
+
+  useEffect(() => {
+    if (story.status === 'pass' && prevStatusRef.current !== 'pass') {
+      setJustPassed(true);
+      const timer = setTimeout(() => setJustPassed(false), 600);
+      return () => clearTimeout(timer);
+    }
+    prevStatusRef.current = story.status;
+  }, [story.status]);
+
   return (
     <div
       onClick={isClickable ? () => onStoryClick!(story.storyId) : undefined}
       className={`flex items-center gap-2 ${indented ? 'pl-6 pr-3' : 'px-3'} py-2 border-b border-border/50 transition-colors ${
         cfg.rowClass || ''
-      } ${isClickable ? 'cursor-pointer hover:bg-bg/50' : ''}`}
+      } ${isClickable ? 'cursor-pointer hover:bg-bg/50' : ''} ${justPassed ? 'animate-story-pass' : ''}`}
     >
       <Icon
         size={14}
-        className={`shrink-0 ${cfg.color} ${isAnimated ? 'animate-spin' : ''}`}
+        className={`shrink-0 ${cfg.color} ${isAnimated ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
       />
       <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
         story.status === 'running' ? 'bg-blue-500/10 text-blue-500' :
