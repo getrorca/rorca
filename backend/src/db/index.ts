@@ -385,6 +385,28 @@ export function runMigrations() {
   if (!wsColsEQ012.some(c => c.name === 'default_parallelism')) {
     db.exec("ALTER TABLE workspaces ADD COLUMN default_parallelism INTEGER NOT NULL DEFAULT 1");
   }
+
+  // RQ-001: Create run_queue table (idempotent)
+  const rqExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='run_queue'`
+  ).get();
+  if (!rqExists) {
+    db.exec(`
+      CREATE TABLE run_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+        spec_id TEXT NOT NULL,
+        spec_path TEXT NOT NULL,
+        parallelism INTEGER NOT NULL DEFAULT 1,
+        auto_worktree INTEGER NOT NULL DEFAULT 0,
+        position INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        triggered_at TEXT
+      );
+      CREATE INDEX idx_run_queue_workspace_status ON run_queue(workspace_id, status);
+    `);
+  }
 }
 
 runMigrations();
