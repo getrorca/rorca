@@ -5,7 +5,7 @@ import {
   Plus, Hammer, X,
 } from 'lucide-react';
 
-export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'settings' | 'workspace-settings';
+export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'settings' | 'workspace-settings' | 'spec-review';
 
 interface NavItem {
   id: PanelId;
@@ -125,6 +125,7 @@ function resolveActiveNav(panel: PanelId): MinimalNavId {
     case 'queue':
     case 'archive':
     case 'marketplace':
+    case 'spec-review':
     default:
       return 'forge';
   }

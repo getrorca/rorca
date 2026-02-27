@@ -42,6 +42,7 @@ import SettingsPanel from './panels/SettingsPanel';
 import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
 import HubPanel from './panels/HubPanel';
 import RunViewPanel from './panels/RunViewPanel';
+import SpecReviewPanel from './panels/SpecReviewPanel';
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
@@ -127,10 +128,11 @@ function GlobalErrorWiring() {
 }
 
 /** Renders the active panel component */
-function ActivePanel({ id, onNavigate, onNavigateToRun }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void }) {
+function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview }: { id: PanelId; onNavigate: (p: PanelId) => void; onNavigateToRun?: (runId: number) => void; reviewSpecId?: string | null; onNavigateToSpecReview?: (specId: string) => void }) {
   switch (id) {
-    case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} />;
+    case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
     case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} />;
+    case 'spec-review': return <SpecReviewPanel specId={reviewSpecId ?? ''} onBack={() => onNavigate('hub')} onNavigate={onNavigate} />;
     case 'stack': return <DirectionStackPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'queue': return <ReviewQueuePanel />;
@@ -179,11 +181,13 @@ const PANEL_LABELS: Record<PanelId, string> = {
   github: 'GitHub Settings',
   'workspace-settings': 'Workspace Settings',
   settings: 'Settings',
+  'spec-review': 'Spec Review',
 };
 
 function AppContent() {
   const [activePanel, setActivePanel] = useState<PanelId>('hub');
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
+  const [reviewSpecId, setReviewSpecId] = useState<string | null>(null);
   const { workspaces } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -214,6 +218,15 @@ function AppContent() {
     setActiveRunId(null);
     window.location.hash = '';
   }, []);
+
+  const navigateToSpecReview = useCallback((specId: string) => {
+    setReviewSpecId(specId);
+    setActivePanel('spec-review');
+    if (activeRunId !== null) {
+      setActiveRunId(null);
+      window.location.hash = '';
+    }
+  }, [activeRunId]);
 
   // Override setActivePanel to clear run view when navigating elsewhere
   const handleNavigate = useCallback((panel: PanelId) => {
@@ -274,7 +287,7 @@ function AppContent() {
         <>
           {/* key={activePanel} resets ErrorBoundary when switching panels */}
           <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel]}>
-            <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} />
+            <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} reviewSpecId={reviewSpecId} onNavigateToSpecReview={navigateToSpecReview} />
           </ErrorBoundary>
         </>
       )}
