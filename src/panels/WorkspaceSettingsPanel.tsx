@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Settings2, Layers, Github, Variable, Play, Webhook,
-  Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route,
+  Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route, FileText,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { useToast, ToastContainer } from '../components/Toast';
 import AgentsEditorSection from '../components/AgentsEditorSection';
 import ContextRoutingSettings from '../components/ContextRoutingSettings';
+import ContextFilesEditor from '../components/ContextFilesEditor';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -114,7 +115,7 @@ export default function WorkspaceSettingsPanel() {
         <div className="flex-1 overflow-y-auto p-4 sm:p-6">
           {activeTab === 'general'   && <GeneralSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'direction' && <DirectionSection workspaceId={workspaceId} showToast={showToast} />}
-          {activeTab === 'context'   && <ContextRoutingSettings workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'context'   && <ContextSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'github'    && <GithubSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'env-vars'  && <EnvVarsSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'pipeline'  && <PipelineSection workspaceId={workspaceId} showToast={showToast} />}
@@ -133,6 +134,45 @@ export default function WorkspaceSettingsPanel() {
 interface SectionProps {
   workspaceId: string;
   showToast: (message: string, type?: 'success' | 'error') => void;
+}
+
+// ─── Context Section (sub-tabs: Routing | Files) ────────────────────────────
+
+function ContextSection({ workspaceId, showToast }: SectionProps) {
+  const [subTab, setSubTab] = useState<'routing' | 'files'>('routing');
+
+  return (
+    <div className="space-y-4">
+      {/* Sub-tab bar */}
+      <div className="flex gap-1 border-b border-border -mt-2 mb-4">
+        <button
+          onClick={() => setSubTab('routing')}
+          className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
+            subTab === 'routing'
+              ? 'text-accent border-accent'
+              : 'text-muted hover:text-[var(--text)] border-transparent'
+          }`}
+        >
+          <Route size={14} />
+          Routing
+        </button>
+        <button
+          onClick={() => setSubTab('files')}
+          className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
+            subTab === 'files'
+              ? 'text-accent border-accent'
+              : 'text-muted hover:text-[var(--text)] border-transparent'
+          }`}
+        >
+          <FileText size={14} />
+          Files
+        </button>
+      </div>
+
+      {subTab === 'routing' && <ContextRoutingSettings workspaceId={workspaceId} showToast={showToast} />}
+      {subTab === 'files' && <ContextFilesEditor workspaceId={workspaceId} showToast={showToast} />}
+    </div>
+  );
 }
 
 // ─── General Section ─────────────────────────────────────────────────────────
