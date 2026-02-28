@@ -1760,6 +1760,28 @@ async function main(): Promise<void> {
   const retryCounts = new Map<string, number>();
   const escalationStates = new Map<string, EscalationState>();
 
+  // ── Clear stale skipped/blocked flags from previous failed runs ───────────
+  // Wave parallel failures mark downstream stories as skipped in the spec JSON.
+  // On a fresh run, these stale flags would prevent those stories from executing.
+  // Reset skipped/blocked for any non-passed story so every run starts clean.
+  if (!config.specificStory) {
+    const freshSpec: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
+    const freshStories = getStories(freshSpec);
+    let staleFlags = 0;
+    for (const s of freshStories) {
+      if (!isPassed(s) && (s.skipped || (s as any).blocked)) {
+        delete s.skipped;
+        delete (s as any).blocked;
+        delete s.notes;
+        staleFlags++;
+      }
+    }
+    if (staleFlags > 0) {
+      fs.writeFileSync(config.jsonPath, JSON.stringify(freshSpec, null, 2) + '\n');
+      console.log(`[engine] Cleared stale skipped/blocked flags from ${staleFlags} stor${staleFlags === 1 ? 'y' : 'ies'}`);
+    }
+  }
+
   process.on('SIGINT', () => {
     console.log('');
     console.log('Engine stopped by user.');
