@@ -54,6 +54,21 @@ import {
 import { route as routeContext, writeContextFile, type ContextStory } from './context-router';
 import { loadRorcaConfig } from './rorca-config';
 import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
+import {
+  initRunState,
+  readRunState,
+  markStoryStarted as rsMarkStoryStarted,
+  markStoryCompleted as rsMarkStoryCompleted,
+  markStoryFailed as rsMarkStoryFailed,
+  markStorySkipped as rsMarkStorySkipped,
+  recordDecision,
+  archiveRunState,
+  writeProgressTxt,
+  migrateProgressTxt,
+  getResumeContext,
+  type StoryEntry,
+  type ResumeContext,
+} from './run-state';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1281,6 +1296,10 @@ async function executeStory(
       const betterEngine = findCapableEngine(requiredTools, effectiveAgent);
       if (betterEngine) {
         console.log(`  [capability] Rerouting ${story.id} from ${effectiveAgent} → ${betterEngine} (missing: ${capResult.missingTools.join(', ')})`);
+        recordDecision(effectiveCwd, {
+          storyId: story.id, timestamp: new Date().toISOString(),
+          type: 'capability_reroute', description: `Rerouted ${effectiveAgent} → ${betterEngine} (missing: ${capResult.missingTools.join(', ')})`,
+        });
 
         // Emit WAL event for capability reroute
         const wsId = workspaceId;
@@ -1414,6 +1433,9 @@ async function executeStory(
     }, story.id);
   }
 
+  // CIE-007: Mark story started in run-state.json
+  rsMarkStoryStarted(effectiveCwd, story.id);
+
   const storyResultExtra = worktreeInfo
     ? { worktreePath: worktreeInfo.worktreePath, worktreeBranch: worktreeInfo.branchName }
     : {};
@@ -1487,6 +1509,13 @@ async function executeStory(
 
         console.log(`${story.id} rate limited ${rateLimitAttempts} times — exhausted. Marking failed.`);
         markStorySkipped(config.jsonPath, story.id);
+        rsMarkStoryFailed(effectiveCwd, {
+          storyId: story.id, title: story.title, status: 'failed',
+          startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+          finishedAt: new Date().toISOString(), agentType: effectiveAgent,
+          failReason: 'rate_limit_exhausted', retries: rateLimitAttempts,
+        });
+        writeProgressTxt(effectiveCwd);
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -1552,6 +1581,10 @@ async function executeStory(
               const provider = extractProvider(config.agentModel);
               currentModel = `${provider}/${resolveModelId(nextTier, provider, config.cwd)}`;
               console.log(`${story.id} gate failed — escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
+              recordDecision(effectiveCwd, {
+                storyId: story.id, timestamp: new Date().toISOString(),
+                type: 'escalation', description: `Gate ${gate.reason} failed — escalated ${fromTier} → ${nextTier}`,
+              });
 
               if (workspaceId) {
                 await emitWalEvent(config.port, 'story_escalated', workspaceId, {
@@ -1571,7 +1604,16 @@ async function executeStory(
         const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
         retryCounts.set(story.id, currentRetries);
 
-        if (currentRetries >= MAX_RETRIES) markStorySkipped(config.jsonPath, story.id);
+        if (currentRetries >= MAX_RETRIES) {
+          markStorySkipped(config.jsonPath, story.id);
+          rsMarkStoryFailed(effectiveCwd, {
+            storyId: story.id, title: story.title, status: 'failed',
+            startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+            finishedAt: new Date().toISOString(), agentType: effectiveAgent,
+            failReason: `gate_${gate.reason}`, retries: currentRetries,
+          });
+          writeProgressTxt(effectiveCwd);
+        }
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -1592,6 +1634,19 @@ async function executeStory(
       markStoryPassed(config.jsonPath, story.id);
       retryCounts.delete(story.id);
       retryCounts.delete(rateLimitKey);
+
+      // CIE-007: Record story completion in run-state.json
+      rsMarkStoryCompleted(effectiveCwd, {
+        storyId: story.id,
+        title: story.title,
+        status: 'passed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: effectiveAgent,
+        model: currentModel ?? undefined,
+        elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
 
       console.log(`Committing ${story.id}...`);
       gitCommitStory(effectiveCwd, story.id, story.title, mode);
@@ -1636,6 +1691,13 @@ async function executeStory(
       console.log(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
       console.log(`   Log: ${storyLogFile}`);
       markStorySkipped(config.jsonPath, story.id);
+      rsMarkStoryFailed(effectiveCwd, {
+        storyId: story.id, title: story.title, status: 'failed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(), agentType: effectiveAgent,
+        failReason: 'timeout', elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -1658,6 +1720,13 @@ async function executeStory(
       console.log(`${story.id} failed (non-retryable): ${classified.category} — ${classified.message}`);
       console.log(`   Log: ${storyLogFile}`);
       markStorySkipped(config.jsonPath, story.id);
+      rsMarkStoryFailed(effectiveCwd, {
+        storyId: story.id, title: story.title, status: 'failed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(), agentType: effectiveAgent,
+        failReason: classified.category, elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -1696,6 +1765,10 @@ async function executeStory(
           currentModel = `${provider}/${resolveModelId(nextTier, provider, config.cwd)}`;
 
           console.log(`${story.id} escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
+          recordDecision(effectiveCwd, {
+            storyId: story.id, timestamp: new Date().toISOString(),
+            type: 'escalation', description: `${classified.category} — escalated ${fromTier} → ${nextTier}`,
+          });
 
           // Emit story_escalated WAL event
           if (workspaceId) {
@@ -1723,6 +1796,14 @@ async function executeStory(
         console.log(`   Log: ${storyLogFile}`);
         console.log(`   Error: ${classified.message}`);
         markStorySkipped(config.jsonPath, story.id);
+        rsMarkStoryFailed(effectiveCwd, {
+          storyId: story.id, title: story.title, status: 'failed',
+          startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+          finishedAt: new Date().toISOString(), agentType: effectiveAgent,
+          failReason: 'max_retries_all_tiers', retries: escState.retriesOnCurrentTier,
+          model: currentModel ?? undefined, elapsedMs: result.elapsedMs,
+        });
+        writeProgressTxt(effectiveCwd);
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -1756,6 +1837,14 @@ async function executeStory(
       console.log(`   Log: ${storyLogFile}`);
       console.log(`   Error: ${classified.message}`);
       markStorySkipped(config.jsonPath, story.id);
+      rsMarkStoryFailed(effectiveCwd, {
+        storyId: story.id, title: story.title, status: 'failed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(), agentType: effectiveAgent,
+        failReason: 'max_retries', retries: currentRetries,
+        elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -1915,6 +2004,12 @@ async function main(): Promise<void> {
     }
   }
 
+  // ── Initialize run-state.json (CIE-007) ───────────────────────────────────
+  const specId = spec.title ?? path.basename(config.jsonPath, '.json');
+  migrateProgressTxt(config.cwd, specId, config.runId);
+  const runState = initRunState(config.cwd, specId, config.runId);
+  const resumeCtx = getResumeContext(config.cwd, specId);
+
   process.on('SIGINT', () => {
     console.log('');
     console.log('Engine stopped by user.');
@@ -1928,6 +2023,9 @@ async function main(): Promise<void> {
   }
 
   // ─── Sequential execution path (N = 1) ────────────────────────────
+  if (resumeCtx.isResume) {
+    console.log(`[engine] Resuming from story ${resumeCtx.resumedFromStory} (${resumeCtx.passedStoryIds.size} stories already passed)`);
+  }
   let iteration = 0;
 
   while (true) {
@@ -1952,6 +2050,9 @@ async function main(): Promise<void> {
       const finalProgress = getProgress(currentStories);
       console.log('');
       console.log(`All stories complete! ${finalProgress.passed}/${finalProgress.total}`);
+      // CIE-007: Archive run-state.json and write final progress.txt
+      writeProgressTxt(config.cwd);
+      archiveRunState(config.cwd, config.runId);
       process.exit(0);
     }
 
@@ -2063,6 +2164,11 @@ async function runParallel(
         failedIds.add(original.id);
         processedIds.add(original.id);
         markStorySkipped(config.jsonPath, original.id);
+        rsMarkStorySkipped(config.cwd, {
+          storyId: original.id, title: original.title, status: 'skipped',
+          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+          agentType: config.agentType, failReason: `blocked_by: ${blockers.join(', ')}`,
+        });
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -2092,6 +2198,11 @@ async function runParallel(
         failedIds.add(story.id);
         processedIds.add(story.id);
         markStorySkipped(config.jsonPath, story.id);
+        rsMarkStoryFailed(config.cwd, {
+          storyId: story.id, title: story.title, status: 'failed',
+          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+          agentType: config.agentType, failReason: 'worktree_create_failed',
+        });
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -2194,6 +2305,11 @@ async function runParallel(
         failedIds.add(blockedId);
         processedIds.add(blockedId);
         markStorySkipped(config.jsonPath, blockedId);
+        rsMarkStorySkipped(config.cwd, {
+          storyId: blockedId, title: blockedId, status: 'skipped',
+          startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+          agentType: config.agentType, failReason: `blocked_by: ${blockers.join(', ')}`,
+        });
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -2217,6 +2333,9 @@ async function runParallel(
   if (failedIds.size > 0) {
     console.log(`Failed/blocked: ${[...failedIds].join(', ')}`);
   }
+  // CIE-007: Archive run-state.json and write final progress.txt
+  writeProgressTxt(config.cwd);
+  archiveRunState(config.cwd, config.runId);
   process.exit(failedIds.size > 0 ? 1 : 0);
 }
 

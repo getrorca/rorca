@@ -22,6 +22,7 @@ import { agentConfig, type AgentType } from '../lib/config';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
+import { readRunState, type RunState } from '../lib/run-state';
 import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
@@ -2151,6 +2152,17 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       costUsd: s.cost_usd ?? 0,
     }));
 
+    // CIE-007: Read run-state.json for real-time story progress fallback
+    let runState: RunState | null = null;
+    try {
+      const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(run.workspace_id) as { path: string } | undefined;
+      if (workspace) {
+        runState = readRunState(workspace.path);
+        // Only include if it belongs to this run
+        if (runState && runState.runId !== runId) runState = null;
+      }
+    } catch { /* non-fatal */ }
+
     res.json({
       run,
       stories,
@@ -2164,6 +2176,7 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
         totalCostUsd: tokenRow.total_cost,
       },
       storyTokenBreakdown,
+      runState,
     });
   } catch (error: any) {
     console.error('[Pipeline] Get run error:', error);
