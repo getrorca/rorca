@@ -74,7 +74,8 @@
         "Late-joining viewers (opening terminal tab after run started) receive buffered replay from process start"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }
