@@ -45,6 +45,7 @@ import HubPanel from './panels/HubPanel';
 import RunViewPanel from './panels/RunViewPanel';
 import SpecReviewPanel from './panels/SpecReviewPanel';
 import MemoryPanel from './panels/MemoryPanel';
+import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
@@ -229,6 +230,9 @@ function AppContent() {
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
   const [queueCount, setQueueCount] = useState(0);
+
+  // CIE-009: Toast on external context file changes
+  useFileWatchSSE();
 
   // Poll queue count every 10s for badge
   useEffect(() => {
