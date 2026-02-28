@@ -46,6 +46,11 @@ interface StoryResultSeed {
   elapsed_seconds: number | null;
 }
 
+interface ContextComparisonData {
+  predicted: Record<string, { totalTokens: number; injectedFiles: string[] }>;
+  actual: Record<string, { contextFiles: string[] }>;
+}
+
 interface RunApiResponse {
   run: PipelineRun;
   stories: StoryResultSeed[];
@@ -54,6 +59,7 @@ interface RunApiResponse {
   agentType?: string;
   agentModel?: string | null;
   tokenSummary?: { inputTokens: number; outputTokens: number };
+  contextComparison?: ContextComparisonData | null;
 }
 
 interface CommitEntry {
@@ -336,6 +342,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
 
   const [specModel, setSpecModel] = useState<string | null>(null);
   const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
+  const [contextComparison, setContextComparison] = useState<ContextComparisonData | null>(null);
   const [totalStories, setTotalStories] = useState(0);
   // Seed from story_results on initial load so graph colors are correct for in-progress/historical runs
   const [seedStatuses, setSeedStatuses] = useState<Map<string, DerivedStatus>>(new Map());
@@ -415,6 +422,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       setRun(data.run);
       if (data.specModel !== undefined) setSpecModel(data.specModel);
       if (data.tokenSummary) setTokenSummary(data.tokenSummary);
+      if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
       if (data.specStories) setTotalStories(data.specStories.length);
       // Seed graph colors from DB story results so nodes aren't all grey on load
       if (data.stories?.length) {
@@ -644,6 +652,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
                   totalStories={totalStories}
                   walEvents={walEvents}
                   onKill={() => setShowKillConfirm(true)}
+                  contextComparison={contextComparison}
                 />
               </div>
             }

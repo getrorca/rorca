@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
@@ -24,6 +24,76 @@ interface OrchestrationPreview {
   maxWaveSize: number;
   totalStories: number;
   waves: { index: number; storyIds: string[] }[];
+}
+
+interface ContextFileEntry {
+  path: string;
+  tokens: number;
+  matchedScope?: string;
+  matchedTag?: string;
+}
+
+interface ContextStoryPreview {
+  storyId: string;
+  title: string;
+  predictedPaths: string[];
+  globalFiles: ContextFileEntry[];
+  scopedFiles: ContextFileEntry[];
+  taggedFiles: ContextFileEntry[];
+  globalTokens: number;
+  scopedTokens: number;
+  taggedTokens: number;
+  totalTokens: number;
+  exceeded: boolean;
+  droppedFiles: string[];
+}
+
+interface ContextPreviewData {
+  tokenBudget: number;
+  anyExceeded: boolean;
+  globalFileCount: number;
+  scopeCount: number;
+  tagCount: number;
+  stories: ContextStoryPreview[];
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function TokenBar({ global, scoped, tagged, budget }: { global: number; scoped: number; tagged: number; budget: number }) {
+  const total = global + scoped + tagged;
+  const max = Math.max(total, budget);
+  const gPct = max > 0 ? (global / max) * 100 : 0;
+  const sPct = max > 0 ? (scoped / max) * 100 : 0;
+  const tPct = max > 0 ? (tagged / max) * 100 : 0;
+  const budgetPct = max > 0 ? (budget / max) * 100 : 100;
+  const exceeded = total > budget;
+
+  return (
+    <div className="space-y-1">
+      <div className="relative h-2 rounded-full bg-bg overflow-hidden">
+        <div className="absolute inset-y-0 left-0 bg-blue-500 rounded-l-full" style={{ width: `${gPct}%` }} />
+        <div className="absolute inset-y-0 bg-emerald-500" style={{ left: `${gPct}%`, width: `${sPct}%` }} />
+        <div className="absolute inset-y-0 bg-purple-500 rounded-r-full" style={{ left: `${gPct + sPct}%`, width: `${tPct}%` }} />
+        {/* Budget marker */}
+        <div
+          className={`absolute inset-y-0 w-0.5 ${exceeded ? 'bg-red-500' : 'bg-muted/50'}`}
+          style={{ left: `${Math.min(budgetPct, 100)}%` }}
+        />
+      </div>
+      <div className="flex items-center gap-3 text-[9px] text-muted">
+        <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block" /> Global {formatTokenCount(global)}</span>
+        <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" /> Scoped {formatTokenCount(scoped)}</span>
+        <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-purple-500 inline-block" /> Tagged {formatTokenCount(tagged)}</span>
+        <span className={`ml-auto tabular-nums ${exceeded ? 'text-red-400 font-medium' : ''}`}>
+          {formatTokenCount(total)} / {formatTokenCount(budget)}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 interface TriggerPopoverProps {
@@ -61,6 +131,9 @@ export default function TriggerPopover({
   const [capMismatchMode, setCapMismatchMode] = useState<string>('warn');
   const [orchestration, setOrchestration] = useState<OrchestrationPreview | null>(null);
   const [healthBadge, setHealthBadge] = useState<HealthBadge | null>(null);
+  const [contextPreview, setContextPreview] = useState<ContextPreviewData | null>(null);
+  const [contextExpanded, setContextExpanded] = useState(false);
+  const [expandedStory, setExpandedStory] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   // Fetch workspace health badge on mount
@@ -102,6 +175,18 @@ export default function TriggerPopover({
         // Auto-enable worktrees for wave-parallel
         if (result.mode === 'wave-parallel') setAutoWorktree(true);
       })
+      .catch(() => {});
+  }, [specPath, workspaceId]);
+
+  // Fetch context preview on mount
+  useEffect(() => {
+    if (!specPath || !workspaceId) return;
+    apiFetch<ContextPreviewData>('/api/pipeline/context-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ specPath, workspaceId }),
+    })
+      .then(setContextPreview)
       .catch(() => {});
   }, [specPath, workspaceId]);
 
@@ -291,6 +376,164 @@ export default function TriggerPopover({
                 <span className="truncate">{w.storyIds.join(', ')}</span>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* CIE-016: Context Preview — expandable section */}
+      <div>
+        <button
+          onClick={() => setContextExpanded(!contextExpanded)}
+          className="flex items-center gap-1.5 w-full text-left"
+        >
+          {contextExpanded
+            ? <ChevronDown size={12} className="text-muted shrink-0" />
+            : <ChevronRight size={12} className="text-muted shrink-0" />
+          }
+          <FileText size={13} className="text-muted shrink-0" />
+          <span className="text-xs text-muted">Context Preview</span>
+          {contextPreview ? (
+            <span className="ml-auto flex items-center gap-1.5">
+              <span className="text-[10px] tabular-nums text-muted">
+                {contextPreview.stories.length} {contextPreview.stories.length === 1 ? 'story' : 'stories'}
+              </span>
+              {contextPreview.anyExceeded && (
+                <AlertTriangle size={10} className="text-amber-500" />
+              )}
+            </span>
+          ) : (
+            <Loader2 size={10} className="ml-auto animate-spin text-muted" />
+          )}
+        </button>
+
+        {contextExpanded && contextPreview && (
+          <div className="mt-2 space-y-2">
+            {/* Aggregate token bar across all stories (average) */}
+            {(() => {
+              const totalGlobal = contextPreview.stories.reduce((s, st) => s + st.globalTokens, 0);
+              const totalScoped = contextPreview.stories.reduce((s, st) => s + st.scopedTokens, 0);
+              const totalTagged = contextPreview.stories.reduce((s, st) => s + st.taggedTokens, 0);
+              const storyCount = contextPreview.stories.length || 1;
+              return (
+                <div>
+                  <div className="text-[10px] text-muted mb-1">Average per story</div>
+                  <TokenBar
+                    global={Math.round(totalGlobal / storyCount)}
+                    scoped={Math.round(totalScoped / storyCount)}
+                    tagged={Math.round(totalTagged / storyCount)}
+                    budget={contextPreview.tokenBudget}
+                  />
+                </div>
+              );
+            })()}
+
+            {/* Budget exceeded warning */}
+            {contextPreview.anyExceeded && (
+              <div className="flex items-start gap-1.5 text-amber-500">
+                <AlertTriangle size={11} className="shrink-0 mt-0.5" />
+                <span className="text-[10px] leading-tight">
+                  {contextPreview.stories.filter(s => s.exceeded).length} {contextPreview.stories.filter(s => s.exceeded).length === 1 ? 'story exceeds' : 'stories exceed'} the {formatTokenCount(contextPreview.tokenBudget)} token budget — files were dropped
+                </span>
+              </div>
+            )}
+
+            {/* Per-story breakdown */}
+            <div className="space-y-0.5 max-h-40 overflow-y-auto">
+              {contextPreview.stories.map((story) => (
+                <div key={story.storyId}>
+                  <button
+                    onClick={() => setExpandedStory(expandedStory === story.storyId ? null : story.storyId)}
+                    className="flex items-center gap-1.5 w-full text-left py-0.5 hover:bg-bg/50 rounded px-1 -mx-1 transition-colors"
+                  >
+                    {expandedStory === story.storyId
+                      ? <ChevronDown size={9} className="text-muted shrink-0" />
+                      : <ChevronRight size={9} className="text-muted shrink-0" />
+                    }
+                    <span className="text-[10px] font-mono text-muted shrink-0">{story.storyId}</span>
+                    <span className="text-[10px] text-[var(--text)] truncate flex-1">{story.title}</span>
+                    <span className={`text-[10px] tabular-nums shrink-0 ${story.exceeded ? 'text-amber-500 font-medium' : 'text-muted'}`}>
+                      {formatTokenCount(story.totalTokens)}
+                    </span>
+                    {story.exceeded && <AlertTriangle size={9} className="text-amber-500 shrink-0" />}
+                  </button>
+
+                  {/* Expanded story detail */}
+                  {expandedStory === story.storyId && (
+                    <div className="ml-4 mt-1 mb-2 space-y-1.5">
+                      <TokenBar
+                        global={story.globalTokens}
+                        scoped={story.scopedTokens}
+                        tagged={story.taggedTokens}
+                        budget={contextPreview.tokenBudget}
+                      />
+
+                      {/* Global files */}
+                      {story.globalFiles.length > 0 && (
+                        <div>
+                          <div className="text-[9px] text-blue-400 font-medium mb-0.5">Global files</div>
+                          {story.globalFiles.map((f) => (
+                            <div key={f.path} className="flex items-center gap-1 text-[9px] text-muted pl-1">
+                              <span className="w-1 h-1 rounded-full bg-blue-500 shrink-0" />
+                              <span className="font-mono truncate flex-1">{f.path}</span>
+                              <span className="tabular-nums shrink-0">{formatTokenCount(f.tokens)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Scoped files */}
+                      {story.scopedFiles.length > 0 && (
+                        <div>
+                          <div className="text-[9px] text-emerald-400 font-medium mb-0.5">Scope matches</div>
+                          {story.scopedFiles.map((f, i) => (
+                            <div key={`${f.path}-${i}`} className="flex items-center gap-1 text-[9px] text-muted pl-1">
+                              <span className="w-1 h-1 rounded-full bg-emerald-500 shrink-0" />
+                              <span className="font-mono truncate flex-1">{f.path}</span>
+                              <span className="tabular-nums shrink-0">{formatTokenCount(f.tokens)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Tagged files */}
+                      {story.taggedFiles.length > 0 && (
+                        <div>
+                          <div className="text-[9px] text-purple-400 font-medium mb-0.5">Tag matches</div>
+                          {story.taggedFiles.map((f, i) => (
+                            <div key={`${f.path}-${i}`} className="flex items-center gap-1 text-[9px] text-muted pl-1">
+                              <span className="w-1 h-1 rounded-full bg-purple-500 shrink-0" />
+                              <span className="font-mono truncate flex-1">{f.path}</span>
+                              <span className="tabular-nums shrink-0">{formatTokenCount(f.tokens)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Predicted paths */}
+                      {story.predictedPaths.length > 0 && (
+                        <div>
+                          <div className="text-[9px] text-muted font-medium mb-0.5">Predicted paths</div>
+                          <div className="text-[9px] text-muted font-mono pl-1">
+                            {story.predictedPaths.join(', ')}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Dropped files warning */}
+                      {story.droppedFiles.length > 0 && (
+                        <div className="flex items-start gap-1 text-amber-500">
+                          <AlertTriangle size={9} className="shrink-0 mt-0.5" />
+                          <div className="text-[9px]">
+                            <span className="font-medium">Dropped:</span>{' '}
+                            <span className="font-mono">{story.droppedFiles.join(', ')}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
