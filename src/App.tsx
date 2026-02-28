@@ -155,13 +155,14 @@ interface ActivePanelProps {
   reviewSpecId: string | null;
   onNavigateToSpecReview: (specId: string) => void;
   forgeBrief: string | null;
+  onForgeBriefConsumed: () => void;
   settingsTab: SettingsTab | undefined;
 }
 
-function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, settingsTab }: ActivePanelProps) {
+function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed, settingsTab }: ActivePanelProps) {
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
-    case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief } : {})} />;
+    case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
     case 'stack': return <SettingsPanel initialTab={settingsTab} />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'queue': return <ReviewQueuePanel />;
@@ -272,11 +273,14 @@ function AppContent() {
     }
   }, [activeRunId]);
 
-  // Send brief from command palette to Forge
+  // Send brief from command palette to Forge (or signal focus-only with empty string)
   const handleSendToForge = useCallback((brief: string) => {
     setForgeBrief(brief);
-    // Clear after a tick so the prop is consumed once
-    setTimeout(() => setForgeBrief(null), 500);
+  }, []);
+
+  // Called by ForgePanel after consuming the brief — prevents stale state
+  const handleForgeBriefConsumed = useCallback(() => {
+    setForgeBrief(null);
   }, []);
 
   // Override setActivePanel to clear run view when navigating elsewhere
@@ -311,9 +315,11 @@ function AppContent() {
     // Review context: approve / reject (navigate to queue if not already there)
     { key: 'mod+enter', handler: () => { if (activePanel !== 'queue' && activePanel !== 'spec-review') handleNavigate('queue'); } },
     { key: 'mod+backspace', handler: () => { if (activePanel !== 'queue' && activePanel !== 'spec-review') handleNavigate('queue'); } },
+    // New spec with brief focused
+    { key: 'mod+shift+n', handler: () => { handleSendToForge(''); handleNavigate('forge'); } },
     // Pipeline actions
     { key: 'mod+shift+r', handler: () => handleNavigate('pipeline') },
-  ], [handleNavigate, navigateToSettingsTab, activePanel]);
+  ], [handleNavigate, handleSendToForge, navigateToSettingsTab, activePanel]);
 
   useHotkeys(hotkeys);
 
@@ -361,7 +367,7 @@ function AppContent() {
       <EmailVerificationBanner />
       {/* Underlying panel */}
       <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel] || 'Panel'}>
-        <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} reviewSpecId={reviewSpecId} onNavigateToSpecReview={navigateToSpecReview} forgeBrief={forgeBrief} settingsTab={settingsTab} />
+        <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} reviewSpecId={reviewSpecId} onNavigateToSpecReview={navigateToSpecReview} forgeBrief={forgeBrief} onForgeBriefConsumed={handleForgeBriefConsumed} settingsTab={settingsTab} />
       </ErrorBoundary>
 
       {/* Slide-over Overlays */}
