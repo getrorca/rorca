@@ -112,7 +112,7 @@ interface SpecSummary {
   id: string;
   specName: string;
   storyCount: number;
-  status: 'pending' | 'approved';
+  status: 'pending' | 'approved' | 'completed';
   generatedAt: string;
   approvedAt?: string;
   workspacePath: string;
@@ -211,7 +211,7 @@ function getSpecAssignee(specId: string, workspaceId: string): AssigneeInfo | un
 function buildSummary(
   filePath: string,
   fileName: string,
-  status: 'pending' | 'approved',
+  status: 'pending' | 'approved' | 'completed',
   workspacePath: string,
   workspaceId?: string,
 ): SpecSummary {
@@ -1298,7 +1298,7 @@ interface MatchSnippet {
 function buildArchiveSummary(
   filePath: string,
   fileName: string,
-  status: 'pending' | 'approved',
+  status: 'pending' | 'approved' | 'completed',
   workspacePath: string,
   branchName?: string,
   workspaceId?: string,
@@ -1575,6 +1575,16 @@ router.get('/archive', (req: Request, res: Response) => {
       if (!agentBySlug.has(slug)) agentBySlug.set(slug, { agentType: row.agent_type, agentModel: row.agent_model });
     }
 
+    // FR-005: Build set of spec slugs that have at least one successful pipeline run (status='done')
+    const completedRows = db.prepare(
+      `SELECT DISTINCT spec_path FROM pipeline_runs
+       WHERE workspace_id = ? AND status = 'done'`
+    ).all(workspaceId) as { spec_path: string }[];
+    const completedSlugs = new Set<string>();
+    for (const row of completedRows) {
+      completedSlugs.add(path.basename(row.spec_path, '.json'));
+    }
+
     // Fall back to current git branch for specs that have no worktree branch
     let currentBranch: string | undefined;
     try {
@@ -1611,13 +1621,18 @@ router.get('/archive', (req: Request, res: Response) => {
       }
     }
 
-    // Collect approved specs
-    if (statusFilter === 'all' || statusFilter === 'approved') {
+    // Collect approved and completed specs (files live in approved/ dir; status derived from pipeline_runs)
+    if (statusFilter === 'all' || statusFilter === 'approved' || statusFilter === 'completed') {
       for (const file of safeReaddir(approvedDir)) {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, 'approved', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
+          const isCompleted = completedSlugs.has(slug);
+          // Filter: 'approved' shows only non-completed; 'completed' shows only completed; 'all' shows both
+          if (statusFilter === 'approved' && isCompleted) continue;
+          if (statusFilter === 'completed' && !isCompleted) continue;
+          const effectiveStatus = isCompleted ? 'completed' as const : 'approved' as const;
+          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, effectiveStatus, workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
