@@ -24,6 +24,7 @@ import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
 import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
+import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
 
 /** Extract semantic steps from a raw text chunk (may contain multiple lines). */
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
@@ -58,6 +59,72 @@ function resolveLogPath(runId: number): string | null {
 /** True if the given PID is still alive */
 function isPidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// ─── Fallback Result Syncer ──────────────────────────────────────────────────
+// When execution-engine.ts / run-loop.ts can't POST results to the backend
+// (backend down, restart, port mismatch), they write to .rorca-results.jsonl.
+// This function reads that file and replays entries into the DB.
+
+function syncFallbackResults(cwd: string, workspaceId: string): number {
+  const entries = readFallbackResults(cwd);
+  if (entries.length === 0) return 0;
+
+  let synced = 0;
+  for (const entry of entries) {
+    try {
+      if (entry.type === 'wal') {
+        // Replay WAL event directly into DB
+        const p = entry.payload as Record<string, unknown>;
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES (?, ?, ?, ?, ?)`
+        ).run(
+          p.event_type ?? entry.status,
+          p.workspace_id ?? workspaceId,
+          p.spec_id ?? null,
+          p.story_id ?? entry.storyId,
+          JSON.stringify(p.payload ?? p),
+        );
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+        broadcastAll(walEvent);
+        synced++;
+      } else if (entry.type === 'story_result') {
+        // Replay story_result into DB
+        const p = entry.payload as Record<string, unknown>;
+        const runId = (p.runId as number) ?? entry.runId;
+        const storyId = (p.storyId as string) ?? entry.storyId;
+        const status = (p.status as string) ?? entry.status;
+
+        if (!runId || !storyId || !status) continue;
+
+        // Check if already synced (idempotent — don't double-insert)
+        const existing = db.prepare(
+          'SELECT id FROM story_results WHERE run_id = ? AND story_id = ?'
+        ).get(runId, storyId);
+
+        if (!existing) {
+          db.prepare(
+            `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd)
+             VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)`
+          ).run(
+            runId, storyId, status,
+            (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
+            (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
+            (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
+          );
+        }
+        synced++;
+      }
+    } catch (err: any) {
+      console.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
+    }
+  }
+
+  if (synced > 0) {
+    deleteFallbackFile(cwd);
+    console.log(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
+  }
+  return synced;
 }
 
 // All Claude Code env vars that block nested invocation (same as llm-client.ts)
@@ -1051,6 +1118,18 @@ router.post('/trigger', async (req: Request, res: Response) => {
       } catch { /* file not yet created or transient read error */ }
     }, 200);
 
+    // 10b. Poll for fallback result files (.rorca-results.jsonl) every 5 seconds.
+    // When the execution engine can't POST results (backend restart, port mismatch),
+    // it writes them to this file. We sync them back to DB here.
+    const fallbackPollCwd = cwd; // worktree path or main workspace path
+    const fallbackPollInterval = setInterval(() => {
+      try {
+        if (db.open) {
+          syncFallbackResults(fallbackPollCwd, workspaceId);
+        }
+      } catch { /* non-fatal */ }
+    }, 5_000);
+
     // 10c. Monitor OpenCode server health during run — detect crashes and attempt one restart
     let ocHealthInterval: ReturnType<typeof setInterval> | null = null;
     if (ocServer && resolvedAgentType === 'opencode') {
@@ -1118,7 +1197,13 @@ router.post('/trigger', async (req: Request, res: Response) => {
     // 11. Update status when process exits; stop OpenCode server if running
     child.on('exit', (code) => {
       clearInterval(tailInterval);
+      clearInterval(fallbackPollInterval);
       if (ocHealthInterval) clearInterval(ocHealthInterval);
+
+      // Final sync of any remaining fallback results before marking run complete
+      if (db.open) {
+        try { syncFallbackResults(fallbackPollCwd, workspaceId); } catch { /* best-effort */ }
+      }
 
       // Stop OpenCode server — lifecycle tied to this pipeline run
       if (ocServer) {

@@ -44,6 +44,7 @@ import {
 import { parseClaudeLogTokens } from './claude-token-parser';
 import { parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
 import { calculateCost } from './model-pricing';
+import { retryPost, writeFallbackResult, type FallbackResultEntry } from './resilient-post';
 import {
   check as checkToolCapability,
   detectRequiredTools,
@@ -242,6 +243,16 @@ function getNextStory(stories: UserStory[]): UserStory | null {
   return null;
 }
 
+/** Effective CWD for fallback file writes — set by executeStory / main before use. */
+let _fallbackCwd: string | null = null;
+/** Current run ID for fallback entries. */
+let _fallbackRunId: number = 0;
+
+function setFallbackContext(cwd: string, runId: number): void {
+  _fallbackCwd = cwd;
+  _fallbackRunId = runId;
+}
+
 async function emitWalEvent(
   port: number,
   eventType: string,
@@ -250,20 +261,56 @@ async function emitWalEvent(
   storyId?: string,
   specId?: string,
 ): Promise<void> {
-  try {
-    await fetch(`http://localhost:${port}/api/wal`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event_type: eventType,
-        workspace_id: workspaceId,
-        story_id: storyId ?? null,
-        spec_id: specId ?? null,
-        payload,
-      }),
-    });
-  } catch {
-    console.error(`[engine] Failed to emit WAL event: ${eventType}`);
+  const body = {
+    event_type: eventType,
+    workspace_id: workspaceId,
+    story_id: storyId ?? null,
+    spec_id: specId ?? null,
+    payload,
+  };
+
+  const ok = await retryPost(
+    `http://localhost:${port}/api/wal`,
+    body,
+    `WAL:${eventType}`,
+  );
+
+  if (!ok && _fallbackCwd) {
+    const entry: FallbackResultEntry = {
+      type: 'wal',
+      storyId: storyId ?? null,
+      status: eventType,
+      runId: _fallbackRunId,
+      retries: 3,
+      ts: new Date().toISOString(),
+      payload: body,
+    };
+    writeFallbackResult(_fallbackCwd, entry);
+  }
+}
+
+/** POST a story result to the backend with retry + fallback. */
+async function postStoryResult(
+  port: number,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const ok = await retryPost(
+    `http://localhost:${port}/api/pipeline/story-result`,
+    body,
+    `story-result:${body.storyId ?? 'unknown'}`,
+  );
+
+  if (!ok && _fallbackCwd) {
+    const entry: FallbackResultEntry = {
+      type: 'story_result',
+      storyId: (body.storyId as string) ?? null,
+      status: (body.status as string) ?? null,
+      runId: _fallbackRunId,
+      retries: 3,
+      ts: new Date().toISOString(),
+      payload: body,
+    };
+    writeFallbackResult(_fallbackCwd, entry);
   }
 }
 
@@ -1169,6 +1216,9 @@ async function executeStory(
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
+  // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
+  setFallbackContext(effectiveCwd, config.runId);
+
   // Per-story agent resolution: explicit override > story.agent field > run-level config
   let effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);
 
@@ -1359,12 +1409,7 @@ async function executeStory(
             run_id: config.runId, story_id: story.id,
             reason: 'rate_limit_exhausted', attempts: rateLimitAttempts,
           }, story.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
-            });
-          } catch { /* backend may be down */ }
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
         }
         return 'failed';
       }
@@ -1448,12 +1493,7 @@ async function executeStory(
             run_id: config.runId, story_id: story.id, reason: gate.reason,
             ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
           }, story.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
-            });
-          } catch { /* backend may be down */ }
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
         }
 
         if (currentRetries >= MAX_RETRIES) {
@@ -1475,12 +1515,7 @@ async function executeStory(
           run_id: config.runId, story_id: story.id, story_title: story.title,
           agent_type: effectiveAgent,
         }, story.id);
-        try {
-          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'pass', ...storyResultExtra, ...tokenPayload }),
-          });
-        } catch { /* backend may be down */ }
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', ...storyResultExtra, ...tokenPayload });
       }
       return 'passed';
     }
@@ -1496,12 +1531,7 @@ async function executeStory(
           run_id: config.runId, story_id: story.id,
           reason: 'timeout', timeout_minutes: timeoutMin,
         }, story.id);
-        try {
-          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
-          });
-        } catch { /* backend may be down */ }
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
       }
       return 'failed';
     }
@@ -1523,12 +1553,7 @@ async function executeStory(
           reason: classified.category, error_message: classified.message,
           agent_type: effectiveAgent, exit_code: result.exitCode,
         }, story.id);
-        try {
-          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
-          });
-        } catch { /* backend may be down */ }
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
       }
       return 'failed';
     }
@@ -1596,12 +1621,7 @@ async function executeStory(
             error_category: classified.category, error_message: classified.message,
             agent_type: effectiveAgent,
           }, story.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
-            });
-          } catch { /* backend may be down */ }
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
         }
         return 'failed';
       }
@@ -1630,12 +1650,7 @@ async function executeStory(
           error_category: classified.category, error_message: classified.message,
           agent_type: effectiveAgent,
         }, story.id);
-        try {
-          await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload }),
-          });
-        } catch { /* backend may be down */ }
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
       }
       return 'failed';
     }
@@ -1759,6 +1774,9 @@ async function main(): Promise<void> {
   const workspaceId = await resolveWorkspaceId(config.port, config.cwd);
   const retryCounts = new Map<string, number>();
   const escalationStates = new Map<string, EscalationState>();
+
+  // Set fallback context for emitWalEvent / postStoryResult fallback file writes
+  setFallbackContext(config.cwd, config.runId);
 
   // ── Clear stale skipped/blocked flags from previous failed runs ───────────
   // Wave parallel failures mark downstream stories as skipped in the spec JSON.
@@ -1936,12 +1954,7 @@ async function runParallel(
             run_id: config.runId, story_id: original.id,
             reason: 'blocked_by', blockedBy: blockers,
           }, original.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: original.id, status: 'skip' }),
-            });
-          } catch { /* backend may be down */ }
+          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip' });
         }
         continue;
       }
@@ -1969,12 +1982,7 @@ async function runParallel(
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: story.id, reason: 'worktree_create_failed',
           }, story.id);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: story.id, status: 'fail' }),
-            });
-          } catch { /* backend may be down */ }
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail' });
         }
       }
     }
@@ -2077,12 +2085,7 @@ async function runParallel(
             run_id: config.runId, story_id: blockedId,
             reason: 'blocked_by', blockedBy: blockers,
           }, blockedId);
-          try {
-            await fetch(`http://localhost:${config.port}/api/pipeline/story-result`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ runId: config.runId, storyId: blockedId, status: 'skip' }),
-            });
-          } catch { /* backend may be down */ }
+          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip' });
         }
       }
     }
