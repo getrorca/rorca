@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { NavLink } from 'react-router-dom';
 import { useHotkeys, type HotkeyBinding } from '../hooks/useHotkeys';
 import {
   Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight,
@@ -10,6 +11,7 @@ import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
 import NotificationBell from './NotificationBell';
 import { UserMenu } from './Shell';
+import { PANEL_ROUTES } from '../routes';
 
 export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory';
 
@@ -122,14 +124,13 @@ function resolveActiveNav(panel: PanelId): MinimalNavId {
 }
 
 interface SidebarProps {
-  activePanel: PanelId;
   onNavigate: (panel: PanelId) => void;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
   queueCount?: number;
 }
 
-export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileClose, queueCount = 0 }: SidebarProps) {
+export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0 }: SidebarProps) {
   const [collapsedSections, setCollapsedSections] = useState(getCollapsedSections);
 
   // Map toggle drawer event to Command Palette trigger for backwards compat
@@ -179,28 +180,33 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
         >
           <div className="space-y-[1px] pb-1">
             {section.items.map((item) => {
-              const isActive = item.id === activePanel;
               const Icon = item.icon;
               return (
-                <button
+                <NavLink
                   key={item.id}
-                  onClick={() => {
+                  to={PANEL_ROUTES[item.id]}
+                  onClick={(e) => {
+                    e.preventDefault();
                     onNavigate(item.id);
                     onMobileClose?.();
                   }}
-                  className={`w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] transition-colors ${isActive
+                  className={({ isActive }) => `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] transition-colors ${isActive
                     ? 'text-[var(--text)] bg-surface-200 font-medium'
                     : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
                     }`}
                 >
-                  <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
-                  <span className="truncate">{item.label}</span>
-                  {item.id === 'queue' && queueCount > 0 && (
-                    <span className="ml-auto min-w-[16px] h-4 flex items-center justify-center px-1 text-[10px] font-bold rounded-full bg-accent text-white leading-none">
-                      {queueCount > 99 ? '99+' : queueCount}
-                    </span>
+                  {({ isActive }) => (
+                    <>
+                      <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
+                      <span className="truncate">{item.label}</span>
+                      {item.id === 'queue' && queueCount > 0 && (
+                        <span className="ml-auto min-w-[16px] h-4 flex items-center justify-center px-1 text-[10px] font-bold rounded-full bg-accent text-white leading-none">
+                          {queueCount > 99 ? '99+' : queueCount}
+                        </span>
+                      )}
+                    </>
                   )}
-                </button>
+                </NavLink>
               );
             })}
           </div>
@@ -224,14 +230,15 @@ export default function Sidebar({ activePanel, onNavigate, mobileOpen, onMobileC
           <span className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</span>
         </button>
 
-        <button
-          onClick={() => onNavigate('forge')}
+        <NavLink
+          to={PANEL_ROUTES.forge}
+          onClick={(e) => { e.preventDefault(); onNavigate('forge'); }}
           className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-accent hover:bg-accent/10 transition-colors focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-accent"
         >
           <Plus size={14} className="shrink-0" />
           <span className="font-medium truncate">New Spec</span>
           <span className="ml-auto text-[10px] font-mono text-accent/50 border border-accent/20 rounded px-1 shrink-0">C</span>
-        </button>
+        </NavLink>
       </div>
 
       {/* Main Navigation Sections */}
