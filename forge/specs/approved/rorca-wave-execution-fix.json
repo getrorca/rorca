@@ -22,7 +22,8 @@
         "A simulated POST failure (kill backend mid-run) results in results being recovered via fallback file when backend restarts"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "WE-002",
@@ -53,7 +54,9 @@
         "Failed vs blocked stories are visually distinct (red badge vs grey badge) in the Stories tab",
         "Story log is captured from sub-worktree execution output and stored in story_results.log_path"
       ],
-      "dependsOn": ["WE-001"],
+      "dependsOn": [
+        "WE-001"
+      ],
       "passes": false
     },
     {
