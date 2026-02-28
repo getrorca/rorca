@@ -582,7 +582,6 @@ function SpecPreviewDrawer({
   const [runState, setRunState] = useState<RunState>('idle');
   const [runError, setRunError] = useState('');
   const [showTriggerPopover, setShowTriggerPopover] = useState(false);
-  const [defaultParallelism, setDefaultParallelism] = useState(1);
   const [addState, setAddState] = useState<'idle' | 'form' | 'generating' | 'done' | 'error'>('idle');
   const [addCount, setAddCount] = useState(3);
   const [addBrief, setAddBrief] = useState('');
@@ -610,14 +609,6 @@ function SpecPreviewDrawer({
   useEffect(() => {
     setLocalStories(detail?.userStories ?? detail?.stories ?? []);
   }, [detail]);
-
-  // Fetch workspace default parallelism
-  useEffect(() => {
-    if (!workspaceId) return;
-    apiFetch<{ config: { defaultParallelism?: number } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
-      .then(data => setDefaultParallelism(data.config.defaultParallelism ?? 1))
-      .catch(() => { /* keep default */ });
-  }, [workspaceId]);
 
   const handleToggleExclude = async (storyId: string) => {
     if (!workspaceId) return;
@@ -739,7 +730,7 @@ function SpecPreviewDrawer({
     }
   };
 
-  const handleRun = async (parallelism: number, autoWorktree: boolean) => {
+  const handleRun = async (autoWorktree: boolean) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -754,7 +745,6 @@ function SpecPreviewDrawer({
             specPath: `forge/specs/approved/${summary.id}.json`,
             workspaceId,
             autoWorktree,
-            parallelism,
           }),
         }
       );
@@ -955,7 +945,7 @@ function SpecPreviewDrawer({
                     <p className="text-xs text-warning font-medium">Active run in progress. Run in a new worktree?</p>
                     <div className="flex gap-2">
                       <button
-                        onClick={() => handleRun(defaultParallelism, true)}
+                        onClick={() => handleRun(true)}
                         className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90 transition-opacity"
                       >
                         <GitBranch size={12} />
@@ -978,10 +968,11 @@ function SpecPreviewDrawer({
                   <>
                     {showTriggerPopover && !isFreePlan && (
                       <TriggerPopover
-                        defaultParallelism={defaultParallelism}
                         loading={runState === 'triggering'}
                         onTrigger={handleRun}
                         onClose={() => setShowTriggerPopover(false)}
+                        specPath={`forge/specs/approved/${summary.id}.json`}
+                        workspaceId={workspaceId ?? undefined}
                       />
                     )}
                     <button
