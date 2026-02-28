@@ -1,0 +1,42 @@
+{
+  "$schema": "./config.schema.json",
+  "version": 1,
+  "routing": {
+    "global": ["CLAUDE.md", "AGENTS.md"],
+    "scopes": [],
+    "tags": [],
+    "tokenBudget": 8000
+  },
+  "context": {
+    "fileRegistry": [],
+    "memory": {
+      "ledgerPath": ".rorca/memory/MEMORY.md",
+      "maxEntries": 500,
+      "autoCapture": true
+    }
+  },
+  "teleology": {
+    "specDir": "forge/specs",
+    "directionStackLayers": ["L1", "L2", "L3", "L4", "L5"]
+  },
+  "orchestration": {
+    "router": "auto",
+    "thresholds": {
+      "haiku": [0, 30],
+      "sonnet": [31, 65],
+      "opus": [66, 100]
+    },
+    "escalation": {
+      "enabled": true,
+      "maxRetriesOnTier": 2,
+      "chain": ["haiku", "sonnet", "opus"]
+    },
+    "tokenBudgetPerStory": 50000
+  },
+  "execution": {
+    "waveParallelism": false,
+    "storyTimeoutMin": 45,
+    "maxRetries": 3,
+    "autoCommit": true
+  }
+}

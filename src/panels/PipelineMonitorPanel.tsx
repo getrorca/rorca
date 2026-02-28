@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle, DollarSign } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle, DollarSign, GitCommitHorizontal, RefreshCw, Loader2, Info } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
@@ -13,8 +13,9 @@ import SpecPickerModal from '../components/SpecPickerModal';
 import AgentBadge from '../components/AgentBadge';
 import FinOpsTab from '../components/FinOpsTab';
 import AppHeader from '../components/AppHeader';
+import RunMetadataPanel from '../components/RunMetadataPanel';
 
-type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens' | 'finops';
+type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens' | 'finops' | 'run-info' | 'commits';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,16 @@ interface PipelineRun {
   agent_type?: string;
   agent_model?: string | null;
   parallelism?: number;
+  branch_name?: string | null;
+  worktree_path?: string | null;
+}
+
+interface CommitEntry {
+  sha: string;
+  message: string;
+  author: string;
+  date: string;
+  storyId?: string;
 }
 
 type RunStatus = PipelineRun['status'];
@@ -295,6 +306,10 @@ export default function PipelineMonitorPanel() {
   const [showStartHelp, setShowStartHelp] = useState(false);
   const [detailTab, setDetailTab] = useState<DetailTab>('terminal');
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
+  const [specModel, setSpecModel] = useState<string | null>(null);
+  const [commits, setCommits] = useState<CommitEntry[]>([]);
+  const [commitsLoading, setCommitsLoading] = useState(false);
+  const [commitsBranch, setCommitsBranch] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const dragSrcId = useRef<string | null>(null);
   const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
@@ -363,8 +378,11 @@ export default function PipelineMonitorPanel() {
       setSelectedRunDetail(null);
       return;
     }
-    apiFetch<{ run: PipelineRun; stories: StoryResult[]; specStories?: Array<{ id: string; title: string; agent?: string; reroute?: RerouteInfo }> }>(`/api/pipeline/runs/${selectedRunId}`)
-      .then(setSelectedRunDetail)
+    apiFetch<{ run: PipelineRun; stories: StoryResult[]; specStories?: Array<{ id: string; title: string; agent?: string; reroute?: RerouteInfo }>; specModel?: string }>(`/api/pipeline/runs/${selectedRunId}`)
+      .then((data) => {
+        setSelectedRunDetail(data);
+        if (data.specModel) setSpecModel(data.specModel);
+      })
       .catch(console.error);
   }, [selectedRunId]);
 
@@ -384,6 +402,29 @@ export default function PipelineMonitorPanel() {
       .then((data) => setSpecStories(data.userStories ?? []))
       .catch(() => setSpecStories([]));
   }, [selectedRunDetail, workspaceId]);
+
+  // Fetch commits for selected run
+  const fetchCommits = useCallback(async () => {
+    if (!selectedRunId) return;
+    setCommitsLoading(true);
+    try {
+      const data = await apiFetch<{ commits: CommitEntry[]; branchName: string | null }>(
+        `/api/pipeline/runs/${selectedRunId}/commits`,
+      );
+      setCommits(data.commits);
+      setCommitsBranch(data.branchName);
+    } catch {
+      setCommits([]);
+    } finally {
+      setCommitsLoading(false);
+    }
+  }, [selectedRunId]);
+
+  useEffect(() => {
+    setCommits([]);
+    setCommitsBranch(null);
+    fetchCommits();
+  }, [fetchCommits]);
 
   // Build priority lookup from spec stories
   const priorityMap = useMemo(() => {
@@ -1041,6 +1082,31 @@ export default function PipelineMonitorPanel() {
                   <DollarSign className="w-3.5 h-3.5" />
                   FinOps
                 </button>
+                <button
+                  onClick={() => setDetailTab('run-info')}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'run-info'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                    }`}
+                >
+                  <Info className="w-3.5 h-3.5" />
+                  Run Info
+                </button>
+                <button
+                  onClick={() => { setDetailTab('commits'); fetchCommits(); }}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'commits'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                    }`}
+                >
+                  <GitCommitHorizontal className="w-3.5 h-3.5" />
+                  Commits
+                  {commits.length > 0 && (
+                    <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
+                      {commits.length}
+                    </span>
+                  )}
+                </button>
               </div>
 
               {/* Terminal tab — xterm.js live output */}
@@ -1345,6 +1411,84 @@ export default function PipelineMonitorPanel() {
                   ) : (
                     <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
                       Select a run to view FinOps data
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Run Info tab */}
+              {detailTab === 'run-info' && (
+                <div className="flex-1 min-h-0 overflow-y-auto">
+                  {liveRun ? (
+                    <RunMetadataPanel
+                      run={{ ...liveRun, branch_name: liveRun.branch_name ?? null, worktree_path: liveRun.worktree_path ?? null }}
+                      tokenSummary={{ inputTokens: tokenStats.totalInput, outputTokens: tokenStats.totalOutput }}
+                      specModel={specModel}
+                      totalStories={totalCount}
+                      walEvents={sseEvents}
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                      Select a run to view run info
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Commits tab */}
+              {detailTab === 'commits' && (
+                <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                  {/* Header */}
+                  <div className="shrink-0 px-4 py-2.5 border-b border-[var(--border)] bg-panel flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+                      <GitBranch size={13} />
+                      <span className="font-mono">{commitsBranch || 'default branch'}</span>
+                      <span>{commits.length} commit{commits.length !== 1 ? 's' : ''}</span>
+                    </div>
+                    <button
+                      onClick={fetchCommits}
+                      className="p-1 rounded hover:bg-bg transition-colors text-[var(--text-muted)] hover:text-[var(--text)]"
+                      title="Refresh commits"
+                    >
+                      <RefreshCw size={13} />
+                    </button>
+                  </div>
+                  {/* Body */}
+                  {commitsLoading ? (
+                    <div className="flex-1 flex items-center justify-center gap-2 text-[var(--text-muted)] text-sm">
+                      <Loader2 size={16} className="animate-spin" />
+                      Loading commits...
+                    </div>
+                  ) : commits.length === 0 ? (
+                    <div className="flex-1 flex flex-col items-center justify-center gap-3 text-[var(--text-muted)]">
+                      <GitCommitHorizontal size={32} className="opacity-30" />
+                      <span className="text-sm">No commits yet</span>
+                      <span className="text-xs opacity-70">Commits will appear here as stories complete.</span>
+                      <button
+                        onClick={fetchCommits}
+                        className="mt-2 flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border border-[var(--border)] hover:bg-panel transition-colors"
+                      >
+                        <RefreshCw size={12} />
+                        Refresh
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex-1 overflow-y-auto">
+                      {commits.map((commit) => (
+                        <div key={commit.sha} className="px-4 py-2.5 border-b border-[var(--border)] hover:bg-panel/50 transition-colors">
+                          <div className="flex items-start gap-3">
+                            <code className="text-xs font-mono text-[var(--accent)] shrink-0 mt-0.5">
+                              {commit.sha.slice(0, 7)}
+                            </code>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs text-[var(--text)] truncate">{commit.message}</p>
+                              <p className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                                {commit.author} · {commit.date}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
