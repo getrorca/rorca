@@ -169,6 +169,7 @@ export interface StoryOutput {
   retries: number;
   failureReason: string | null;
   failureAttempts: number | null;
+  blockedBy: string[] | null;
   output: string[];
   lineCount: number;
 }

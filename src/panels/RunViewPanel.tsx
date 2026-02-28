@@ -522,6 +522,48 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
 
   const failedStoryCount = failedStoryIds.size;
 
+  // Derive passed story count
+  const passedStoryCount = useMemo(() => {
+    const passed = new Set<string>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_passed') passed.add(evt.story_id);
+      else if (evt.event_type === 'story_failed') passed.delete(evt.story_id);
+    }
+    return passed.size;
+  }, [walEvents]);
+
+  // Derive root cause analysis for wave failure banner:
+  // rootCause = the story(s) that actually ran and failed (not blocked)
+  // blockedCount = stories blocked because of root cause failures
+  const waveFailureInfo = useMemo(() => {
+    if (passedStoryCount > 0) return null; // only show for 0/N pass runs
+    if (effectiveStatus !== 'failed' && effectiveStatus !== 'partial_failure') return null;
+
+    const rootCauses: string[] = [];
+    const blockedStories = new Map<string, string[]>(); // storyId -> blockedBy[]
+
+    for (const evt of walEvents) {
+      if (evt.event_type !== 'story_failed' || !evt.story_id || !evt.payload) continue;
+      try {
+        const payload = JSON.parse(evt.payload);
+        if (payload.reason === 'blocked_by' && Array.isArray(payload.blockedBy)) {
+          blockedStories.set(evt.story_id, payload.blockedBy);
+        } else {
+          rootCauses.push(evt.story_id);
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (rootCauses.length === 0) return null;
+
+    // Find the primary root cause (first story that failed and blocked the most downstream)
+    const primaryRoot = rootCauses[0];
+    const downstreamCount = blockedStories.size;
+
+    return { primaryRoot, rootCauses, downstreamCount };
+  }, [walEvents, passedStoryCount, effectiveStatus]);
+
   const handleRetryFailed = useCallback(async () => {
     if (failedStoryCount === 0) return;
     setRetryLoading(true);
@@ -796,24 +838,42 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
         </div>
       )}
 
-      {/* Run failed banner */}
+      {/* Run failed banner — root cause analysis for wave failures */}
       {(effectiveStatus === 'failed' || effectiveStatus === 'partial_failure') && failedStoryCount > 0 && (
         <div className="shrink-0 border-b border-red-500/30 bg-red-500/10" role="alert" aria-live="assertive">
           <div className="px-3 md:px-4 py-2.5 md:py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-3">
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <XCircle size={18} className="text-red-500 shrink-0" />
               <span className="text-xs md:text-sm font-medium text-red-400">
-                Run failed — {failedStoryCount} {failedStoryCount === 1 ? 'story' : 'stories'} did not complete
+                {waveFailureInfo ? (
+                  <>
+                    <span className="font-mono font-bold">{waveFailureInfo.primaryRoot}</span>
+                    {' '}failed{waveFailureInfo.downstreamCount > 0
+                      ? ` and blocked ${waveFailureInfo.downstreamCount} downstream ${waveFailureInfo.downstreamCount === 1 ? 'story' : 'stories'}`
+                      : ''
+                    }.{' '}
+                    <button
+                      onClick={handleViewErrorDetail}
+                      className="underline hover:text-red-300 transition-colors"
+                    >
+                      View story log →
+                    </button>
+                  </>
+                ) : (
+                  <>Run failed — {failedStoryCount} {failedStoryCount === 1 ? 'story' : 'stories'} did not complete</>
+                )}
               </span>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={handleViewErrorDetail}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors"
-              >
-                <ExternalLink size={12} />
-                View error detail
-              </button>
+              {!waveFailureInfo && (
+                <button
+                  onClick={handleViewErrorDetail}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors"
+                >
+                  <ExternalLink size={12} />
+                  View error detail
+                </button>
+              )}
               <button
                 onClick={handleRetryFailed}
                 disabled={retryLoading}

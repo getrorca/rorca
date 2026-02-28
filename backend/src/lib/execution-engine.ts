@@ -1408,8 +1408,9 @@ async function executeStory(
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: story.id,
             reason: 'rate_limit_exhausted', attempts: rateLimitAttempts,
+            log_file: storyLogFile,
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
         }
         return 'failed';
       }
@@ -1492,8 +1493,9 @@ async function executeStory(
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: story.id, reason: gate.reason,
             ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
+            log_file: storyLogFile,
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
         }
 
         if (currentRetries >= MAX_RETRIES) {
@@ -1515,7 +1517,7 @@ async function executeStory(
           run_id: config.runId, story_id: story.id, story_title: story.title,
           agent_type: effectiveAgent,
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', ...storyResultExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
       }
       return 'passed';
     }
@@ -1530,8 +1532,9 @@ async function executeStory(
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
           reason: 'timeout', timeout_minutes: timeoutMin,
+          log_file: storyLogFile,
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
       }
       return 'failed';
     }
@@ -1552,8 +1555,9 @@ async function executeStory(
           run_id: config.runId, story_id: story.id,
           reason: classified.category, error_message: classified.message,
           agent_type: effectiveAgent, exit_code: result.exitCode,
+          log_file: storyLogFile,
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
       }
       return 'failed';
     }
@@ -1620,8 +1624,9 @@ async function executeStory(
             escalation_history: escState.escalationHistory,
             error_category: classified.category, error_message: classified.message,
             agent_type: effectiveAgent,
+            log_file: storyLogFile,
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
         }
         return 'failed';
       }
@@ -1649,8 +1654,9 @@ async function executeStory(
           reason: 'max_retries', attempts: currentRetries,
           error_category: classified.category, error_message: classified.message,
           agent_type: effectiveAgent,
+          log_file: storyLogFile,
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', ...storyResultExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
       }
       return 'failed';
     }
@@ -1954,7 +1960,7 @@ async function runParallel(
             run_id: config.runId, story_id: original.id,
             reason: 'blocked_by', blockedBy: blockers,
           }, original.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip' });
+          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip', blockedBy: blockers });
         }
         continue;
       }
@@ -2085,7 +2091,7 @@ async function runParallel(
             run_id: config.runId, story_id: blockedId,
             reason: 'blocked_by', blockedBy: blockers,
           }, blockedId);
-          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip' });
+          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip', blockedBy: blockers });
         }
       }
     }
