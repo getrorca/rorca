@@ -12,6 +12,8 @@ import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { echolocate } from '../lib/workspace-echolocation';
+import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-scaffold';
+import type { ScaffoldFile } from '../lib/workspace-scaffold';
 
 const router = Router();
 
@@ -922,6 +924,151 @@ router.post('/:id/echolocate', (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Echolocation scan failed' });
   }
+});
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/scaffold:
+ *   post:
+ *     tags: [Workspaces]
+ *     summary: Generate or write context/intent scaffolding for a workspace
+ *     description: >
+ *       CIE-002: After echolocation detects the stack, this endpoint generates
+ *       bespoke CLAUDE.md, AGENTS.md, .rorca/config.json, and skill files.
+ *       With mode=preview (default), returns generated files without writing.
+ *       With mode=write, writes provided files to disk and commits.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               mode:
+ *                 type: string
+ *                 enum: [preview, write]
+ *                 default: preview
+ *               files:
+ *                 type: array
+ *                 description: Files to write (required when mode=write). Each item has relativePath and content.
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     relativePath: { type: string }
+ *                     content: { type: string }
+ *     responses:
+ *       200:
+ *         description: Scaffold preview or write result
+ *       404: { description: "Workspace not found" }
+ *       400: { description: "Invalid request" }
+ */
+router.post('/:id/scaffold', async (req, res) => {
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  if (!fs.existsSync(workspace.path)) {
+    res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+    return;
+  }
+
+  const mode = (req.body.mode as string) || 'preview';
+
+  if (mode === 'preview') {
+    try {
+      // Run echolocation first to get fresh report
+      const report = echolocate(workspace.path);
+
+      const preview = await generateScaffoldPreview(workspace.path, report);
+
+      db.prepare(
+        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('scaffold_preview', ?, ?)"
+      ).run(req.params.id, JSON.stringify({
+        fileCount: preview.files.length,
+        stackSummary: preview.stackSummary,
+      }));
+
+      res.json(preview);
+    } catch (err: any) {
+      console.error('[scaffold] Preview error:', err.message);
+      res.status(500).json({ error: err.message || 'Scaffold generation failed' });
+    }
+    return;
+  }
+
+  if (mode === 'write') {
+    const files = req.body.files as Array<{ relativePath: string; content: string }> | undefined;
+    if (!files || !Array.isArray(files) || files.length === 0) {
+      res.status(400).json({ error: 'mode=write requires a non-empty files array' });
+      return;
+    }
+
+    // Validate file paths — prevent directory traversal
+    for (const f of files) {
+      if (!f.relativePath || !f.content) {
+        res.status(400).json({ error: 'Each file must have relativePath and content' });
+        return;
+      }
+      const resolved = path.resolve(workspace.path, f.relativePath);
+      if (!resolved.startsWith(workspace.path)) {
+        res.status(400).json({ error: `Path traversal detected: ${f.relativePath}` });
+        return;
+      }
+    }
+
+    try {
+      const scaffoldFiles: ScaffoldFile[] = files.map(f => ({
+        relativePath: f.relativePath,
+        content: f.content,
+        alreadyExists: fs.existsSync(path.join(workspace.path, f.relativePath)),
+      }));
+
+      const result = writeScaffoldFiles(workspace.path, scaffoldFiles);
+
+      db.prepare(
+        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('scaffold_written', ?, ?)"
+      ).run(req.params.id, JSON.stringify({
+        filesWritten: result.filesWritten.length,
+        filesSkipped: result.filesSkipped.length,
+        fileNames: result.filesWritten,
+      }));
+
+      // Auto-commit if any files were written
+      if (result.filesWritten.length > 0) {
+        try {
+          const { execSync } = require('child_process');
+          const gitOpts = { cwd: workspace.path, encoding: 'utf-8' as const, timeout: 15_000 };
+
+          // Stage all written files
+          for (const f of result.filesWritten) {
+            execSync(`git add "${f}"`, gitOpts);
+          }
+
+          execSync(
+            'git commit -m "chore: initialize rorca context/intent scaffolding"',
+            gitOpts,
+          );
+        } catch (gitErr: any) {
+          // Non-fatal — files were written even if commit fails
+          console.warn('[scaffold] Git commit failed:', gitErr.message);
+        }
+      }
+
+      res.json(result);
+    } catch (err: any) {
+      console.error('[scaffold] Write error:', err.message);
+      res.status(500).json({ error: err.message || 'Scaffold write failed' });
+    }
+    return;
+  }
+
+  res.status(400).json({ error: `Unknown mode: ${mode}. Use "preview" or "write".` });
 });
 
 // DELETE /api/workspaces/:id
