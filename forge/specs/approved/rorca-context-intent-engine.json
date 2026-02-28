@@ -397,7 +397,8 @@
         "CIE-016",
         "CIE-017"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }
