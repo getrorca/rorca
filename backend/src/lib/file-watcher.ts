@@ -19,6 +19,7 @@ import chokidar, { type FSWatcher } from 'chokidar';
 import { db } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { loadRorcaConfig } from './rorca-config';
+import { computeHealthReport } from './workspace-echolocation';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -192,6 +193,21 @@ function handleFileChange(
       ) as WalEvent;
 
       broadcastAll(walEvent);
+
+      // CIE-012: Recalculate health score on context file change
+      try {
+        const health = computeHealthReport(workspacePath);
+        const healthEvent = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, payload)
+           VALUES ('health_recalculated', ?, ?)`,
+        ).run(workspaceId, JSON.stringify({ score: health.score, trigger: relPath }));
+        const healthWal = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+          healthEvent.lastInsertRowid,
+        ) as WalEvent;
+        broadcastAll(healthWal);
+      } catch (healthErr) {
+        console.error('[file-watcher] Health recalc failed:', healthErr);
+      }
     } catch (err) {
       console.error('[file-watcher] Failed to emit WAL event:', err);
     }
