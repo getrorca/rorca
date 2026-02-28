@@ -32,7 +32,7 @@ const RoutingSchema = z.object({
   global: z.array(z.string()).default(['CLAUDE.md', 'AGENTS.md']),
   scopes: z.array(RoutingScopeSchema).default([]),
   tags: z.array(RoutingTagSchema).default([]),
-  tokenBudget: z.number().int().min(1000).max(200000).default(8000),
+  tokenBudget: z.number().int().min(1000).max(200000).default(32000),
 });
 
 const FileRegistryEntrySchema = z.object({

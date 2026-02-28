@@ -5,7 +5,7 @@
     "global": ["CLAUDE.md", "AGENTS.md"],
     "scopes": [],
     "tags": [],
-    "tokenBudget": 8000
+    "tokenBudget": 32000
   },
   "context": {
     "fileRegistry": [],

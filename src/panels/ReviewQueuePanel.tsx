@@ -123,6 +123,33 @@ export default function ReviewQueuePanel() {
   const [specDetail, setSpecDetail] = useState<SpecDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
+  // ─── Resizable split pane ────────────────────────────────────────
+  const [leftWidth, setLeftWidth] = useState(380);
+  const isDragging = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartWidth = useRef(0);
+
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = leftWidth;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDragging.current) return;
+      const delta = ev.clientX - dragStartX.current;
+      const next = Math.min(Math.max(dragStartWidth.current + delta, 260), 700);
+      setLeftWidth(next);
+    };
+    const onMouseUp = () => {
+      isDragging.current = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [leftWidth]);
+
   const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
@@ -400,7 +427,10 @@ export default function ReviewQueuePanel() {
       />
       <div className="flex flex-1 min-h-0">
         {/* ─── Left column: Spec list ──────────────────────────────────── */}
-        <div className="w-full xl:w-[380px] xl:shrink-0 xl:border-r xl:border-border flex flex-col overflow-hidden">
+        <div
+          className="flex flex-col overflow-hidden shrink-0 border-r border-border"
+          style={{ width: selectedId ? leftWidth : '100%' }}
+        >
           <div className="px-4 py-3 border-b border-border shrink-0">
             <h2 className="text-sm font-semibold text-text">
               Pending Review
@@ -498,9 +528,18 @@ export default function ReviewQueuePanel() {
           </div>
         </div>
 
-        {/* ─── Right column: Spec preview (xl+ only, or replaces list) ─ */}
-        <div className="hidden xl:flex flex-col flex-1 overflow-hidden">
-          {!selectedId || !specDetail ? (
+        {/* ─── Draggable divider ───────────────────────────────────────── */}
+        {selectedId && (
+          <div
+            onMouseDown={handleDividerMouseDown}
+            className="w-1 shrink-0 bg-border hover:bg-accent/60 cursor-col-resize transition-colors active:bg-accent"
+          />
+        )}
+
+        {/* ─── Right column: Spec preview ──────────────────────────────── */}
+        {selectedId && (
+        <div className="flex flex-col flex-1 overflow-hidden">
+          {!specDetail ? (
             <div className="flex items-center justify-center h-full text-muted text-sm">
               {detailLoading ? 'Loading spec...' : 'Select a spec to preview'}
             </div>
@@ -531,6 +570,7 @@ export default function ReviewQueuePanel() {
             />
           )}
         </div>
+        )}
 
         {/* ─── Mobile/tablet: detail as overlay when selected ────────── */}
         {selectedId && specDetail && (

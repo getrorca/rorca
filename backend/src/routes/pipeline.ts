@@ -896,6 +896,17 @@ router.post('/trigger', async (req: Request, res: Response) => {
       const git = simpleGit(workspace.path);
       await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
       cwd = worktreePath;
+
+      // Add run-tracking files to worktree's .gitignore so parallel stories
+      // don't conflict on these files during wave merges.
+      const worktreeGitignore = path.join(worktreePath, '.gitignore');
+      const trackingPatterns = '\n# Rorca run-tracking files (parallel-safe)\nprogress.txt\n.rorca/run-state.json\n.rorca/memory/health-log.json\n';
+      try {
+        const existing = fs.existsSync(worktreeGitignore) ? fs.readFileSync(worktreeGitignore, 'utf-8') : '';
+        if (!existing.includes('progress.txt')) {
+          fs.appendFileSync(worktreeGitignore, trackingPatterns);
+        }
+      } catch { /* non-fatal */ }
     }
 
     // 6. Create pipeline_runs record (with agent_type and agent_model)
