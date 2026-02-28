@@ -423,6 +423,343 @@ router.get('/:id/context-files/diff', (req: Request, res: Response) => {
  *       409:
  *         description: File already exists
  */
+// ─── Skill Templates ──────────────────────────────────────────────────────────
+
+const SKILL_TEMPLATES: Record<string, string> = {
+  blank: `# {name}
+
+## Description
+
+Describe what this skill does and when it should be injected.
+
+## Instructions
+
+- Step-by-step instructions for the agent when this skill is active
+- Be specific about expected behavior, coding patterns, and conventions
+
+## Context
+
+Additional context the agent needs to follow this skill correctly.
+`,
+  testing: `# {name}
+
+## Description
+
+Testing skill — enforces test-writing conventions and quality standards.
+
+## Instructions
+
+- Write tests before or alongside implementation (TDD preferred)
+- Use \`describe\` / \`it\` / \`test\` blocks with descriptive names
+- Cover happy path, edge cases, and error scenarios
+- Mock external dependencies (APIs, databases, filesystems)
+- Assert specific values, not just truthiness
+- Keep tests deterministic — no random data, no timing dependencies
+- Use factory functions for test data, not inline object literals
+- One assertion concept per test (multiple asserts are OK if testing the same behavior)
+
+## Patterns
+
+\`\`\`typescript
+describe('UserService', () => {
+  it('should create a user with valid input', () => { /* ... */ });
+  it('should reject duplicate emails', () => { /* ... */ });
+  it('should hash passwords before storing', () => { /* ... */ });
+});
+\`\`\`
+
+## Anti-Patterns
+
+- No snapshot tests for dynamic data
+- No \`any\` in test types
+- No \`console.log\` debugging left in tests
+- No tests that depend on execution order
+`,
+  security: `# {name}
+
+## Description
+
+Security skill — enforces secure coding practices and vulnerability prevention.
+
+## Instructions
+
+- Validate ALL user input at system boundaries (never trust client data)
+- Use parameterized queries for ALL database operations (no string concatenation)
+- Escape output for the target context (HTML, URL, SQL, shell)
+- Never log sensitive data (passwords, tokens, API keys, PII)
+- Use constant-time comparison for secrets (\`crypto.timingSafeEqual\`)
+- Set appropriate HTTP security headers (CSP, HSTS, X-Frame-Options)
+- Implement rate limiting on authentication endpoints
+- Use HTTPS for all external communications
+- Validate file uploads: check MIME type, size limits, no executable extensions
+- Never expose stack traces or internal errors to clients
+
+## OWASP Top 10 Checklist
+
+1. Injection — parameterized queries, input validation
+2. Broken Authentication — strong password hashing (bcrypt/argon2), session management
+3. Sensitive Data Exposure — encrypt at rest and in transit
+4. XXE — disable external entity processing in XML parsers
+5. Broken Access Control — verify authorization on every request
+6. Security Misconfiguration — secure defaults, no debug in production
+7. XSS — context-aware output encoding
+8. Insecure Deserialization — validate and sanitize before deserializing
+9. Known Vulnerabilities — keep dependencies updated
+10. Insufficient Logging — log security events, alert on anomalies
+`,
+  performance: `# {name}
+
+## Description
+
+Performance skill — enforces performance best practices and optimization patterns.
+
+## Instructions
+
+- Avoid N+1 queries — use JOINs, batch loading, or DataLoader pattern
+- Use database indexes for frequently queried columns
+- Implement pagination for list endpoints (never return unbounded results)
+- Cache expensive computations and repeated database queries
+- Use connection pooling for database connections
+- Lazy-load heavy modules and components
+- Debounce user input handlers (search, resize, scroll)
+- Use \`requestAnimationFrame\` for DOM-intensive operations
+- Profile before optimizing — measure, don't guess
+- Set appropriate HTTP cache headers (ETag, Cache-Control)
+
+## Patterns
+
+- Memoization: \`useMemo\`, \`useCallback\` for expensive React computations
+- Virtual scrolling for long lists (react-virtual, @tanstack/virtual)
+- Code splitting with dynamic \`import()\` for route-level chunks
+- Web Workers for CPU-intensive tasks off the main thread
+- Connection pooling and prepared statements for database access
+`,
+  database: `# {name}
+
+## Description
+
+Database skill — enforces database design and query best practices.
+
+## Instructions
+
+- Use migrations for ALL schema changes (never manual ALTER TABLE)
+- Add indexes for columns used in WHERE, JOIN, and ORDER BY clauses
+- Use foreign key constraints to maintain referential integrity
+- Prefer explicit column lists over SELECT * in production queries
+- Use transactions for multi-statement operations that must be atomic
+- Normalize data to 3NF unless denormalization is justified by performance
+- Use appropriate column types (don't store dates as strings)
+- Add NOT NULL constraints where the column should always have a value
+- Use CHECK constraints for enum-like columns
+- Name constraints and indexes explicitly (not auto-generated names)
+
+## Patterns
+
+\`\`\`sql
+-- Good: explicit columns, parameterized
+SELECT id, name, email FROM users WHERE status = ? ORDER BY created_at DESC LIMIT ?;
+
+-- Good: index for the above query
+CREATE INDEX idx_users_status_created ON users(status, created_at DESC);
+
+-- Good: migration with explicit constraint names
+ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id);
+\`\`\`
+`,
+  api: `# {name}
+
+## Description
+
+API design skill — enforces RESTful API conventions and best practices.
+
+## Instructions
+
+- Use standard HTTP methods: GET (read), POST (create), PUT (replace), PATCH (update), DELETE (remove)
+- Use plural nouns for resource endpoints: \`/api/users\`, not \`/api/user\`
+- Return appropriate HTTP status codes: 200, 201, 204, 400, 401, 403, 404, 409, 422, 500
+- Use JSON for request/response bodies with \`Content-Type: application/json\`
+- Implement pagination: \`?page=1&pageSize=20\` with total count in response
+- Version APIs if breaking changes are needed: \`/api/v2/users\`
+- Validate request bodies with a schema validator (zod, joi, ajv)
+- Return consistent error format: \`{ error: string, code?: string, details?: object }\`
+- Use query params for filtering/sorting: \`?status=active&sort=name:asc\`
+- Document endpoints with OpenAPI/Swagger annotations
+
+## Response Format
+
+\`\`\`json
+// Success (list)
+{ "items": [...], "total": 42, "page": 1, "pageSize": 20 }
+
+// Success (single)
+{ "user": { "id": "...", "name": "..." } }
+
+// Error
+{ "error": "Validation failed", "code": "VALIDATION_ERROR", "details": [...] }
+\`\`\`
+`,
+  react: `# {name}
+
+## Description
+
+React development skill — enforces React patterns and component conventions.
+
+## Instructions
+
+- Use functional components with hooks (no class components)
+- Keep components focused — one responsibility per component
+- Extract custom hooks for reusable stateful logic (\`useXxx\`)
+- Use TypeScript interfaces for all props (not \`any\`)
+- Prefer controlled components for form inputs
+- Use \`useCallback\` for event handlers passed to child components
+- Use \`useMemo\` for expensive derived data (not for every variable)
+- Handle loading, error, and empty states explicitly
+- Use semantic HTML elements (\`<button>\`, \`<nav>\`, \`<main>\`, not \`<div>\` for everything)
+- Keep effects minimal — one concern per \`useEffect\`
+
+## Patterns
+
+\`\`\`tsx
+interface Props {
+  items: Item[];
+  onSelect: (item: Item) => void;
+}
+
+export default function ItemList({ items, onSelect }: Props) {
+  if (items.length === 0) {
+    return <EmptyState message="No items found" />;
+  }
+  return (
+    <ul role="list">
+      {items.map(item => (
+        <li key={item.id}>
+          <button onClick={() => onSelect(item)}>{item.name}</button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+\`\`\`
+`,
+  postgres: `# {name}
+
+## Description
+
+PostgreSQL skill — enforces Postgres-specific best practices and patterns.
+
+## Instructions
+
+- Use \`SERIAL\` or \`GENERATED ALWAYS AS IDENTITY\` for auto-increment PKs
+- Use \`TEXT\` over \`VARCHAR(n)\` unless length validation is needed
+- Use \`TIMESTAMPTZ\` (not \`TIMESTAMP\`) for time-aware columns
+- Use \`JSONB\` (not \`JSON\`) for structured JSON storage
+- Create partial indexes for queries with common WHERE clauses
+- Use \`EXPLAIN ANALYZE\` to verify query plans
+- Use CTEs (\`WITH\`) for complex multi-step queries
+- Use \`ON CONFLICT\` for upsert operations
+- Use connection pooling (pgBouncer or built-in pool)
+- Use row-level security (RLS) for multi-tenant data isolation
+
+## Patterns
+
+\`\`\`sql
+-- Upsert
+INSERT INTO users (email, name) VALUES ($1, $2)
+ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW();
+
+-- Partial index
+CREATE INDEX idx_orders_pending ON orders(created_at) WHERE status = 'pending';
+
+-- CTE for complex query
+WITH active_users AS (
+  SELECT id FROM users WHERE last_login > NOW() - INTERVAL '30 days'
+)
+SELECT o.* FROM orders o JOIN active_users u ON o.user_id = u.id;
+\`\`\`
+`,
+  terraform: `# {name}
+
+## Description
+
+Terraform/IaC skill — enforces infrastructure-as-code best practices.
+
+## Instructions
+
+- Use modules for reusable infrastructure components
+- Tag ALL resources with: Name, Environment, Project, ManagedBy=terraform
+- Use variables with descriptions and type constraints
+- Use \`terraform fmt\` and \`terraform validate\` before every commit
+- Store state remotely (S3, GCS, Terraform Cloud) — never local state in production
+- Use state locking (DynamoDB for S3 backend)
+- Use workspaces or separate state files for environment isolation
+- Pin provider versions: \`required_providers { aws = { version = "~> 5.0" } }\`
+- Use data sources to reference existing resources (don't hardcode IDs)
+- Use \`lifecycle { prevent_destroy = true }\` for critical resources
+
+## Patterns
+
+\`\`\`hcl
+resource "aws_instance" "web" {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+
+  tags = merge(var.common_tags, {
+    Name = "\${var.project}-web-\${var.environment}"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+\`\`\`
+`,
+  auth: `# {name}
+
+## Description
+
+Authentication & authorization skill — enforces auth best practices.
+
+## Instructions
+
+- Hash passwords with bcrypt (cost factor 12+) or argon2id
+- Use JWTs with short expiry (15min access, 7d refresh) and HTTP-only cookies
+- Implement refresh token rotation (invalidate old refresh token on use)
+- Rate-limit login attempts (5 per minute per IP/email)
+- Use constant-time comparison for token validation
+- Validate JWT signature, expiry, and issuer on every protected request
+- Implement RBAC or ABAC for authorization (not ad-hoc permission checks)
+- Log all auth events: login, logout, failed attempts, password changes
+- Enforce password complexity: 8+ chars, no common passwords
+- Use CSRF tokens for cookie-based auth (not needed for Bearer token auth)
+
+## Patterns
+
+\`\`\`typescript
+// Middleware
+function requireAuth(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Authentication required' });
+  try {
+    req.user = verifyJWT(token);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// Permission check
+function requireRole(...roles: string[]) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    next();
+  };
+}
+\`\`\`
+`,
+};
+
 router.post('/:id/context-files/create-skill', (req: Request, res: Response) => {
   const wsPath = resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
@@ -430,7 +767,7 @@ router.post('/:id/context-files/create-skill', (req: Request, res: Response) => 
     return;
   }
 
-  const { filename } = req.body as { filename: string };
+  const { filename, template: templateId } = req.body as { filename: string; template?: string };
   if (!filename || typeof filename !== 'string') {
     res.status(400).json({ error: 'Missing filename' });
     return;
@@ -457,24 +794,11 @@ router.post('/:id/context-files/create-skill', (req: Request, res: Response) => 
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  const template = `# ${sanitized}
-
-## Description
-
-Describe what this skill does and when it should be injected.
-
-## Instructions
-
-- Step-by-step instructions for the agent when this skill is active
-- Be specific about expected behavior, coding patterns, and conventions
-
-## Context
-
-Additional context the agent needs to follow this skill correctly.
-`;
+  const templateKey = templateId && SKILL_TEMPLATES[templateId] ? templateId : 'blank';
+  const content = SKILL_TEMPLATES[templateKey].replace(/\{name\}/g, sanitized);
 
   markWriting(abs);
-  fs.writeFileSync(abs, template, 'utf-8');
+  fs.writeFileSync(abs, content, 'utf-8');
 
   const stat = fs.statSync(abs);
   res.status(201).json({
@@ -483,6 +807,397 @@ Additional context the agent needs to follow this skill correctly.
     sizeBytes: stat.size,
     modifiedAt: stat.mtime.toISOString(),
   });
+});
+
+// ─── List Skill Templates ────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-files/skill-templates:
+ *   get:
+ *     summary: List available skill templates
+ *     tags: [Context Files]
+ *     responses:
+ *       200:
+ *         description: Array of template IDs with labels
+ */
+router.get('/:id/context-files/skill-templates', (_req: Request, res: Response) => {
+  const templates = Object.keys(SKILL_TEMPLATES).map(id => ({
+    id,
+    label: id === 'blank' ? 'Blank' : id.charAt(0).toUpperCase() + id.slice(1),
+  }));
+  res.json({ templates });
+});
+
+// ─── Delete Skill File ──────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-files/delete-skill:
+ *   delete:
+ *     summary: Delete a skill file from .rorca/skills/
+ *     tags: [Context Files]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               filename:
+ *                 type: string
+ *                 description: Filename without extension
+ *     responses:
+ *       200:
+ *         description: Skill file deleted (with active scope/tag warnings if applicable)
+ *       404:
+ *         description: File not found
+ */
+router.delete('/:id/context-files/delete-skill', (req: Request, res: Response) => {
+  const wsPath = resolveWorkspacePath(req.params.id as string);
+  if (!wsPath) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  const { filename } = req.body as { filename: string };
+  if (!filename || typeof filename !== 'string') {
+    res.status(400).json({ error: 'Missing filename' });
+    return;
+  }
+
+  const sanitized = filename.replace(/\.md$/, '');
+  const relPath = `.rorca/skills/${sanitized}.md`;
+  const abs = path.join(wsPath, relPath);
+
+  if (!abs.startsWith(path.resolve(wsPath))) {
+    res.status(400).json({ error: 'Invalid path' });
+    return;
+  }
+
+  if (!fs.existsSync(abs)) {
+    res.status(404).json({ error: 'File not found' });
+    return;
+  }
+
+  // Check if skill is referenced in routing config
+  const config = loadRorcaConfig(wsPath);
+  const activeScopes: string[] = [];
+  const activeTags: string[] = [];
+
+  for (const scope of config.routing?.scopes ?? []) {
+    if (scope.inject.includes(relPath)) {
+      activeScopes.push(scope.path);
+    }
+  }
+  for (const tag of config.routing?.tags ?? []) {
+    if (tag.inject.includes(relPath)) {
+      activeTags.push(tag.tag);
+    }
+  }
+
+  markWriting(abs);
+  fs.unlinkSync(abs);
+
+  res.json({
+    deleted: true,
+    filename: `${sanitized}.md`,
+    warnings: activeScopes.length > 0 || activeTags.length > 0
+      ? {
+        activeScopes,
+        activeTags,
+        message: `Skill was assigned to ${activeScopes.length} scope(s) and ${activeTags.length} tag(s). Update routing config to remove references.`,
+      }
+      : null,
+  });
+});
+
+// ─── Skill Usage Stats ──────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-files/skill-usage:
+ *   get:
+ *     summary: Get skill injection counts from recent WAL events
+ *     tags: [Context Files]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: runs
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 10
+ *         description: Number of recent runs to check
+ *     responses:
+ *       200:
+ *         description: Usage counts per skill file
+ */
+router.get('/:id/context-files/skill-usage', (req: Request, res: Response) => {
+  const wsPath = resolveWorkspacePath(req.params.id as string);
+  if (!wsPath) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  const runLimit = Math.min(Math.max(parseInt(String(req.query.runs)) || 10, 1), 100);
+
+  // Query WAL events for story_started events that contain context_files
+  try {
+    const rows = db.prepare(`
+      SELECT payload FROM wal_events
+      WHERE event_type = 'story_started'
+        AND workspace_id = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(req.params.id, runLimit * 50) as { payload: string }[];
+
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      try {
+        const payload = JSON.parse(row.payload);
+        const files: string[] = payload.context_files ?? [];
+        for (const f of files) {
+          if (f.startsWith('.rorca/skills/')) {
+            counts.set(f, (counts.get(f) || 0) + 1);
+          }
+        }
+      } catch { /* skip malformed */ }
+    }
+
+    const usage: Record<string, number> = {};
+    for (const [file, count] of counts) {
+      usage[file] = count;
+    }
+
+    res.json({ usage, runsChecked: runLimit });
+  } catch {
+    res.json({ usage: {}, runsChecked: 0 });
+  }
+});
+
+// ─── Import Skill from URL ──────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-files/import-skill:
+ *   post:
+ *     summary: Import a skill file from a URL
+ *     tags: [Context Files]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               url:
+ *                 type: string
+ *               filename:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Skill imported
+ */
+router.post('/:id/context-files/import-skill', async (req: Request, res: Response) => {
+  const wsPath = resolveWorkspacePath(req.params.id as string);
+  if (!wsPath) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  const { url, filename } = req.body as { url: string; filename: string };
+  if (!url || !filename) {
+    res.status(400).json({ error: 'Missing url or filename' });
+    return;
+  }
+
+  // Validate URL
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      res.status(400).json({ error: 'Only HTTP/HTTPS URLs are supported' });
+      return;
+    }
+  } catch {
+    res.status(400).json({ error: 'Invalid URL' });
+    return;
+  }
+
+  const sanitized = filename.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  if (!sanitized) {
+    res.status(400).json({ error: 'Invalid filename' });
+    return;
+  }
+
+  const relPath = `.rorca/skills/${sanitized}.md`;
+  const abs = path.join(wsPath, relPath);
+
+  if (fs.existsSync(abs)) {
+    res.status(409).json({ error: 'File already exists', path: relPath });
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(parsedUrl.toString(), {
+      signal: controller.signal,
+      headers: { 'Accept': 'text/plain, text/markdown, */*' },
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      res.status(400).json({ error: `Failed to fetch: HTTP ${response.status}` });
+      return;
+    }
+
+    const content = await response.text();
+    if (content.length > 500_000) {
+      res.status(400).json({ error: 'Content too large (max 500KB)' });
+      return;
+    }
+
+    // Ensure directory exists
+    const dir = path.dirname(abs);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    markWriting(abs);
+    fs.writeFileSync(abs, content, 'utf-8');
+
+    const stat = fs.statSync(abs);
+    res.status(201).json({
+      created: true,
+      relativePath: relPath,
+      sizeBytes: stat.size,
+      modifiedAt: stat.mtime.toISOString(),
+      wordCount: countWords(content),
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to fetch URL';
+    res.status(400).json({ error: msg });
+  }
+});
+
+// ─── Export Skill ───────────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-files/export-skill:
+ *   get:
+ *     summary: Export a skill file as downloadable .md
+ *     tags: [Context Files]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: filename
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Markdown file download
+ */
+router.get('/:id/context-files/export-skill', (req: Request, res: Response) => {
+  const wsPath = resolveWorkspacePath(req.params.id as string);
+  if (!wsPath) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  const filename = req.query.filename as string;
+  if (!filename) {
+    res.status(400).json({ error: 'Missing filename query parameter' });
+    return;
+  }
+
+  const sanitized = filename.replace(/\.md$/, '');
+  const relPath = `.rorca/skills/${sanitized}.md`;
+  const abs = path.join(wsPath, relPath);
+
+  if (!abs.startsWith(path.resolve(wsPath))) {
+    res.status(400).json({ error: 'Invalid path' });
+    return;
+  }
+
+  if (!fs.existsSync(abs)) {
+    res.status(404).json({ error: 'Skill file not found' });
+    return;
+  }
+
+  const content = fs.readFileSync(abs, 'utf-8');
+  res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${sanitized}.md"`);
+  res.send(content);
+});
+
+// ─── Skill Scope/Tag Assignments ────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-files/skill-assignments:
+ *   get:
+ *     summary: Get scope and tag assignments for all skill files
+ *     tags: [Context Files]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Map of skill file path to assigned scopes/tags
+ */
+router.get('/:id/context-files/skill-assignments', (req: Request, res: Response) => {
+  const wsPath = resolveWorkspacePath(req.params.id as string);
+  if (!wsPath) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  const config = loadRorcaConfig(wsPath);
+  const assignments: Record<string, { scopes: string[]; tags: string[] }> = {};
+
+  for (const scope of config.routing?.scopes ?? []) {
+    for (const injectPath of scope.inject) {
+      if (injectPath.startsWith('.rorca/skills/')) {
+        if (!assignments[injectPath]) assignments[injectPath] = { scopes: [], tags: [] };
+        assignments[injectPath].scopes.push(scope.path);
+      }
+    }
+  }
+
+  for (const tag of config.routing?.tags ?? []) {
+    for (const injectPath of tag.inject) {
+      if (injectPath.startsWith('.rorca/skills/')) {
+        if (!assignments[injectPath]) assignments[injectPath] = { scopes: [], tags: [] };
+        assignments[injectPath].tags.push(tag.tag);
+      }
+    }
+  }
+
+  res.json({ assignments });
 });
 
 export default router;

@@ -1374,6 +1374,7 @@ async function executeStory(
 
   // CIE-004: Route context for this story
   let contextFilePath: string | undefined;
+  let injectedContextFiles: string[] = [];
   try {
     const rorcaConfig = loadRorcaConfig(config.cwd);
     const contextStory: ContextStory = {
@@ -1387,6 +1388,7 @@ async function executeStory(
     const contextPayload = routeContext(contextStory, rorcaConfig.routing, effectiveCwd);
     if (contextPayload.totalTokens > 0) {
       contextFilePath = writeContextFile(contextPayload, effectiveCwd);
+      injectedContextFiles = contextPayload.injectedFiles;
       console.log(`  [context] Routed ${contextPayload.totalTokens} tokens (${contextPayload.globals.length}g/${contextPayload.scoped.length}s/${contextPayload.tagged.length}t)`);
     }
   } catch (err: any) {
@@ -1430,6 +1432,7 @@ async function executeStory(
       agent_type: effectiveAgent,
       ...(currentModel !== config.agentModel ? { model_override: currentModel, model_tier: escState?.currentTier } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
+      ...(injectedContextFiles.length > 0 ? { context_files: injectedContextFiles } : {}),
     }, story.id);
   }
 
