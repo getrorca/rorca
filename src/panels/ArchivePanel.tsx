@@ -36,6 +36,7 @@ import type { PanelId } from '../components/Sidebar';
 import { ReadinessRing } from '../components/ReadinessRing';
 import { TagChipsReadonly, TagChips } from '../components/TagChips';
 import { SpecVersionHistory } from '../components/SpecVersionHistory';
+import AppHeader from '../components/AppHeader';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -62,8 +63,6 @@ interface ArchiveSpec {
   forkedFrom?: string;
   reviewStatus?: ReviewStatus;
   source?: string;
-  agentType?: string;
-  agentModel?: string | null;
 }
 
 interface ArchiveResponse {
@@ -159,7 +158,6 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
   const [searchText, setSearchText] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [agentFilter, setAgentFilter] = useState<'all' | 'claude' | 'opencode'>('all');
   const [tagFilter, setTagFilter] = useState<string[]>([]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -193,7 +191,6 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
       });
       if (debouncedSearch) params.set('q', debouncedSearch);
       if (tagFilter.length > 0) params.set('tags', tagFilter.join(','));
-      if (agentFilter !== 'all') params.set('agentType', agentFilter);
 
       const res = await apiFetch<ArchiveResponse>(`/api/specs/archive?${params}`);
       if (append) {
@@ -209,7 +206,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [workspaceId, statusFilter, debouncedSearch, tagFilter, agentFilter]);
+  }, [workspaceId, statusFilter, debouncedSearch, tagFilter]);
 
   useEffect(() => {
     setSelectedId(null);
@@ -278,282 +275,280 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
 
   const selectedSpec = specs.find(s => s.id === selectedId);
 
+  const allTags = Array.from(new Set(specs.flatMap(s => s.tags || []))).sort();
+
   return (
-    <div className="flex h-full overflow-hidden">
-      {/* ─── Left: Search + Results ──────────────────────────────── */}
-      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        {/* Search bar (sticky) */}
-        <div className="px-4 py-3 border-b border-border shrink-0 space-y-3">
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-            <input
-              type="text"
-              value={searchText}
-              onChange={e => setSearchText(e.target.value)}
-              placeholder="Search specs by name, story, or keyword..."
-              className="w-full pl-9 pr-8 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 focus:outline-none focus:border-accent transition-colors"
-            />
-            {searchText && (
-              <button
-                onClick={() => setSearchText('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-text transition-colors"
-              >
-                <X size={14} />
-              </button>
-            )}
+    <div className="flex flex-col h-full bg-bg overflow-hidden">
+      <AppHeader
+        breadcrumbs={
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-[var(--text)] text-sm tracking-tight">
+              {workspaceId ? 'Workspace' : 'Global'}
+            </span>
+            <ChevronRight size={14} className="text-muted" />
+            <span className="text-sm text-muted">Archive</span>
           </div>
-
-          {/* Status filter pills */}
-          <div className="flex gap-1.5">
-            {STATUS_FILTERS.map(f => (
-              <button
-                key={f.id}
-                onClick={() => setStatusFilter(f.id)}
-                className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
-                  statusFilter === f.id
-                    ? 'bg-accent text-white'
-                    : 'bg-panel border border-border text-muted hover:text-text'
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
-            <span className="w-px bg-border mx-1" />
-            {([
-              { id: 'all' as const, label: 'All Agents' },
-              { id: 'claude' as const, label: 'Claude' },
-              { id: 'opencode' as const, label: 'OpenCode' },
-            ]).map(f => (
-              <button
-                key={f.id}
-                onClick={() => setAgentFilter(f.id)}
-                className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
-                  agentFilter === f.id
-                    ? f.id === 'claude' ? 'bg-blue-500 text-white'
-                      : f.id === 'opencode' ? 'bg-purple-500 text-white'
-                      : 'bg-accent text-white'
-                    : 'bg-panel border border-border text-muted hover:text-text'
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Active tag filters */}
-          {tagFilter.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] text-muted">Tags:</span>
-              {tagFilter.map(t => (
+        }
+        actions={
+          <div className="flex items-center gap-2 flex-wrap flex-1 max-w-full justify-end pb-1 pt-1 pr-2">
+            {/* Search bar */}
+            <div className="relative w-48 shrink-0">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
+              <input
+                type="text"
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                placeholder="Search archive..."
+                className="w-full h-8 pl-8 pr-8 bg-panel border gap-3 border-border rounded text-sm text-text placeholder-muted/60 focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/40 transition-shadow transition-colors"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    setSearchText(e.currentTarget.value);
+                  }
+                }}
+              />
+              {searchText && (
                 <button
-                  key={t}
-                  onClick={() => setTagFilter(prev => prev.filter(x => x !== t))}
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/15 text-accent border border-accent/30 hover:bg-accent/25 transition-colors"
+                  onClick={() => setSearchText('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text transition-colors"
+                  title="Clear search"
                 >
-                  {t}
-                  <X size={8} />
+                  <X size={14} />
                 </button>
-              ))}
-              <button
-                onClick={() => setTagFilter([])}
-                className="text-[10px] text-muted hover:text-text transition-colors"
+              )}
+            </div>
+
+            {/* Filters */}
+            <div className="flex gap-2 shrink-0">
+              {/* Type Filter */}
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                className="h-8 px-2 pr-8 bg-transparent border border-border/50 rounded text-sm text-muted hover:text-text focus:outline-none focus:border-accent/40 transition-colors cursor-pointer appearance-none"
+                style={{
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
+                  backgroundRepeat: 'no-repeat',
+                  backgroundPosition: 'right 8px center',
+                }}
               >
-                Clear all
-              </button>
-            </div>
-          )}
-        </div>
+                <option value="all">Any Status</option>
+                <option value="success">Success</option>
+                <option value="error">Failed</option>
+                <option value="needs_review">Needs Review</option>
+              </select>
 
-        {/* Results */}
-        <div className="flex-1 overflow-y-auto">
-          {loading ? (
-            <div className="flex items-center justify-center h-full text-muted text-sm">
-              Loading specs...
+              {/* Tag Filter */}
+              <select
+                value={tagFilter.length > 0 ? tagFilter[0] : 'all'}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'all') setTagFilter([]);
+                  else setTagFilter([val]);
+                }}
+                className="h-8 px-2 pr-8 bg-transparent border border-border/50 rounded text-sm text-muted hover:text-text focus:outline-none focus:border-accent/40 transition-colors cursor-pointer appearance-none max-w-[100px]"
+                style={{
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
+                  backgroundRepeat: 'no-repeat',
+                  backgroundPosition: 'right 8px center',
+                }}
+              >
+                <option value="all">Any Tag</option>
+                {allTags.map(tag => (
+                  <option key={tag} value={tag}>{tag}</option>
+                ))}
+              </select>
             </div>
-          ) : specs.length === 0 ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
-                <Archive size={64} className="text-muted/40" strokeWidth={1.2} />
-                <div>
-                  {debouncedSearch ? (
-                    <>
-                      <p className="text-sm font-medium text-text mb-1">
-                        No specs match &ldquo;{debouncedSearch}&rdquo;
-                      </p>
-                      <p className="text-xs text-muted">Try a different keyword</p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="text-sm font-medium text-text mb-1">
-                        No specs generated yet
-                      </p>
-                      <p className="text-xs text-muted">
-                        Create your first in Spec Forge
-                      </p>
-                    </>
-                  )}
+          </div>
+        }
+      />
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* ─── Left: Split List ────────────────────────────────────────── */}
+        <div
+          className={`flex-col border-r border-border transition-all duration-300 ${selectedId ? 'w-1/3 min-w-[320px] max-w-[500px]' : 'w-full'
+            }`}
+        >
+          <div className="flex flex-col h-full bg-panel">
+            {/* Results */}
+            <div className="flex-1 overflow-y-auto">
+              {loading ? (
+                <div className="flex items-center justify-center h-full text-muted text-sm">
+                  Loading specs...
                 </div>
-              </div>
-            </div>
-          ) : (
-            <div>
-              {specs.map(spec => {
-                const cfg = STATUS_CONFIG[spec.status];
-                const Icon = cfg.icon;
-                return (
-                  <button
-                    key={spec.id}
-                    onClick={() => setSelectedId(spec.id === selectedId ? null : spec.id)}
-                    className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${
-                      spec.id === selectedId ? 'bg-accent/10' : 'hover:bg-panel'
-                    }`}
-                  >
-                    {/* Row 1: status badge + date + story count + readiness */}
-                    <div className="flex items-center justify-between mb-1.5">
-                      <div className="flex items-center gap-2">
-                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${cfg.className}`}>
-                          <Icon size={10} />
-                          {cfg.label}
-                        </span>
-                        <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
-                          {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
-                        </span>
-                        {spec.reviewStatus && spec.reviewStatus !== 'draft' && (
-                          <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded border ${
-                            spec.reviewStatus === 'review_requested' ? 'bg-accent/15 text-accent border-accent/30' :
-                            spec.reviewStatus === 'approved' ? 'bg-success/15 text-success border-success/30' :
-                            'bg-warning/15 text-warning border-warning/30'
-                          }`}>
-                            {spec.reviewStatus === 'review_requested' ? 'Needs Review' :
-                             spec.reviewStatus === 'approved' ? 'Review OK' :
-                             'Changes Req.'}
-                          </span>
-                        )}
-                        {spec.source === 'quick-run' && (
-                          <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400 border border-purple-500/30">
-                            Quick Run
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {spec.readinessPercent != null && (
-                          <ReadinessRing percent={spec.readinessPercent} size={28} />
-                        )}
-                        <span className="text-[10px] text-muted flex items-center gap-1">
-                          <Clock size={10} />
-                          {formatDate(spec.generatedAt)}
-                        </span>
-                        <ChevronRight
-                          size={14}
-                          className={`shrink-0 text-muted transition-transform ${
-                            spec.id === selectedId ? 'rotate-90' : ''
-                          }`}
-                        />
-                      </div>
-                    </div>
-
-                    {/* Row 2: spec name + repo badge + branch badge */}
-                    <div className="flex items-center gap-2 mb-1 min-w-0">
-                      <span className="text-sm font-mono font-semibold text-text truncate">
-                        {spec.specName}
-                      </span>
-                      {spec.repoName && (
-                        <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted font-mono">
-                          {spec.repoName}
-                        </span>
-                      )}
-                      {spec.branchName && (
-                        <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted font-mono">
-                          <GitBranch className="w-2.5 h-2.5" />
-                          {spec.branchName.replace('feat/', '')}
-                        </span>
-                      )}
-                      {spec.forkedFrom && (
-                        <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 border border-accent/20 text-accent font-mono">
-                          <GitFork className="w-2.5 h-2.5" />
-                          {spec.forkedFrom}
-                        </span>
-                      )}
-                      <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${
-                        spec.agentType === 'opencode'
-                          ? 'bg-purple-500/15 text-purple-400 border-purple-500/30'
-                          : 'bg-blue-500/15 text-blue-400 border-blue-500/30'
-                      }`}>
-                        {spec.agentType === 'opencode'
-                          ? (spec.agentModel?.split('/').pop() ?? 'OpenCode')
-                          : 'Claude'}
-                      </span>
-                    </div>
-
-                    {/* Tags */}
-                    {spec.tags?.length > 0 && (
-                      <div className="mb-1">
-                        <TagChipsReadonly
-                          tags={spec.tags}
-                          onTagClick={tag => {
-                            if (!tagFilter.includes(tag)) {
-                              setTagFilter(prev => [...prev, tag]);
-                            }
-                          }}
-                        />
-                      </div>
-                    )}
-
-                    {/* Row 3: first 2 story titles */}
-                    {spec.storyTitles.length > 0 && (
-                      <div className="space-y-0.5">
-                        {spec.storyTitles.slice(0, 2).map((title, i) => (
-                          <p key={i} className="text-xs text-muted truncate">
-                            {spec.storyTitles.length > 0 ? `US-${String(i + 1).padStart(3, '0')}: ` : ''}{title}
+              ) : specs.length === 0 ? (
+                <div className="flex items-center justify-center h-full">
+                  <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
+                    <Archive size={64} className="text-muted/40" strokeWidth={1.2} />
+                    <div>
+                      {debouncedSearch ? (
+                        <>
+                          <p className="text-sm font-medium text-text mb-1">
+                            No specs match &ldquo;{debouncedSearch}&rdquo;
                           </p>
-                        ))}
-                      </div>
-                    )}
+                          <p className="text-xs text-muted">Try a different keyword</p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-sm font-medium text-text mb-1">
+                            No specs generated yet
+                          </p>
+                          <p className="text-xs text-muted">
+                            Create your first in Spec Forge
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  {specs.map(spec => {
+                    const cfg = STATUS_CONFIG[spec.status];
+                    const Icon = cfg.icon;
+                    return (
+                      <button
+                        key={spec.id}
+                        onClick={() => setSelectedId(spec.id === selectedId ? null : spec.id)}
+                        className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${spec.id === selectedId ? 'bg-accent/10' : 'hover:bg-panel'
+                          }`}
+                      >
+                        {/* Row 1: status badge + date + story count + readiness */}
+                        <div className="flex items-center justify-between mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${cfg.className}`}>
+                              <Icon size={10} />
+                              {cfg.label}
+                            </span>
+                            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
+                              {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
+                            </span>
+                            {spec.reviewStatus && spec.reviewStatus !== 'draft' && (
+                              <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded border ${spec.reviewStatus === 'review_requested' ? 'bg-accent/15 text-accent border-accent/30' :
+                                spec.reviewStatus === 'approved' ? 'bg-success/15 text-success border-success/30' :
+                                  'bg-warning/15 text-warning border-warning/30'
+                                }`}>
+                                {spec.reviewStatus === 'review_requested' ? 'Needs Review' :
+                                  spec.reviewStatus === 'approved' ? 'Review OK' :
+                                    'Changes Req.'}
+                              </span>
+                            )}
+                            {spec.source === 'quick-run' && (
+                              <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400 border border-purple-500/30">
+                                Quick Run
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {spec.readinessPercent != null && (
+                              <ReadinessRing percent={spec.readinessPercent} size={28} />
+                            )}
+                            <span className="text-[10px] text-muted flex items-center gap-1">
+                              <Clock size={10} />
+                              {formatDate(spec.generatedAt)}
+                            </span>
+                            <ChevronRight
+                              size={14}
+                              className={`shrink-0 text-muted transition-transform ${spec.id === selectedId ? 'rotate-90' : ''
+                                }`}
+                            />
+                          </div>
+                        </div>
 
-                    {/* Reject reason (if rejected) */}
-                    {spec.status === 'rejected' && spec.rejectReason && (
-                      <p className="text-xs text-error/70 mt-1 truncate">
-                        Reason: {spec.rejectReason}
-                      </p>
-                    )}
-                  </button>
-                );
-              })}
+                        {/* Row 2: spec name + repo badge + branch badge */}
+                        <div className="flex items-center gap-2 mb-1 min-w-0">
+                          <span className="text-sm font-mono font-semibold text-text truncate">
+                            {spec.specName}
+                          </span>
+                          {spec.repoName && (
+                            <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted font-mono">
+                              {spec.repoName}
+                            </span>
+                          )}
+                          {spec.branchName && (
+                            <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted font-mono">
+                              <GitBranch className="w-2.5 h-2.5" />
+                              {spec.branchName.replace('feat/', '')}
+                            </span>
+                          )}
+                          {spec.forkedFrom && (
+                            <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 border border-accent/20 text-accent font-mono">
+                              <GitFork className="w-2.5 h-2.5" />
+                              {spec.forkedFrom}
+                            </span>
+                          )}
+                        </div>
 
-              {/* Pagination footer */}
-              <div className="px-4 py-3 border-b border-border text-center">
-                <p className="text-xs text-muted mb-2">
-                  Showing {specs.length} of {total} specs
-                </p>
-                {hasMore && (
-                  <button
-                    onClick={handleLoadMore}
-                    disabled={loadingMore}
-                    className="px-4 py-1.5 text-xs font-medium rounded bg-panel border border-border text-text hover:bg-accent/10 transition-colors disabled:opacity-50"
-                  >
-                    {loadingMore ? 'Loading...' : 'Load more'}
-                  </button>
-                )}
-              </div>
+                        {/* Tags */}
+                        {spec.tags?.length > 0 && (
+                          <div className="mb-1">
+                            <TagChipsReadonly
+                              tags={spec.tags}
+                              onTagClick={tag => {
+                                if (!tagFilter.includes(tag)) {
+                                  setTagFilter(prev => [...prev, tag]);
+                                }
+                              }}
+                            />
+                          </div>
+                        )}
+
+                        {/* Row 3: first 2 story titles */}
+                        {spec.storyTitles.length > 0 && (
+                          <div className="space-y-0.5">
+                            {spec.storyTitles.slice(0, 2).map((title, i) => (
+                              <p key={i} className="text-xs text-muted truncate">
+                                {spec.storyTitles.length > 0 ? `US-${String(i + 1).padStart(3, '0')}: ` : ''}{title}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Reject reason (if rejected) */}
+                        {spec.status === 'rejected' && spec.rejectReason && (
+                          <p className="text-xs text-error/70 mt-1 truncate">
+                            Reason: {spec.rejectReason}
+                          </p>
+                        )}
+                      </button>
+                    );
+                  })}
+
+                  {/* Pagination footer */}
+                  <div className="px-4 py-3 border-b border-border text-center">
+                    <p className="text-xs text-muted mb-2">
+                      Showing {specs.length} of {total} specs
+                    </p>
+                    {hasMore && (
+                      <button
+                        onClick={handleLoadMore}
+                        disabled={loadingMore}
+                        className="px-4 py-1.5 text-xs font-medium rounded bg-panel border border-border text-text hover:bg-accent/10 transition-colors disabled:opacity-50"
+                      >
+                        {loadingMore ? 'Loading...' : 'Load more'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
+          </div>
+
+          {/* ─── Right: Spec Detail ─────────────────────────────────── */}
+          {selectedId && (
+            <SpecPreviewDrawer
+              specId={selectedId}
+              summary={selectedSpec ?? null}
+              detail={specDetail}
+              detailLoading={detailLoading}
+              onClose={() => { setSelectedId(null); setSpecDetail(null); }}
+              onNavigate={onNavigate}
+              onTagsChange={(newTags) => {
+                setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, tags: newTags } : s));
+              }}
+            />
           )}
         </div>
       </div>
-
-      {/* ─── Right: Preview Drawer (desktop) ───────────────────── */}
-      {selectedId && (
-        <SpecPreviewDrawer
-          specId={selectedId}
-          summary={selectedSpec ?? null}
-          detail={specDetail}
-          detailLoading={detailLoading}
-          onClose={() => { setSelectedId(null); setSpecDetail(null); }}
-          onNavigate={onNavigate}
-          onTagsChange={(newTags) => {
-            setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, tags: newTags } : s));
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -910,11 +905,10 @@ function SpecPreviewDrawer({
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 ${
-                    activeTab === tab.id
-                      ? 'text-text border-accent'
-                      : 'text-muted hover:text-text border-transparent'
-                  }`}
+                  className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 ${activeTab === tab.id
+                    ? 'text-text border-accent'
+                    : 'text-muted hover:text-text border-transparent'
+                    }`}
                 >
                   {tab.icon && <tab.icon size={12} />}
                   {tab.label}
@@ -988,19 +982,15 @@ function SpecPreviewDrawer({
                         loading={runState === 'triggering'}
                         onTrigger={handleRun}
                         onClose={() => setShowTriggerPopover(false)}
-                        onNavigate={onNavigate}
-                        specPath={summary ? `forge/specs/approved/${summary.id}.json` : undefined}
-                        workspaceId={workspaceId ?? undefined}
                       />
                     )}
                     <button
                       onClick={() => isFreePlan ? setShowPricing(true) : setShowTriggerPopover(true)}
                       disabled={runState === 'triggering'}
-                      className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium transition-opacity disabled:opacity-60 ${
-                        isFreePlan
-                          ? 'bg-amber-500/15 text-amber-600 border border-amber-500/30 hover:bg-amber-500/25'
-                          : 'bg-accent text-white hover:opacity-90'
-                      }`}
+                      className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium transition-opacity disabled:opacity-60 ${isFreePlan
+                        ? 'bg-amber-500/15 text-amber-600 border border-amber-500/30 hover:bg-amber-500/25'
+                        : 'bg-accent text-white hover:opacity-90'
+                        }`}
                     >
                       {runState === 'triggering' ? (
                         <><Loader2 size={14} className="animate-spin" /> Starting run...</>
@@ -1318,7 +1308,7 @@ function StoriesTab({
   useEffect(() => {
     apiFetch<{ counts: Record<string, number> }>(`/api/specs/${specId}/comments/counts`)
       .then(data => setCommentCounts(data.counts))
-      .catch(() => {});
+      .catch(() => { });
   }, [specId]);
 
   if (stories.length === 0) {

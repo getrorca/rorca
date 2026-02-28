@@ -366,6 +366,14 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
 
     const git = simpleGit(workspace.path);
 
+    // Auto-stash dirty working tree so dry-run merge can proceed
+    let stashed = false;
+    const statusResult = await git.status();
+    if (statusResult.files.length > 0) {
+      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-preview-${branchName}`]);
+      stashed = true;
+    }
+
     // Get diff stats to show what would change
     let filesChanged = 0;
     try {
@@ -382,6 +390,7 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
       await git.merge([branchName, '--no-commit', '--no-ff']);
       // If merge succeeds without conflicts, abort it (dry-run)
       await git.merge(['--abort']);
+      if (stashed) { try { await git.stash(['pop']); } catch { /* ignore */ } }
       res.json({ canMerge: true, hasConflicts: false, conflictFiles: [], filesChanged });
     } catch (mergeError: any) {
       if (mergeError.message?.includes('CONFLICT') || mergeError.message?.includes('Automatic merge failed')) {
@@ -405,11 +414,13 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
 
         // Always abort the failed merge to restore clean state
         try { await git.merge(['--abort']); } catch { /* already aborted */ }
+        if (stashed) { try { await git.stash(['pop']); } catch { /* ignore */ } }
 
         res.json({ canMerge: false, hasConflicts: true, conflictFiles, filesChanged });
       } else {
         // Non-conflict error — try to abort and propagate
         try { await git.merge(['--abort']); } catch { /* nothing to abort */ }
+        if (stashed) { try { await git.stash(['pop']); } catch { /* ignore */ } }
         throw mergeError;
       }
     }
@@ -474,38 +485,58 @@ router.post('/merge', async (req: Request, res: Response) => {
 
     const git = simpleGit(workspace.path);
 
-    if (force) {
-      // Force merge: use -X theirs to auto-resolve conflicts in favor of the incoming branch
-      try {
-        await git.merge([branchName, '--no-ff', '-X', 'theirs']);
-      } catch (mergeError: any) {
-        // Even -X theirs can fail on delete/modify conflicts; handle those
-        if (mergeError.message?.includes('CONFLICT')) {
-          try { await git.merge(['--abort']); } catch { /* already clean */ }
-          res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles: [] });
-          return;
+    // Auto-stash any uncommitted local changes so the merge can proceed cleanly
+    let stashed = false;
+    const statusResult = await git.status();
+    const hasDirtyWorkingTree = statusResult.files.length > 0;
+    if (hasDirtyWorkingTree) {
+      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-before-merge-${branchName}`]);
+      stashed = true;
+    }
+
+    try {
+      if (force) {
+        // Force merge: use -X theirs to auto-resolve conflicts in favor of the incoming branch
+        try {
+          await git.merge([branchName, '--no-ff', '-X', 'theirs']);
+        } catch (mergeError: any) {
+          // Even -X theirs can fail on delete/modify conflicts; handle those
+          if (mergeError.message?.includes('CONFLICT')) {
+            try { await git.merge(['--abort']); } catch { /* already clean */ }
+            res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles: [] });
+            return;
+          }
+          throw mergeError;
         }
-        throw mergeError;
+      } else {
+        try {
+          await git.merge([branchName, '--no-ff']);
+        } catch (mergeError: any) {
+          if (mergeError.message?.includes('CONFLICT') || mergeError.message?.includes('Automatic merge failed')) {
+            // Extract conflict file list before aborting
+            let conflictFiles: ConflictFile[] = [];
+            try {
+              const statusOutput = await git.raw(['diff', '--name-only', '--diff-filter=U']);
+              const conflictPaths = statusOutput.trim().split('\n').filter(Boolean);
+              conflictFiles = await extractConflictMarkers(git, workspace.path, conflictPaths);
+            } catch { /* fallback without conflict details */ }
+
+            try { await git.merge(['--abort']); } catch { /* already aborted */ }
+
+            res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles });
+            return;
+          }
+          throw mergeError;
+        }
       }
-    } else {
-      try {
-        await git.merge([branchName, '--no-ff']);
-      } catch (mergeError: any) {
-        if (mergeError.message?.includes('CONFLICT') || mergeError.message?.includes('Automatic merge failed')) {
-          // Extract conflict file list before aborting
-          let conflictFiles: ConflictFile[] = [];
-          try {
-            const statusOutput = await git.raw(['diff', '--name-only', '--diff-filter=U']);
-            const conflictPaths = statusOutput.trim().split('\n').filter(Boolean);
-            conflictFiles = await extractConflictMarkers(git, workspace.path, conflictPaths);
-          } catch { /* fallback without conflict details */ }
-
-          try { await git.merge(['--abort']); } catch { /* already aborted */ }
-
-          res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles });
-          return;
+    } finally {
+      // Always restore stashed changes after merge attempt (success or failure)
+      if (stashed) {
+        try {
+          await git.stash(['pop']);
+        } catch {
+          // Stash pop can conflict with merged files — not fatal, user can resolve
         }
-        throw mergeError;
       }
     }
 
@@ -515,7 +546,7 @@ router.post('/merge', async (req: Request, res: Response) => {
 
     emitWalEvent('worktree_merged', workspaceId, { branchName, mergeCommitSha });
 
-    res.json({ ok: true, mergeCommitSha });
+    res.json({ ok: true, mergeCommitSha, stashedAndRestored: stashed });
   } catch (error: any) {
     console.error('[Worktrees] Merge error:', error);
     res.status(500).json({ error: error.message });

@@ -12,6 +12,7 @@ import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
 import SpecPickerModal from '../components/SpecPickerModal';
 import AgentBadge from '../components/AgentBadge';
 import FinOpsTab from '../components/FinOpsTab';
+import AppHeader from '../components/AppHeader';
 
 type DetailTab = 'stories' | 'terminal' | 'graph' | 'tokens' | 'finops';
 
@@ -28,6 +29,7 @@ interface PipelineRun {
   retried_from_run_id: number | null;
   agent_type?: string;
   agent_model?: string | null;
+  parallelism?: number;
 }
 
 type RunStatus = PipelineRun['status'];
@@ -154,9 +156,8 @@ function ContextBudgetBar({ inputTokens, outputTokens }: { inputTokens: number; 
     <div className="flex items-center gap-2 min-w-0">
       <div className="flex-1 h-1.5 bg-[var(--border)] rounded-full overflow-hidden min-w-[60px]">
         <div
-          className={`h-full rounded-full transition-all duration-300 ${
-            isWarning ? 'bg-amber-500' : 'bg-[var(--accent)]'
-          }`}
+          className={`h-full rounded-full transition-all duration-300 ${isWarning ? 'bg-amber-500' : 'bg-[var(--accent)]'
+            }`}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -530,9 +531,9 @@ export default function PipelineMonitorPanel() {
     for (const s of derivedStories) {
       const graphStatus = s.status === 'pass' ? 'passed' as const
         : s.status === 'fail' ? 'failed' as const
-        : s.status === 'running' ? 'running' as const
-        : s.status === 'retry' ? 'running' as const
-        : 'pending' as const;
+          : s.status === 'running' ? 'running' as const
+            : s.status === 'retry' ? 'running' as const
+              : 'pending' as const;
       statusMap.set(s.storyId, {
         storyId: s.storyId,
         status: graphStatus,
@@ -774,125 +775,137 @@ export default function PipelineMonitorPanel() {
   // ─── Main Layout ─────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full">
-      {/* Left sidebar — Run history list */}
-      <div className="w-60 border-r border-[var(--border)] flex flex-col">
-        <div className="p-3 border-b border-[var(--border)] flex items-center justify-between">
-          <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
-            Runs
-          </span>
-          <button
-            onClick={() => setShowStartHelp(!showStartHelp)}
-            className="p-1 rounded hover:bg-[var(--border)] transition-colors"
-            title="Start New Run"
-          >
-            <Play className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-          </button>
-        </div>
-
-        {showStartHelp && (
-          <div className="p-3 border-b border-[var(--border)] bg-[var(--surface)]">
-            <p className="text-xs text-[var(--text-muted)] mb-2">
-              Paste in terminal:
-            </p>
-            <div className="flex items-center gap-1.5">
-              <code className="flex-1 text-[10px] font-mono bg-[var(--bg)] px-1.5 py-1 rounded text-[var(--text)] truncate">
-                ./scripts/ralph/run-loop.sh
-              </code>
-              <button
-                onClick={handleCopyCommand}
-                className="p-0.5 rounded hover:bg-[var(--border)]"
-              >
-                {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3 text-[var(--text-muted)]" />}
-              </button>
-            </div>
+    <div className="flex flex-col h-full bg-bg">
+      <AppHeader
+        breadcrumbs={
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-[var(--text)] text-sm tracking-tight">
+              {window.location.hash.includes('workspaceId=')
+                ? 'Workspace'
+                : 'Pipeline'}
+            </span>
+            <ChevronRight size={14} className="text-muted" />
+            <span className="text-sm text-muted">Queue & Runs</span>
           </div>
-        )}
-
-        <div className="flex-1 overflow-y-auto min-h-0">
-          {runs.map((run) => (
+        }
+      />
+      <div className="flex flex-1 min-h-0">
+        {/* Left sidebar — Run history list */}
+        <div className="w-60 border-r border-[var(--border)] flex flex-col">
+          <div className="p-3 border-b border-[var(--border)] flex items-center justify-between">
+            <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
+              Runs
+            </span>
             <button
-              key={run.id}
-              onClick={() => setSelectedRunId(run.id)}
-              className={`w-full text-left px-3 py-2.5 border-b border-[var(--border)] transition-colors ${
-                selectedRunId === run.id
+              onClick={() => setShowStartHelp(!showStartHelp)}
+              className="p-1 rounded hover:bg-[var(--border)] transition-colors"
+              title="Start New Run"
+            >
+              <Play className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+            </button>
+          </div>
+
+          {showStartHelp && (
+            <div className="p-3 border-b border-[var(--border)] bg-[var(--surface)]">
+              <p className="text-xs text-[var(--text-muted)] mb-2">
+                Paste in terminal:
+              </p>
+              <div className="flex items-center gap-1.5">
+                <code className="flex-1 text-[10px] font-mono bg-[var(--bg)] px-1.5 py-1 rounded text-[var(--text)] truncate">
+                  ./scripts/ralph/run-loop.sh
+                </code>
+                <button
+                  onClick={handleCopyCommand}
+                  className="p-0.5 rounded hover:bg-[var(--border)]"
+                >
+                  {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3 text-[var(--text-muted)]" />}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto min-h-0">
+            {runs.map((run) => (
+              <button
+                key={run.id}
+                onClick={() => setSelectedRunId(run.id)}
+                className={`w-full text-left px-3 py-2.5 border-b border-[var(--border)] transition-colors ${selectedRunId === run.id
                   ? 'bg-[var(--accent)]/10'
                   : 'hover:bg-[var(--surface)]'
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS_DOTS[run.status] || 'bg-zinc-500'}`} />
-                <span className="text-sm truncate capitalize">{specName(run.spec_path)}</span>
-                {run.retried_from_run_id != null && (
-                  <span className="px-1 py-0.5 text-[9px] font-medium rounded bg-purple-500/20 text-purple-400 flex-shrink-0">
-                    retry
+                  }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS_DOTS[run.status] || 'bg-zinc-500'}`} />
+                  <span className="text-sm truncate capitalize">{specName(run.spec_path)}</span>
+                  {run.retried_from_run_id != null && (
+                    <span className="px-1 py-0.5 text-[9px] font-medium rounded bg-purple-500/20 text-purple-400 flex-shrink-0">
+                      retry
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1 flex items-center gap-2 pl-4">
+                  <span className="text-xs text-[var(--text-muted)]">
+                    {elapsedTime(run.started_at, run.finished_at)}
                   </span>
-                )}
-              </div>
-              <div className="mt-1 flex items-center gap-2 pl-4">
-                <span className="text-xs text-[var(--text-muted)]">
-                  {elapsedTime(run.started_at, run.finished_at)}
+                  <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Queue section */}
+          {(queueEntries.length > 0 || !runs.some((r) => r.status === 'running')) && (
+            <div className="border-t border-[var(--border)] shrink-0">
+              <div className="p-3 flex items-center justify-between">
+                <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
+                  Queue
+                  {queueEntries.length > 0 && (
+                    <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
+                      {queueEntries.length}
+                    </span>
+                  )}
                 </span>
-                <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
+                <button
+                  onClick={() => setSpecPickerOpen(true)}
+                  className="p-1 rounded hover:bg-[var(--border)] transition-colors"
+                  title="Add to Queue"
+                >
+                  <List className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                </button>
               </div>
-            </button>
-          ))}
+              <RunQueueSection
+                entries={queueEntries}
+                onRefresh={fetchQueue}
+                onAddClick={() => setSpecPickerOpen(true)}
+              />
+            </div>
+          )}
         </div>
 
-        {/* Queue section */}
-        {(queueEntries.length > 0 || !runs.some((r) => r.status === 'running')) && (
-          <div className="border-t border-[var(--border)] shrink-0">
-            <div className="p-3 flex items-center justify-between">
-              <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
-                Queue
-                {queueEntries.length > 0 && (
-                  <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
-                    {queueEntries.length}
-                  </span>
-                )}
-              </span>
-              <button
-                onClick={() => setSpecPickerOpen(true)}
-                className="p-1 rounded hover:bg-[var(--border)] transition-colors"
-                title="Add to Queue"
-              >
-                <List className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-              </button>
-            </div>
-            <RunQueueSection
-              entries={queueEntries}
-              onRefresh={fetchQueue}
-              onAddClick={() => setSpecPickerOpen(true)}
-            />
-          </div>
+        {/* Spec Picker Modal */}
+        {workspaceId && (
+          <SpecPickerModal
+            workspaceId={workspaceId}
+            open={specPickerOpen}
+            onClose={() => setSpecPickerOpen(false)}
+            onSelect={handleSpecPicked}
+          />
         )}
-      </div>
 
-      {/* Spec Picker Modal */}
-      {workspaceId && (
-        <SpecPickerModal
-          workspaceId={workspaceId}
-          open={specPickerOpen}
-          onClose={() => setSpecPickerOpen(false)}
-          onSelect={handleSpecPicked}
-        />
-      )}
-
-      {/* Main area — Selected run detail */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {!liveRun ? (
-          <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-            Select a run to view details
-          </div>
-        ) : (
-          <>
-            {/* Run header */}
-            <div className="p-4 border-b border-[var(--border)]">
-              <div className="flex items-center gap-3">
-                <h2 className="text-base font-medium capitalize">{specName(liveRun.spec_path)}</h2>
-                <span
-                  className={`px-2 py-0.5 text-xs font-medium rounded-full ${
-                    liveRun.status === 'running'
+        {/* Main area — Selected run detail */}
+        <div className="flex-1 flex flex-col min-w-0">
+          {!liveRun ? (
+            <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+              Select a run to view details
+            </div>
+          ) : (
+            <>
+              {/* Run header */}
+              <div className="p-4 border-b border-[var(--border)]">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-base font-medium capitalize">{specName(liveRun.spec_path)}</h2>
+                  <span
+                    className={`px-2 py-0.5 text-xs font-medium rounded-full ${liveRun.status === 'running'
                       ? 'bg-blue-500/20 text-blue-400'
                       : liveRun.status === 'done'
                         ? 'bg-emerald-500/20 text-emerald-400'
@@ -901,451 +914,444 @@ export default function PipelineMonitorPanel() {
                           : liveRun.status === 'failed' || liveRun.status === 'partial_failure'
                             ? 'bg-red-500/20 text-red-400'
                             : 'bg-yellow-500/20 text-yellow-400'
-                  }`}
-                >
-                  {liveRun.status === 'partial_failure' ? 'partial failure' : liveRun.status}
-                </span>
-                <AgentBadge agentType={liveRun.agent_type} agentModel={liveRun.agent_model} size="md" />
-                {liveRun.retried_from_run_id != null && (
-                  <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-500/20 text-purple-400 flex items-center gap-1">
-                    <RotateCcw className="w-3 h-3" />
-                    retry of #{liveRun.retried_from_run_id}
-                  </span>
-                )}
-                {(liveRun.status === 'failed' || liveRun.status === 'partial_failure') && (
-                  <button
-                    onClick={handleRetryFailed}
-                    disabled={retryLoading}
-                    className="ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 disabled:opacity-50"
-                    title="Retry failed stories in a new run"
+                      }`}
                   >
-                    <RotateCcw className="w-3 h-3" />
-                    {retryLoading ? 'Retrying...' : 'Retry Failed'}
-                  </button>
-                )}
-                {(liveRun.status === 'running' || liveRun.status === 'paused') && (
-                  <button
-                    onClick={handlePauseResume}
-                    disabled={pauseLoading}
-                    className={`ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 ${
-                      liveRun.status === 'paused'
+                    {liveRun.status === 'partial_failure' ? 'partial failure' : liveRun.status}
+                  </span>
+                  <AgentBadge agentType={liveRun.agent_type} agentModel={liveRun.agent_model} size="md" />
+                  {liveRun.retried_from_run_id != null && (
+                    <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-500/20 text-purple-400 flex items-center gap-1">
+                      <RotateCcw className="w-3 h-3" />
+                      retry of #{liveRun.retried_from_run_id}
+                    </span>
+                  )}
+                  {(liveRun.status === 'failed' || liveRun.status === 'partial_failure') && (
+                    <button
+                      onClick={handleRetryFailed}
+                      disabled={retryLoading}
+                      className="ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 disabled:opacity-50"
+                      title="Retry failed stories in a new run"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      {retryLoading ? 'Retrying...' : 'Retry Failed'}
+                    </button>
+                  )}
+                  {(liveRun.status === 'running' || liveRun.status === 'paused') && (
+                    <button
+                      onClick={handlePauseResume}
+                      disabled={pauseLoading}
+                      className={`ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 ${liveRun.status === 'paused'
                         ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
                         : 'bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30'
-                    } disabled:opacity-50`}
-                    title={liveRun.status === 'paused' ? 'Resume pipeline' : 'Pause pipeline'}
-                  >
-                    {liveRun.status === 'paused' ? (
-                      <>
-                        <Play className="w-3 h-3" />
-                        Resume
-                      </>
-                    ) : (
-                      <>
-                        <Pause className="w-3 h-3" />
-                        Pause
-                      </>
-                    )}
-                  </button>
-                )}
-                {(liveRun.status === 'running' || liveRun.status === 'paused') && (
-                  <button
-                    onClick={handleCancel}
-                    disabled={cancelLoading}
-                    className="ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50"
-                    title="Cancel pipeline run"
-                  >
-                    <XCircle className="w-3 h-3" />
-                    {cancelLoading ? 'Cancelling...' : 'Cancel'}
-                  </button>
-                )}
-              </div>
-              <div className="mt-1 text-xs text-[var(--text-muted)]">
-                Started {formatDistanceToNow(parseUtc(liveRun.started_at), { addSuffix: true })}
-                {(liveRun.status === 'running' || liveRun.status === 'paused') && (
-                  <span> &middot; {liveRun.status === 'paused' ? 'paused' : 'running'} for {elapsedTime(liveRun.started_at, null)}</span>
-                )}
-              </div>
-            </div>
-
-            {/* Tab bar: Stories | Terminal */}
-            <div className="flex border-b border-[var(--border)] shrink-0">
-              <button
-                onClick={() => setDetailTab('terminal')}
-                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
-                  detailTab === 'terminal'
-                    ? 'text-[var(--text)] border-[var(--accent)]'
-                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
-                }`}
-              >
-                <Terminal className="w-3.5 h-3.5" />
-                Terminal
-              </button>
-              <button
-                onClick={() => setDetailTab('stories')}
-                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
-                  detailTab === 'stories'
-                    ? 'text-[var(--text)] border-[var(--accent)]'
-                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
-                }`}
-              >
-                <List className="w-3.5 h-3.5" />
-                Stories
-                {totalCount > 0 && (
-                  <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
-                    {completedCount}/{totalCount}
-                  </span>
-                )}
-              </button>
-              <button
-                onClick={() => setDetailTab('graph')}
-                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
-                  detailTab === 'graph'
-                    ? 'text-[var(--text)] border-[var(--accent)]'
-                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
-                }`}
-              >
-                <GitBranch className="w-3.5 h-3.5" />
-                Graph
-              </button>
-              <button
-                onClick={() => setDetailTab('tokens')}
-                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
-                  detailTab === 'tokens'
-                    ? 'text-[var(--text)] border-[var(--accent)]'
-                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
-                }`}
-              >
-                <BarChart3 className="w-3.5 h-3.5" />
-                Tokens
-                {tokenStats.warningStories.length > 0 && (
-                  <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/15 text-amber-400 font-semibold">
-                    {tokenStats.warningStories.length}
-                  </span>
-                )}
-              </button>
-              <button
-                onClick={() => setDetailTab('finops')}
-                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
-                  detailTab === 'finops'
-                    ? 'text-[var(--text)] border-[var(--accent)]'
-                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
-                }`}
-              >
-                <DollarSign className="w-3.5 h-3.5" />
-                FinOps
-              </button>
-            </div>
-
-            {/* Terminal tab — xterm.js live output */}
-            {detailTab === 'terminal' && (
-              <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-                {selectedRunId && (
-                  <div className="flex justify-end px-2 py-1 border-b border-[var(--border)] shrink-0">
-                    <a
-                      href={`${BASE_URL}/api/pipeline/runs/${selectedRunId}/log`}
-                      download={`run-${selectedRunId}.log`}
-                      className="flex items-center gap-1 px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] rounded transition-colors hover:bg-[var(--surface-hover)]"
-                      title="Download log file"
+                        } disabled:opacity-50`}
+                      title={liveRun.status === 'paused' ? 'Resume pipeline' : 'Pause pipeline'}
                     >
-                      <Download className="w-3 h-3" />
-                      Download Log
-                    </a>
-                  </div>
-                )}
-                <div className="flex-1 min-h-0 overflow-hidden">
-                  {selectedRunId ? (
-                    useMultiPane ? (
-                      <MultiPaneTerminal key={selectedRunId} runId={selectedRunId} walEvents={sseEvents} />
+                      {liveRun.status === 'paused' ? (
+                        <>
+                          <Play className="w-3 h-3" />
+                          Resume
+                        </>
+                      ) : (
+                        <>
+                          <Pause className="w-3 h-3" />
+                          Pause
+                        </>
+                      )}
+                    </button>
+                  )}
+                  {(liveRun.status === 'running' || liveRun.status === 'paused') && (
+                    <button
+                      onClick={handleCancel}
+                      disabled={cancelLoading}
+                      className="ml-2 px-2.5 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1.5 bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50"
+                      title="Cancel pipeline run"
+                    >
+                      <XCircle className="w-3 h-3" />
+                      {cancelLoading ? 'Cancelling...' : 'Cancel'}
+                    </button>
+                  )}
+                </div>
+                <div className="mt-1 text-xs text-[var(--text-muted)]">
+                  Started {formatDistanceToNow(parseUtc(liveRun.started_at), { addSuffix: true })}
+                  {(liveRun.status === 'running' || liveRun.status === 'paused') && (
+                    <span> &middot; {liveRun.status === 'paused' ? 'paused' : 'running'} for {elapsedTime(liveRun.started_at, null)}</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Tab bar: Stories | Terminal */}
+              <div className="flex border-b border-[var(--border)] shrink-0">
+                <button
+                  onClick={() => setDetailTab('terminal')}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'terminal'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                    }`}
+                >
+                  <Terminal className="w-3.5 h-3.5" />
+                  Terminal
+                </button>
+                <button
+                  onClick={() => setDetailTab('stories')}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'stories'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                    }`}
+                >
+                  <List className="w-3.5 h-3.5" />
+                  Stories
+                  {totalCount > 0 && (
+                    <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-[var(--accent)]/15 text-[var(--accent)] font-semibold">
+                      {completedCount}/{totalCount}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => setDetailTab('graph')}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'graph'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                    }`}
+                >
+                  <GitBranch className="w-3.5 h-3.5" />
+                  Graph
+                </button>
+                <button
+                  onClick={() => setDetailTab('tokens')}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'tokens'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                    }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  Tokens
+                  {tokenStats.warningStories.length > 0 && (
+                    <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/15 text-amber-400 font-semibold">
+                      {tokenStats.warningStories.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => setDetailTab('finops')}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'finops'
+                    ? 'text-[var(--text)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
+                    }`}
+                >
+                  <DollarSign className="w-3.5 h-3.5" />
+                  FinOps
+                </button>
+              </div>
+
+              {/* Terminal tab — xterm.js live output */}
+              {detailTab === 'terminal' && (
+                <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                  {selectedRunId && (
+                    <div className="flex justify-end px-2 py-1 border-b border-[var(--border)] shrink-0">
+                      <a
+                        href={`${BASE_URL}/api/pipeline/runs/${selectedRunId}/log`}
+                        download={`run-${selectedRunId}.log`}
+                        className="flex items-center gap-1 px-2 py-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] rounded transition-colors hover:bg-[var(--surface-hover)]"
+                        title="Download log file"
+                      >
+                        <Download className="w-3 h-3" />
+                        Download Log
+                      </a>
+                    </div>
+                  )}
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    {selectedRunId ? (
+                      useMultiPane ? (
+                        <MultiPaneTerminal key={selectedRunId} runId={selectedRunId} walEvents={sseEvents} />
+                      ) : (
+                        <RunTerminal key={selectedRunId} runId={selectedRunId} />
+                      )
                     ) : (
-                      <RunTerminal key={selectedRunId} runId={selectedRunId} />
-                    )
-                  ) : (
-                    <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-                      Select a run to view output
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Stories tab */}
-            {detailTab === 'stories' && (
-              <>
-                {/* Progress bar */}
-                {totalCount > 0 && (
-                  <div className="px-4 py-2 border-b border-[var(--border)] shrink-0">
-                    <div className="flex items-center justify-between text-xs text-[var(--text-muted)] mb-1">
-                      <span className="inline-flex items-center gap-1">
-                        {completedCount}/{totalCount} stories complete
-                        <HelpTooltip helpKey="pipeline-parallelism" size={10} />
-                      </span>
-                      <span>{progressPct}%</span>
-                    </div>
-                    <div className="h-1.5 bg-[var(--border)] rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-[var(--accent)] rounded-full transition-all duration-300"
-                        style={{ width: `${progressPct}%` }}
-                      />
-                    </div>
+                      <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                        Select a run to view output
+                      </div>
+                    )}
                   </div>
-                )}
+                </div>
+              )}
 
-                <div className="flex-1 overflow-y-auto">
-                  {derivedStories.length === 0 ? (
-                    <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-                      Waiting for stories...
-                    </div>
-                  ) : (
-                    derivedStories.map((story) => {
-                      const pConfig = PRIORITY_CONFIG[story.priority] || PRIORITY_CONFIG[3];
-                      const canDrag = story.status === 'pending';
-                      return (
+              {/* Stories tab */}
+              {detailTab === 'stories' && (
+                <>
+                  {/* Progress bar */}
+                  {totalCount > 0 && (
+                    <div className="px-4 py-2 border-b border-[var(--border)] shrink-0">
+                      <div className="flex items-center justify-between text-xs text-[var(--text-muted)] mb-1">
+                        <span className="inline-flex items-center gap-1">
+                          {completedCount}/{totalCount} stories complete
+                          <HelpTooltip helpKey="pipeline-parallelism" size={10} />
+                        </span>
+                        <span>{progressPct}%</span>
+                      </div>
+                      <div className="h-1.5 bg-[var(--border)] rounded-full overflow-hidden">
                         <div
-                          key={story.storyId}
-                          draggable={canDrag}
-                          onDragStart={() => canDrag && handleDragStart(story.storyId)}
-                          onDragOver={(e) => canDrag && handleDragOver(e, story.storyId)}
-                          onDragLeave={handleDragLeave}
-                          onDrop={() => handleDrop(story.storyId)}
-                          onDragEnd={() => { dragSrcId.current = null; setDragOverId(null); }}
-                          className={dragOverId === story.storyId ? 'border-t-2 border-[var(--accent)]' : ''}
-                        >
-                          <button
-                            onClick={() => handleStoryExpand(story.storyId)}
-                            className="w-full text-left px-4 py-2 border-b border-[var(--border)] hover:bg-[var(--surface)] transition-colors flex items-center gap-2"
-                          >
-                            {canDrag && (
-                              <GripVertical className="w-3 h-3 text-[var(--text-muted)] flex-shrink-0 cursor-grab opacity-40 hover:opacity-100" />
-                            )}
-                            <span className="w-4 text-center flex-shrink-0">
-                              {expandedStory === story.storyId ? (
-                                <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                              ) : (
-                                <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                              )}
-                            </span>
-                            <span className="font-mono text-xs text-[var(--text-muted)] w-16 flex-shrink-0">
-                              {story.storyId}
-                            </span>
-                            <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded border flex-shrink-0 ${pConfig.className}`}>
-                              {pConfig.label}
-                              <HelpTooltip helpKey="story-priority" size={9} />
-                            </span>
-                            <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
-                            {story.status === 'skipped' ? (
-                              <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-teal-500/15 text-teal-400 border border-teal-500/30 flex-shrink-0">
-                                Already Passing
-                              </span>
-                            ) : (
-                              <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
-                                {story.status}
-                              </span>
-                            )}
-                            {story.escalation && (
-                              <span
-                                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-500/15 text-amber-400 border border-amber-500/30 flex-shrink-0"
-                                title={`Escalated from ${story.escalation.fromTier} to ${story.escalation.toTier} (attempt ${story.escalation.attemptNumber})`}
-                              >
-                                Escalated: {story.escalation.fromTier.charAt(0).toUpperCase() + story.escalation.fromTier.slice(1)}&rarr;{story.escalation.toTier.charAt(0).toUpperCase() + story.escalation.toTier.slice(1)}
-                              </span>
-                            )}
-                            {story.reroute && (
-                              <span
-                                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30 flex-shrink-0"
-                                title={`Rerouted from ${story.reroute.fromEngine} to ${story.reroute.toEngine} (${story.reroute.reason})`}
-                              >
-                                Rerouted: {story.reroute.fromEngine.charAt(0).toUpperCase() + story.reroute.fromEngine.slice(1)}&rarr;{story.reroute.toEngine.charAt(0).toUpperCase() + story.reroute.toEngine.slice(1)} ({story.reroute.reason.replace('_', ' ')})
-                              </span>
-                            )}
-                            <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
-                              {story.elapsed && `(${story.elapsed})`}
-                            </span>
-                            <span className="text-sm truncate min-w-0 flex-1">{story.title}</span>
-                            {(story.inputTokens != null || story.outputTokens != null) && (
-                              <span className="flex-shrink-0 w-36">
-                                <ContextBudgetBar
-                                  inputTokens={story.inputTokens ?? 0}
-                                  outputTokens={story.outputTokens ?? 0}
-                                />
-                              </span>
-                            )}
-                          </button>
+                          className="h-full bg-[var(--accent)] rounded-full transition-all duration-300"
+                          style={{ width: `${progressPct}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
 
-                          {/* Expanded log tail + token details */}
-                          {expandedStory === story.storyId && (
-                            <div className="border-b border-[var(--border)] bg-[var(--bg)]">
-                              {(story.inputTokens != null || story.outputTokens != null) && (
-                                <div className="px-3 pt-3 pb-1 flex items-center gap-4 text-xs">
-                                  <span className="text-[var(--text-muted)]">
-                                    Input: <span className="font-mono text-[var(--text)]">{formatTokens(story.inputTokens ?? 0)}</span>
-                                  </span>
-                                  <span className="text-[var(--text-muted)]">
-                                    Output: <span className="font-mono text-[var(--text)]">{formatTokens(story.outputTokens ?? 0)}</span>
-                                  </span>
-                                  <span className="text-[var(--text-muted)]">
-                                    Total: <span className="font-mono text-[var(--text)]">{formatTokens((story.inputTokens ?? 0) + (story.outputTokens ?? 0))}</span>
-                                  </span>
-                                  <span className="text-[var(--text-muted)]">
-                                    Context used: <span className={`font-mono ${
-                                      ((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD
-                                        ? 'text-amber-400' : 'text-[var(--text)]'
-                                    }`}>
-                                      {Math.round(((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW * 100)}%
-                                    </span>
-                                  </span>
-                                  {((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD && (
-                                    <span className="flex items-center gap-1 text-amber-400">
-                                      <AlertTriangle className="w-3 h-3" /> Near context limit
-                                    </span>
-                                  )}
-                                </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {derivedStories.length === 0 ? (
+                      <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                        Waiting for stories...
+                      </div>
+                    ) : (
+                      derivedStories.map((story) => {
+                        const pConfig = PRIORITY_CONFIG[story.priority] || PRIORITY_CONFIG[3];
+                        const canDrag = story.status === 'pending';
+                        return (
+                          <div
+                            key={story.storyId}
+                            draggable={canDrag}
+                            onDragStart={() => canDrag && handleDragStart(story.storyId)}
+                            onDragOver={(e) => canDrag && handleDragOver(e, story.storyId)}
+                            onDragLeave={handleDragLeave}
+                            onDrop={() => handleDrop(story.storyId)}
+                            onDragEnd={() => { dragSrcId.current = null; setDragOverId(null); }}
+                            className={dragOverId === story.storyId ? 'border-t-2 border-[var(--accent)]' : ''}
+                          >
+                            <button
+                              onClick={() => handleStoryExpand(story.storyId)}
+                              className="w-full text-left px-4 py-2 border-b border-[var(--border)] hover:bg-[var(--surface)] transition-colors flex items-center gap-2"
+                            >
+                              {canDrag && (
+                                <GripVertical className="w-3 h-3 text-[var(--text-muted)] flex-shrink-0 cursor-grab opacity-40 hover:opacity-100" />
                               )}
-                              <div className="max-h-64 overflow-y-auto p-3">
-                                <pre className="text-xs font-mono text-[var(--text-muted)] whitespace-pre-wrap break-all leading-relaxed">
-                                  {logLines.length > 0 ? logLines.join('\n') : '(Loading...)'}
-                                </pre>
+                              <span className="w-4 text-center flex-shrink-0">
+                                {expandedStory === story.storyId ? (
+                                  <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                                ) : (
+                                  <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                                )}
+                              </span>
+                              <span className="font-mono text-xs text-[var(--text-muted)] w-16 flex-shrink-0">
+                                {story.storyId}
+                              </span>
+                              <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded border flex-shrink-0 ${pConfig.className}`}>
+                                {pConfig.label}
+                                <HelpTooltip helpKey="story-priority" size={9} />
+                              </span>
+                              <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
+                              {story.status === 'skipped' ? (
+                                <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-teal-500/15 text-teal-400 border border-teal-500/30 flex-shrink-0">
+                                  Already Passing
+                                </span>
+                              ) : (
+                                <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
+                                  {story.status}
+                                </span>
+                              )}
+                              {story.escalation && (
+                                <span
+                                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-500/15 text-amber-400 border border-amber-500/30 flex-shrink-0"
+                                  title={`Escalated from ${story.escalation.fromTier} to ${story.escalation.toTier} (attempt ${story.escalation.attemptNumber})`}
+                                >
+                                  Escalated: {story.escalation.fromTier.charAt(0).toUpperCase() + story.escalation.fromTier.slice(1)}&rarr;{story.escalation.toTier.charAt(0).toUpperCase() + story.escalation.toTier.slice(1)}
+                                </span>
+                              )}
+                              {story.reroute && (
+                                <span
+                                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30 flex-shrink-0"
+                                  title={`Rerouted from ${story.reroute.fromEngine} to ${story.reroute.toEngine} (${story.reroute.reason})`}
+                                >
+                                  Rerouted: {story.reroute.fromEngine.charAt(0).toUpperCase() + story.reroute.fromEngine.slice(1)}&rarr;{story.reroute.toEngine.charAt(0).toUpperCase() + story.reroute.toEngine.slice(1)} ({story.reroute.reason.replace('_', ' ')})
+                                </span>
+                              )}
+                              <span className="text-xs font-mono text-[var(--text-muted)] w-16 flex-shrink-0 text-right">
+                                {story.elapsed && `(${story.elapsed})`}
+                              </span>
+                              <span className="text-sm truncate min-w-0 flex-1">{story.title}</span>
+                              {(story.inputTokens != null || story.outputTokens != null) && (
+                                <span className="flex-shrink-0 w-36">
+                                  <ContextBudgetBar
+                                    inputTokens={story.inputTokens ?? 0}
+                                    outputTokens={story.outputTokens ?? 0}
+                                  />
+                                </span>
+                              )}
+                            </button>
+
+                            {/* Expanded log tail + token details */}
+                            {expandedStory === story.storyId && (
+                              <div className="border-b border-[var(--border)] bg-[var(--bg)]">
+                                {(story.inputTokens != null || story.outputTokens != null) && (
+                                  <div className="px-3 pt-3 pb-1 flex items-center gap-4 text-xs">
+                                    <span className="text-[var(--text-muted)]">
+                                      Input: <span className="font-mono text-[var(--text)]">{formatTokens(story.inputTokens ?? 0)}</span>
+                                    </span>
+                                    <span className="text-[var(--text-muted)]">
+                                      Output: <span className="font-mono text-[var(--text)]">{formatTokens(story.outputTokens ?? 0)}</span>
+                                    </span>
+                                    <span className="text-[var(--text-muted)]">
+                                      Total: <span className="font-mono text-[var(--text)]">{formatTokens((story.inputTokens ?? 0) + (story.outputTokens ?? 0))}</span>
+                                    </span>
+                                    <span className="text-[var(--text-muted)]">
+                                      Context used: <span className={`font-mono ${((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD
+                                        ? 'text-amber-400' : 'text-[var(--text)]'
+                                        }`}>
+                                        {Math.round(((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW * 100)}%
+                                      </span>
+                                    </span>
+                                    {((story.inputTokens ?? 0) + (story.outputTokens ?? 0)) / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD && (
+                                      <span className="flex items-center gap-1 text-amber-400">
+                                        <AlertTriangle className="w-3 h-3" /> Near context limit
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                                <div className="max-h-64 overflow-y-auto p-3">
+                                  <pre className="text-xs font-mono text-[var(--text-muted)] whitespace-pre-wrap break-all leading-relaxed">
+                                    {logLines.length > 0 ? logLines.join('\n') : '(Loading...)'}
+                                  </pre>
+                                </div>
                               </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* Graph tab — interactive DAG */}
+              {detailTab === 'graph' && (
+                <div className="flex-1 min-h-0 overflow-hidden">
+                  {selectedSpecId && workspaceId ? (
+                    <InteractiveDependencyGraph
+                      specId={selectedSpecId}
+                      workspaceId={workspaceId}
+                      runId={selectedRunId ?? undefined}
+                      liveStatuses={graphLiveStatuses}
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                      Select a run to view its dependency graph
+                    </div>
                   )}
                 </div>
-              </>
-            )}
+              )}
 
-            {/* Graph tab — interactive DAG */}
-            {detailTab === 'graph' && (
-              <div className="flex-1 min-h-0 overflow-hidden">
-                {selectedSpecId && workspaceId ? (
-                  <InteractiveDependencyGraph
-                    specId={selectedSpecId}
-                    workspaceId={workspaceId}
-                    runId={selectedRunId ?? undefined}
-                    liveStatuses={graphLiveStatuses}
-                  />
-                ) : (
-                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-                    Select a run to view its dependency graph
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Tokens tab — token consumption summary */}
-            {detailTab === 'tokens' && (
-              <div className="flex-1 overflow-y-auto">
-                {!tokenStats.hasData ? (
-                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-                    No token usage data available for this run.
-                  </div>
-                ) : (
-                  <div className="p-4 space-y-4">
-                    {/* Summary cards */}
-                    <div className="grid grid-cols-4 gap-3">
-                      <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
-                        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Total Input</div>
-                        <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalInput)}</div>
-                      </div>
-                      <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
-                        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Total Output</div>
-                        <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalOutput)}</div>
-                      </div>
-                      <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
-                        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Combined</div>
-                        <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalInput + tokenStats.totalOutput)}</div>
-                      </div>
-                      <div className={`p-3 rounded-lg border ${
-                        tokenStats.warningStories.length > 0
+              {/* Tokens tab — token consumption summary */}
+              {detailTab === 'tokens' && (
+                <div className="flex-1 overflow-y-auto">
+                  {!tokenStats.hasData ? (
+                    <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                      No token usage data available for this run.
+                    </div>
+                  ) : (
+                    <div className="p-4 space-y-4">
+                      {/* Summary cards */}
+                      <div className="grid grid-cols-4 gap-3">
+                        <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
+                          <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Total Input</div>
+                          <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalInput)}</div>
+                        </div>
+                        <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
+                          <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Total Output</div>
+                          <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalOutput)}</div>
+                        </div>
+                        <div className="p-3 rounded-lg bg-[var(--surface)] border border-[var(--border)]">
+                          <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Combined</div>
+                          <div className="text-lg font-mono font-medium">{formatTokens(tokenStats.totalInput + tokenStats.totalOutput)}</div>
+                        </div>
+                        <div className={`p-3 rounded-lg border ${tokenStats.warningStories.length > 0
                           ? 'bg-amber-500/10 border-amber-500/30'
                           : 'bg-[var(--surface)] border-[var(--border)]'
-                      }`}>
-                        <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Warnings</div>
-                        <div className={`text-lg font-mono font-medium ${tokenStats.warningStories.length > 0 ? 'text-amber-400' : ''}`}>
-                          {tokenStats.warningStories.length}
+                          }`}>
+                          <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Warnings</div>
+                          <div className={`text-lg font-mono font-medium ${tokenStats.warningStories.length > 0 ? 'text-amber-400' : ''}`}>
+                            {tokenStats.warningStories.length}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Per-story token chart */}
+                      <div className="rounded-lg bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
+                        <div className="px-3 py-2 border-b border-[var(--border)] text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
+                          Token Consumption by Story
+                        </div>
+                        <div className="divide-y divide-[var(--border)]">
+                          {tokenStats.storiesWithTokens
+                            .sort((a, b) => ((b.inputTokens ?? 0) + (b.outputTokens ?? 0)) - ((a.inputTokens ?? 0) + (a.outputTokens ?? 0)))
+                            .map((story) => {
+                              const input = story.inputTokens ?? 0;
+                              const output = story.outputTokens ?? 0;
+                              const total = input + output;
+                              const pct = (total / CONTEXT_WINDOW) * 100;
+                              const isWarning = total / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD;
+                              const inputPct = total > 0 ? (input / CONTEXT_WINDOW) * 100 : 0;
+                              const outputPct = total > 0 ? (output / CONTEXT_WINDOW) * 100 : 0;
+
+                              return (
+                                <div key={story.storyId} className="px-3 py-2.5">
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className="font-mono text-xs text-[var(--text-muted)]">{story.storyId}</span>
+                                      <span className="text-xs truncate text-[var(--text)]">{story.title !== story.storyId ? story.title : ''}</span>
+                                      {isWarning && <AlertTriangle className="w-3 h-3 text-amber-400 flex-shrink-0" />}
+                                    </div>
+                                    <div className="flex items-center gap-3 text-[10px] font-mono text-[var(--text-muted)] flex-shrink-0">
+                                      <span>In: {formatTokens(input)}</span>
+                                      <span>Out: {formatTokens(output)}</span>
+                                      <span className={isWarning ? 'text-amber-400 font-semibold' : ''}>{Math.round(pct)}%</span>
+                                    </div>
+                                  </div>
+                                  {/* Stacked bar: input (blue) + output (cyan) */}
+                                  <div className="h-2 bg-[var(--border)] rounded-full overflow-hidden flex">
+                                    <div
+                                      className="h-full bg-blue-500 transition-all duration-300"
+                                      style={{ width: `${Math.min(inputPct, 100)}%` }}
+                                    />
+                                    <div
+                                      className={`h-full transition-all duration-300 ${isWarning ? 'bg-amber-500' : 'bg-cyan-500'}`}
+                                      style={{ width: `${Math.min(outputPct, 100 - Math.min(inputPct, 100))}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                        </div>
+                        {/* Legend */}
+                        <div className="px-3 py-2 border-t border-[var(--border)] flex items-center gap-4 text-[10px] text-[var(--text-muted)]">
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-sm bg-blue-500" /> Input tokens
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-sm bg-cyan-500" /> Output tokens
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-sm bg-amber-500" /> Warning (&ge;80%)
+                          </span>
+                          <span className="ml-auto">Context window: {formatTokens(CONTEXT_WINDOW)}</span>
                         </div>
                       </div>
                     </div>
-
-                    {/* Per-story token chart */}
-                    <div className="rounded-lg bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
-                      <div className="px-3 py-2 border-b border-[var(--border)] text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
-                        Token Consumption by Story
-                      </div>
-                      <div className="divide-y divide-[var(--border)]">
-                        {tokenStats.storiesWithTokens
-                          .sort((a, b) => ((b.inputTokens ?? 0) + (b.outputTokens ?? 0)) - ((a.inputTokens ?? 0) + (a.outputTokens ?? 0)))
-                          .map((story) => {
-                            const input = story.inputTokens ?? 0;
-                            const output = story.outputTokens ?? 0;
-                            const total = input + output;
-                            const pct = (total / CONTEXT_WINDOW) * 100;
-                            const isWarning = total / CONTEXT_WINDOW >= CONTEXT_WARNING_THRESHOLD;
-                            const inputPct = total > 0 ? (input / CONTEXT_WINDOW) * 100 : 0;
-                            const outputPct = total > 0 ? (output / CONTEXT_WINDOW) * 100 : 0;
-
-                            return (
-                              <div key={story.storyId} className="px-3 py-2.5">
-                                <div className="flex items-center justify-between mb-1.5">
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <span className="font-mono text-xs text-[var(--text-muted)]">{story.storyId}</span>
-                                    <span className="text-xs truncate text-[var(--text)]">{story.title !== story.storyId ? story.title : ''}</span>
-                                    {isWarning && <AlertTriangle className="w-3 h-3 text-amber-400 flex-shrink-0" />}
-                                  </div>
-                                  <div className="flex items-center gap-3 text-[10px] font-mono text-[var(--text-muted)] flex-shrink-0">
-                                    <span>In: {formatTokens(input)}</span>
-                                    <span>Out: {formatTokens(output)}</span>
-                                    <span className={isWarning ? 'text-amber-400 font-semibold' : ''}>{Math.round(pct)}%</span>
-                                  </div>
-                                </div>
-                                {/* Stacked bar: input (blue) + output (cyan) */}
-                                <div className="h-2 bg-[var(--border)] rounded-full overflow-hidden flex">
-                                  <div
-                                    className="h-full bg-blue-500 transition-all duration-300"
-                                    style={{ width: `${Math.min(inputPct, 100)}%` }}
-                                  />
-                                  <div
-                                    className={`h-full transition-all duration-300 ${isWarning ? 'bg-amber-500' : 'bg-cyan-500'}`}
-                                    style={{ width: `${Math.min(outputPct, 100 - Math.min(inputPct, 100))}%` }}
-                                  />
-                                </div>
-                              </div>
-                            );
-                          })}
-                      </div>
-                      {/* Legend */}
-                      <div className="px-3 py-2 border-t border-[var(--border)] flex items-center gap-4 text-[10px] text-[var(--text-muted)]">
-                        <span className="flex items-center gap-1">
-                          <span className="w-2 h-2 rounded-sm bg-blue-500" /> Input tokens
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <span className="w-2 h-2 rounded-sm bg-cyan-500" /> Output tokens
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <span className="w-2 h-2 rounded-sm bg-amber-500" /> Warning (&ge;80%)
-                        </span>
-                        <span className="ml-auto">Context window: {formatTokens(CONTEXT_WINDOW)}</span>
-                      </div>
+                  )}
+                </div>
+              )}
+              {/* FinOps tab — cost breakdown and savings */}
+              {detailTab === 'finops' && (
+                <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                  {selectedRunId ? (
+                    <FinOpsTab runId={selectedRunId} />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
+                      Select a run to view FinOps data
                     </div>
-                  </div>
-                )}
-              </div>
-            )}
-            {/* FinOps tab — cost breakdown and savings */}
-            {detailTab === 'finops' && (
-              <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-                {selectedRunId ? (
-                  <FinOpsTab runId={selectedRunId} />
-                ) : (
-                  <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
-                    Select a run to view FinOps data
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-        )}
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

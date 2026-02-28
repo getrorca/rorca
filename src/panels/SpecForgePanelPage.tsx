@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -8,8 +8,11 @@ import DirectionPreviewSidebar from '../components/DirectionPreviewSidebar';
 import SpecForgeProgress from '../components/SpecForgeProgress';
 import SpecForgePreview from '../components/SpecForgePreview';
 import TemplatePickerModal from '../components/TemplatePickerModal';
+import AppHeader from '../components/AppHeader';
 
+import { ChevronRight } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
+import { briefToSlug, KEBAB_RE } from '../lib/slugify';
 
 type ForgeMode = 'single' | 'batch';
 type DiagramType = 'flowchart' | 'sequenceDiagram' | 'ascii';
@@ -23,8 +26,6 @@ interface ModelOption {
   costPer1kOutput: number;
   recommended: boolean;
 }
-
-const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
 export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initialBrief }: { onNavigate?: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; initialBrief?: string | null }) {
   const { workspaceId, workspaces } = useWorkspace();
@@ -54,7 +55,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
       setAvailableModels(modelData.models);
       setDefaultModelId(modelData.defaultModel);
       setActiveProvider(providerData.provider);
-    }).catch(() => {});
+    }).catch(() => { });
   }, [workspaceId]);
 
   // Persist model selection to localStorage
@@ -95,6 +96,18 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     try { return localStorage.getItem('rorca:forge:brief') ?? ''; } catch { return ''; }
   });
   const briefRef = useRef<HTMLTextAreaElement>(null);
+
+  // Debounced slug preview derived from brief
+  const [previewSlug, setPreviewSlug] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setPreviewSlug(specName ? '' : briefToSlug(specBrief));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [specBrief, specName]);
+
+  // The effective slug that will be used (manual specName takes precedence)
+  const effectiveSlug = useMemo(() => specName || previewSlug, [specName, previewSlug]);
 
   // Auto-resize textarea between 6 and 16 rows
   const autoResizeBrief = useCallback(() => {
@@ -185,7 +198,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [isQuickRunning, setIsQuickRunning] = useState(false);
   const { show: showToast } = useGlobalToast();
 
-  const canGenerate = specName.length > 0 && !specNameError && specBrief.length > 0;
+  const canGenerate = !specNameError && specBrief.length > 0;
   const canQuickRun = specBrief.trim().length > 0 && !!workspaceId;
 
   const handleCancel = useCallback(() => {
@@ -211,7 +224,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
         signal: controller.signal,
         body: JSON.stringify({
           workspaceId,
-          specName,
+          specName: specName || undefined,
           domain,
           l4Override: l4Override || undefined,
           l5Override: l5Override || undefined,
@@ -284,377 +297,392 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Mode toggle: Single / Batch */}
-      <div className="flex border-b border-border shrink-0 bg-bg">
-        {(['single', 'batch'] as const).map((mode) => (
-          <button
-            key={mode}
-            onClick={() => setForgeMode(mode)}
-            aria-current={forgeMode === mode ? 'page' : undefined}
-            className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 ${
-              forgeMode === mode
-                ? 'text-text border-accent'
-                : 'text-muted hover:text-text border-transparent'
-            }`}
-          >
-            {mode === 'single' ? 'Single' : 'Batch'}
-          </button>
-        ))}
-      </div>
+    <div className="flex flex-col h-full bg-bg">
+      <AppHeader
+        breadcrumbs={
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-[var(--text)] text-sm tracking-tight">
+              {workspace?.name ?? 'Workspace'}
+            </span>
+            <ChevronRight size={14} className="text-muted" />
+            <span className="text-sm text-muted">Spec Forge</span>
+          </div>
+        }
+        actions={
+          <div className="flex bg-panel rounded-lg border border-border p-0.5">
+            {(['single', 'batch'] as const).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setForgeMode(mode)}
+                aria-current={forgeMode === mode ? 'page' : undefined}
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${forgeMode === mode
+                    ? 'bg-accent text-white shadow-sm'
+                    : 'text-muted hover:text-[var(--text)] hover:bg-surface-200'
+                  }`}
+              >
+                {mode === 'single' ? 'Single' : 'Batch'}
+              </button>
+            ))}
+          </div>
+        }
+      />
 
       {forgeMode === 'batch' ? (
         <BatchForge />
       ) : (
-    <div className="flex flex-1 min-h-0 gap-px bg-border">
-      {/* Left pane: Form (~50% width) */}
-      <div className="flex-1 flex flex-col bg-bg min-w-0">
-        <div className="flex-1 overflow-y-auto">
-          <div className="max-w-xl mx-auto px-6 py-6 space-y-8">
+        <div className="flex flex-1 min-h-0 gap-px bg-border">
+          {/* Left pane: Form (~50% width) */}
+          <div className="flex-1 flex flex-col bg-bg min-w-0">
+            <div className="flex-1 overflow-y-auto">
+              <div className="max-w-xl mx-auto px-6 py-6 space-y-8">
 
-            {/* Section 1: Spec Identity */}
-            <section>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted mb-4">
-                Spec Identity
-              </h3>
-              <div className="space-y-4">
-                <Field label="Spec Name" error={specNameError}>
-                  <input
-                    type="text"
-                    value={specName}
-                    onChange={(e) => setSpecName(e.target.value)}
-                    onBlur={() => validateSpecName(specName)}
-                    placeholder="user-auth-oauth"
-                    className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
-                  />
-                </Field>
-                <Field label="Domain">
-                  <input
-                    type="text"
-                    value={domain}
-                    onChange={(e) => setDomain(e.target.value)}
-                    placeholder="backend, frontend, infra"
-                    className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
-                  />
-                </Field>
-                <Field label="Target Workspace">
-                  <span className="inline-flex items-center px-2.5 py-1 rounded text-xs font-medium bg-accent/10 text-accent border border-accent/20">
-                    {workspace?.name ?? workspaceId}
-                  </span>
-                </Field>
-              </div>
-            </section>
+                {/* Section 1: Spec Identity */}
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted mb-4">
+                    Spec Identity
+                  </h3>
+                  <div className="space-y-4">
+                    <Field label="Domain">
+                      <input
+                        type="text"
+                        value={domain}
+                        onChange={(e) => setDomain(e.target.value)}
+                        placeholder="backend, frontend, infra"
+                        className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
+                      />
+                    </Field>
+                    <Field label="Target Workspace">
+                      <span className="inline-flex items-center px-2.5 py-1 rounded text-xs font-medium bg-accent/10 text-accent border border-accent/20">
+                        {workspace?.name ?? workspaceId}
+                      </span>
+                    </Field>
+                  </div>
+                </section>
 
-            {/* Section 2: Direction Stack Overrides (collapsed by default) */}
-            <section>
-              <button
-                onClick={() => setOverridesOpen(!overridesOpen)}
-                aria-expanded={overridesOpen}
-                aria-label="Toggle direction stack overrides"
-                className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-text transition-colors w-full"
-              >
-                <svg
-                  className={`w-3 h-3 transition-transform ${overridesOpen ? 'rotate-90' : ''}`}
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-                Direction Stack Overrides
-              </button>
-              {overridesOpen && (
-                <div className="mt-4 space-y-4">
-                  <Field label="L4 Spec Brief">
-                    <textarea
-                      rows={4}
-                      value={l4Override}
-                      onChange={(e) => setL4Override(e.target.value)}
-                      placeholder="One paragraph describing what this spec builds"
-                      className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
-                    />
-                  </Field>
-                  <Field label="L5 Story Annotations">
-                    <textarea
-                      rows={4}
-                      value={l5Override}
-                      onChange={(e) => setL5Override(e.target.value)}
-                      placeholder="Per-story hints, constraints, or design decisions"
-                      className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
-                    />
-                  </Field>
-                  <p className="text-xs text-muted/70">
-                    These override L4/L5 from the Direction Stack Composer for this generation only
-                  </p>
-                </div>
-              )}
-            </section>
-
-            {/* Section 3: Spec Parameters */}
-            <section>
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted mb-4">
-                Spec Parameters
-              </h3>
-              <div className="space-y-4">
-                <Field label={
-                  <span className="flex items-center gap-2">
-                    LLM Model
-                    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${
-                      activeProvider === 'claude-cli'
-                        ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                        : 'bg-accent/10 text-accent border border-accent/20'
-                    }`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${
-                        activeProvider === 'claude-cli' ? 'bg-green-500' : 'bg-accent'
-                      }`} />
-                      {activeProvider === 'claude-cli' ? 'Subscription' :
-                       activeProvider === 'anthropic' ? 'Anthropic API' :
-                       activeProvider === 'openai-compat' ? 'OpenAI Compat' :
-                       activeProvider === 'openrouter' ? 'OpenRouter' :
-                       activeProvider}
-                    </span>
-                  </span>
-                }>
-                  <select
-                    value={selectedModel || defaultModelId || ''}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center]"
-                    aria-label="Select LLM model"
+                {/* Section 2: Advanced Options (collapsed by default) */}
+                <section>
+                  <button
+                    onClick={() => setOverridesOpen(!overridesOpen)}
+                    aria-expanded={overridesOpen}
+                    aria-label="Toggle advanced options"
+                    className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-text transition-colors w-full"
                   >
-                    {availableModels.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.label} — {m.provider}{m.recommended ? ' (Recommended)' : ''} · ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-
-                <div className="flex gap-4">
-                  <Field label="Story Count" className="w-40">
-                    <div className="flex gap-2">
-                      <select
-                        value={showCustomInput ? 'custom' : String(storyCount)}
-                        onChange={(e) => handleStoryCountSelect(e.target.value)}
-                        className="flex-1 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center]"
-                        aria-label="Select story count"
-                      >
-                        {STORY_COUNT_PRESETS.map((n) => (
-                          <option key={n} value={n}>{n} stories</option>
-                        ))}
-                        <option value="custom">Custom</option>
-                      </select>
-                      {showCustomInput && (
+                    <svg
+                      className={`w-3 h-3 transition-transform ${overridesOpen ? 'rotate-90' : ''}`}
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                    Advanced Options
+                  </button>
+                  {overridesOpen && (
+                    <div className="mt-4 space-y-4">
+                      <Field label="Spec Name (optional)" error={specNameError}>
                         <input
                           type="text"
-                          inputMode="numeric"
-                          value={storyCountRaw}
-                          onChange={(e) => handleCustomCountChange(e.target.value)}
-                          onBlur={handleCustomCountBlur}
-                          className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center"
-                          aria-label="Custom story count"
-                          autoFocus
+                          value={specName}
+                          onChange={(e) => setSpecName(e.target.value)}
+                          onBlur={() => validateSpecName(specName)}
+                          placeholder="auto-generated from brief"
+                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
                         />
-                      )}
-                    </div>
-                  </Field>
-                  <Field label="Story Prefix" className="w-28">
-                    <input
-                      type="text"
-                      maxLength={4}
-                      value={storyPrefix}
-                      onChange={(e) => handleStoryPrefixChange(e.target.value)}
-                      className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors font-mono"
-                    />
-                  </Field>
-                </div>
-
-                <div className="space-y-3">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={includeDiagram}
-                      onChange={(e) => setIncludeDiagram(e.target.checked)}
-                      className="w-4 h-4 rounded border-border bg-panel accent-accent"
-                    />
-                    <span className="text-sm text-text">Include diagram</span>
-                  </label>
-
-                  {includeDiagram && (
-                    <div className="ml-6 space-y-2">
-                      <RadioOption
-                        name="diagramType"
-                        value="flowchart"
-                        checked={diagramType === 'flowchart'}
-                        onChange={() => setDiagramType('flowchart')}
-                        label="Mermaid flowchart"
-                      />
-                      <RadioOption
-                        name="diagramType"
-                        value="sequenceDiagram"
-                        checked={diagramType === 'sequenceDiagram'}
-                        onChange={() => setDiagramType('sequenceDiagram')}
-                        label="Mermaid sequenceDiagram"
-                      />
-                      <RadioOption
-                        name="diagramType"
-                        value="ascii"
-                        checked={diagramType === 'ascii'}
-                        onChange={() => setDiagramType('ascii')}
-                        label="ASCII block"
-                      />
+                        <p className="text-xs text-muted/60 mt-1">
+                          Leave blank to auto-generate from your brief
+                        </p>
+                      </Field>
+                      <Field label="L4 Spec Brief">
+                        <textarea
+                          rows={4}
+                          value={l4Override}
+                          onChange={(e) => setL4Override(e.target.value)}
+                          placeholder="One paragraph describing what this spec builds"
+                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
+                        />
+                      </Field>
+                      <Field label="L5 Story Annotations">
+                        <textarea
+                          rows={4}
+                          value={l5Override}
+                          onChange={(e) => setL5Override(e.target.value)}
+                          placeholder="Per-story hints, constraints, or design decisions"
+                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
+                        />
+                      </Field>
+                      <p className="text-xs text-muted/70">
+                        These override L4/L5 from the Direction Stack Composer for this generation only
+                      </p>
                     </div>
                   )}
-                </div>
+                </section>
 
-                <div className="space-y-2">
-                  <span className="text-xs font-medium text-muted">Output Format</span>
-                  <div className="space-y-2">
-                    <RadioOption
-                      name="outputFormat"
-                      value="json"
-                      checked={outputFormat === 'json'}
-                      onChange={() => setOutputFormat('json')}
-                      label="JSON for run-loop.sh"
-                    />
-                    <RadioOption
-                      name="outputFormat"
-                      value="markdown"
-                      checked={outputFormat === 'markdown'}
-                      onChange={() => setOutputFormat('markdown')}
-                      label="Markdown spec doc"
-                    />
-                    <RadioOption
-                      name="outputFormat"
-                      value="both"
-                      checked={outputFormat === 'both'}
-                      onChange={() => setOutputFormat('both')}
-                      label="Both"
-                    />
+                {/* Section 3: Spec Parameters */}
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted mb-4">
+                    Spec Parameters
+                  </h3>
+                  <div className="space-y-4">
+                    <Field label={
+                      <span className="flex items-center gap-2">
+                        LLM Model
+                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${activeProvider === 'claude-cli'
+                            ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                            : 'bg-accent/10 text-accent border border-accent/20'
+                          }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${activeProvider === 'claude-cli' ? 'bg-green-500' : 'bg-accent'
+                            }`} />
+                          {activeProvider === 'claude-cli' ? 'Subscription' :
+                            activeProvider === 'anthropic' ? 'Anthropic API' :
+                              activeProvider === 'openai-compat' ? 'OpenAI Compat' :
+                                activeProvider === 'openrouter' ? 'OpenRouter' :
+                                  activeProvider}
+                        </span>
+                      </span>
+                    }>
+                      <select
+                        value={selectedModel || defaultModelId || ''}
+                        onChange={(e) => setSelectedModel(e.target.value)}
+                        className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center]"
+                        aria-label="Select LLM model"
+                      >
+                        {availableModels.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.label} — {m.provider}{m.recommended ? ' (Recommended)' : ''} · ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+
+                    <div className="flex gap-4">
+                      <Field label="Story Count" className="w-40">
+                        <div className="flex gap-2">
+                          <select
+                            value={showCustomInput ? 'custom' : String(storyCount)}
+                            onChange={(e) => handleStoryCountSelect(e.target.value)}
+                            className="flex-1 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center]"
+                            aria-label="Select story count"
+                          >
+                            {STORY_COUNT_PRESETS.map((n) => (
+                              <option key={n} value={n}>{n} stories</option>
+                            ))}
+                            <option value="custom">Custom</option>
+                          </select>
+                          {showCustomInput && (
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              value={storyCountRaw}
+                              onChange={(e) => handleCustomCountChange(e.target.value)}
+                              onBlur={handleCustomCountBlur}
+                              className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center"
+                              aria-label="Custom story count"
+                              autoFocus
+                            />
+                          )}
+                        </div>
+                      </Field>
+                      <Field label="Story Prefix" className="w-28">
+                        <input
+                          type="text"
+                          maxLength={4}
+                          value={storyPrefix}
+                          onChange={(e) => handleStoryPrefixChange(e.target.value)}
+                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors font-mono"
+                        />
+                      </Field>
+                    </div>
+
+                    <div className="space-y-3">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={includeDiagram}
+                          onChange={(e) => setIncludeDiagram(e.target.checked)}
+                          className="w-4 h-4 rounded border-border bg-panel accent-accent"
+                        />
+                        <span className="text-sm text-text">Include diagram</span>
+                      </label>
+
+                      {includeDiagram && (
+                        <div className="ml-6 space-y-2">
+                          <RadioOption
+                            name="diagramType"
+                            value="flowchart"
+                            checked={diagramType === 'flowchart'}
+                            onChange={() => setDiagramType('flowchart')}
+                            label="Mermaid flowchart"
+                          />
+                          <RadioOption
+                            name="diagramType"
+                            value="sequenceDiagram"
+                            checked={diagramType === 'sequenceDiagram'}
+                            onChange={() => setDiagramType('sequenceDiagram')}
+                            label="Mermaid sequenceDiagram"
+                          />
+                          <RadioOption
+                            name="diagramType"
+                            value="ascii"
+                            checked={diagramType === 'ascii'}
+                            onChange={() => setDiagramType('ascii')}
+                            label="ASCII block"
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <span className="text-xs font-medium text-muted">Output Format</span>
+                      <div className="space-y-2">
+                        <RadioOption
+                          name="outputFormat"
+                          value="json"
+                          checked={outputFormat === 'json'}
+                          onChange={() => setOutputFormat('json')}
+                          label="JSON for run-loop.sh"
+                        />
+                        <RadioOption
+                          name="outputFormat"
+                          value="markdown"
+                          checked={outputFormat === 'markdown'}
+                          onChange={() => setOutputFormat('markdown')}
+                          label="Markdown spec doc"
+                        />
+                        <RadioOption
+                          name="outputFormat"
+                          value="both"
+                          checked={outputFormat === 'both'}
+                          onChange={() => setOutputFormat('both')}
+                          label="Both"
+                        />
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
-            </section>
+                </section>
 
-            {/* Section 4: Spec Brief (main input) */}
-            <section>
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
-                  Spec Brief
-                </h3>
-                <button
-                  onClick={() => setShowTemplatePicker(true)}
-                  className="text-xs text-accent hover:text-accent-hover transition-colors"
-                >
-                  Start from template &rarr;
-                </button>
-              </div>
-              <Field label="What does this spec build?">
-                <textarea
-                  ref={briefRef}
-                  rows={6}
-                  value={specBrief}
-                  onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
-                  placeholder="Describe what you want to build..."
-                  className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
-                />
-              </Field>
-              <div className="flex items-center justify-between mt-1.5">
-                <div className="flex items-center gap-3">
-                  <span className={`text-xs ${estimatedTokens >= 2000 ? 'text-warning' : 'text-muted/60'}`}>
-                    ~{estimatedTokens.toLocaleString()} tokens
-                  </span>
-                  <span className={`text-xs ${specBrief.length >= 3500 ? 'text-warning' : 'text-muted/60'}`}>
-                    {specBrief.length.toLocaleString()} chars
-                  </span>
+                {/* Section 4: Spec Brief (main input) */}
+                <section>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
+                      Spec Brief
+                    </h3>
+                    <button
+                      onClick={() => setShowTemplatePicker(true)}
+                      className="text-xs text-accent hover:text-accent-hover transition-colors"
+                    >
+                      Start from template &rarr;
+                    </button>
+                  </div>
+                  <Field label="What does this spec build?">
+                    <textarea
+                      ref={briefRef}
+                      rows={6}
+                      value={specBrief}
+                      onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
+                      placeholder="Describe what you want to build..."
+                      className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
+                    />
+                  </Field>
+                  <div className="flex items-center justify-between mt-1.5">
+                    <div className="flex items-center gap-3">
+                      <span className={`text-xs ${estimatedTokens >= 2000 ? 'text-warning' : 'text-muted/60'}`}>
+                        ~{estimatedTokens.toLocaleString()} tokens
+                      </span>
+                      <span className={`text-xs ${specBrief.length >= 3500 ? 'text-warning' : 'text-muted/60'}`}>
+                        {specBrief.length.toLocaleString()} chars
+                      </span>
+                    </div>
+                    {estimatedTokens >= 2000 && (
+                      <span className="text-xs text-warning">
+                        Brief is long — consider breaking into smaller specs
+                      </span>
+                    )}
+                  </div>
+                  {effectiveSlug && (
+                    <p className="text-xs text-muted/60 mt-2 font-mono truncate">
+                      {effectiveSlug}
+                    </p>
+                  )}
+                </section>
+
+                {/* Generate Button / Progress Indicator */}
+                <div className="space-y-2">
+                  {isGenerating || (generateError && !generatedSpec) ? (
+                    <SpecForgeProgress
+                      isActive={isGenerating}
+                      onCancel={handleCancel}
+                      error={generateError}
+                      apiDone={apiDone}
+                    />
+                  ) : !generatedSpec ? (
+                    <>
+                      <button
+                        onClick={handleGenerate}
+                        disabled={!canGenerate || isGenerating}
+                        className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${canGenerate && !isGenerating
+                            ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
+                            : 'bg-accent/30 text-white/40 cursor-not-allowed'
+                          }`}
+                      >
+                        Generate Spec
+                      </button>
+                      {canQuickRun && (
+                        <button
+                          onClick={handleQuickRun}
+                          disabled={isQuickRunning || isGenerating}
+                          className={`w-full py-2 rounded text-sm font-medium transition-colors border ${isQuickRunning || isGenerating
+                              ? 'bg-panel/50 border-border/50 text-muted/40 cursor-not-allowed'
+                              : 'bg-panel border-border text-text hover:bg-accent/10 hover:border-accent/30 cursor-pointer'
+                            }`}
+                        >
+                          {isQuickRunning ? (
+                            <span className="flex items-center justify-center gap-2">
+                              <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                              </svg>
+                              Generating & running...
+                            </span>
+                          ) : (
+                            'Quick Run'
+                          )}
+                        </button>
+                      )}
+                    </>
+                  ) : null}
                 </div>
-                {estimatedTokens >= 2000 && (
-                  <span className="text-xs text-warning">
-                    Brief is long — consider breaking into smaller specs
-                  </span>
+
+                {/* Inline spec preview after generation */}
+                {generatedSpec && !isGenerating && (
+                  <SpecForgePreview
+                    spec={generatedSpec}
+                    workspaceId={workspaceId}
+                    onRegenerate={handleGenerate}
+                    onEditBrief={() => {
+                      setGeneratedSpec(null);
+                      setGenerateError(null);
+                      setApiDone(false);
+                      setTimeout(() => briefRef.current?.focus(), 50);
+                    }}
+                    isRegenerating={isGenerating}
+                    onNavigate={onNavigate}
+                    onNavigateToRun={onNavigateToRun}
+                  />
                 )}
               </div>
-            </section>
-
-            {/* Generate Button / Progress Indicator */}
-            <div className="space-y-2">
-              {isGenerating || (generateError && !generatedSpec) ? (
-                <SpecForgeProgress
-                  isActive={isGenerating}
-                  onCancel={handleCancel}
-                  error={generateError}
-                  apiDone={apiDone}
-                />
-              ) : !generatedSpec ? (
-                <>
-                  <button
-                    onClick={handleGenerate}
-                    disabled={!canGenerate || isGenerating}
-                    className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${
-                      canGenerate && !isGenerating
-                        ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
-                        : 'bg-accent/30 text-white/40 cursor-not-allowed'
-                    }`}
-                  >
-                    Generate Spec
-                  </button>
-                  {canQuickRun && (
-                    <button
-                      onClick={handleQuickRun}
-                      disabled={isQuickRunning || isGenerating}
-                      className={`w-full py-2 rounded text-sm font-medium transition-colors border ${
-                        isQuickRunning || isGenerating
-                          ? 'bg-panel/50 border-border/50 text-muted/40 cursor-not-allowed'
-                          : 'bg-panel border-border text-text hover:bg-accent/10 hover:border-accent/30 cursor-pointer'
-                      }`}
-                    >
-                      {isQuickRunning ? (
-                        <span className="flex items-center justify-center gap-2">
-                          <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                          </svg>
-                          Generating & running...
-                        </span>
-                      ) : (
-                        'Quick Run'
-                      )}
-                    </button>
-                  )}
-                </>
-              ) : null}
             </div>
+          </div>
 
-            {/* Inline spec preview after generation */}
-            {generatedSpec && !isGenerating && (
-              <SpecForgePreview
-                spec={generatedSpec}
-                workspaceId={workspaceId}
-                onRegenerate={handleGenerate}
-                onEditBrief={() => {
-                  setGeneratedSpec(null);
-                  setGenerateError(null);
-                  setApiDone(false);
-                  setTimeout(() => briefRef.current?.focus(), 50);
-                }}
-                isRegenerating={isGenerating}
-                onNavigate={onNavigate}
-                onNavigateToRun={onNavigateToRun}
-              />
-            )}
+          {/* Center pane: Direction preview sidebar (30% width) */}
+          <div className="w-[30%] shrink-0 min-w-[200px] max-w-[320px]">
+            <DirectionPreviewSidebar onNavigateToStack={onNavigate ? () => onNavigate('stack') : undefined} />
+          </div>
+
+          {/* Right pane: Output tabs */}
+          <div className="flex-1 flex flex-col bg-bg min-w-0">
+            <SpecForgeOutput spec={generatedSpec} />
           </div>
         </div>
-      </div>
-
-      {/* Center pane: Direction preview sidebar (30% width) */}
-      <div className="w-[30%] shrink-0 min-w-[200px] max-w-[320px]">
-        <DirectionPreviewSidebar onNavigateToStack={onNavigate ? () => onNavigate('stack') : undefined} />
-      </div>
-
-      {/* Right pane: Output tabs */}
-      <div className="flex-1 flex flex-col bg-bg min-w-0">
-        <SpecForgeOutput spec={generatedSpec} />
-      </div>
-    </div>
       )}
 
       {showTemplatePicker && (

@@ -9,12 +9,14 @@ import {
   MessageSquare,
   UserPlus,
   Pencil,
-  Loader2,
   ChevronDown,
   Filter,
+  ChevronRight,
+  Loader2,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import AppHeader from '../components/AppHeader';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -56,11 +58,11 @@ type ActivityTypeFilter = 'all' | 'spec_created' | 'spec_approved' | 'spec_rejec
 const PAGE_SIZE = 30;
 
 const TYPE_FILTERS: { id: ActivityTypeFilter; label: string }[] = [
-  { id: 'all',           label: 'All' },
-  { id: 'spec_created',  label: 'Created' },
+  { id: 'all', label: 'All' },
+  { id: 'spec_created', label: 'Created' },
   { id: 'spec_approved', label: 'Approved' },
   { id: 'spec_rejected', label: 'Rejected' },
-  { id: 'spec_edited',   label: 'Edited' },
+  { id: 'spec_edited', label: 'Edited' },
   { id: 'run_triggered', label: 'Runs' },
   { id: 'run_completed', label: 'Completed' },
   { id: 'comment_added', label: 'Comments' },
@@ -71,15 +73,15 @@ const TYPE_FILTERS: { id: ActivityTypeFilter; label: string }[] = [
 
 function activityIcon(type: string) {
   switch (type) {
-    case 'spec_created':  return <FileText size={16} className="text-blue-400" />;
+    case 'spec_created': return <FileText size={16} className="text-blue-400" />;
     case 'spec_approved': return <CheckCircle2 size={16} className="text-emerald-400" />;
     case 'spec_rejected': return <XCircle size={16} className="text-red-400" />;
-    case 'spec_edited':   return <Pencil size={16} className="text-amber-400" />;
+    case 'spec_edited': return <Pencil size={16} className="text-amber-400" />;
     case 'run_triggered': return <Play size={16} className="text-blue-400" />;
     case 'run_completed': return <Flag size={16} className="text-emerald-400" />;
     case 'comment_added': return <MessageSquare size={16} className="text-purple-400" />;
     case 'member_joined': return <UserPlus size={16} className="text-teal-400" />;
-    default:              return <Clock size={16} className="text-muted" />;
+    default: return <Clock size={16} className="text-muted" />;
   }
 }
 
@@ -168,32 +170,40 @@ export default function ActivityFeedPanel() {
   const dateGroups = groupByDate(items);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      {/* Header */}
-      <div className="px-5 py-4 border-b border-border shrink-0">
-        <div className="flex items-center justify-between mb-3">
-          <h1 className="text-lg font-semibold text-[var(--text)]">Activity Feed</h1>
-          <span className="text-xs text-muted">{total} event{total !== 1 ? 's' : ''}</span>
-        </div>
-
-        {/* Type filters */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <Filter size={14} className="text-muted mr-1" />
-          {TYPE_FILTERS.map(f => (
-            <button
-              key={f.id}
-              onClick={() => setTypeFilter(f.id)}
-              className={`px-2.5 py-1 text-xs rounded-full transition-colors ${
-                typeFilter === f.id
+    <div className="flex flex-col h-full overflow-hidden bg-bg">
+      <AppHeader
+        breadcrumbs={
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-[var(--text)] text-sm tracking-tight">
+              {workspaceId ? 'Workspace' : 'Global'}
+            </span>
+            <ChevronRight size={14} className="text-muted" />
+            <span className="text-sm text-muted flex items-center gap-1.5">
+              Activity Feed
+              <span className="text-xs px-1.5 py-0.5 rounded-full bg-surface text-muted">
+                {total}
+              </span>
+            </span>
+          </div>
+        }
+        actions={
+          <div className="flex items-center gap-1.5 flex-wrap flex-1 max-w-full overflow-x-auto no-scrollbar pb-1 pt-1 pr-2">
+            <Filter size={14} className="text-muted mr-1 md:hidden" />
+            {TYPE_FILTERS.map((f) => (
+              <button
+                key={f.id}
+                onClick={() => setTypeFilter(f.id)}
+                className={`px-2.5 py-1 text-xs whitespace-nowrap rounded-full transition-colors ${typeFilter === f.id
                   ? 'bg-accent text-white'
-                  : 'bg-bg text-muted hover:text-[var(--text)]'
-              }`}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-      </div>
+                  : 'bg-surface text-muted hover:text-[var(--text)]'
+                  }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        }
+      />
 
       {/* Timeline */}
       <div className="flex-1 overflow-y-auto px-5 py-4">

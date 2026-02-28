@@ -7,11 +7,19 @@ import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
+import SettingsSidebar from './components/SettingsSidebar';
+import ResizableSidebar from './components/ResizableSidebar';
 import ErrorBoundary from './components/ErrorBoundary';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { apiFetch, onApiFetchError } from './lib/apiFetch';
 import PublicReviewPage from './pages/PublicReviewPage';
+import { HubSkeleton, GenericPanelSkeleton, RunViewTerminalSkeleton } from './components/Skeleton';
+import SlideOver from './components/SlideOver';
+import CommandPalette from './components/CommandPalette';
+import ForgotPasswordPage from './components/ForgotPasswordPage';
+import ResetPasswordPage from './components/ResetPasswordPage';
+import OnboardingWizard from './components/OnboardingWizard';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
 import ReviewQueuePanel from './panels/ReviewQueuePanel';
 import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
@@ -140,12 +148,20 @@ function GlobalErrorWiring() {
   return null;
 }
 
-/** Map PanelId to appropriate skeleton fallback */
-function panelFallback(id: PanelId) {
+interface ActivePanelProps {
+  id: PanelId;
+  onNavigate: (panel: PanelId) => void;
+  onNavigateToRun: (runId: number) => void;
+  reviewSpecId: string | null;
+  onNavigateToSpecReview: (specId: string) => void;
+  forgeBrief: string | null;
+  settingsTab: SettingsTab | undefined;
+}
+
+function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, settingsTab }: ActivePanelProps) {
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
     case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief } : {})} />;
-    case 'spec-review': return <SpecReviewPanel specId={reviewSpecId ?? ''} onBack={() => onNavigate('hub')} onNavigate={onNavigate} />;
     case 'stack': return <SettingsPanel initialTab={settingsTab} />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'queue': return <ReviewQueuePanel />;
@@ -169,7 +185,6 @@ function panelFallback(id: PanelId) {
     case 'settings': return <SettingsPanel initialTab={settingsTab} />;
     default: return null;
   }
-  return <Suspense fallback={panelFallback(id)}>{panel}</Suspense>;
 }
 
 /** Panel label for ErrorBoundary fallback */
@@ -241,7 +256,6 @@ function AppContent() {
   // Sync hash when navigating to/from run view
   const navigateToRun = useCallback((runId: number) => {
     setActiveRunId(runId);
-    setActivePanel('hub');
     window.location.hash = `/run/${runId}`;
   }, []);
 
@@ -252,7 +266,6 @@ function AppContent() {
 
   const navigateToSpecReview = useCallback((specId: string) => {
     setReviewSpecId(specId);
-    setActivePanel('spec-review');
     if (activeRunId !== null) {
       setActiveRunId(null);
       window.location.hash = '';
@@ -317,16 +330,43 @@ function AppContent() {
   // Run View replaces the main content area when a run ID is active
   const showRunView = activeRunId !== null;
 
+  const isSettingsContext = ['settings', 'workspace-settings', 'github', 'stack'].includes(activePanel);
+
   return (
     <Shell
-      sidebar={<Sidebar activePanel={activePanel} onNavigate={handleNavigate} mobileOpen={mobileNavOpen} onMobileClose={() => setMobileNavOpen(false)} queueCount={queueCount} />}
+      sidebar={
+        <ResizableSidebar>
+          {isSettingsContext ? (
+            <SettingsSidebar
+              activePanel={activePanel}
+              activeSettingsTab={settingsTab}
+              onNavigate={handleNavigate}
+              onNavigateSettings={navigateToSettingsTab}
+            />
+          ) : (
+            <Sidebar
+              activePanel={activePanel}
+              onNavigate={handleNavigate}
+              mobileOpen={mobileNavOpen}
+              onMobileClose={() => setMobileNavOpen(false)}
+              queueCount={queueCount}
+            />
+          )}
+        </ResizableSidebar>
+      }
       showMenuButton
       onMenuToggle={() => setMobileNavOpen((v) => !v)}
       onNavigate={handleNavigate}
     >
       <EmailVerificationBanner />
-      {showRunView ? (
-        <ErrorBoundary key={`run-${activeRunId}`} label={`Run #${activeRunId}`}>
+      {/* Underlying panel */}
+      <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel] || 'Panel'}>
+        <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} reviewSpecId={reviewSpecId} onNavigateToSpecReview={navigateToSpecReview} forgeBrief={forgeBrief} settingsTab={settingsTab} />
+      </ErrorBoundary>
+
+      {/* Slide-over Overlays */}
+      <SlideOver isOpen={showRunView} onClose={navigateBackFromRun} hideHeader={true}>
+        {showRunView && (
           <Suspense fallback={<RunViewTerminalSkeleton />}>
             <RunViewPanel
               runId={activeRunId}
@@ -334,15 +374,15 @@ function AppContent() {
               onNavigate={handleNavigate}
             />
           </Suspense>
-        </ErrorBoundary>
-      ) : (
-        <>
-          {/* key={activePanel} resets ErrorBoundary when switching panels */}
-          <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel]}>
-            <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} reviewSpecId={reviewSpecId} onNavigateToSpecReview={navigateToSpecReview} forgeBrief={forgeBrief} settingsTab={settingsTab} />
-          </ErrorBoundary>
-        </>
-      )}
+        )}
+      </SlideOver>
+
+      <SlideOver isOpen={reviewSpecId !== null} onClose={() => setReviewSpecId(null)} hideHeader={true}>
+        {reviewSpecId !== null && (
+          <SpecReviewPanel specId={reviewSpecId} onBack={() => setReviewSpecId(null)} onNavigate={handleNavigate} />
+        )}
+      </SlideOver>
+
       {showCommandPalette && (
         <Suspense fallback={null}>
           <CommandPalette
