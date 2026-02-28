@@ -70,7 +70,9 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   }, [selectedModel]);
 
   // Section 2: Direction Stack Overrides
-  const [overridesOpen, setOverridesOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(() => {
+    try { return localStorage.getItem('rorca:forge:advancedOpen') === 'true'; } catch { return false; }
+  });
   const [l4Override, setL4Override] = useState('');
   const [l5Override, setL5Override] = useState('');
 
@@ -152,7 +154,23 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [apiDone, setApiDone] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const advancedInnerRef = useRef<HTMLDivElement>(null);
+  const [advancedHeight, setAdvancedHeight] = useState<number>(0);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+
+  // Measure inner content height for smooth transition
+  useEffect(() => {
+    if (!advancedOpen) return;
+    const measure = () => {
+      if (advancedInnerRef.current) {
+        setAdvancedHeight(advancedInnerRef.current.scrollHeight);
+      }
+    };
+    measure();
+    // Re-measure on window resize
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [advancedOpen, includeDiagram, showCustomInput]);
 
   const validateSpecName = useCallback((value: string) => {
     if (!value) {
@@ -170,6 +188,27 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   useEffect(() => {
     try { localStorage.setItem('rorca:forge:storyCount', String(storyCount)); } catch { /* quota */ }
   }, [storyCount]);
+
+  // Persist advancedOpen to localStorage
+  useEffect(() => {
+    try { localStorage.setItem('rorca:forge:advancedOpen', String(advancedOpen)); } catch { /* quota */ }
+  }, [advancedOpen]);
+
+  // Count how many advanced fields differ from defaults
+  const customizedCount = useMemo(() => {
+    let count = 0;
+    if (specName) count++;
+    if (domain) count++;
+    if (selectedModel) count++;
+    if (storyCount !== 8) count++;
+    if (storyPrefix !== 'US') count++;
+    if (!includeDiagram) count++;
+    if (diagramType !== 'flowchart') count++;
+    if (outputFormat !== 'json') count++;
+    if (l4Override) count++;
+    if (l5Override) count++;
+    return count;
+  }, [specName, domain, selectedModel, storyCount, storyPrefix, includeDiagram, diagramType, outputFormat, l4Override, l5Override]);
 
   const handleStoryCountSelect = (value: string) => {
     if (value === 'custom') {
@@ -435,16 +474,16 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                   ) : null}
                 </div>
 
-                {/* Section 4: Advanced Options (collapsed by default) */}
+                {/* Section 4: Advanced Options (collapsed by default, CSS transition) */}
                 <section>
                   <button
-                    onClick={() => setOverridesOpen(!overridesOpen)}
-                    aria-expanded={overridesOpen}
+                    onClick={() => setAdvancedOpen(o => !o)}
+                    aria-expanded={advancedOpen}
                     aria-label="Toggle advanced options"
                     className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-text transition-colors w-full"
                   >
                     <svg
-                      className={`w-3 h-3 transition-transform ${overridesOpen ? 'rotate-90' : ''}`}
+                      className={`w-3 h-3 transition-transform duration-200 ${advancedOpen ? 'rotate-90' : ''}`}
                       fill="none"
                       viewBox="0 0 24 24"
                       stroke="currentColor"
@@ -452,9 +491,21 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
                     Advanced Options
+                    {customizedCount > 0 ? (
+                      <span className="ml-1 px-1.5 py-0.5 text-[10px] font-medium rounded-full bg-accent/15 text-accent normal-case tracking-normal">
+                        {customizedCount} customized
+                      </span>
+                    ) : (
+                      <span className="ml-1 text-[10px] font-normal text-muted/50 normal-case tracking-normal">
+                        Using defaults
+                      </span>
+                    )}
                   </button>
-                  {overridesOpen && (
-                    <div className="mt-4 space-y-6">
+                  <div
+                    className="overflow-hidden transition-[max-height] duration-300 ease-in-out"
+                    style={{ maxHeight: advancedOpen ? advancedHeight || 2000 : 0 }}
+                  >
+                    <div ref={advancedInnerRef} className="mt-4 space-y-6">
                       {/* Spec Identity */}
                       <div className="space-y-4">
                         <h4 className="text-xs font-medium text-muted/80">Spec Identity</h4>
@@ -464,7 +515,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                             value={specName}
                             onChange={(e) => setSpecName(e.target.value)}
                             onBlur={() => validateSpecName(specName)}
-                            placeholder="auto-generated from brief"
+                            placeholder={effectiveSlug || 'auto-generated from brief'}
                             className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
                           />
                           <p className="text-xs text-muted/60 mt-1">
@@ -652,7 +703,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                         </div>
                       </div>
                     </div>
-                  )}
+                  </div>
                 </section>
 
                 {/* Inline spec preview after generation */}
