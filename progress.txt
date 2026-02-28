@@ -3,9 +3,9 @@
 Spec: rorca-context-intent-engine
 Run ID: 795
 Started: 2026-02-28T17:47:44.308Z
-Last Updated: 2026-02-28T18:02:29.158Z
+Last Updated: 2026-02-28T18:17:08.822Z
 
-## Completed Stories (46)
+## Completed Stories (47)
 - US-001: Spec Version Comparison — DONE (claude)
 - US-002: Spec Template System — DONE (claude)
 - US-003: LLM Model Selection for Spec Generation — DONE (claude)
@@ -52,3 +52,4 @@ Last Updated: 2026-02-28T18:02:29.158Z
 - OC-030: Codex CLI Direction Stack Context Injection via AGENTS.md — DONE (claude)
 - CIE-016: Context Preview Before Run — DONE (claude)
 - CIE-017: Monorepo Support — Multi-App Scope Detection — DONE (claude, 879s)
+- CIE-018: Context/Intent Engine Integration Tests — DONE (claude, 870s)
