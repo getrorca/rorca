@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Settings2, Layers, Github, Variable, Play, Webhook,
-  Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route, FileText,
+  Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route, FileText, Wrench,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -9,6 +9,7 @@ import { useToast, ToastContainer } from '../components/Toast';
 import AgentsEditorSection from '../components/AgentsEditorSection';
 import ContextRoutingSettings from '../components/ContextRoutingSettings';
 import ContextFilesEditor from '../components/ContextFilesEditor';
+import SkillsManager from '../components/SkillsManager';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -139,12 +140,23 @@ interface SectionProps {
 // ─── Context Section (sub-tabs: Routing | Files) ────────────────────────────
 
 function ContextSection({ workspaceId, showToast }: SectionProps) {
-  const [subTab, setSubTab] = useState<'routing' | 'files'>('routing');
+  const [subTab, setSubTab] = useState<'routing' | 'files' | 'skills'>('skills');
 
   return (
     <div className="space-y-4">
       {/* Sub-tab bar */}
       <div className="flex gap-1 border-b border-border -mt-2 mb-4">
+        <button
+          onClick={() => setSubTab('skills')}
+          className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
+            subTab === 'skills'
+              ? 'text-accent border-accent'
+              : 'text-muted hover:text-[var(--text)] border-transparent'
+          }`}
+        >
+          <Wrench size={14} />
+          Skills
+        </button>
         <button
           onClick={() => setSubTab('routing')}
           className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
@@ -169,6 +181,7 @@ function ContextSection({ workspaceId, showToast }: SectionProps) {
         </button>
       </div>
 
+      {subTab === 'skills' && <SkillsManager workspaceId={workspaceId} showToast={showToast} />}
       {subTab === 'routing' && <ContextRoutingSettings workspaceId={workspaceId} showToast={showToast} />}
       {subTab === 'files' && <ContextFilesEditor workspaceId={workspaceId} showToast={showToast} />}
     </div>

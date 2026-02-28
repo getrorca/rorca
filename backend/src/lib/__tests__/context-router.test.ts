@@ -266,6 +266,7 @@ describe('route', () => {
     expect(payload.scoped).toHaveLength(0);
     expect(payload.tagged).toHaveLength(0);
     expect(payload.totalTokens).toBeGreaterThan(0);
+    expect(payload.injectedFiles).toEqual(['CLAUDE.md', 'AGENTS.md']);
   });
 
   it('includes scoped files when story paths match scope globs', () => {
@@ -353,6 +354,7 @@ describe('writeContextFile', () => {
       scoped: ['Scoped content'],
       tagged: ['Tagged content'],
       totalTokens: 100,
+      injectedFiles: ['CLAUDE.md', '.rorca/skills/backend.md', '.rorca/skills/security.md'],
     };
     const filePath = writeContextFile(payload);
     expect(fs.existsSync(filePath)).toBe(true);
@@ -375,6 +377,7 @@ describe('writeContextFile', () => {
       scoped: [],
       tagged: [],
       totalTokens: 10,
+      injectedFiles: ['CLAUDE.md'],
     };
     const filePath = writeContextFile(payload);
     const content = fs.readFileSync(filePath, 'utf-8');
