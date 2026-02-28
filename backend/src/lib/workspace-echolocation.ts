@@ -462,3 +462,197 @@ export function echolocate(workspacePath: string): EcholocationReport {
     scannedAt: new Date().toISOString(),
   };
 }
+
+// ─── CIE-012: Health Report with Component Breakdown ────────────────────────
+
+export interface HealthComponent {
+  name: string;
+  score: number;    // 0–100 for this component
+  maxScore: number; // weight in overall score
+  present: boolean;
+  detail: string;   // e.g. "324 lines", "3 roles defined", "5 skill files"
+  suggestion: string | null; // actionable fix if score < max
+}
+
+export interface HealthReport {
+  score: number; // 0–100 overall
+  components: HealthComponent[];
+  scannedAt: string;
+}
+
+function countAgentsRoles(workspacePath: string): number {
+  const agentsPath = path.join(workspacePath, 'AGENTS.md');
+  if (!fs.existsSync(agentsPath)) return 0;
+  try {
+    const content = fs.readFileSync(agentsPath, 'utf-8');
+    // Count heading-level role definitions (## Role: ..., ## Owner: ..., or lines with ownership/zone patterns)
+    const roleMatches = content.match(/^##\s+.+/gm);
+    return roleMatches ? roleMatches.length : 0;
+  } catch { return 0; }
+}
+
+function countConfigScopes(workspacePath: string): number {
+  const configPath = path.join(workspacePath, '.rorca', 'config.json');
+  if (!fs.existsSync(configPath)) return 0;
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    return config?.routing?.scopes?.length ?? 0;
+  } catch { return 0; }
+}
+
+function countMemoryEntries(workspacePath: string): number {
+  const memoryPath = path.join(workspacePath, 'MEMORY.md');
+  if (!fs.existsSync(memoryPath)) return 0;
+  try {
+    const content = fs.readFileSync(memoryPath, 'utf-8');
+    // Count entries: lines starting with "- " (list items) or "## " (sections)
+    const entries = content.match(/^- .+/gm);
+    return entries ? entries.length : 0;
+  } catch { return 0; }
+}
+
+function countSkillFiles(workspacePath: string): number {
+  const skillsDir = path.join(workspacePath, '.rorca', 'skills');
+  if (!fs.existsSync(skillsDir)) return 0;
+  try {
+    const entries = fs.readdirSync(skillsDir);
+    return entries.filter(e => e.endsWith('.md')).length;
+  } catch { return 0; }
+}
+
+export function computeHealthReport(workspacePath: string): HealthReport {
+  const components: HealthComponent[] = [];
+  let totalScore = 0;
+  let totalMax = 0;
+
+  // 1. CLAUDE.md (30 points)
+  const claudePath = path.join(workspacePath, 'CLAUDE.md');
+  const claudeExists = fs.existsSync(claudePath);
+  let claudeLines = 0;
+  if (claudeExists) {
+    try { claudeLines = fs.readFileSync(claudePath, 'utf-8').split('\n').length; } catch {}
+  }
+  const claudeMax = 30;
+  let claudeScore = 0;
+  if (claudeExists) {
+    if (claudeLines >= 50) claudeScore = 30;
+    else if (claudeLines >= 20) claudeScore = 22;
+    else if (claudeLines >= 10) claudeScore = 15;
+    else claudeScore = 8;
+  }
+  components.push({
+    name: 'CLAUDE.md',
+    score: claudeScore,
+    maxScore: claudeMax,
+    present: claudeExists,
+    detail: claudeExists ? `${claudeLines} lines` : 'Not found',
+    suggestion: !claudeExists
+      ? 'Create CLAUDE.md with architecture, build commands, and conventions'
+      : claudeLines < 20
+        ? 'CLAUDE.md is sparse — add architecture overview and key constraints'
+        : null,
+  });
+  totalScore += claudeScore;
+  totalMax += claudeMax;
+
+  // 2. AGENTS.md (20 points)
+  const agentsPath = path.join(workspacePath, 'AGENTS.md');
+  const agentsExists = fs.existsSync(agentsPath);
+  const agentsRoles = countAgentsRoles(workspacePath);
+  const agentsMax = 20;
+  let agentsScore = 0;
+  if (agentsExists) {
+    agentsScore = agentsRoles >= 3 ? 20 : agentsRoles >= 1 ? 12 : 6;
+  }
+  components.push({
+    name: 'AGENTS.md',
+    score: agentsScore,
+    maxScore: agentsMax,
+    present: agentsExists,
+    detail: agentsExists ? `${agentsRoles} roles defined` : 'Not found',
+    suggestion: !agentsExists
+      ? 'AGENTS.md missing — generate from directory structure'
+      : agentsRoles < 3
+        ? 'Add more file ownership roles to AGENTS.md for better governance'
+        : null,
+  });
+  totalScore += agentsScore;
+  totalMax += agentsMax;
+
+  // 3. .rorca/config.json (20 points)
+  const configPath = path.join(workspacePath, '.rorca', 'config.json');
+  const configExists = fs.existsSync(configPath);
+  const configScopes = countConfigScopes(workspacePath);
+  const configMax = 20;
+  let configScore = 0;
+  if (configExists) {
+    configScore = configScopes >= 2 ? 20 : configScopes >= 1 ? 14 : 8;
+  }
+  components.push({
+    name: '.rorca/config.json',
+    score: configScore,
+    maxScore: configMax,
+    present: configExists,
+    detail: configExists ? `${configScopes} scopes defined` : 'Not found',
+    suggestion: !configExists
+      ? 'Initialize .rorca/config.json for context routing and orchestration'
+      : configScopes < 1
+        ? 'Add routing scopes to config.json for targeted context injection'
+        : null,
+  });
+  totalScore += configScore;
+  totalMax += configMax;
+
+  // 4. MEMORY.md (15 points)
+  const memoryPath = path.join(workspacePath, 'MEMORY.md');
+  const memoryExists = fs.existsSync(memoryPath);
+  const memoryEntries = countMemoryEntries(workspacePath);
+  const memoryMax = 15;
+  let memoryScore = 0;
+  if (memoryExists) {
+    memoryScore = memoryEntries >= 10 ? 15 : memoryEntries >= 3 ? 10 : 5;
+  }
+  components.push({
+    name: 'MEMORY.md',
+    score: memoryScore,
+    maxScore: memoryMax,
+    present: memoryExists,
+    detail: memoryExists ? `${memoryEntries} entries` : 'Not found',
+    suggestion: !memoryExists
+      ? 'Create MEMORY.md for episodic decision ledger'
+      : memoryEntries < 3
+        ? 'MEMORY.md has few entries — run specs to build up decision history'
+        : null,
+  });
+  totalScore += memoryScore;
+  totalMax += memoryMax;
+
+  // 5. Skills (15 points)
+  const skillCount = countSkillFiles(workspacePath);
+  const skillsMax = 15;
+  let skillsScore = 0;
+  if (skillCount > 0) {
+    skillsScore = skillCount >= 3 ? 15 : skillCount >= 1 ? 8 : 0;
+  }
+  components.push({
+    name: 'Skills',
+    score: skillsScore,
+    maxScore: skillsMax,
+    present: skillCount > 0,
+    detail: skillCount > 0 ? `${skillCount} skill files` : 'No skill files',
+    suggestion: skillCount === 0
+      ? 'Create .rorca/skills/ with stack-specific skill files'
+      : null,
+  });
+  totalScore += skillsScore;
+  totalMax += skillsMax;
+
+  // Normalize to 0-100
+  const normalizedScore = totalMax > 0 ? Math.round((totalScore / totalMax) * 100) : 0;
+
+  return {
+    score: normalizedScore,
+    components,
+    scannedAt: new Date().toISOString(),
+  };
+}

@@ -11,7 +11,7 @@ import {
 import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
-import { echolocate } from '../lib/workspace-echolocation';
+import { echolocate, computeHealthReport } from '../lib/workspace-echolocation';
 import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-scaffold';
 import type { ScaffoldFile } from '../lib/workspace-scaffold';
 
@@ -834,6 +834,80 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
   } catch (err: any) {
     console.error('[scan-direction] error:', err.message);
     res.status(500).json({ error: err.message || 'Repo scan failed' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/health:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get workspace health report with component breakdown
+ *     description: >
+ *       CIE-012: Returns context/intent completeness score (0-100%) with per-component
+ *       breakdown showing CLAUDE.md depth, AGENTS.md roles, config scopes, MEMORY.md
+ *       entries, and skill file count. Appends score to health history log.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Health report with component breakdown
+ *       404: { description: "Workspace not found" }
+ *       400: { description: "Workspace path does not exist" }
+ */
+router.get('/:id/health', (req, res) => {
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  if (!fs.existsSync(workspace.path)) {
+    res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+    return;
+  }
+
+  try {
+    const report = computeHealthReport(workspace.path);
+
+    // Append to health history log
+    const memoryDir = path.join(workspace.path, '.rorca', 'memory');
+    const logPath = path.join(memoryDir, 'health-log.json');
+    try {
+      if (!fs.existsSync(memoryDir)) {
+        fs.mkdirSync(memoryDir, { recursive: true });
+      }
+      let history: Array<{ score: number; timestamp: string }> = [];
+      if (fs.existsSync(logPath)) {
+        history = JSON.parse(fs.readFileSync(logPath, 'utf-8'));
+      }
+      // Only append if score changed or > 1 hour since last entry
+      const last = history[history.length - 1];
+      const now = new Date().toISOString();
+      if (!last || last.score !== report.score || (Date.now() - new Date(last.timestamp).getTime() > 3600_000)) {
+        history.push({ score: report.score, timestamp: now });
+        // Keep last 100 entries
+        if (history.length > 100) history = history.slice(-100);
+        fs.writeFileSync(logPath, JSON.stringify(history, null, 2));
+      }
+    } catch {
+      // Non-fatal: history tracking failure doesn't block response
+    }
+
+    // Read trend for response
+    let trend: Array<{ score: number; timestamp: string }> = [];
+    try {
+      if (fs.existsSync(logPath)) {
+        trend = JSON.parse(fs.readFileSync(logPath, 'utf-8'));
+      }
+    } catch {}
+
+    res.json({ ...report, trend });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Health check failed' });
   }
 });
 
