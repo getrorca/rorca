@@ -456,20 +456,25 @@ function spawnClaude(
       prompt,
     ];
 
-    const logFd = fs.openSync(logFile, 'a');
+    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     const child = spawn(CLAUDE_BIN, args, {
       cwd,
       env,
-      stdio: ['ignore', logFd, 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    fs.closeSync(logFd);
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      logStream.write(chunk);
+      process.stdout.write(chunk);
+    });
 
     const stderrChunks: Buffer[] = [];
     let stderrSize = 0;
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
-      fs.appendFileSync(logFile, chunk);
+      logStream.write(chunk);
+      process.stdout.write(chunk);
       stderrChunks.push(chunk);
       stderrSize += chunk.length;
       while (stderrSize > MAX_STDERR && stderrChunks.length > 1) {
@@ -490,12 +495,14 @@ function spawnClaude(
 
     child.on('error', (err) => {
       clearTimeout(timer);
+      logStream.end();
       console.error(`[engine] Failed to spawn claude: ${err.message}`);
       resolve({ exitCode: 1, stderrTail: err.message, elapsedMs: Date.now() - startTime });
     });
 
     child.on('exit', (code) => {
       clearTimeout(timer);
+      logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
       if (code === null) {
@@ -538,14 +545,13 @@ function spawnOpenCode(
       args.push('--model', agentModel);
     }
 
-    const logFd = fs.openSync(logFile, 'a');
-    // stdin: pipe (to send prompt), stdout: log file, stderr: pipe (capture)
+    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+    // stdin: pipe (to send prompt), stdout: pipe (tee to log + process.stdout), stderr: pipe (capture)
     const child = spawn(bin, args, {
       cwd,
       env,
-      stdio: ['pipe', logFd, 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
-    fs.closeSync(logFd);
 
     // Write prompt to stdin then close
     if (child.stdin) {
@@ -553,12 +559,18 @@ function spawnOpenCode(
       child.stdin.end();
     }
 
+    child.stdout?.on('data', (chunk: Buffer) => {
+      logStream.write(chunk);
+      process.stdout.write(chunk);
+    });
+
     const stderrChunks: Buffer[] = [];
     let stderrSize = 0;
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
-      fs.appendFileSync(logFile, chunk);
+      logStream.write(chunk);
+      process.stdout.write(chunk);
       stderrChunks.push(chunk);
       stderrSize += chunk.length;
       while (stderrSize > MAX_STDERR && stderrChunks.length > 1) {
@@ -579,12 +591,14 @@ function spawnOpenCode(
 
     child.on('error', (err) => {
       clearTimeout(timer);
+      logStream.end();
       console.error(`[engine] Failed to spawn opencode: ${err.message}`);
       resolve({ exitCode: 1, stderrTail: err.message, elapsedMs: Date.now() - startTime });
     });
 
     child.on('exit', (code) => {
       clearTimeout(timer);
+      logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
       if (code === null) {
@@ -612,14 +626,13 @@ function spawnCodex(
 
     const args: string[] = ['--approval-mode', 'auto-edit'];
 
-    const logFd = fs.openSync(logFile, 'a');
-    // stdin: pipe (to send prompt), stdout: log file, stderr: pipe (capture)
+    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+    // stdin: pipe (to send prompt), stdout: pipe (tee to log + process.stdout), stderr: pipe (capture)
     const child = spawn(CODEX_BIN, args, {
       cwd,
       env,
-      stdio: ['pipe', logFd, 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
-    fs.closeSync(logFd);
 
     // Write prompt to stdin then close
     if (child.stdin) {
@@ -627,12 +640,18 @@ function spawnCodex(
       child.stdin.end();
     }
 
+    child.stdout?.on('data', (chunk: Buffer) => {
+      logStream.write(chunk);
+      process.stdout.write(chunk);
+    });
+
     const stderrChunks: Buffer[] = [];
     let stderrSize = 0;
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
-      fs.appendFileSync(logFile, chunk);
+      logStream.write(chunk);
+      process.stdout.write(chunk);
       stderrChunks.push(chunk);
       stderrSize += chunk.length;
       while (stderrSize > MAX_STDERR && stderrChunks.length > 1) {
@@ -653,12 +672,14 @@ function spawnCodex(
 
     child.on('error', (err) => {
       clearTimeout(timer);
+      logStream.end();
       console.error(`[engine] Failed to spawn codex: ${err.message}`);
       resolve({ exitCode: 1, stderrTail: err.message, elapsedMs: Date.now() - startTime });
     });
 
     child.on('exit', (code) => {
       clearTimeout(timer);
+      logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
       if (code === null) {
