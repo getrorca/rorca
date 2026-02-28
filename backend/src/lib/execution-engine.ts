@@ -1362,7 +1362,7 @@ async function executeStory(
     };
     const contextPayload = routeContext(contextStory, rorcaConfig.routing, effectiveCwd);
     if (contextPayload.totalTokens > 0) {
-      contextFilePath = writeContextFile(contextPayload);
+      contextFilePath = writeContextFile(contextPayload, effectiveCwd);
       console.log(`  [context] Routed ${contextPayload.totalTokens} tokens (${contextPayload.globals.length}g/${contextPayload.scoped.length}s/${contextPayload.tagged.length}t)`);
     }
   } catch (err: any) {
