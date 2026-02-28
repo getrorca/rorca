@@ -27,7 +27,7 @@ interface ModelOption {
   recommended: boolean;
 }
 
-export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initialBrief }: { onNavigate?: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; initialBrief?: string | null }) {
+export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initialBrief, onBriefConsumed }: { onNavigate?: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; initialBrief?: string | null; onBriefConsumed?: () => void }) {
   const { workspaceId, workspaces } = useWorkspace();
   const workspace = workspaces.find((w) => w.id === workspaceId);
   const [forgeMode, setForgeMode] = useState<ForgeMode>('single');
@@ -138,13 +138,16 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Apply initialBrief from command palette
+  // Apply initialBrief from command palette (empty string = focus only, non-empty = pre-fill + focus)
   useEffect(() => {
-    if (initialBrief != null && initialBrief.length > 0) {
-      setSpecBrief(initialBrief);
+    if (initialBrief != null) {
+      if (initialBrief.length > 0) {
+        setSpecBrief(initialBrief);
+      }
       setTimeout(() => briefRef.current?.focus(), 100);
+      onBriefConsumed?.();
     }
-  }, [initialBrief]);
+  }, [initialBrief, onBriefConsumed]);
 
   // Token estimate: word count × 1.3
   const estimatedTokens = Math.ceil((specBrief.trim().split(/\s+/).filter(Boolean).length) * 1.3);
