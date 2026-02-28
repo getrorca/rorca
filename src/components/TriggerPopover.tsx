@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, Minus, Plus, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
@@ -11,29 +11,36 @@ interface AgentConfigSummary {
   hasApiKey: boolean;
 }
 
+interface OrchestrationPreview {
+  mode: 'sequential' | 'wave-parallel';
+  parallelism: number;
+  reason: string;
+  waveCount: number;
+  maxWaveSize: number;
+  totalStories: number;
+  waves: { index: number; storyIds: string[] }[];
+}
+
 interface TriggerPopoverProps {
-  /** Default parallelism from workspace settings */
-  defaultParallelism?: number;
   /** Whether a trigger is currently in progress */
   loading?: boolean;
   /** Called when user clicks Run Now */
-  onTrigger: (parallelism: number, autoWorktree: boolean) => void;
+  onTrigger: (autoWorktree: boolean) => void;
   /** Called when user clicks Add to Queue */
-  onAddToQueue?: (parallelism: number, autoWorktree: boolean) => void;
+  onAddToQueue?: (autoWorktree: boolean) => void;
   /** Whether Add to Queue action is loading */
   queueLoading?: boolean;
   /** Called when popover is dismissed */
   onClose: () => void;
   /** Navigate to another panel (e.g. settings) */
   onNavigate?: (panel: PanelId) => void;
-  /** Spec path for capability preflight check */
+  /** Spec path for capability preflight check + orchestration preview */
   specPath?: string;
-  /** Workspace ID for capability preflight check */
+  /** Workspace ID for capability preflight check + orchestration preview */
   workspaceId?: string;
 }
 
 export default function TriggerPopover({
-  defaultParallelism = 1,
   loading = false,
   onTrigger,
   onAddToQueue,
@@ -43,17 +50,12 @@ export default function TriggerPopover({
   specPath,
   workspaceId,
 }: TriggerPopoverProps) {
-  const [parallelism, setParallelism] = useState(defaultParallelism);
-  const [autoWorktree, setAutoWorktree] = useState(defaultParallelism > 1);
+  const [autoWorktree, setAutoWorktree] = useState(false);
   const [agentConfig, setAgentConfig] = useState<AgentConfigSummary | null>(null);
   const [capWarnings, setCapWarnings] = useState<CapabilityWarning[]>([]);
   const [capMismatchMode, setCapMismatchMode] = useState<string>('warn');
+  const [orchestration, setOrchestration] = useState<OrchestrationPreview | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-
-  // Auto-check worktrees when parallelism > 1
-  useEffect(() => {
-    if (parallelism > 1) setAutoWorktree(true);
-  }, [parallelism]);
 
   // Fetch agent config on mount
   useEffect(() => {
@@ -73,6 +75,22 @@ export default function TriggerPopover({
       .catch(() => {});
   }, [specPath, workspaceId]);
 
+  // Fetch orchestration preview on mount
+  useEffect(() => {
+    if (!specPath || !workspaceId) return;
+    apiFetch<OrchestrationPreview>('/api/pipeline/orchestration-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ specPath, workspaceId }),
+    })
+      .then((result) => {
+        setOrchestration(result);
+        // Auto-enable worktrees for wave-parallel
+        if (result.mode === 'wave-parallel') setAutoWorktree(true);
+      })
+      .catch(() => {});
+  }, [specPath, workspaceId]);
+
   // Close on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -83,9 +101,6 @@ export default function TriggerPopover({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [onClose]);
-
-  const decrement = () => setParallelism((p) => Math.max(1, p - 1));
-  const increment = () => setParallelism((p) => Math.min(10, p + 1));
 
   // Derive engine display string and whether trigger should be disabled
   const isOpenCode = agentConfig?.agentType === 'opencode';
@@ -107,6 +122,15 @@ export default function TriggerPopover({
             ? `OpenCode — ${agentConfig.modelDisplayName}`
             : 'OpenCode'
         : 'Claude (Pro/Max)'
+    : null;
+
+  const isWaveParallel = orchestration?.mode === 'wave-parallel';
+
+  // Build orchestration badge text
+  const orchBadgeText = orchestration
+    ? isWaveParallel
+      ? `Wave parallel \u00b7 ${orchestration.waveCount} waves \u00b7 max ${orchestration.maxWaveSize} parallel`
+      : `Sequential \u00b7 ${orchestration.totalStories} stories`
     : null;
 
   return (
@@ -203,51 +227,53 @@ export default function TriggerPopover({
         </div>
       )}
 
-      {/* Parallelism stepper */}
+      {/* Orchestration mode badge (read-only, auto-selected) */}
       <div>
-        <label className="block text-xs text-muted mb-1.5">Parallelism</label>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={decrement}
-            disabled={parallelism <= 1}
-            className="p-1 rounded border border-border hover:bg-bg disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-          >
-            <Minus size={14} />
-          </button>
-          <span className="w-8 text-center text-sm font-semibold text-[var(--text)] tabular-nums">
-            {parallelism}
-          </span>
-          <button
-            onClick={increment}
-            disabled={parallelism >= 10}
-            className="p-1 rounded border border-border hover:bg-bg disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-          >
-            <Plus size={14} />
-          </button>
-          <span className="text-[10px] text-muted ml-1">
-            {parallelism === 1 ? 'sequential' : `${parallelism} parallel`}
-          </span>
-        </div>
+        <label className="block text-xs text-muted mb-1.5">Execution</label>
+        {orchestration ? (
+          <div className="flex items-center gap-2">
+            <Layers size={13} className={isWaveParallel ? 'text-accent shrink-0' : 'text-muted shrink-0'} />
+            <span className={`text-xs font-medium ${isWaveParallel ? 'text-accent' : 'text-[var(--text)]'}`}>
+              {orchBadgeText}
+            </span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <Layers size={13} className="text-muted shrink-0 animate-pulse" />
+            <span className="text-xs text-muted">Analyzing dependencies...</span>
+          </div>
+        )}
+        {/* Show wave breakdown for wave-parallel */}
+        {isWaveParallel && orchestration && (
+          <div className="mt-1.5 space-y-0.5">
+            {orchestration.waves.map((w) => (
+              <div key={w.index} className="flex items-center gap-1 text-[10px] text-muted">
+                <span className="font-medium tabular-nums w-12 shrink-0">Wave {w.index}</span>
+                <ArrowRight size={8} className="shrink-0" />
+                <span className="truncate">{w.storyIds.join(', ')}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Use worktrees checkbox */}
       <label className="flex items-center gap-2 cursor-pointer">
         <input
           type="checkbox"
-          checked={autoWorktree}
+          checked={autoWorktree || isWaveParallel}
           onChange={(e) => {
-            // Don't allow unchecking when parallelism > 1
-            if (parallelism > 1) return;
+            if (isWaveParallel) return;
             setAutoWorktree(e.target.checked);
           }}
-          disabled={parallelism > 1}
+          disabled={isWaveParallel}
           className="rounded border-border accent-[var(--accent)]"
         />
         <span className="text-xs text-[var(--text)] flex items-center gap-1">
           <GitBranch size={12} className="text-muted" />
           Use worktrees
         </span>
-        {parallelism > 1 && (
+        {isWaveParallel && (
           <span className="text-[10px] text-muted">(required for parallel)</span>
         )}
       </label>
@@ -256,7 +282,7 @@ export default function TriggerPopover({
       <div className="space-y-2">
         {/* Run Now — primary */}
         <button
-          onClick={() => onTrigger(parallelism, autoWorktree)}
+          onClick={() => onTrigger(autoWorktree || isWaveParallel)}
           disabled={triggerDisabled}
           className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
         >
@@ -270,7 +296,7 @@ export default function TriggerPopover({
         {/* Add to Queue — secondary */}
         {onAddToQueue && (
           <button
-            onClick={() => onAddToQueue(parallelism, autoWorktree)}
+            onClick={() => onAddToQueue(autoWorktree || isWaveParallel)}
             disabled={triggerDisabled}
             title="Will run after the active spec completes"
             className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium border border-border text-[var(--text)] hover:bg-bg disabled:opacity-60 transition-colors"

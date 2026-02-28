@@ -25,6 +25,61 @@ import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedS
 import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
+import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
+
+/** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
+function autoSelectOrchestration(userStories: WaveUserStory[]): {
+  mode: 'sequential' | 'wave-parallel';
+  parallelism: number;
+  reason: string;
+  waveCount: number;
+  maxWaveSize: number;
+  totalStories: number;
+  waves: { index: number; storyIds: string[] }[];
+} {
+  const pending = userStories.filter(s => !s.passes && !s.excluded);
+  const totalStories = pending.length;
+
+  if (totalStories === 0) {
+    return { mode: 'sequential', parallelism: 1, reason: 'no pending stories', waveCount: 0, maxWaveSize: 0, totalStories: 0, waves: [] };
+  }
+
+  const waveResult = compileWaves(pending);
+  if (isCycleError(waveResult)) {
+    return { mode: 'sequential', parallelism: 1, reason: `cycle detected among ${waveResult.involvedIds.join(', ')}`, waveCount: 0, maxWaveSize: 0, totalStories, waves: [] };
+  }
+
+  const waves: Wave[] = waveResult;
+  const maxWaveSize = Math.max(...waves.map(w => w.stories.length));
+  const waveCount = waves.length;
+  const waveSummary = waves.map(w => ({ index: w.index, storyIds: w.stories.map(s => s.id) }));
+
+  // Decision rules:
+  // 1. If max wave size < 2 (all waves have exactly 1 story) → sequential
+  // 2. If total stories < 5 → sequential (overhead not worth it)
+  // 3. Otherwise → wave-parallel with parallelism = maxWaveSize
+  if (maxWaveSize < 2) {
+    return {
+      mode: 'sequential', parallelism: 1,
+      reason: `max wave size: ${maxWaveSize}, stories: ${totalStories}`,
+      waveCount, maxWaveSize, totalStories, waves: waveSummary,
+    };
+  }
+
+  if (totalStories < 5) {
+    return {
+      mode: 'sequential', parallelism: 1,
+      reason: `total stories: ${totalStories} (< 5 threshold)`,
+      waveCount, maxWaveSize, totalStories, waves: waveSummary,
+    };
+  }
+
+  return {
+    mode: 'wave-parallel', parallelism: maxWaveSize,
+    reason: `max wave size: ${maxWaveSize}, stories: ${totalStories}`,
+    waveCount, maxWaveSize, totalStories, waves: waveSummary,
+  };
+}
 
 /** Extract semantic steps from a raw text chunk (may contain multiple lines). */
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
@@ -533,22 +588,11 @@ router.post('/preflight', async (req: Request, res: Response) => {
  */
 router.post('/trigger', async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, dryRun, triggerType, parallelism: rawParallelism } = req.body;
+    const { specPath, workspaceId, autoWorktree, dryRun, triggerType } = req.body;
 
     if (!specPath || !workspaceId) {
       res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
       return;
-    }
-
-    // Validate parallelism: optional integer 1–10, default 1
-    let parallelism = 1;
-    if (rawParallelism !== undefined && rawParallelism !== null) {
-      const parsed = Number(rawParallelism);
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
-        res.status(400).json({ error: 'parallelism must be an integer between 1 and 10' });
-        return;
-      }
-      parallelism = parsed;
     }
 
     // 1. Look up workspace path
@@ -777,12 +821,35 @@ router.post('/trigger', async (req: Request, res: Response) => {
     // 4. Build absolute spec path: workspace/<specPath>
     const absSpecPath = path.join(workspace.path, specPath);
 
+    // 4b. Auto-select orchestration mode (sequential vs wave-parallel)
+    let parallelism = 1;
+    let orchestration: ReturnType<typeof autoSelectOrchestration> | null = null;
+    try {
+      const specJsonForOrch = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+      const orchStories: WaveUserStory[] = (specJsonForOrch.userStories ?? []).map((s: any) => ({
+        id: s.id,
+        title: s.title ?? '',
+        description: s.description ?? '',
+        acceptanceCriteria: s.acceptanceCriteria ?? [],
+        dependsOn: s.dependsOn ?? [],
+        passes: s.passes,
+        excluded: s.excluded,
+      }));
+      orchestration = autoSelectOrchestration(orchStories);
+      parallelism = orchestration.parallelism;
+      console.log(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
+    } catch {
+      // Spec parse error — fall back to sequential
+      console.log('[orchestration] Using sequential (spec parse error, fallback)');
+    }
+
     // 5. Determine CWD — main workspace or new worktree
+    const needsWorktree = autoWorktree || orchestration?.mode === 'wave-parallel';
     let cwd = workspace.path;
     let branchName: string | null = null;
     let worktreePath: string | null = null;
 
-    if (autoWorktree) {
+    if (needsWorktree) {
       const specSlug = path.basename(specPath, '.json').replace(/[^a-z0-9-]/gi, '-');
       branchName = `feat/${specSlug}-${Date.now()}`;
       const repoName = path.basename(workspace.path);
@@ -1283,9 +1350,71 @@ router.post('/trigger', async (req: Request, res: Response) => {
       ok: true, runId, worktreePath, branchName,
       agentType: resolvedAgentType, agentModel: resolvedAgentModel,
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
+      ...(orchestration ? { orchestration } : {}),
     });
   } catch (error: any) {
     console.error('[Pipeline] Trigger error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/pipeline/orchestration-preview — Preview auto-orchestration mode ─
+
+/**
+ * @swagger
+ * /api/pipeline/orchestration-preview:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Preview auto-orchestration mode for a spec
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [specPath, workspaceId]
+ *             properties:
+ *               specPath: { type: string }
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Orchestration preview
+ */
+router.post('/orchestration-preview', (req: Request, res: Response) => {
+  try {
+    const { specPath, workspaceId } = req.body;
+    if (!specPath || !workspaceId) {
+      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      return;
+    }
+
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+      { id: string; path: string } | undefined;
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const absSpecPath = path.join(workspace.path, specPath);
+    if (!fs.existsSync(absSpecPath)) {
+      res.status(404).json({ error: 'Spec file not found' });
+      return;
+    }
+
+    const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+    const orchStories: WaveUserStory[] = (specJson.userStories ?? []).map((s: any) => ({
+      id: s.id,
+      title: s.title ?? '',
+      description: s.description ?? '',
+      acceptanceCriteria: s.acceptanceCriteria ?? [],
+      dependsOn: s.dependsOn ?? [],
+      passes: s.passes,
+      excluded: s.excluded,
+    }));
+
+    const result = autoSelectOrchestration(orchStories);
+    res.json(result);
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });

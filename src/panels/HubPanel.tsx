@@ -456,10 +456,9 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
 
 // ─── Ready-to-Run Card ──────────────────────────────────────────────────────
 
-function ReadyToRunCard({ spec, workspaceId, defaultParallelism, workspaceBusy, workspaceName, onTriggered, onNavigate, onQueueRefresh }: {
+function ReadyToRunCard({ spec, workspaceId, workspaceBusy, workspaceName, onTriggered, onNavigate, onQueueRefresh }: {
   spec: SpecSummary;
   workspaceId: string;
-  defaultParallelism: number;
   workspaceBusy: boolean;
   workspaceName: string;
   onTriggered: (specId: string) => void;
@@ -494,7 +493,7 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, workspaceBusy, 
     }
   };
 
-  const handleAddToQueue = async (parallelism: number, autoWorktree: boolean) => {
+  const handleAddToQueue = async () => {
     setQueueLoading(true);
     try {
       await apiFetch('/api/run-queue', {
@@ -504,8 +503,6 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, workspaceBusy, 
           workspaceId: Number(workspaceId),
           specId: spec.id,
           specPath: `forge/specs/approved/${spec.id}.json`,
-          parallelism,
-          autoWorktree,
         }),
       });
       setShowPopover(false);
@@ -631,7 +628,6 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [recentRuns, setRecentRuns] = useState<PipelineRun[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [defaultParallelism, setDefaultParallelism] = useState(1);
   const [queueLength, setQueueLength] = useState(0);
   const [nextQueueSpecName, setNextQueueSpecName] = useState<string | null>(null);
   const [justCompletedRunIds, setJustCompletedRunIds] = useState<Set<number>>(new Set());
@@ -959,7 +955,6 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                     <ReadyToRunCard
                       spec={spec}
                       workspaceId={workspaceId!}
-                      defaultParallelism={defaultParallelism}
                       workspaceBusy={hasActiveRun}
                       workspaceName={selectedWorkspace?.name ?? ''}
                       onTriggered={() => fetchData()}
