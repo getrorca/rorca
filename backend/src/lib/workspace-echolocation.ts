@@ -16,9 +16,26 @@ export interface ContextFile {
   lineCount?: number;
 }
 
+export interface MonorepoPackage {
+  /** Relative path from workspace root, e.g. "apps/web" */
+  path: string;
+  /** Package name from package.json / Cargo.toml if available */
+  name: string;
+  /** Detected stack items for this specific app/package */
+  stack: StackItem[];
+  /** Inferred skill files that should be injected for this scope */
+  inferredSkills: string[];
+}
+
+export type MonorepoTool = 'turborepo' | 'nx' | 'lerna' | 'pnpm-workspaces' | 'npm-workspaces' | 'yarn-workspaces' | 'unknown';
+
 export interface MonorepoInfo {
   detected: boolean;
-  packages: string[]; // relative paths to package roots
+  packages: string[]; // relative paths to package roots (backward compat)
+  /** Monorepo orchestration tool detected */
+  tool: MonorepoTool | null;
+  /** Deep per-package analysis with stack + skill inference */
+  apps: MonorepoPackage[];
 }
 
 export interface EcholocationReport {
@@ -224,6 +241,159 @@ const STACK_DETECTORS: StackDetector[] = [
 
 // ─── Monorepo detection ─────────────────────────────────────────────────────
 
+/** Map from detected stack names to suggested skill filenames. */
+export const STACK_TO_SKILLS: Record<string, string[]> = {
+  'React': ['react.md'],
+  'Next.js': ['react.md', 'nextjs.md'],
+  'Vue.js': ['vue.md'],
+  'Nuxt.js': ['vue.md', 'nuxt.md'],
+  'Angular': ['angular.md'],
+  'Svelte': ['svelte.md'],
+  'SvelteKit': ['svelte.md', 'sveltekit.md'],
+  'Tailwind CSS': ['tailwind.md'],
+  'Express': ['node.md', 'express.md'],
+  'Fastify': ['node.md', 'fastify.md'],
+  'Koa': ['node.md'],
+  'Hono': ['node.md', 'hono.md'],
+  'Prisma': ['prisma.md'],
+  'Drizzle ORM': ['drizzle.md'],
+  'SQLite': ['sqlite.md'],
+  'PostgreSQL': ['postgres.md'],
+  'MySQL': ['mysql.md'],
+  'Redis': ['redis.md'],
+  'Mongoose': ['mongodb.md'],
+  'Jest': ['testing.md'],
+  'Vitest': ['testing.md'],
+  'Mocha': ['testing.md'],
+  'Playwright': ['testing.md', 'e2e.md'],
+  'Cypress': ['testing.md', 'e2e.md'],
+  'Electron': ['electron.md'],
+  'Tauri': ['tauri.md'],
+  'React Native': ['react-native.md'],
+  'Expo': ['react-native.md', 'expo.md'],
+  'GraphQL': ['graphql.md'],
+  'tRPC': ['trpc.md'],
+  'Stripe': ['payments.md'],
+  'Socket.io': ['websockets.md'],
+  'Docker': ['docker.md'],
+  'Docker Compose': ['docker.md'],
+  'Terraform': ['terraform.md'],
+  'Rust': ['rust.md'],
+  'Python': ['python.md'],
+  'Django': ['python.md', 'django.md'],
+  'Flask': ['python.md', 'flask.md'],
+  'FastAPI': ['python.md', 'fastapi.md'],
+  'Go': ['go.md'],
+  'Node.js': ['node.md'],
+  'TypeScript': ['typescript.md'],
+  'Storybook': ['storybook.md'],
+};
+
+/**
+ * Detect stack items from a single package's manifest files.
+ * Reuses the global STACK_DETECTORS but scoped to a specific directory.
+ */
+function detectPackageStack(packagePath: string): StackItem[] {
+  const items: StackItem[] = [];
+  const seen = new Set<string>();
+
+  for (const detector of STACK_DETECTORS) {
+    const filePath = path.join(packagePath, detector.file);
+
+    if (detector.file.endsWith('/')) {
+      if (fs.existsSync(filePath)) {
+        for (const item of detector.detect('', packagePath)) {
+          if (!seen.has(item.name)) {
+            seen.add(item.name);
+            items.push(item);
+          }
+        }
+      }
+      continue;
+    }
+
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) continue;
+
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      for (const item of detector.detect(content, packagePath)) {
+        if (!seen.has(item.name)) {
+          seen.add(item.name);
+          items.push(item);
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  // Check for storybook config
+  const storybookDir = path.join(packagePath, '.storybook');
+  if (fs.existsSync(storybookDir) && !seen.has('Storybook')) {
+    items.push({ name: 'Storybook', source: '.storybook/' });
+  }
+
+  return items;
+}
+
+/**
+ * Infer skill file names from a stack item list.
+ * Returns deduplicated sorted skill filenames.
+ */
+export function inferSkillsFromStack(stack: StackItem[]): string[] {
+  const skills = new Set<string>();
+  for (const item of stack) {
+    const mapped = STACK_TO_SKILLS[item.name];
+    if (mapped) {
+      for (const s of mapped) skills.add(s);
+    }
+  }
+  return [...skills].sort();
+}
+
+/**
+ * Detect the monorepo orchestration tool.
+ */
+function detectMonorepoTool(workspacePath: string): MonorepoTool | null {
+  if (fs.existsSync(path.join(workspacePath, 'turbo.json'))) return 'turborepo';
+  if (fs.existsSync(path.join(workspacePath, 'nx.json'))) return 'nx';
+  if (fs.existsSync(path.join(workspacePath, 'lerna.json'))) return 'lerna';
+  if (fs.existsSync(path.join(workspacePath, 'pnpm-workspace.yaml'))) return 'pnpm-workspaces';
+  if (fs.existsSync(path.join(workspacePath, 'pnpm-workspace.yml'))) return 'pnpm-workspaces';
+
+  // Check root package.json for workspaces field
+  const rootPkgPath = path.join(workspacePath, 'package.json');
+  if (fs.existsSync(rootPkgPath)) {
+    try {
+      const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'));
+      if (rootPkg.workspaces) {
+        // Yarn uses "workspaces" in package.json natively; npm 7+ also supports it
+        // Differentiate by checking for yarn.lock
+        if (fs.existsSync(path.join(workspacePath, 'yarn.lock'))) return 'yarn-workspaces';
+        return 'npm-workspaces';
+      }
+    } catch {
+      // Malformed
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Read the package name from a package directory.
+ */
+function readPackageName(packagePath: string, fallback: string): string {
+  const pkgJsonPath = path.join(packagePath, 'package.json');
+  if (fs.existsSync(pkgJsonPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+      if (pkg.name) return pkg.name;
+    } catch { /* use fallback */ }
+  }
+  return fallback;
+}
+
 function detectMonorepo(workspacePath: string): MonorepoInfo {
   const packages: string[] = [];
 
@@ -250,36 +420,38 @@ function detectMonorepo(workspacePath: string): MonorepoInfo {
     }
   }
 
-  // Check root package.json for workspaces field
+  // Detect orchestration tool
+  const tool = detectMonorepoTool(workspacePath);
+
+  // Check root package.json for workspaces field (for the old detected flag)
   const rootPkgPath = path.join(workspacePath, 'package.json');
+  let hasWorkspacesField = false;
   if (fs.existsSync(rootPkgPath)) {
     try {
       const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'));
-      if (rootPkg.workspaces) {
-        // Workspaces field exists — monorepo confirmed
-        return { detected: true, packages };
-      }
-    } catch {
-      // Malformed package.json
-    }
+      if (rootPkg.workspaces) hasWorkspacesField = true;
+    } catch { /* skip */ }
   }
 
-  // Check for pnpm-workspace.yaml
-  if (fs.existsSync(path.join(workspacePath, 'pnpm-workspace.yaml'))) {
-    return { detected: true, packages };
+  // Determine if monorepo
+  const isMonorepo = tool !== null || hasWorkspacesField || packages.length > 1;
+
+  if (!isMonorepo) {
+    return { detected: false, packages: [], tool: null, apps: [] };
   }
 
-  // Check for lerna.json
-  if (fs.existsSync(path.join(workspacePath, 'lerna.json'))) {
-    return { detected: true, packages };
-  }
+  // Deep per-package analysis
+  const apps: MonorepoPackage[] = packages.map(pkgRelPath => {
+    const pkgAbsPath = path.join(workspacePath, pkgRelPath);
+    const dirName = path.basename(pkgRelPath);
+    const name = readPackageName(pkgAbsPath, dirName);
+    const stack = detectPackageStack(pkgAbsPath);
+    const inferredSkills = inferSkillsFromStack(stack);
 
-  // If we found multiple sub-packages, it's likely a monorepo
-  if (packages.length > 1) {
-    return { detected: true, packages };
-  }
+    return { path: pkgRelPath, name, stack, inferredSkills };
+  });
 
-  return { detected: false, packages: [] };
+  return { detected: true, packages, tool, apps };
 }
 
 // ─── Context Richness Score ─────────────────────────────────────────────────
@@ -360,7 +532,11 @@ function generateSuggestions(contextFiles: ContextFile[], stack: StackItem[], mo
   }
 
   if (monorepo.detected && monorepo.packages.length > 0) {
-    suggestions.push(`Monorepo detected with ${monorepo.packages.length} packages — consider per-package AGENTS.md files`);
+    const toolLabel = monorepo.tool ? ` (${monorepo.tool})` : '';
+    suggestions.push(
+      `Monorepo detected${toolLabel} with ${monorepo.packages.length} packages — ` +
+      `run "Discover Monorepo" to auto-generate per-app scopes and AGENTS.md roles`
+    );
   }
 
   // Check for shallow CLAUDE.md
@@ -655,4 +831,174 @@ export function computeHealthReport(workspacePath: string): HealthReport {
     components,
     scannedAt: new Date().toISOString(),
   };
+}
+
+// ─── CIE-017: Monorepo Scope Generation ──────────────────────────────────────
+
+export interface MonorepoScope {
+  /** Glob pattern for routing, e.g. "apps/web/**" */
+  path: string;
+  /** Skill filenames to inject */
+  inject: string[];
+  /** Priority (50 = default) */
+  priority: number;
+  /** Managed by Rorca */
+  managed: 'rorca' | 'manual' | 'hybrid';
+}
+
+export interface MonorepoDiscoveryResult {
+  tool: MonorepoTool | null;
+  apps: MonorepoPackage[];
+  scopes: MonorepoScope[];
+  agentsMd: string;
+}
+
+/**
+ * Full monorepo discovery: scans workspace, generates per-app scopes + AGENTS.md.
+ * Called from the /api/workspaces/:id/monorepo/discover endpoint.
+ */
+export function discoverMonorepo(workspacePath: string): MonorepoDiscoveryResult {
+  const report = echolocate(workspacePath);
+
+  if (!report.monorepo.detected || report.monorepo.apps.length === 0) {
+    return { tool: null, apps: [], scopes: [], agentsMd: '' };
+  }
+
+  const { tool, apps } = report.monorepo;
+
+  // Generate scopes from apps
+  const scopes: MonorepoScope[] = apps.map(app => ({
+    path: `${app.path}/**`,
+    inject: app.inferredSkills.map(s => `.rorca/skills/${s}`),
+    priority: 50,
+    managed: 'rorca' as const,
+  }));
+
+  // Generate AGENTS.md content with per-app roles
+  const agentsMd = generateMonorepoAgentsMd(apps, workspacePath);
+
+  return { tool, apps, scopes, agentsMd };
+}
+
+/**
+ * Generate an AGENTS.md with per-app roles for a monorepo workspace.
+ */
+/**
+ * Generate a CLAUDE.md section describing the monorepo structure.
+ * This is appended to the workspace's root CLAUDE.md when discovery is applied.
+ */
+export function generateMonorepoCLAUDESection(
+  apps: MonorepoPackage[],
+  tool: MonorepoTool | null,
+): string {
+  const lines: string[] = [
+    '',
+    '## Monorepo Structure',
+    '',
+  ];
+
+  if (tool) {
+    lines.push(`**Orchestration**: ${tool}`);
+    lines.push('');
+  }
+
+  lines.push('| App | Path | Stack | Skills |');
+  lines.push('|-----|------|-------|--------|');
+
+  for (const app of apps) {
+    const stackStr = app.stack.map(s => s.name).join(', ') || '-';
+    const skillStr = app.inferredSkills.join(', ') || '-';
+    lines.push(`| ${app.name} | \`${app.path}/\` | ${stackStr} | ${skillStr} |`);
+  }
+
+  lines.push('');
+  lines.push('### Cross-App Conventions');
+  lines.push('- Shared packages in `packages/` are imported by apps — changes require testing consumers');
+  lines.push('- Root-level config files (tsconfig, eslint, prettier) apply to all apps unless overridden');
+  if (tool === 'turborepo') {
+    lines.push('- `turbo.json` defines task pipeline — respect `dependsOn` for build order');
+  } else if (tool === 'nx') {
+    lines.push('- `nx.json` defines project boundaries — respect dependency constraints');
+  } else if (tool === 'lerna') {
+    lines.push('- `lerna.json` manages versioning — respect package interdependencies');
+  }
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+/**
+ * Load monorepo apps from a workspace, returning cached data from config or running fresh detection.
+ * Used by execution engine and pipeline for cross-app story routing.
+ */
+export function loadMonorepoApps(workspacePath: string): MonorepoPackage[] {
+  const report = echolocate(workspacePath);
+  if (!report.monorepo.detected) return [];
+  return report.monorepo.apps;
+}
+
+export function generateMonorepoAgentsMd(apps: MonorepoPackage[], workspacePath: string): string {
+  const lines: string[] = [
+    '# AGENTS.md',
+    '',
+    '## Monorepo Structure',
+    '',
+  ];
+
+  // Detect tool for header context
+  const tool = detectMonorepoTool(workspacePath);
+  if (tool) {
+    lines.push(`Orchestration: **${tool}**`);
+    lines.push('');
+  }
+
+  lines.push('## Roles');
+  lines.push('');
+
+  // Per-app roles
+  for (const app of apps) {
+    const stackNames = app.stack.map(s => s.name).join(', ') || 'unknown stack';
+    const roleName = `${app.name} Agent`;
+
+    lines.push(`### ${roleName}`);
+    lines.push(`- owns: ${app.path}/**`);
+
+    // Avoids: other app directories
+    const others = apps.filter(a => a.path !== app.path);
+    if (others.length > 0) {
+      lines.push(`- avoids: ${others.map(a => `${a.path}/**`).join(', ')}`);
+    }
+
+    lines.push('- rules:');
+    lines.push(`  - Stack: ${stackNames}`);
+    lines.push(`  - Follow conventions from ${app.path}/ directory`);
+
+    // Add stack-specific rules
+    const stackSet = new Set(app.stack.map(s => s.name));
+    if (stackSet.has('React') || stackSet.has('Next.js')) {
+      lines.push('  - Use React component conventions from this app');
+    }
+    if (stackSet.has('Express') || stackSet.has('Fastify') || stackSet.has('Hono')) {
+      lines.push('  - Validate input at route boundary');
+    }
+    if (stackSet.has('Prisma') || stackSet.has('Drizzle ORM')) {
+      lines.push('  - Use the ORM for all database access — no raw SQL');
+    }
+
+    lines.push('');
+  }
+
+  // Shared infrastructure role
+  lines.push('### Infrastructure Agent');
+  lines.push('- owns: *.json, *.config.*, .github/**, Dockerfile, docker-compose.*');
+  lines.push('- rules:');
+  lines.push('  - Configuration changes require careful review');
+  if (tool === 'turborepo') {
+    lines.push('  - Maintain turbo.json pipeline dependencies when adding new packages');
+  } else if (tool === 'nx') {
+    lines.push('  - Keep nx.json project boundaries and dependency constraints in sync');
+  }
+  lines.push('');
+
+  return lines.join('\n');
 }

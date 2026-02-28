@@ -53,6 +53,7 @@ import {
 } from './tool-capability-checker';
 import { route as routeContext, writeContextFile, type ContextStory } from './context-router';
 import { loadRorcaConfig } from './rorca-config';
+import { loadMonorepoApps, type MonorepoPackage } from './workspace-echolocation';
 import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
 import {
   initRunState,
@@ -1373,6 +1374,7 @@ async function executeStory(
   console.log(`  Timeout: ${timeoutMin}m`);
 
   // CIE-004: Route context for this story
+  // CIE-017: Load monorepo apps for cross-app story detection
   let contextFilePath: string | undefined;
   let injectedContextFiles: string[] = [];
   try {
@@ -1385,11 +1387,19 @@ async function executeStory(
       dependsOn: story.dependsOn,
       tags: story.tags,
     };
-    const contextPayload = routeContext(contextStory, rorcaConfig.routing, effectiveCwd);
+    // CIE-017: Load monorepo apps so cross-app story references inject both scopes
+    let monorepoApps: MonorepoPackage[] | undefined;
+    try {
+      monorepoApps = loadMonorepoApps(effectiveCwd);
+      if (monorepoApps.length === 0) monorepoApps = undefined;
+    } catch { /* non-fatal */ }
+
+    const contextPayload = routeContext(contextStory, rorcaConfig.routing, effectiveCwd, monorepoApps);
     if (contextPayload.totalTokens > 0) {
       contextFilePath = writeContextFile(contextPayload, effectiveCwd);
       injectedContextFiles = contextPayload.injectedFiles;
-      console.log(`  [context] Routed ${contextPayload.totalTokens} tokens (${contextPayload.globals.length}g/${contextPayload.scoped.length}s/${contextPayload.tagged.length}t)`);
+      const appCount = monorepoApps?.length ?? 0;
+      console.log(`  [context] Routed ${contextPayload.totalTokens} tokens (${contextPayload.globals.length}g/${contextPayload.scoped.length}s/${contextPayload.tagged.length}t)${appCount > 0 ? ` [monorepo: ${appCount} apps]` : ''}`);
     }
   } catch (err: any) {
     // Non-fatal — proceed without routed context

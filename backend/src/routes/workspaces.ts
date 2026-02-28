@@ -11,7 +11,8 @@ import {
 import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
-import { echolocate, computeHealthReport } from '../lib/workspace-echolocation';
+import { echolocate, computeHealthReport, discoverMonorepo, generateMonorepoCLAUDESection } from '../lib/workspace-echolocation';
+import { loadRorcaConfig, writeRorcaConfig } from '../lib/rorca-config';
 import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-scaffold';
 import type { ScaffoldFile } from '../lib/workspace-scaffold';
 
@@ -997,6 +998,133 @@ router.post('/:id/echolocate', (req, res) => {
     res.json(report);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Echolocation scan failed' });
+  }
+});
+
+// ─── CIE-017: Monorepo Discovery & Scope Generation ──────────────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/monorepo/discover:
+ *   post:
+ *     tags: [Workspaces]
+ *     summary: Discover monorepo structure and generate per-app scopes + AGENTS.md
+ *     description: >
+ *       CIE-017: Detects monorepo tool (Turborepo, Nx, Lerna, pnpm/npm/yarn workspaces),
+ *       scans each app/package for tech stack, infers skill files, generates routing
+ *       scopes and AGENTS.md content. Returns a preview by default; pass mode=apply
+ *       to write scopes to .rorca/config.json and AGENTS.md to workspace root.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               mode:
+ *                 type: string
+ *                 enum: [preview, apply]
+ *                 default: preview
+ *     responses:
+ *       200:
+ *         description: Monorepo discovery result with scopes and AGENTS.md
+ *       404: { description: "Workspace not found" }
+ *       400: { description: "Not a monorepo or workspace path missing" }
+ */
+router.post('/:id/monorepo/discover', (req, res) => {
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  if (!fs.existsSync(workspace.path)) {
+    res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+    return;
+  }
+
+  try {
+    const result = discoverMonorepo(workspace.path);
+
+    if (!result.apps.length) {
+      res.status(400).json({ error: 'No monorepo structure detected', tool: result.tool });
+      return;
+    }
+
+    const mode = (req.body?.mode as string) || 'preview';
+
+    if (mode === 'apply') {
+      // Merge discovered scopes into existing config
+      const config = loadRorcaConfig(workspace.path);
+      const existingScopePaths = new Set(config.routing.scopes.map(s => s.path));
+      const newScopes = result.scopes.filter(s => !existingScopePaths.has(s.path));
+
+      if (newScopes.length > 0) {
+        config.routing.scopes.push(...newScopes);
+        writeRorcaConfig(workspace.path, config);
+      }
+
+      // Write AGENTS.md (only if it doesn't exist or user opts to overwrite)
+      const agentsPath = path.join(workspace.path, 'AGENTS.md');
+      if (!fs.existsSync(agentsPath)) {
+        fs.writeFileSync(agentsPath, result.agentsMd, 'utf-8');
+      }
+
+      // CIE-017: Append monorepo structure section to CLAUDE.md
+      const claudePath = path.join(workspace.path, 'CLAUDE.md');
+      const monoSection = generateMonorepoCLAUDESection(result.apps, result.tool);
+      const MONO_START = '<!-- RORCA:MONOREPO:START -->';
+      const MONO_END = '<!-- RORCA:MONOREPO:END -->';
+      try {
+        if (fs.existsSync(claudePath)) {
+          let claudeContent = fs.readFileSync(claudePath, 'utf-8');
+          // Replace existing section or append
+          const startIdx = claudeContent.indexOf(MONO_START);
+          const endIdx = claudeContent.indexOf(MONO_END);
+          if (startIdx !== -1 && endIdx !== -1) {
+            claudeContent = claudeContent.slice(0, startIdx) + MONO_START + '\n' + monoSection + MONO_END + claudeContent.slice(endIdx + MONO_END.length);
+          } else {
+            claudeContent += '\n' + MONO_START + '\n' + monoSection + MONO_END + '\n';
+          }
+          fs.writeFileSync(claudePath, claudeContent, 'utf-8');
+        }
+        // Don't create CLAUDE.md just for monorepo — scaffold handles that
+      } catch { /* non-fatal */ }
+
+      db.prepare(
+        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('monorepo_discovered', ?, ?)"
+      ).run(req.params.id, JSON.stringify({
+        tool: result.tool,
+        appCount: result.apps.length,
+        scopesAdded: newScopes.length,
+        applied: true,
+      }));
+
+      res.json({
+        ...result,
+        applied: true,
+        scopesAdded: newScopes.length,
+        config: loadRorcaConfig(workspace.path),
+      });
+    } else {
+      // Preview mode
+      db.prepare(
+        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('monorepo_discovered', ?, ?)"
+      ).run(req.params.id, JSON.stringify({
+        tool: result.tool,
+        appCount: result.apps.length,
+        scopeCount: result.scopes.length,
+        applied: false,
+      }));
+
+      res.json({ ...result, applied: false });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Monorepo discovery failed' });
   }
 });
 
