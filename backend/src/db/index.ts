@@ -473,3 +473,22 @@ export function runMigrations() {
 }
 
 runMigrations();
+
+// ── Seed default local admin user (idempotent) ────────────────────────────
+// Self-hosted: always ensure a local admin user exists with plan='pro' so
+// billing gates never block pipeline runs. Safe to run on every startup.
+{
+  const existingAdmin = db.prepare("SELECT id FROM users WHERE email = 'admin@rorca.local'").get();
+  if (!existingAdmin) {
+    // bcrypt hash of 'rorca123' (cost 10)
+    const defaultHash = '$2b$10$BMXqmRMejhhifW5gs6Ju.eI.cxoG/k7iW5sGJ86Nb4WloLowY.qxy';
+    db.prepare(
+      `INSERT INTO users (id, email, display_name, password_hash, role, plan, email_verified_at)
+       VALUES ('local-admin', 'admin@rorca.local', 'Admin', ?, 'admin', 'pro', datetime('now'))`
+    ).run(defaultHash);
+    console.log('[db] Seeded default admin user (admin@rorca.local)');
+  } else {
+    // Ensure plan is never 'free' — billing gate should never appear on self-hosted
+    db.prepare("UPDATE users SET plan = 'pro' WHERE email = 'admin@rorca.local' AND plan = 'free'").run();
+  }
+}
