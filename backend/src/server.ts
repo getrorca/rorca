@@ -55,6 +55,7 @@ import copilotRouter from './routes/copilot';
 import memoryRouter from './routes/memory';
 import agentsRouter from './routes/agents';
 import contextRoutingRouter from './routes/context-routing';
+import contextFilesRouter from './routes/context-files';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 
@@ -152,6 +153,7 @@ app.use('/api/copilot', copilotRouter);
 app.use('/api/memory', memoryRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/workspaces', contextRoutingRouter);
+app.use('/api/workspaces', contextFilesRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
