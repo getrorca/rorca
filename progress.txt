@@ -1142,3 +1142,27 @@ Key decisions:
 - No --instructions CLI flag exists for Codex — context injection via AGENTS.md auto-discovery is the documented mechanism (verified via OpenAI docs)
 - Cleanup uses original content restoration (not marker stripping) for reliability — stored original content before modification
 - Same synthesize() call as OpenCode path — no code duplication for direction stack assembly
+
+## Story CIE-016: Context Preview Before Run — DONE
+Files touched:
+- backend/src/routes/pipeline.ts (modified — POST /api/pipeline/context-preview endpoint, context_preview storage on trigger, contextComparison in GET /runs/:runId)
+- backend/src/db/index.ts (modified — idempotent context_preview TEXT column on pipeline_runs)
+- src/components/TriggerPopover.tsx (modified — Context Preview expandable section with token bar, per-story breakdown, budget warnings)
+- src/components/RunMetadataPanel.tsx (modified — Context row showing predicted vs actual file/token counts)
+- src/panels/RunViewPanel.tsx (modified — contextComparison state, passed to RunMetadataPanel)
+
+What was built:
+- POST /api/pipeline/context-preview: accepts specPath + workspaceId, loads .rorca/config.json routing config, runs context-router.route() for each pending story, returns per-story breakdown with global/scoped/tagged files, token counts, predicted paths, budget exceeded flags, and dropped files
+- TriggerPopover: expandable "Context Preview" section with aggregate token bar (avg per story) + per-story click-to-expand detail showing: TokenBar visualization (blue=global, green=scoped, purple=tagged vs budget marker), file lists by source, predicted paths, dropped files warning
+- TokenBar component: proportional bar with color-coded segments for global/scoped/tagged tokens, budget marker line, legend with token counts
+- Budget warnings: amber triangle icons on stories exceeding tokenBudget, aggregate warning showing count of exceeded stories and which files were dropped
+- Pipeline trigger stores context_preview JSON on pipeline_runs row (predicted tokens + injected files per story)
+- GET /api/pipeline/runs/:runId returns contextComparison: predicted (from pipeline_runs.context_preview) vs actual (from story_started WAL events' context_files field)
+- RunMetadataPanel shows "Context" row with predicted token count + file count, and actual file count after run starts
+
+Key decisions:
+- Context preview computed via POST (same route pattern as orchestration-preview) — needs specPath + workspaceId, not a spec DB id
+- Token estimation uses existing estimateTokens() from context-router.ts (chars/4 heuristic)
+- context_preview stored as TEXT column (JSON) on pipeline_runs rather than separate table — single read per run, no schema complexity
+- Predicted vs actual comparison uses WAL event payload (story_started events already include context_files array from execution-engine.ts)
+- TokenBar uses CSS percentage-based widths with budget marker as absolute positioned 2px line — no external charting library needed
