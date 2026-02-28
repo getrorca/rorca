@@ -3,7 +3,7 @@
 Spec: rorca-context-intent-engine
 Run ID: 795
 Started: 2026-02-28T17:47:44.308Z
-Last Updated: 2026-02-28T21:39:07.906Z
+Last Updated: 2026-02-28T21:44:14.515Z
 
 ## Completed Stories (48)
 - US-001: Spec Version Comparison — DONE (claude)
@@ -53,4 +53,4 @@ Last Updated: 2026-02-28T21:39:07.906Z
 - CIE-016: Context Preview Before Run — DONE (claude)
 - CIE-017: Monorepo Support — Multi-App Scope Detection — DONE (claude, 879s)
 - CIE-018: Context/Intent Engine Integration Tests — DONE (claude, 870s)
-- FR-001: Install React Router and Create Route Table — DONE (claude, 238s)
+- FR-005: Spec Completion Status in Archive — DONE (claude, 545s)
