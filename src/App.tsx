@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback, Suspense } from 'react';
+import { Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { HelpTipsProvider } from './contexts/HelpTipsContext';
@@ -46,19 +47,20 @@ import RunViewPanel from './panels/RunViewPanel';
 import SpecReviewPanel from './panels/SpecReviewPanel';
 import MemoryPanel from './panels/MemoryPanel';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
+import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
 function AuthGate() {
   const { isAuthenticated, loading } = useAuth();
+  const location = useLocation();
   const [authPage, setAuthPage] = useState<AuthPage>(() => {
-    // Check if landing on /reset-password with a token
-    if (window.location.pathname === '/reset-password') return 'reset-password';
+    if (location.pathname === '/reset-password') return 'reset-password';
     return 'login';
   });
 
   // EQ-007: Public review page — rendered outside auth gate
-  const reviewMatch = window.location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
+  const reviewMatch = location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
   if (reviewMatch) {
     return (
       <Suspense fallback={<GenericPanelSkeleton />}>
@@ -68,7 +70,6 @@ function AuthGate() {
   }
 
   if (loading) {
-    // Render shell + skeleton instead of blocking — top bar and sidebar paint immediately
     return (
       <NotificationProvider>
         <WorkspaceProvider>
@@ -80,9 +81,9 @@ function AuthGate() {
     );
   }
 
-  // Handle /reset-password route — show reset page even when auth is bypassed
+  // Handle /reset-password route
   if (authPage === 'reset-password') {
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(location.search);
     const token = params.get('token') || '';
     if (!token) {
       return (
@@ -101,13 +102,13 @@ function AuthGate() {
     );
   }
 
-  // Auth gate bypassed — Rorca is a local single-user tool, login wall not needed yet
+  // Auth gate bypassed — Rorca is a local single-user tool
   void isAuthenticated; void authPage; void setAuthPage;
 
   return (
     <NotificationProvider>
       <WorkspaceProvider>
-        <AppContent />
+        <AppRoutes />
       </WorkspaceProvider>
     </NotificationProvider>
   );
@@ -116,8 +117,6 @@ function AuthGate() {
 /** Subscribes to apiFetch error events and unhandled rejections, shows toasts */
 function GlobalErrorWiring() {
   const { show } = useGlobalToast();
-
-  // Track recent messages to avoid duplicate toasts (apiFetch errors + unhandled rejections)
   const recentRef = useRef(new Set<string>());
 
   const showDeduped = useCallback((message: string) => {
@@ -128,14 +127,12 @@ function GlobalErrorWiring() {
     show(message, 'error');
   }, [show]);
 
-  // API fetch errors → toast
   useEffect(() => {
     return onApiFetchError((message) => {
       showDeduped(message);
     });
   }, [showDeduped]);
 
-  // Unhandled promise rejections → toast
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<string>).detail;
@@ -148,6 +145,110 @@ function GlobalErrorWiring() {
   }, [showDeduped]);
 
   return null;
+}
+
+/** Panel label for ErrorBoundary fallback */
+const PANEL_LABELS: Record<PanelId, string> = {
+  hub: 'Hub',
+  forge: 'Spec Forge',
+  stack: 'Direction Stack',
+  'team-direction': 'Team Direction',
+  queue: 'Review Queue',
+  pipeline: 'Pipeline Monitor',
+  worktrees: 'Worktree Manager',
+  compare: 'Compare Runs',
+  archive: 'Archive',
+  marketplace: 'Template Marketplace',
+  usage: 'Token Usage',
+  costs: 'Cost Breakdown',
+  models: 'Model Comparison',
+  velocity: 'Velocity Chart',
+  completion: 'Completion Rates',
+  roi: 'ROI Calculator',
+  finops: 'FinOps Dashboard',
+  health: 'Health Dashboard',
+  'audit-log': 'Audit Log',
+  activity: 'Activity Feed',
+  github: 'GitHub Settings',
+  'workspace-settings': 'Workspace Settings',
+  settings: 'Settings',
+  'spec-review': 'Spec Review',
+  memory: 'Memory Ledger',
+};
+
+/** Top-level route config — Shell layout wraps all panel routes */
+function AppRoutes() {
+  const { workspaces } = useWorkspace();
+
+  if (workspaces.length === 0) {
+    return (
+      <Shell>
+        <Suspense fallback={<GenericPanelSkeleton />}>
+          <OnboardingWizard />
+        </Suspense>
+      </Shell>
+    );
+  }
+
+  return (
+    <Routes>
+      <Route element={<AppLayout />}>
+        {/* Index route — Hub */}
+        <Route index element={<PanelRoute panel="hub" />} />
+        {/* Specs */}
+        <Route path="forge" element={<PanelRoute panel="forge" />} />
+        <Route path="queue" element={<PanelRoute panel="queue" />} />
+        <Route path="archive" element={<PanelRoute panel="archive" />} />
+        <Route path="marketplace" element={<PanelRoute panel="marketplace" />} />
+        {/* Pipeline */}
+        <Route path="pipeline" element={<PanelRoute panel="pipeline" />} />
+        <Route path="worktrees" element={<PanelRoute panel="worktrees" />} />
+        <Route path="compare" element={<PanelRoute panel="compare" />} />
+        {/* Direction */}
+        <Route path="direction" element={<PanelRoute panel="stack" />} />
+        <Route path="team-direction" element={<PanelRoute panel="team-direction" />} />
+        <Route path="memory" element={<PanelRoute panel="memory" />} />
+        {/* Analytics */}
+        <Route path="usage" element={<PanelRoute panel="usage" />} />
+        <Route path="costs" element={<PanelRoute panel="costs" />} />
+        <Route path="models" element={<PanelRoute panel="models" />} />
+        <Route path="velocity" element={<PanelRoute panel="velocity" />} />
+        <Route path="completion" element={<PanelRoute panel="completion" />} />
+        <Route path="roi" element={<PanelRoute panel="roi" />} />
+        <Route path="finops" element={<PanelRoute panel="finops" />} />
+        <Route path="health" element={<PanelRoute panel="health" />} />
+        {/* System */}
+        <Route path="audit-log" element={<PanelRoute panel="audit-log" />} />
+        <Route path="activity" element={<PanelRoute panel="activity" />} />
+        <Route path="github" element={<PanelRoute panel="github" />} />
+        <Route path="workspace-settings" element={<PanelRoute panel="workspace-settings" />} />
+        <Route path="settings" element={<PanelRoute panel="settings" />} />
+        {/* Catch-all — redirect to hub */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Route>
+    </Routes>
+  );
+}
+
+/** Renders the correct panel component based on the panel prop */
+function PanelRoute({ panel }: { panel: PanelId }) {
+  const navigate = useAppNavigate();
+  const { navigateToRun, reviewSpecId, navigateToSpecReview, forgeBrief, handleForgeBriefConsumed, settingsTab } = useAppContentContext();
+
+  return (
+    <ErrorBoundary key={panel} label={PANEL_LABELS[panel] || 'Panel'}>
+      <ActivePanel
+        id={panel}
+        onNavigate={navigate}
+        onNavigateToRun={navigateToRun}
+        reviewSpecId={reviewSpecId}
+        onNavigateToSpecReview={navigateToSpecReview}
+        forgeBrief={forgeBrief}
+        onForgeBriefConsumed={handleForgeBriefConsumed}
+        settingsTab={settingsTab}
+      />
+    </ErrorBoundary>
+  );
 }
 
 interface ActivePanelProps {
@@ -191,40 +292,38 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
   }
 }
 
-/** Panel label for ErrorBoundary fallback */
-const PANEL_LABELS: Record<PanelId, string> = {
-  hub: 'Hub',
-  forge: 'Spec Forge',
-  stack: 'Direction Stack',
-  'team-direction': 'Team Direction',
-  queue: 'Review Queue',
-  pipeline: 'Pipeline Monitor',
-  worktrees: 'Worktree Manager',
-  compare: 'Compare Runs',
-  archive: 'Archive',
-  marketplace: 'Template Marketplace',
-  usage: 'Token Usage',
-  costs: 'Cost Breakdown',
-  models: 'Model Comparison',
-  velocity: 'Velocity Chart',
-  completion: 'Completion Rates',
-  roi: 'ROI Calculator',
-  finops: 'FinOps Dashboard',
-  health: 'Health Dashboard',
-  'audit-log': 'Audit Log',
-  activity: 'Activity Feed',
-  github: 'GitHub Settings',
-  'workspace-settings': 'Workspace Settings',
-  settings: 'Settings',
-  'spec-review': 'Spec Review',
-  memory: 'Memory Ledger',
-};
+// ─── Shared context for app-level state (run view, review, forge brief, etc.) ─
 
-function AppContent() {
-  const [activePanel, setActivePanel] = useState<PanelId>('hub');
+import { createContext, useContext } from 'react';
+
+interface AppContentContextValue {
+  navigateToRun: (runId: number) => void;
+  navigateBackFromRun: () => void;
+  activeRunId: number | null;
+  reviewSpecId: string | null;
+  navigateToSpecReview: (specId: string) => void;
+  forgeBrief: string | null;
+  handleSendToForge: (brief: string) => void;
+  handleForgeBriefConsumed: () => void;
+  settingsTab: SettingsTab | undefined;
+  navigateToSettingsTab: (tab: SettingsTab) => void;
+}
+
+const AppContentContext = createContext<AppContentContextValue | null>(null);
+
+function useAppContentContext(): AppContentContextValue {
+  const ctx = useContext(AppContentContext);
+  if (!ctx) throw new Error('useAppContentContext must be used within AppLayout');
+  return ctx;
+}
+
+/** Layout route: Shell (sidebar + content area) wrapping an Outlet */
+function AppLayout() {
+  const activePanel = useActivePanel();
+  const navigate = useAppNavigate();
   const [activeRunId, setActiveRunId] = useState<number | null>(null);
   const [reviewSpecId, setReviewSpecId] = useState<string | null>(null);
-  const { workspaces, workspaceId } = useWorkspace();
+  const { workspaceId } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
@@ -253,7 +352,6 @@ function AppContent() {
       const match = window.location.hash.match(/^#\/run\/(\d+)$/);
       if (match) {
         setActiveRunId(Number(match[1]));
-        setActivePanel('hub'); // Run View lives under Hub nav
       }
     };
     parseHash();
@@ -261,7 +359,6 @@ function AppContent() {
     return () => window.removeEventListener('hashchange', parseHash);
   }, []);
 
-  // Sync hash when navigating to/from run view
   const navigateToRun = useCallback((runId: number) => {
     setActiveRunId(runId);
     window.location.hash = `/run/${runId}`;
@@ -280,134 +377,126 @@ function AppContent() {
     }
   }, [activeRunId]);
 
-  // Send brief from command palette to Forge (or signal focus-only with empty string)
   const handleSendToForge = useCallback((brief: string) => {
     setForgeBrief(brief);
   }, []);
 
-  // Called by ForgePanel after consuming the brief — prevents stale state
   const handleForgeBriefConsumed = useCallback(() => {
     setForgeBrief(null);
   }, []);
 
-  // Override setActivePanel to clear run view when navigating elsewhere
+  // Override navigate to clear run view and settings tab
   const handleNavigate = useCallback((panel: PanelId) => {
-    setActivePanel(panel);
-    // Reset settings tab when navigating away from settings
+    navigate(panel);
     if (panel !== 'settings') setSettingsTab(undefined);
     if (activeRunId !== null) {
       setActiveRunId(null);
       window.location.hash = '';
     }
-  }, [activeRunId]);
+  }, [navigate, activeRunId]);
 
-  // Navigate to settings with a specific tab
   const navigateToSettingsTab = useCallback((tab: SettingsTab) => {
     setSettingsTab(tab);
     handleNavigate('settings');
   }, [handleNavigate]);
 
-  // Global keyboard shortcuts via useHotkeys
+  // Global keyboard shortcuts
   const hotkeys = useMemo<HotkeyBinding[]>(() => [
     { key: 'mod+k', handler: () => setShowCommandPalette((prev) => !prev) },
     { key: '?', handler: () => navigateToSettingsTab('shortcuts') },
     { key: 'mod+/', handler: () => navigateToSettingsTab('shortcuts') },
-    // Navigation: Cmd+1..4 for Hub / Forge / RunView / Settings
     { key: 'mod+1', handler: () => handleNavigate('hub') },
     { key: 'mod+2', handler: () => handleNavigate('forge') },
     { key: 'mod+3', handler: () => handleNavigate('pipeline') },
     { key: 'mod+4', handler: () => handleNavigate('settings') },
-    // Spec actions
     { key: 'mod+n', handler: () => handleNavigate('forge') },
-    // Review context: approve / reject (navigate to queue if not already there)
     { key: 'mod+enter', handler: () => { if (activePanel !== 'queue' && activePanel !== 'spec-review') handleNavigate('queue'); } },
     { key: 'mod+backspace', handler: () => { if (activePanel !== 'queue' && activePanel !== 'spec-review') handleNavigate('queue'); } },
-    // New spec with brief focused
     { key: 'mod+shift+n', handler: () => { handleSendToForge(''); handleNavigate('forge'); } },
-    // Pipeline actions
     { key: 'mod+shift+r', handler: () => handleNavigate('pipeline') },
   ], [handleNavigate, handleSendToForge, navigateToSettingsTab, activePanel]);
 
   useHotkeys(hotkeys);
 
-  if (workspaces.length === 0) {
-    return (
-      <Shell>
-        <Suspense fallback={<GenericPanelSkeleton />}>
-          <OnboardingWizard />
-        </Suspense>
-      </Shell>
-    );
-  }
-
-  // Run View replaces the main content area when a run ID is active
   const showRunView = activeRunId !== null;
-
   const isSettingsContext = ['settings', 'workspace-settings', 'github', 'stack'].includes(activePanel);
 
-  return (
-    <Shell
-      sidebar={
-        <ResizableSidebar>
-          {isSettingsContext ? (
-            <SettingsSidebar
-              activePanel={activePanel}
-              activeSettingsTab={settingsTab}
-              onNavigate={handleNavigate}
-              onNavigateSettings={navigateToSettingsTab}
-            />
-          ) : (
-            <Sidebar
-              activePanel={activePanel}
-              onNavigate={handleNavigate}
-              mobileOpen={mobileNavOpen}
-              onMobileClose={() => setMobileNavOpen(false)}
-              queueCount={queueCount}
-            />
-          )}
-        </ResizableSidebar>
-      }
-      showMenuButton
-      onMenuToggle={() => setMobileNavOpen((v) => !v)}
-      onNavigate={handleNavigate}
-    >
-      <EmailVerificationBanner />
-      {/* Underlying panel */}
-      <ErrorBoundary key={activePanel} label={PANEL_LABELS[activePanel] || 'Panel'}>
-        <ActivePanel id={activePanel} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} reviewSpecId={reviewSpecId} onNavigateToSpecReview={navigateToSpecReview} forgeBrief={forgeBrief} onForgeBriefConsumed={handleForgeBriefConsumed} settingsTab={settingsTab} />
-      </ErrorBoundary>
+  const contextValue = useMemo<AppContentContextValue>(() => ({
+    navigateToRun,
+    navigateBackFromRun,
+    activeRunId,
+    reviewSpecId,
+    navigateToSpecReview,
+    forgeBrief,
+    handleSendToForge,
+    handleForgeBriefConsumed,
+    settingsTab,
+    navigateToSettingsTab,
+  }), [navigateToRun, navigateBackFromRun, activeRunId, reviewSpecId, navigateToSpecReview, forgeBrief, handleSendToForge, handleForgeBriefConsumed, settingsTab, navigateToSettingsTab]);
 
-      {/* Slide-over Overlays */}
-      <SlideOver isOpen={showRunView} onClose={navigateBackFromRun} hideHeader={true}>
-        {showRunView && (
-          <Suspense fallback={<RunViewTerminalSkeleton />}>
-            <RunViewPanel
-              runId={activeRunId}
-              onBack={navigateBackFromRun}
+  return (
+    <AppContentContext.Provider value={contextValue}>
+      <Shell
+        sidebar={
+          <ResizableSidebar>
+            {isSettingsContext ? (
+              <SettingsSidebar
+                activePanel={activePanel}
+                activeSettingsTab={settingsTab}
+                onNavigate={handleNavigate}
+                onNavigateSettings={navigateToSettingsTab}
+              />
+            ) : (
+              <Sidebar
+                activePanel={activePanel}
+                onNavigate={handleNavigate}
+                mobileOpen={mobileNavOpen}
+                onMobileClose={() => setMobileNavOpen(false)}
+                queueCount={queueCount}
+              />
+            )}
+          </ResizableSidebar>
+        }
+        showMenuButton
+        onMenuToggle={() => setMobileNavOpen((v) => !v)}
+        onNavigate={handleNavigate}
+      >
+        <EmailVerificationBanner />
+        {/* Router-driven panel content */}
+        <Outlet />
+
+        {/* Slide-over Overlays */}
+        <SlideOver isOpen={showRunView} onClose={navigateBackFromRun} hideHeader={true}>
+          {showRunView && (
+            <Suspense fallback={<RunViewTerminalSkeleton />}>
+              <RunViewPanel
+                runId={activeRunId}
+                onBack={navigateBackFromRun}
+                onNavigate={handleNavigate}
+              />
+            </Suspense>
+          )}
+        </SlideOver>
+
+        <SlideOver isOpen={reviewSpecId !== null} onClose={() => setReviewSpecId(null)} hideHeader={true}>
+          {reviewSpecId !== null && (
+            <SpecReviewPanel specId={reviewSpecId} onBack={() => setReviewSpecId(null)} onNavigate={handleNavigate} />
+          )}
+        </SlideOver>
+
+        {showCommandPalette && (
+          <Suspense fallback={null}>
+            <CommandPalette
               onNavigate={handleNavigate}
+              onClose={() => setShowCommandPalette(false)}
+              activePanel={activePanel}
+              activeRunId={activeRunId}
+              onSendToForge={handleSendToForge}
             />
           </Suspense>
         )}
-      </SlideOver>
-
-      <SlideOver isOpen={reviewSpecId !== null} onClose={() => setReviewSpecId(null)} hideHeader={true}>
-        {reviewSpecId !== null && (
-          <SpecReviewPanel specId={reviewSpecId} onBack={() => setReviewSpecId(null)} onNavigate={handleNavigate} />
-        )}
-      </SlideOver>
-
-      {showCommandPalette && (
-        <Suspense fallback={null}>
-          <CommandPalette
-            onNavigate={handleNavigate}
-            onClose={() => setShowCommandPalette(false)}
-            activePanel={activePanel}
-            activeRunId={activeRunId}
-            onSendToForge={handleSendToForge}
-          />
-        </Suspense>
-      )}
-    </Shell>
+      </Shell>
+    </AppContentContext.Provider>
   );
 }
 
