@@ -1107,6 +1107,34 @@ async function autoResolveConflicts(
 
   console.log(`  [merge] ${conflictingFiles.length} conflicting file(s): ${conflictingFiles.join(', ')}`);
 
+  // Fast-path: tracking files (run-state, progress) are always safe to resolve with --theirs.
+  // These are written by the engine at runtime — they carry no meaningful source changes.
+  const TRACKING_FILES = new Set([
+    'progress.txt', '.rorca/run-state.json', '.rorca/memory/health-log.json',
+  ]);
+  const trackingConflicts = conflictingFiles.filter(f => TRACKING_FILES.has(f));
+  const realConflicts = conflictingFiles.filter(f => !TRACKING_FILES.has(f));
+
+  for (const file of trackingConflicts) {
+    try {
+      execSync(`git checkout --theirs "${file}"`, { cwd, env, stdio: 'pipe' });
+      execSync(`git add "${file}"`, { cwd, env, stdio: 'pipe' });
+      resolvedFiles.push(file);
+      console.log(`  [merge] Resolved tracking file ${file} (--theirs, no LLM needed)`);
+    } catch (err: unknown) {
+      console.error(`  [merge] Failed to resolve tracking file ${file}: ${(err as Error).message}`);
+      return { resolved: false, resolvedFiles };
+    }
+  }
+
+  if (realConflicts.length === 0) {
+    // All conflicts were in tracking files — done without LLM.
+    return { resolved: true, resolvedFiles };
+  }
+
+  // LLM resolution for real code conflicts.
+  conflictingFiles = realConflicts;
+
   for (const file of conflictingFiles) {
     const absFile = path.join(cwd, file);
     let conflictContent: string;
@@ -1208,9 +1236,12 @@ async function mergeWave(
 
     if (resolution.resolved) {
       const filesList = resolution.resolvedFiles.join(', ');
+      const commitMsg = filesList.length > 0
+        ? `merge(wave-${waveIndex}): resolved conflicts in ${filesList}`
+        : `merge(wave-${waveIndex}): auto-resolved conflicts`;
       try {
         execSync(
-          `git commit -m "merge(wave-${waveIndex}): resolved conflicts in ${filesList}"`,
+          `git commit -m "${commitMsg}"`,
           { cwd, env, stdio: 'pipe', timeout: 30_000 },
         );
         totalConflictsResolved += resolution.resolvedFiles.length;
@@ -2299,10 +2330,11 @@ async function runParallel(
           }
 
           failedIds.add(mergeResult.blocked.storyId);
-          console.log(`  [merge] Worktree branches preserved for manual resolution. Pausing run.`);
-          for (const wt of failedInWave) removeStoryWorktree(config.cwd, wt);
-          console.log(`\n[engine] Run paused due to merge conflict. Resolve manually and resume.`);
-          process.exit(2);
+          // Don't kill the run — log a warning and continue. Remaining waves still
+          // execute on the base branch (without the conflicting story's changes).
+          // Worktree branches are preserved so the user can inspect the conflict.
+          console.log(`  [merge] Worktree branches preserved for inspection.`);
+          console.log(`  [merge] Continuing run on base branch — remaining waves unaffected.`);
         }
       }
     }

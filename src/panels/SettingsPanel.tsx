@@ -8,6 +8,7 @@ import { apiFetch, clearTokens, BASE_URL } from '../lib/apiFetch';
 import GitHubSettingsPanel from './GitHubSettingsPanel';
 import { modLabel } from '../hooks/useHotkeys';
 import OpenCodeSetupGuide from '../components/OpenCodeSetupGuide';
+import { useActiveSettingsTab } from '../routes';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -100,29 +101,14 @@ const LAYER_INFO: Record<1 | 2 | 3, { title: string; description: string; placeh
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab } = {}) {
+export default function SettingsPanel() {
   const { workspaceId } = useWorkspace();
-  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab ?? 'direction');
-
-  // Sync tab when initialTab prop changes (e.g. navigating from ? hotkey)
-  useEffect(() => {
-    if (initialTab) setActiveTab(initialTab);
-  }, [initialTab]);
+  const activeTab = useActiveSettingsTab();
 
   // Direction layer hooks — always call (hooks can't be conditional)
   const l1 = useDirectionLayer(workspaceId, 1, { skipValidation: true });
   const l2 = useDirectionLayer(workspaceId, 2, { skipValidation: true });
   const l3 = useDirectionLayer(workspaceId, 3, { skipValidation: true });
-  const directionDirty = l1.isDirty || l2.isDirty || l3.isDirty;
-
-  const TABS: { id: SettingsTab; label: string; icon: typeof Layers }[] = [
-    { id: 'direction', label: 'Direction Stack', icon: Layers },
-    { id: 'providers', label: 'Model & Providers', icon: Zap },
-    { id: 'github', label: 'GitHub', icon: Github },
-    { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
-    { id: 'account', label: 'Account', icon: User },
-    { id: 'billing', label: 'Billing', icon: CreditCard },
-  ];
 
   return (
     <div className="h-full flex flex-col overflow-y-auto">
