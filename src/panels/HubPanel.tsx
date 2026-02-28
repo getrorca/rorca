@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, AlertCircle, Search } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, AlertCircle, Search, HeartPulse, RefreshCw } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
@@ -39,6 +39,15 @@ interface SpecSummary {
 interface StoryResult {
   story_id: string;
   status: 'pass' | 'fail' | 'skip' | 'retry';
+}
+
+interface HealthReport {
+  stack: { name: string; version?: string; source: string }[];
+  missing: string[];
+  score: number;
+  suggestions: string[];
+  monorepo: { detected: boolean; packages: string[] };
+  scannedAt: string;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -609,6 +618,179 @@ function RecentRunRow({ run, onNavigateToRun, justCompleted }: {
   );
 }
 
+// ─── Workspace Health Card ───────────────────────────────────────────────────
+
+function scoreColor(score: number): string {
+  if (score >= 70) return 'text-emerald-500';
+  if (score >= 40) return 'text-yellow-500';
+  return 'text-red-500';
+}
+
+function scoreBg(score: number): string {
+  if (score >= 70) return 'bg-emerald-500';
+  if (score >= 40) return 'bg-yellow-500';
+  return 'bg-red-500';
+}
+
+function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
+  const [report, setReport] = useState<HealthReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  const fetchHealth = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiFetch<HealthReport>(`/api/workspaces/${workspaceId}/echolocate`, {
+        method: 'POST',
+      });
+      setReport(data);
+    } catch (err: any) {
+      setError(err.message || 'Failed to scan workspace');
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    fetchHealth();
+  }, [fetchHealth]);
+
+  if (loading) {
+    return (
+      <div className="p-4 border border-border rounded-lg animate-pulse">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-4 h-4 rounded bg-border" />
+          <div className="h-4 w-32 rounded bg-border" />
+        </div>
+        <div className="h-2 w-full rounded bg-border" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-4 border border-border rounded-lg">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm text-muted">
+            <HeartPulse size={16} />
+            <span>Workspace Health</span>
+          </div>
+          <button onClick={fetchHealth} className="text-xs text-accent hover:underline flex items-center gap-1">
+            <RefreshCw size={12} /> Retry
+          </button>
+        </div>
+        <p className="text-xs text-red-500 mt-2">{error}</p>
+      </div>
+    );
+  }
+
+  if (!report) return null;
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden">
+      {/* Header with score */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full text-left p-4 hover:bg-surface-200 transition-colors"
+      >
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <HeartPulse size={16} className="text-muted" />
+            <span className="text-sm font-semibold text-[var(--text)]">Workspace Health</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => { e.stopPropagation(); fetchHealth(); }}
+              className="p-1 rounded hover:bg-bg transition-colors"
+              title="Re-scan"
+            >
+              <RefreshCw size={12} className="text-muted" />
+            </button>
+            <span className={`text-lg font-bold tabular-nums ${scoreColor(report.score)}`}>
+              {report.score}
+            </span>
+            <span className="text-xs text-muted">/100</span>
+            <ChevronRight size={14} className={`text-muted transition-transform ${expanded ? 'rotate-90' : ''}`} />
+          </div>
+        </div>
+
+        {/* Progress bar */}
+        <div className="w-full h-1.5 bg-border rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${scoreBg(report.score)}`}
+            style={{ width: `${report.score}%` }}
+          />
+        </div>
+
+        {/* Stack pills */}
+        {report.stack.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-3">
+            {report.stack.slice(0, 8).map((s) => (
+              <span key={s.name} className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 text-accent">
+                {s.name}{s.version ? ` ${s.version}` : ''}
+              </span>
+            ))}
+            {report.stack.length > 8 && (
+              <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-bg text-muted">
+                +{report.stack.length - 8}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Monorepo badge */}
+        {report.monorepo.detected && (
+          <div className="flex items-center gap-1 mt-2 text-[10px] text-muted">
+            <FolderGit2 size={10} />
+            <span>Monorepo · {report.monorepo.packages.length} packages</span>
+          </div>
+        )}
+      </button>
+
+      {/* Expanded details */}
+      {expanded && (
+        <div className="border-t border-border px-4 py-3 space-y-3">
+          {/* Missing files */}
+          {report.missing.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-muted mb-1.5">Missing context files</p>
+              <div className="flex flex-wrap gap-1">
+                {report.missing.map((m) => (
+                  <span key={m} className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-red-500/10 text-red-500">
+                    {m}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Suggestions */}
+          {report.suggestions.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-muted mb-1.5">Suggestions</p>
+              <ul className="space-y-1">
+                {report.suggestions.map((s, i) => (
+                  <li key={i} className="text-xs text-[var(--text)] flex gap-1.5">
+                    <span className="text-accent shrink-0 mt-0.5">-</span>
+                    <span>{s}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Scanned timestamp */}
+          <p className="text-[10px] text-muted text-right">
+            Scanned {relativeTime(report.scannedAt)}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── HubPanel ───────────────────────────────────────────────────────────────
 
 interface CompletionToast {
@@ -858,6 +1040,13 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
         <ToastContainer toasts={completionToasts} onDismiss={dismissCompletionToast} position="top-right" />
 
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8">
+          {/* Workspace Health */}
+          {workspaceId && (
+            <section>
+              <WorkspaceHealthCard workspaceId={workspaceId} />
+            </section>
+          )}
+
           {/* Active Run */}
           {hasActiveRun && (
             <section>
