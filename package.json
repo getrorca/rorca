@@ -41,6 +41,7 @@
   ],
   "dependencies": {
     "@dagrejs/dagre": "^2.0.4",
+    "@monaco-editor/react": "^4.7.0",
     "@rollup/rollup-darwin-arm64": "^4.59.0",
     "@tanstack/react-virtual": "^3.13.19",
     "@xterm/addon-fit": "^0.11.0",
