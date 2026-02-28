@@ -3086,10 +3086,12 @@ router.post('/story-result', (req: Request, res: Response) => {
     const {
       runId, storyId, status, worktreePath, worktreeBranch,
       inputTokens, outputTokens, modelUsed, costUsd,
+      logPath, blockedBy,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string;
       inputTokens?: number; outputTokens?: number; modelUsed?: string; costUsd?: number;
+      logPath?: string; blockedBy?: string[];
     };
 
     if (!runId || !storyId || !status) {
@@ -3103,13 +3105,15 @@ router.post('/story-result', (req: Request, res: Response) => {
     }
 
     db.prepare(
-      `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd)
-       VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by)
+       VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
       inputTokens ?? null, outputTokens ?? null,
       modelUsed ?? null, costUsd ?? null,
+      logPath ?? null,
+      blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
     );
 
     // Also record into token_usage analytics table if tokens are present
@@ -3198,18 +3202,37 @@ router.get('/runs/:runId/stories/:storyId/output', (req: Request, res: Response)
 
     let failureReason: string | null = null;
     let failureAttempts: number | null = null;
+    let blockedBy: string[] | null = null;
     if (walEvent?.payload) {
       try {
         const payload = JSON.parse(walEvent.payload);
         failureReason = payload.reason ?? null;
         failureAttempts = payload.attempts ?? null;
+        if (Array.isArray(payload.blockedBy)) blockedBy = payload.blockedBy;
       } catch { /* ignore */ }
     }
 
-    // 3. Try to extract story output from the run log file
+    // Also check story_results.blocked_by
+    if (!blockedBy && (storyResult as any).blocked_by) {
+      try {
+        blockedBy = JSON.parse((storyResult as any).blocked_by);
+      } catch { /* ignore */ }
+    }
+
+    // 3. Try reading from per-story log file (log_path in story_results)
     let outputLines: string[] = [];
+    const storyLogPath = (storyResult as any).log_path as string | null;
+    if (storyLogPath && fs.existsSync(storyLogPath)) {
+      try {
+        const content = fs.readFileSync(storyLogPath, 'utf-8');
+        const allLines = content.split('\n');
+        outputLines = allLines.slice(-lines);
+      } catch { /* log read error */ }
+    }
+
+    // 4. Fallback: Try to extract story output from the run log file
     const logPath = resolveLogPath(runId);
-    if (logPath) {
+    if (outputLines.length === 0 && logPath) {
       try {
         const content = fs.readFileSync(logPath, 'utf-8');
         const allLines = content.split('\n');
@@ -3272,6 +3295,7 @@ router.get('/runs/:runId/stories/:storyId/output', (req: Request, res: Response)
       retries: storyResult.retries,
       failureReason,
       failureAttempts,
+      blockedBy,
       output: outputLines,
       lineCount: outputLines.length,
     });

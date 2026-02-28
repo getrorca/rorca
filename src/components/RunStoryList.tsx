@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
@@ -14,6 +14,8 @@ interface StoryResult {
   started_at: string | null;
   finished_at: string | null;
   elapsed_seconds: number | null;
+  blocked_by: string | null; // JSON array of upstream story IDs
+  log_path: string | null;
 }
 
 interface SpecStory {
@@ -31,13 +33,14 @@ interface RunStoryListProps {
   parallelism?: number;
 }
 
-type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'excluded' | 'skip' | 'retry' | 'rate_limited';
+type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'blocked' | 'excluded' | 'skip' | 'retry' | 'rate_limited';
 
 const STATUS_CONFIG: Record<DerivedStatus, { icon: typeof CheckCircle2; color: string; label: string; rowClass?: string }> = {
   pending:      { icon: Circle,       color: 'text-gray-400',    label: 'Pending' },
   running:      { icon: Loader2,      color: 'text-blue-500',    label: 'Running',      rowClass: 'border-l-2 border-l-blue-500 bg-blue-500/5' },
   pass:         { icon: CheckCircle2, color: 'text-emerald-500', label: 'Passed' },
   fail:         { icon: XCircle,      color: 'text-red-500',     label: 'Failed',       rowClass: 'border-l-2 border-l-red-500 bg-red-500/5' },
+  blocked:      { icon: Ban,          color: 'text-gray-400',    label: 'Blocked',      rowClass: 'border-l-2 border-l-gray-400 bg-gray-500/5' },
   excluded:     { icon: SkipForward,  color: 'text-gray-400',    label: 'Excluded' },
   skip:         { icon: SkipForward,  color: 'text-gray-400',    label: 'Skipped' },
   retry:        { icon: Loader2,      color: 'text-yellow-500',  label: 'Retrying',     rowClass: 'border-l-2 border-l-yellow-500 bg-yellow-500/5' },
@@ -128,6 +131,7 @@ interface MergedStory {
   startedAt: number | null; // epoch ms for live timer
   rateLimitRetryAt: number | null; // epoch ms when rate limit backoff expires
   rateLimitAttempt: number | null;
+  blockedBy: string[] | null; // upstream story IDs that caused this story to be blocked
 }
 
 // ─── Live elapsed timer ──────────────────────────────────────────────────────
@@ -178,9 +182,11 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   const isAnimated = story.status === 'running' || story.status === 'retry';
   const isExcluded = story.status === 'excluded';
   const isFailed = story.status === 'fail';
+  const isBlocked = story.status === 'blocked';
+  const isExpandable = isFailed || isBlocked;
   const isClickable = !!onStoryClick;
 
-  // Expandable detail for failed stories
+  // Expandable detail for failed/blocked stories
   const [expanded, setExpanded] = useState(false);
   const [outputLines, setOutputLines] = useState<string[]>([]);
   const [outputLoading, setOutputLoading] = useState(false);
@@ -200,11 +206,11 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
     prevStatusRef.current = story.status;
   }, [story.status]);
 
-  // Fetch output when expanding a failed story
+  // Fetch output when expanding a failed story (50 lines for story log)
   useEffect(() => {
     if (expanded && isFailed && runId && outputLines.length === 0 && !outputLoading) {
       setOutputLoading(true);
-      fetchStoryOutput(runId, story.storyId, 20)
+      fetchStoryOutput(runId, story.storyId, 50)
         .then(data => {
           setOutputLines(data.output);
           setFailureReason(data.failureReason);
@@ -233,19 +239,19 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
     <div className={`${cfg.rowClass || ''} ${justPassed ? 'animate-story-pass' : ''}`}>
       {/* Main row — fixed 48px height */}
       <div
-        onClick={isFailed ? handleToggleExpand : (isClickable ? () => onStoryClick!(story.storyId) : undefined)}
+        onClick={isExpandable ? handleToggleExpand : (isClickable ? () => onStoryClick!(story.storyId) : undefined)}
         className={`flex items-center gap-2 ${indented ? 'pl-6 pr-3' : 'px-3'} h-[${ROW_HEIGHT}px] border-b border-border/50 transition-colors ${
-          isFailed || isClickable ? 'cursor-pointer hover:bg-bg/50' : ''
+          isExpandable || isClickable ? 'cursor-pointer hover:bg-bg/50' : ''
         } ${isFocused ? 'ring-2 ring-inset ring-accent/50 bg-accent/5' : ''}`}
         style={{ height: ROW_HEIGHT }}
       >
-        {/* Expand chevron for failed stories */}
-        {isFailed ? (
-          <button onClick={handleToggleExpand} className="shrink-0 p-0 bg-transparent border-none" aria-label={expanded ? 'Collapse failure details' : 'Expand failure details'} aria-expanded={expanded}>
+        {/* Expand chevron for failed/blocked stories */}
+        {isExpandable ? (
+          <button onClick={handleToggleExpand} className="shrink-0 p-0 bg-transparent border-none" aria-label={expanded ? 'Collapse details' : 'Expand details'} aria-expanded={expanded}>
             {expanded ? (
-              <ChevronDown size={12} className="text-red-400" />
+              <ChevronDown size={12} className={isFailed ? 'text-red-400' : 'text-gray-400'} />
             ) : (
-              <ChevronRight size={12} className="text-red-400" />
+              <ChevronRight size={12} className={isFailed ? 'text-red-400' : 'text-gray-400'} />
             )}
           </button>
         ) : null}
@@ -257,16 +263,33 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
           story.status === 'running' ? 'bg-blue-500/10 text-blue-500' :
           story.status === 'pass' ? 'bg-emerald-500/10 text-emerald-500' :
           story.status === 'fail' ? 'bg-red-500/10 text-red-500' :
+          story.status === 'blocked' ? 'bg-gray-500/10 text-gray-400' :
           story.status === 'rate_limited' ? 'bg-amber-500/10 text-amber-500' :
           'bg-bg text-muted'
         }`} aria-live="polite">
           {story.storyId}
         </span>
         <span className={`text-xs truncate flex-1 ${
-          isExcluded ? 'line-through text-muted' : 'text-[var(--text)]'
+          isExcluded || isBlocked ? 'text-muted' : isExcluded ? 'line-through text-muted' : 'text-[var(--text)]'
         }`}>
           {story.title}
         </span>
+        {/* Blocked by badge — grey with upstream story ID */}
+        {isBlocked && story.blockedBy && story.blockedBy.length > 0 && (
+          <span className="text-[10px] text-gray-400 bg-gray-500/10 px-1.5 py-0.5 rounded shrink-0 font-mono">
+            Blocked by {story.blockedBy[0]}
+          </span>
+        )}
+        {/* View Log button for failed stories */}
+        {isFailed && (
+          <button
+            onClick={handleToggleExpand}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors shrink-0"
+          >
+            <FileText size={10} />
+            View Log
+          </button>
+        )}
         {/* Rate limit countdown */}
         {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
           <RateLimitCountdown retryAt={story.rateLimitRetryAt} />
@@ -300,7 +323,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         )}
       </div>
 
-      {/* Expanded failure detail panel */}
+      {/* Expanded detail panel — for failed stories (story log) */}
       {isFailed && expanded && (
         <div className={`${indented ? 'pl-6 pr-3' : 'px-3'} py-2 bg-red-500/5 border-b border-border/50`}>
           {/* Failure reason */}
@@ -310,19 +333,22 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
             </div>
           )}
 
-          {/* Output lines */}
-          {outputLoading ? (
-            <div className="flex items-center gap-2 py-2">
-              <Loader2 size={12} className="animate-spin text-muted" />
-              <span className="text-[10px] text-muted">Loading output...</span>
-            </div>
-          ) : outputLines.length > 0 ? (
-            <pre className="text-[10px] font-mono text-muted bg-[#1e1e1e] rounded p-2 overflow-x-auto max-h-48 leading-relaxed mb-2">
-              {outputLines.join('\n')}
-            </pre>
-          ) : (
-            <div className="text-[10px] text-muted py-1 mb-2">No output available</div>
-          )}
+          {/* Story Log — last 50 lines of Claude subprocess output */}
+          <div className="mb-2">
+            <div className="text-[10px] font-semibold text-red-400/80 mb-1">Story Log</div>
+            {outputLoading ? (
+              <div className="flex items-center gap-2 py-2">
+                <Loader2 size={12} className="animate-spin text-muted" />
+                <span className="text-[10px] text-muted">Loading story log...</span>
+              </div>
+            ) : outputLines.length > 0 ? (
+              <pre className="text-[10px] font-mono text-muted bg-[#1e1e1e] rounded p-2 overflow-x-auto max-h-64 leading-relaxed overflow-y-auto">
+                {outputLines.join('\n')}
+              </pre>
+            ) : (
+              <div className="text-[10px] text-muted py-1">No log output available</div>
+            )}
+          </div>
 
           {/* Retry button + retry count */}
           <div className="flex items-center gap-2">
@@ -347,6 +373,20 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
             )}
             <span className="text-[10px] text-muted ml-auto">
               {retriesUsed}/{MAX_RETRIES} retries used
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Expanded detail panel — for blocked stories */}
+      {isBlocked && expanded && (
+        <div className={`${indented ? 'pl-6 pr-3' : 'px-3'} py-2 bg-gray-500/5 border-b border-border/50`}>
+          <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+            <Ban size={10} />
+            <span>
+              This story was blocked because upstream {story.blockedBy && story.blockedBy.length === 1 ? 'story' : 'stories'}{' '}
+              <span className="font-mono font-semibold">{story.blockedBy?.join(', ')}</span>{' '}
+              failed. It never ran.
             </span>
           </div>
         </div>
@@ -566,15 +606,38 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
     return source.map((spec): MergedStory => {
       const result = resultMap.get(spec.id);
       let status: DerivedStatus = 'pending';
+      let blockedBy: string[] | null = null;
 
       if (spec.passes === true && (!result || result.status === 'skip')) {
         status = 'excluded';
       } else if (result) {
         if (result.status === 'pass') status = 'pass';
         else if (result.status === 'fail') status = 'fail';
-        else if (result.status === 'skip') status = 'skip';
+        else if (result.status === 'skip') {
+          // Distinguish between blocked (has blocked_by) and regular skip
+          if (result.blocked_by) {
+            try { blockedBy = JSON.parse(result.blocked_by); } catch { /* ignore */ }
+          }
+          status = blockedBy ? 'blocked' : 'skip';
+        }
         else if (result.status === 'retry') status = 'retry';
         else status = result.status as DerivedStatus;
+      }
+
+      // Also check WAL events for blocked_by info if not in story_results
+      if (!blockedBy && (status === 'skip' || status === 'fail')) {
+        for (const evt of walEvents) {
+          if (evt.story_id === spec.id && evt.event_type === 'story_failed' && evt.payload) {
+            try {
+              const payload = JSON.parse(evt.payload);
+              if (payload.reason === 'blocked_by' && Array.isArray(payload.blockedBy)) {
+                blockedBy = payload.blockedBy;
+                status = 'blocked';
+                break;
+              }
+            } catch { /* ignore */ }
+          }
+        }
       }
 
       // SSE override: if this story is currently rate limited
@@ -602,9 +665,10 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         startedAt: storyStartTimes.get(spec.id) ?? null,
         rateLimitRetryAt: rlInfo?.retryAt ?? null,
         rateLimitAttempt: rlInfo?.attempt ?? null,
+        blockedBy,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -630,7 +694,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
 
       for (const s of stories) {
         if (s.status === 'pass' || s.status === 'excluded') passed++;
-        else if (s.status === 'fail' || s.status === 'skip') failed++;
+        else if (s.status === 'fail' || s.status === 'skip' || s.status === 'blocked') failed++;
         else if (s.status === 'running' || s.status === 'retry' || s.status === 'rate_limited') running++;
       }
 
@@ -677,13 +741,14 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
 
   // Counts
   const counts = useMemo(() => {
-    let passed = 0, failed = 0;
+    let passed = 0, failed = 0, blocked = 0;
     const total = mergedStories.length;
     for (const s of mergedStories) {
       if (s.status === 'pass') passed++;
       else if (s.status === 'fail') failed++;
+      else if (s.status === 'blocked') blocked++;
     }
-    return { passed, failed, total };
+    return { passed, failed, blocked, total };
   }, [mergedStories]);
 
   // ─── Build flat virtual items list ─────────────────────────────────────────
@@ -930,8 +995,13 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         <span className="text-[11px] font-medium text-red-500">
           {counts.failed} failed
         </span>
+        {counts.blocked > 0 && (
+          <span className="text-[11px] font-medium text-gray-400">
+            {counts.blocked} blocked
+          </span>
+        )}
         <span className="text-[11px] text-muted ml-auto">
-          {counts.passed + counts.failed} / {counts.total}
+          {counts.passed + counts.failed + counts.blocked} / {counts.total}
         </span>
       </div>
     </div>
