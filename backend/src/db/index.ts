@@ -462,6 +462,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_cost_usd REAL');
   }
 
+  // CIE-016: Add context_preview JSON column to pipeline_runs (predicted context for post-run comparison)
+  const runColsCIE016 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsCIE016.some(c => c.name === 'context_preview')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN context_preview TEXT');
+  }
+
   // OC-009: agent_config table for persisting execution engine settings (hot-reloadable)
   const agentConfigExists = db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_config'`

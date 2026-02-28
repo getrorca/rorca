@@ -1124,6 +1124,23 @@ router.post('/trigger', async (req: Request, res: Response) => {
         .run(child.pid, branchName, worktreePath, runId);
     }
 
+    // CIE-016: Compute and store predicted context preview for post-run comparison
+    try {
+      const { loadRorcaConfig: loadCfg } = require('../lib/rorca-config') as typeof import('../lib/rorca-config');
+      const { route: routeCtx } = require('../lib/context-router') as typeof import('../lib/context-router');
+      const rorcaCfg = loadCfg(workspace.path);
+      const specForCtx = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+      const ctxStories = (specForCtx.userStories ?? [])
+        .filter((s: any) => !s.passes && !s.excluded)
+        .map((s: any) => ({
+          storyId: s.id,
+          totalTokens: routeCtx(s, rorcaCfg.routing, workspace.path).totalTokens,
+          injectedFiles: routeCtx(s, rorcaCfg.routing, workspace.path).injectedFiles,
+        }));
+      db.prepare('UPDATE pipeline_runs SET context_preview = ? WHERE id = ?')
+        .run(JSON.stringify({ tokenBudget: rorcaCfg.routing.tokenBudget, stories: ctxStories }), runId);
+    } catch { /* non-fatal — context preview is best-effort */ }
+
     // 9b. Record excluded stories immediately — run-loop.sh will skip them,
     //     but we insert story_results rows so the UI shows them as excluded.
     // 9c. Backfill already-passing stories (passes:true) as 'skipped' so the
@@ -1355,6 +1372,185 @@ router.post('/trigger', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[Pipeline] Trigger error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/pipeline/context-preview — Preview context routing per story ───
+
+/**
+ * @swagger
+ * /api/pipeline/context-preview:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Preview context routing for each story in a spec
+ *     description: >
+ *       Returns the predicted context payload for each story, including
+ *       global files, scope matches, tag matches, token estimates, and
+ *       budget warnings. Use before triggering to show users exactly what
+ *       context will be injected.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [specPath, workspaceId]
+ *             properties:
+ *               specPath: { type: string, example: "forge/specs/approved/my-spec.json" }
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Context preview payload
+ *       400: { description: "Missing required fields" }
+ *       404: { description: "Workspace or spec not found" }
+ */
+router.post('/context-preview', (req: Request, res: Response) => {
+  try {
+    const { specPath, workspaceId } = req.body;
+    if (!specPath || !workspaceId) {
+      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      return;
+    }
+
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+      { id: string; path: string } | undefined;
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const absSpecPath = path.join(workspace.path, specPath);
+    if (!fs.existsSync(absSpecPath)) {
+      res.status(404).json({ error: 'Spec file not found' });
+      return;
+    }
+
+    const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+    if (!specJson.userStories || !Array.isArray(specJson.userStories)) {
+      res.status(422).json({ error: 'Spec has no userStories array' });
+      return;
+    }
+
+    // Load routing config from .rorca/config.json
+    const { loadRorcaConfig } = require('../lib/rorca-config') as typeof import('../lib/rorca-config');
+    const rorcaConfig = loadRorcaConfig(workspace.path);
+    const routingConfig = rorcaConfig.routing;
+    const tokenBudget = routingConfig.tokenBudget;
+
+    // Import context-router functions
+    const { route, estimateTokens, extractPathMentions, matchScopes, matchTags } =
+      require('../lib/context-router') as typeof import('../lib/context-router');
+
+    // Build per-story preview
+    const stories: Array<{
+      storyId: string;
+      title: string;
+      predictedPaths: string[];
+      globalFiles: Array<{ path: string; tokens: number }>;
+      scopedFiles: Array<{ path: string; tokens: number; matchedScope: string }>;
+      taggedFiles: Array<{ path: string; tokens: number; matchedTag: string }>;
+      globalTokens: number;
+      scopedTokens: number;
+      taggedTokens: number;
+      totalTokens: number;
+      exceeded: boolean;
+      droppedFiles: string[];
+    }> = [];
+
+    let anyExceeded = false;
+
+    for (const story of specJson.userStories) {
+      if (story.passes || story.excluded) continue;
+
+      // Run the full routing pipeline
+      const payload = route(story, routingConfig, workspace.path);
+
+      // Re-run routing in detail mode to get per-file breakdown
+      const predictedPaths = extractPathMentions(story);
+      const matchedScopes = matchScopes(predictedPaths, routingConfig.scopes);
+      const storyTags = story.tags ?? [];
+      const matchedTagRules = matchTags(storyTags, routingConfig.tags);
+
+      // Build per-file detail lists (reading files to get token counts)
+      const globalFiles: Array<{ path: string; tokens: number }> = [];
+      for (const gp of routingConfig.global) {
+        try {
+          const absPath = path.isAbsolute(gp) ? gp : path.join(workspace.path, gp);
+          const content = fs.readFileSync(absPath, 'utf-8');
+          globalFiles.push({ path: gp, tokens: estimateTokens(content) });
+        } catch {
+          // File doesn't exist — skip
+        }
+      }
+
+      const scopedFiles: Array<{ path: string; tokens: number; matchedScope: string }> = [];
+      for (const scope of matchedScopes) {
+        for (const ip of scope.inject) {
+          try {
+            const absPath = path.isAbsolute(ip) ? ip : path.join(workspace.path, ip);
+            const content = fs.readFileSync(absPath, 'utf-8');
+            scopedFiles.push({ path: ip, tokens: estimateTokens(content), matchedScope: scope.path });
+          } catch {
+            // File doesn't exist — skip
+          }
+        }
+      }
+
+      const taggedFiles: Array<{ path: string; tokens: number; matchedTag: string }> = [];
+      for (const tagRule of matchedTagRules) {
+        for (const ip of tagRule.inject) {
+          try {
+            const absPath = path.isAbsolute(ip) ? ip : path.join(workspace.path, ip);
+            const content = fs.readFileSync(absPath, 'utf-8');
+            taggedFiles.push({ path: ip, tokens: estimateTokens(content), matchedTag: tagRule.tag });
+          } catch {
+            // File doesn't exist — skip
+          }
+        }
+      }
+
+      const globalTokens = globalFiles.reduce((s, f) => s + f.tokens, 0);
+      const scopedTokens = scopedFiles.reduce((s, f) => s + f.tokens, 0);
+      const taggedTokens = taggedFiles.reduce((s, f) => s + f.tokens, 0);
+
+      // Determine dropped files (files that would be injected but were cut by budget)
+      const allCandidatePaths = [
+        ...globalFiles.map(f => f.path),
+        ...scopedFiles.map(f => f.path),
+        ...taggedFiles.map(f => f.path),
+      ];
+      const injectedSet = new Set(payload.injectedFiles);
+      const droppedFiles = allCandidatePaths.filter(p => !injectedSet.has(p));
+
+      const exceeded = payload.totalTokens > tokenBudget || droppedFiles.length > 0;
+      if (exceeded) anyExceeded = true;
+
+      stories.push({
+        storyId: story.id,
+        title: story.title,
+        predictedPaths,
+        globalFiles,
+        scopedFiles,
+        taggedFiles,
+        globalTokens,
+        scopedTokens,
+        taggedTokens,
+        totalTokens: payload.totalTokens,
+        exceeded,
+        droppedFiles,
+      });
+    }
+
+    res.json({
+      tokenBudget,
+      anyExceeded,
+      globalFileCount: routingConfig.global.length,
+      scopeCount: routingConfig.scopes.length,
+      tagCount: routingConfig.tags.length,
+      stories,
+    });
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -2163,6 +2359,41 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       }
     } catch { /* non-fatal */ }
 
+    // CIE-016: Build actual vs predicted context comparison
+    let contextComparison: {
+      predicted: Record<string, { totalTokens: number; injectedFiles: string[] }>;
+      actual: Record<string, { contextFiles: string[] }>;
+    } | null = null;
+
+    const predictedRaw = (run as any).context_preview;
+    if (predictedRaw) {
+      try {
+        const predicted = JSON.parse(predictedRaw);
+        const predictedMap: Record<string, { totalTokens: number; injectedFiles: string[] }> = {};
+        for (const s of (predicted.stories ?? [])) {
+          predictedMap[s.storyId] = { totalTokens: s.totalTokens, injectedFiles: s.injectedFiles };
+        }
+
+        // Collect actual context_files from story_started WAL events
+        const actualMap: Record<string, { contextFiles: string[] }> = {};
+        try {
+          const walRows = db.prepare(
+            `SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND payload LIKE '%"run_id":' || ? || '%'`
+          ).all(runId) as Array<{ story_id: string; payload: string }>;
+          for (const row of walRows) {
+            try {
+              const p = JSON.parse(row.payload);
+              if (p.context_files) {
+                actualMap[row.story_id] = { contextFiles: p.context_files };
+              }
+            } catch { /* skip */ }
+          }
+        } catch { /* non-fatal */ }
+
+        contextComparison = { predicted: predictedMap, actual: actualMap };
+      } catch { /* malformed context_preview */ }
+    }
+
     res.json({
       run,
       stories,
@@ -2177,6 +2408,7 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       },
       storyTokenBreakdown,
       runState,
+      contextComparison,
     });
   } catch (error: any) {
     console.error('[Pipeline] Get run error:', error);

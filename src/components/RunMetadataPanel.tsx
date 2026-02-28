@@ -11,10 +11,16 @@ import {
   DollarSign,
   Loader2,
   Zap,
+  FileText,
 } from 'lucide-react';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
+
+interface ContextComparisonData {
+  predicted: Record<string, { totalTokens: number; injectedFiles: string[] }>;
+  actual: Record<string, { contextFiles: string[] }>;
+}
 
 interface RunMetadataPanelProps {
   run: {
@@ -33,6 +39,7 @@ interface RunMetadataPanelProps {
   totalStories: number;
   walEvents: WalEvent[];
   onKill?: () => void;
+  contextComparison?: ContextComparisonData | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -124,6 +131,7 @@ export default function RunMetadataPanel({
   totalStories,
   walEvents,
   onKill,
+  contextComparison,
 }: RunMetadataPanelProps) {
   const [now, setNow] = useState(Date.now());
 
@@ -251,6 +259,40 @@ export default function RunMetadataPanel({
           </span>
         </MetaRow>
       )}
+
+      {/* CIE-016: Context — predicted vs actual */}
+      {contextComparison && (() => {
+        const predictedKeys = Object.keys(contextComparison.predicted);
+        const actualKeys = Object.keys(contextComparison.actual);
+        const predictedFileCount = predictedKeys.reduce(
+          (sum, k) => sum + (contextComparison.predicted[k]?.injectedFiles?.length ?? 0), 0
+        );
+        const predictedTokens = predictedKeys.reduce(
+          (sum, k) => sum + (contextComparison.predicted[k]?.totalTokens ?? 0), 0
+        );
+        const actualFileCount = actualKeys.reduce(
+          (sum, k) => sum + (contextComparison.actual[k]?.contextFiles?.length ?? 0), 0
+        );
+        const hasActual = actualKeys.length > 0;
+
+        return (
+          <MetaRow icon={FileText} label="Context">
+            <span className="font-mono text-[10px]">
+              {hasActual ? (
+                <>
+                  {formatTokens(predictedTokens)} predicted
+                  <span className="text-muted mx-1">/</span>
+                  {predictedFileCount} files pred
+                  <span className="text-muted mx-1">vs</span>
+                  {actualFileCount} actual
+                </>
+              ) : (
+                <>{formatTokens(predictedTokens)} predicted · {predictedFileCount} files</>
+              )}
+            </span>
+          </MetaRow>
+        );
+      })()}
 
       {/* Cost */}
       <MetaRow icon={DollarSign} label="Cost">
