@@ -42,13 +42,25 @@ interface StoryResult {
   status: 'pass' | 'fail' | 'skip' | 'retry';
 }
 
-interface HealthReport {
-  stack: { name: string; version?: string; source: string }[];
-  missing: string[];
+interface HealthComponent {
+  name: string;
   score: number;
-  suggestions: string[];
-  monorepo: { detected: boolean; packages: string[] };
+  maxScore: number;
+  present: boolean;
+  detail: string;
+  suggestion: string | null;
+}
+
+interface HealthReport {
+  score: number;
+  components: HealthComponent[];
   scannedAt: string;
+  trend?: Array<{ score: number; timestamp: string }>;
+  // Legacy fields from echolocate (still used by scaffold section)
+  stack?: { name: string; version?: string; source: string }[];
+  missing?: string[];
+  suggestions?: string[];
+  monorepo?: { detected: boolean; packages: string[] };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -680,14 +692,21 @@ function ScaffoldFileEditor({ file, onChange }: {
 // ─── Workspace Health Card ───────────────────────────────────────────────────
 
 function scoreColor(score: number): string {
-  if (score >= 70) return 'text-emerald-500';
-  if (score >= 40) return 'text-yellow-500';
+  if (score >= 80) return 'text-emerald-500';
+  if (score >= 50) return 'text-yellow-500';
   return 'text-red-500';
 }
 
 function scoreBg(score: number): string {
-  if (score >= 70) return 'bg-emerald-500';
-  if (score >= 40) return 'bg-yellow-500';
+  if (score >= 80) return 'bg-emerald-500';
+  if (score >= 50) return 'bg-yellow-500';
+  return 'bg-red-500';
+}
+
+function componentBarColor(score: number, max: number): string {
+  const pct = max > 0 ? (score / max) * 100 : 0;
+  if (pct >= 80) return 'bg-emerald-500';
+  if (pct >= 50) return 'bg-yellow-500';
   return 'bg-red-500';
 }
 
@@ -708,9 +727,7 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const data = await apiFetch<HealthReport>(`/api/workspaces/${workspaceId}/echolocate`, {
-        method: 'POST',
-      });
+      const data = await apiFetch<HealthReport>(`/api/workspaces/${workspaceId}/health`);
       setReport(data);
     } catch (err: any) {
       setError(err.message || 'Failed to scan workspace');
@@ -721,6 +738,20 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     fetchHealth();
+  }, [fetchHealth]);
+
+  // SSE: auto-refresh on health_recalculated events
+  useEffect(() => {
+    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
+    es.addEventListener('wal_event', (e) => {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt.event_type === 'health_recalculated') {
+          fetchHealth();
+        }
+      } catch {}
+    });
+    return () => es.close();
   }, [fetchHealth]);
 
   const handleGenerateScaffold = async () => {
@@ -758,7 +789,6 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
         `Scaffolding written: ${result.filesWritten.length} files committed`,
         'success',
       );
-      // Re-scan to update health score
       fetchHealth();
     } catch (err: any) {
       setScaffoldError(err.message || 'Failed to write scaffold files');
@@ -770,8 +800,8 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
     setScaffoldFiles(prev => prev.map((f, i) => i === index ? { ...f, content } : f));
   };
 
-  const hasMissingContextFiles = report && report.missing.length > 0;
-  const showScaffoldPrompt = hasMissingContextFiles && report.stack.length > 0 && scaffoldState === 'idle';
+  const hasMissingComponents = report && report.components.some(c => !c.present);
+  const showScaffoldPrompt = hasMissingComponents && scaffoldState === 'idle';
 
   if (loading) {
     return (
@@ -825,9 +855,8 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
               <RefreshCw size={12} className="text-muted" />
             </button>
             <span className={`text-lg font-bold tabular-nums ${scoreColor(report.score)}`}>
-              {report.score}
+              {report.score}%
             </span>
-            <span className="text-xs text-muted">/100</span>
             <ChevronRight size={14} className={`text-muted transition-transform ${expanded ? 'rotate-90' : ''}`} />
           </div>
         </div>
@@ -839,51 +868,20 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
             style={{ width: `${report.score}%` }}
           />
         </div>
-
-        {/* Stack pills */}
-        {report.stack.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-3">
-            {report.stack.slice(0, 8).map((s) => (
-              <span key={s.name} className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 text-accent">
-                {s.name}{s.version ? ` ${s.version}` : ''}
-              </span>
-            ))}
-            {report.stack.length > 8 && (
-              <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-bg text-muted">
-                +{report.stack.length - 8}
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Monorepo badge */}
-        {report.monorepo.detected && (
-          <div className="flex items-center gap-1 mt-2 text-[10px] text-muted">
-            <FolderGit2 size={10} />
-            <span>Monorepo · {report.monorepo.packages.length} packages</span>
-          </div>
-        )}
       </button>
 
-      {/* Scaffold generation prompt — shown when missing context files + stack detected */}
+      {/* Scaffold generation prompt — shown when missing context files */}
       {showScaffoldPrompt && (
         <div className="border-t border-border px-4 py-3 bg-accent/5">
           <div className="flex items-start gap-3">
             <Wand2 size={16} className="text-accent shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-[var(--text)]">
-                I detected {report.stack.slice(0, 3).map(s => s.name).join(' + ')}{report.stack.length > 3 ? ` + ${report.stack.length - 3} more` : ''}. Generate context scaffolding?
+                {report.components.filter(c => !c.present).length} context files missing. Generate scaffolding?
               </p>
               <p className="text-xs text-muted mt-1">
                 Creates bespoke CLAUDE.md, AGENTS.md, .rorca/config.json, and skill files tailored to your codebase.
               </p>
-              <div className="flex flex-wrap gap-1 mt-2">
-                {['CLAUDE.md', 'AGENTS.md', '.rorca/config.json', '.rorca/skills/'].map(f => (
-                  <span key={f} className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-emerald-500/10 text-emerald-600">
-                    {f}
-                  </span>
-                ))}
-              </div>
               <button
                 onClick={(e) => { e.stopPropagation(); handleGenerateScaffold(); }}
                 className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent/90 transition-colors"
@@ -994,40 +992,38 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
 
-      {/* Expanded details (original health report details) */}
+      {/* Expanded: Component breakdown */}
       {expanded && scaffoldState !== 'preview' && (
-        <div className="border-t border-border px-4 py-3 space-y-3">
-          {/* Missing files */}
-          {report.missing.length > 0 && (
-            <div>
-              <p className="text-xs font-medium text-muted mb-1.5">Missing context files</p>
-              <div className="flex flex-wrap gap-1">
-                {report.missing.map((m) => (
-                  <span key={m} className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-red-500/10 text-red-500">
-                    {m}
-                  </span>
-                ))}
+        <div className="border-t border-border px-4 py-3 space-y-2.5">
+          <p className="text-xs font-medium text-muted mb-1">Context Richness Breakdown</p>
+          {report.components.map((c) => (
+            <div key={c.name} className="space-y-1">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  {c.present ? (
+                    <CheckCircle size={11} className="text-emerald-500 shrink-0" />
+                  ) : (
+                    <XCircle size={11} className="text-red-400 shrink-0" />
+                  )}
+                  <span className="text-xs font-mono text-[var(--text)]">{c.name}</span>
+                </div>
+                <span className="text-[10px] text-muted tabular-nums">{c.detail}</span>
               </div>
+              {/* Mini progress bar */}
+              <div className="w-full h-1 bg-border rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-300 ${componentBarColor(c.score, c.maxScore)}`}
+                  style={{ width: `${c.maxScore > 0 ? (c.score / c.maxScore) * 100 : 0}%` }}
+                />
+              </div>
+              {c.suggestion && (
+                <p className="text-[10px] text-muted pl-4">{c.suggestion}</p>
+              )}
             </div>
-          )}
-
-          {/* Suggestions */}
-          {report.suggestions.length > 0 && (
-            <div>
-              <p className="text-xs font-medium text-muted mb-1.5">Suggestions</p>
-              <ul className="space-y-1">
-                {report.suggestions.map((s, i) => (
-                  <li key={i} className="text-xs text-[var(--text)] flex gap-1.5">
-                    <span className="text-accent shrink-0 mt-0.5">-</span>
-                    <span>{s}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          ))}
 
           {/* Scanned timestamp */}
-          <p className="text-[10px] text-muted text-right">
+          <p className="text-[10px] text-muted text-right pt-1">
             Scanned {relativeTime(report.scannedAt)}
           </p>
         </div>

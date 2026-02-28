@@ -1,8 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
+
+interface HealthBadge {
+  score: number;
+  scannedAt: string;
+}
 
 interface AgentConfigSummary {
   agentType: 'claude' | 'opencode' | 'codex';
@@ -55,7 +60,16 @@ export default function TriggerPopover({
   const [capWarnings, setCapWarnings] = useState<CapabilityWarning[]>([]);
   const [capMismatchMode, setCapMismatchMode] = useState<string>('warn');
   const [orchestration, setOrchestration] = useState<OrchestrationPreview | null>(null);
+  const [healthBadge, setHealthBadge] = useState<HealthBadge | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+
+  // Fetch workspace health badge on mount
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<HealthBadge>(`/api/workspaces/${workspaceId}/health`)
+      .then(setHealthBadge)
+      .catch(() => {});
+  }, [workspaceId]);
 
   // Fetch agent config on mount
   useEffect(() => {
@@ -138,6 +152,30 @@ export default function TriggerPopover({
       ref={ref}
       className="absolute bottom-full left-0 right-0 mb-2 rounded-lg border border-border bg-panel shadow-lg z-50 p-3 space-y-3"
     >
+      {/* CIE-012: Health badge — warns if score < 50% */}
+      {healthBadge && (
+        <div className="flex items-center gap-2">
+          <HeartPulse size={13} className={
+            healthBadge.score >= 80 ? 'text-emerald-500 shrink-0' :
+            healthBadge.score >= 50 ? 'text-yellow-500 shrink-0' :
+            'text-red-500 shrink-0'
+          } />
+          <span className={`text-xs font-medium tabular-nums ${
+            healthBadge.score >= 80 ? 'text-emerald-500' :
+            healthBadge.score >= 50 ? 'text-yellow-500' :
+            'text-red-500'
+          }`}>
+            Health {healthBadge.score}%
+          </span>
+          {healthBadge.score < 50 && (
+            <span className="flex items-center gap-1 text-[10px] text-red-400">
+              <AlertTriangle size={10} />
+              Low context — add CLAUDE.md or run scaffolding
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Engine info row */}
       {agentConfig && (
         <div>
