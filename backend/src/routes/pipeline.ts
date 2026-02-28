@@ -3542,7 +3542,7 @@ router.get('/stream', (req: Request, res: Response) => {
           `SELECT * FROM wal_events
            WHERE id > ?
              AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND (payload LIKE ? OR spec_id IS NOT NULL)
+             AND payload LIKE ?
            ORDER BY id ASC
            LIMIT 50`
         ).all(lastSeenId, `%"run_id":${runId}%`);

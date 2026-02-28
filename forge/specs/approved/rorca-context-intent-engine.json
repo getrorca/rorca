@@ -19,7 +19,8 @@
         "Detects monorepo structure (multiple package.json / apps/ directory) for scope generation"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CIE-002",
@@ -36,7 +37,9 @@
         "One-click write to filesystem after approval",
         "All generated files committed with message 'chore: initialize rorca context/intent scaffolding'"
       ],
-      "dependsOn": ["CIE-001"],
+      "dependsOn": [
+        "CIE-001"
+      ],
       "passes": false
     },
     {
@@ -57,7 +60,9 @@
         "JSON schema file published at .rorca/config.schema.json for IDE validation",
         "backend/src/lib/rorca-config.ts exports typed config loader with zod validation"
       ],
-      "dependsOn": ["CIE-001"],
+      "dependsOn": [
+        "CIE-001"
+      ],
       "passes": false
     },
     {
@@ -77,7 +82,9 @@
         "execution-engine.ts reads RORCA_CONTEXT_FILE and prepends to story prompt before spawning agent subprocess",
         "Unit tests for path matching, priority resolution, token budget enforcement"
       ],
-      "dependsOn": ["CIE-003"],
+      "dependsOn": [
+        "CIE-003"
+      ],
       "passes": false
     },
     {
@@ -96,7 +103,9 @@
         "Context router injects most recent N entries (configurable, default: 20) as part of global context",
         "In-app MEMORY.md editor with entry-level management (delete, edit, categorize)"
       ],
-      "dependsOn": ["CIE-003"],
+      "dependsOn": [
+        "CIE-003"
+      ],
       "passes": false
     },
     {
@@ -114,7 +123,9 @@
         "In-app AGENTS.md editor with role cards (name, owned paths, avoided paths, rules list)",
         "Generated AGENTS.md from echolocation reflects actual directory structure found"
       ],
-      "dependsOn": ["CIE-003"],
+      "dependsOn": [
+        "CIE-003"
+      ],
       "passes": false
     },
     {
@@ -132,7 +143,9 @@
         "Migration: on first init, existing progress.txt converted to run-state.json format",
         "UI: Run View shows 'Resumed from story N' indicator when resuming from run-state.json"
       ],
-      "dependsOn": ["CIE-003"],
+      "dependsOn": [
+        "CIE-003"
+      ],
       "passes": false
     },
     {
@@ -150,7 +163,11 @@
         "Sync history stored in .rorca/memory/sync-log.json (timestamp, direction, diff, approved/rejected)",
         "Never auto-write on managed:hybrid files — always require approval"
       ],
-      "dependsOn": ["CIE-003", "CIE-004", "CIE-009"],
+      "dependsOn": [
+        "CIE-003",
+        "CIE-004",
+        "CIE-009"
+      ],
       "passes": false
     },
     {
@@ -168,7 +185,9 @@
         "File watcher disabled during Rorca-initiated writes (prevents echo events)",
         "GET /api/workspace/file-watch-status returns watcher health and watched file list"
       ],
-      "dependsOn": ["CIE-003"],
+      "dependsOn": [
+        "CIE-003"
+      ],
       "passes": false
     },
     {
@@ -188,7 +207,10 @@
         "'Eject to Config' button for new workspaces: generates .rorca/config.json from current settings state — surfaces advanced options not shown in visual editor",
         "Import/export config as JSON for team sharing"
       ],
-      "dependsOn": ["CIE-003", "CIE-009"],
+      "dependsOn": [
+        "CIE-003",
+        "CIE-009"
+      ],
       "passes": false
     },
     {
@@ -207,7 +229,9 @@
         "Unsaved changes indicator + keyboard shortcut ⌘S to save",
         "New file button: create new skill file in .rorca/skills/ with template"
       ],
-      "dependsOn": ["CIE-009"],
+      "dependsOn": [
+        "CIE-009"
+      ],
       "passes": false
     },
     {
@@ -224,7 +248,10 @@
         "Health score recalculated on any file change (chokidar event triggers recalc)",
         "Score history tracked in .rorca/memory/health-log.json — shows trend over time"
       ],
-      "dependsOn": ["CIE-001", "CIE-009"],
+      "dependsOn": [
+        "CIE-001",
+        "CIE-009"
+      ],
       "passes": false
     },
     {
@@ -243,7 +270,10 @@
         "Skill templates: starter content for common domains (react.md, postgres.md, terraform.md, auth.md)",
         "Skill preview: render Markdown in preview panel alongside editor"
       ],
-      "dependsOn": ["CIE-010", "CIE-011"],
+      "dependsOn": [
+        "CIE-010",
+        "CIE-011"
+      ],
       "passes": false
     },
     {
@@ -261,7 +291,10 @@
         "Synthesis result cached — user can dismiss and return to review later",
         "Synthesis skipped for runs with 0 completed stories"
       ],
-      "dependsOn": ["CIE-005", "CIE-007"],
+      "dependsOn": [
+        "CIE-005",
+        "CIE-007"
+      ],
       "passes": false
     },
     {
@@ -279,7 +312,10 @@
         "Community templates: Settings shows a hardcoded curated list of starter templates (rorca.app/templates cloud fetch is post-cloud-launch; stub with empty list and 'Coming soon' note for now)",
         "Template diff: when applying template to existing workspace, show what would change"
       ],
-      "dependsOn": ["CIE-002", "CIE-003"],
+      "dependsOn": [
+        "CIE-002",
+        "CIE-003"
+      ],
       "passes": false
     },
     {
@@ -296,7 +332,10 @@
         "GET /api/pipeline/context-preview?specId=X returns full preview payload",
         "After run: actual vs predicted context shown in Run View (did path prediction match reality?)"
       ],
-      "dependsOn": ["CIE-004", "CIE-012"],
+      "dependsOn": [
+        "CIE-004",
+        "CIE-012"
+      ],
       "passes": false
     },
     {
@@ -312,7 +351,10 @@
         "Cross-app story detection: if story touches multiple apps, both scopes injected (up to tokenBudget)",
         "Visual Rules Engine shows monorepo tree structure for scope assignment"
       ],
-      "dependsOn": ["CIE-001", "CIE-004"],
+      "dependsOn": [
+        "CIE-001",
+        "CIE-004"
+      ],
       "passes": false
     },
     {
@@ -331,7 +373,14 @@
         "All tests use fixture workspaces in backend/src/__tests__/fixtures/",
         "Tests run without requiring OpenCode or Claude CLI (mocked)"
       ],
-      "dependsOn": ["CIE-007", "CIE-008", "CIE-009", "CIE-014", "CIE-016", "CIE-017"],
+      "dependsOn": [
+        "CIE-007",
+        "CIE-008",
+        "CIE-009",
+        "CIE-014",
+        "CIE-016",
+        "CIE-017"
+      ],
       "passes": false
     }
   ]

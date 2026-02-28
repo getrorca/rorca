@@ -11,6 +11,7 @@ import {
 import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { echolocate } from '../lib/workspace-echolocation';
 
 const router = Router();
 
@@ -126,7 +127,24 @@ router.post('/', (req, res) => {
   ).run(id, l3Row?.content_yaml || null);
 
   const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as WorkspaceRow;
-  res.status(201).json({ workspace: parseWorkspace(row) });
+
+  // CIE-001: Auto-run echolocation on workspace registration
+  let health = null;
+  try {
+    health = echolocate(path);
+    db.prepare(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('echolocate', ?, ?)"
+    ).run(id, JSON.stringify({
+      score: health.score,
+      stackCount: health.stack.length,
+      missingCount: health.missing.length,
+      monorepo: health.monorepo.detected,
+    }));
+  } catch {
+    // Non-fatal — workspace still registers even if echolocation fails
+  }
+
+  res.status(201).json({ workspace: parseWorkspace(row), health });
 });
 
 // GET /api/workspaces
@@ -814,6 +832,95 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
   } catch (err: any) {
     console.error('[scan-direction] error:', err.message);
     res.status(500).json({ error: err.message || 'Repo scan failed' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/echolocate:
+ *   post:
+ *     tags: [Workspaces]
+ *     summary: Scan workspace to detect tech stack, context files, and compute health score
+ *     description: >
+ *       Non-destructive scan of workspace root and subdirectories.
+ *       Detects tech stack from manifest files, checks for context/intent files
+ *       (CLAUDE.md, AGENTS.md, .rorca/), computes a Context Richness Score (0-100),
+ *       and detects monorepo structure. Reads only, never writes.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Echolocation report
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 stack:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name: { type: string }
+ *                       version: { type: string }
+ *                       source: { type: string }
+ *                 contextFiles:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       path: { type: string }
+ *                       exists: { type: boolean }
+ *                       sizeBytes: { type: integer }
+ *                       lineCount: { type: integer }
+ *                 missing:
+ *                   type: array
+ *                   items: { type: string }
+ *                 monorepo:
+ *                   type: object
+ *                   properties:
+ *                     detected: { type: boolean }
+ *                     packages:
+ *                       type: array
+ *                       items: { type: string }
+ *                 score: { type: integer, minimum: 0, maximum: 100 }
+ *                 suggestions:
+ *                   type: array
+ *                   items: { type: string }
+ *                 scannedAt: { type: string, format: date-time }
+ *       404: { description: "Workspace not found" }
+ *       400: { description: "Workspace path does not exist" }
+ */
+router.post('/:id/echolocate', (req, res) => {
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  if (!fs.existsSync(workspace.path)) {
+    res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+    return;
+  }
+
+  try {
+    const report = echolocate(workspace.path);
+
+    db.prepare(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('echolocate', ?, ?)"
+    ).run(req.params.id, JSON.stringify({
+      score: report.score,
+      stackCount: report.stack.length,
+      missingCount: report.missing.length,
+      monorepo: report.monorepo.detected,
+    }));
+
+    res.json(report);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Echolocation scan failed' });
   }
 });
 
