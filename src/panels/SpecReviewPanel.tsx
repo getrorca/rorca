@@ -51,8 +51,8 @@ function ComplexityBadge({ value }: { value: number }) {
     value <= 2
       ? 'bg-success/15 text-success'
       : value === 3
-      ? 'bg-warning/15 text-warning'
-      : 'bg-error/15 text-error';
+        ? 'bg-warning/15 text-warning'
+        : 'bg-error/15 text-error';
   return (
     <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded ${style}`}>
       C{value}
@@ -175,11 +175,10 @@ function StoryFilterBar({
 
         <button
           onClick={onToggleFilters}
-          className={`relative flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
-            filtersOpen || activeCount > 0
+          className={`relative flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${filtersOpen || activeCount > 0
               ? 'border-accent bg-accent/10 text-accent'
               : 'border-border bg-panel text-muted hover:text-text'
-          }`}
+            }`}
         >
           <SlidersHorizontal size={13} />
           Filters
@@ -203,11 +202,10 @@ function StoryFilterBar({
               <button
                 key={chip.value}
                 onClick={() => onStatusChange(chip.value)}
-                className={`px-2 py-0.5 text-[11px] rounded-full border transition-colors ${
-                  status === chip.value
+                className={`px-2 py-0.5 text-[11px] rounded-full border transition-colors ${status === chip.value
                     ? 'border-accent bg-accent/15 text-accent font-medium'
                     : 'border-border bg-panel text-muted hover:text-text'
-                }`}
+                  }`}
               >
                 {chip.label}
               </button>
@@ -223,11 +221,10 @@ function StoryFilterBar({
               <button
                 key={chip.value}
                 onClick={() => onComplexityChange(chip.value)}
-                className={`px-2 py-0.5 text-[11px] rounded-full border transition-colors ${
-                  complexity === chip.value
+                className={`px-2 py-0.5 text-[11px] rounded-full border transition-colors ${complexity === chip.value
                     ? 'border-accent bg-accent/15 text-accent font-medium'
                     : 'border-border bg-panel text-muted hover:text-text'
-                }`}
+                  }`}
               >
                 {chip.label}
               </button>
@@ -286,13 +283,12 @@ function StoryReviewCard({
   return (
     <div
       data-story-id={story.id}
-      className={`border rounded-lg bg-panel transition-all ${
-        highlighted
+      className={`border rounded-lg bg-panel transition-all ${highlighted
           ? 'ring-2 ring-warning/60 border-warning animate-pulse'
           : focused
-          ? 'ring-2 ring-accent/50 border-accent'
-          : 'border-border'
-      } ${isExcluded ? 'opacity-50' : ''}`}
+            ? 'ring-2 ring-accent/50 border-accent'
+            : 'border-border'
+        } ${isExcluded ? 'opacity-50' : ''}`}
     >
       {/* Collapsed row */}
       <button
@@ -308,22 +304,20 @@ function StoryReviewCard({
 
         {/* ID badge */}
         <span
-          className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded ${
-            isDone
+          className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded ${isDone
               ? 'bg-success/15 text-success'
               : isExcluded
-              ? 'bg-muted/15 text-muted'
-              : 'bg-accent/15 text-accent'
-          }`}
+                ? 'bg-muted/15 text-muted'
+                : 'bg-accent/15 text-accent'
+            }`}
         >
           {story.id}
         </span>
 
         {/* Title */}
         <span
-          className={`text-sm font-medium truncate flex-1 ${
-            isExcluded ? 'text-muted line-through' : 'text-text'
-          }`}
+          className={`text-sm font-medium truncate flex-1 ${isExcluded ? 'text-muted line-through' : 'text-text'
+            }`}
         >
           {story.title}
         </span>
@@ -366,11 +360,10 @@ function StoryReviewCard({
                     e.stopPropagation();
                     if (resolved) onScrollToStory(d);
                   }}
-                  className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded transition-colors ${
-                    resolved
+                  className={`px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded transition-colors ${resolved
                       ? 'bg-accent/10 text-accent hover:bg-accent/25 cursor-pointer'
                       : 'bg-error/10 text-error cursor-default'
-                  }`}
+                    }`}
                   title={resolved ? `Jump to ${d}` : `${d} not found in spec`}
                 >
                   {d}
@@ -410,9 +403,8 @@ function StoryReviewCard({
                       className="shrink-0 mt-0.5 w-3.5 h-3.5 rounded border-border accent-accent cursor-pointer"
                     />
                     <span
-                      className={`text-xs leading-relaxed ${
-                        checkedAc.has(i) ? 'text-muted line-through' : 'text-text'
-                      }`}
+                      className={`text-xs leading-relaxed ${checkedAc.has(i) ? 'text-muted line-through' : 'text-text'
+                        }`}
                     >
                       {criterion}
                     </span>
@@ -762,22 +754,21 @@ export default function SpecReviewPanel({
       {/* ─── Header ──────────────────────────────────────────────────── */}
       <div className="px-4 sm:px-6 py-4 border-b border-border shrink-0 bg-bg">
         <div className="max-w-3xl mx-auto">
-          {/* Back + title row */}
           <div className="flex items-center gap-3 mb-2">
-            <button
-              onClick={onBack}
-              className="text-muted hover:text-text transition-colors shrink-0"
-              title="Back to Hub"
-            >
-              <ArrowLeft size={18} />
-            </button>
             <h1 className="text-lg font-semibold text-text truncate flex-1">
               {specTitle}
             </h1>
+            <button
+              onClick={onBack}
+              className="text-muted hover:text-text transition-colors shrink-0"
+              title="Close review"
+            >
+              <X size={18} />
+            </button>
           </div>
 
           {/* Stats row */}
-          <div className="flex items-center gap-4 ml-[30px]">
+          <div className="flex items-center gap-4">
             <div className="flex items-center gap-1.5 text-xs text-muted">
               <ListChecks size={13} />
               <span>

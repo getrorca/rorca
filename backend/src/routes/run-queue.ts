@@ -110,7 +110,9 @@ router.post('/', (req: Request, res: Response) => {
 // ─── DELETE /api/run-queue/:id ──────────────────────────────────
 router.delete('/:id', (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const idParam = req.params.id;
+    const idStr = Array.isArray(idParam) ? idParam[0] : idParam;
+    const id = parseInt(idStr, 10);
     if (isNaN(id)) {
       res.status(400).json({ error: 'Invalid queue entry ID' });
       return;

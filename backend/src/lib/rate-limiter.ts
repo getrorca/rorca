@@ -156,7 +156,7 @@ export function rateLimiter(req: Request, res: Response, next: NextFunction): vo
   if (!user) {
     const fallback = db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined;
     if (fallback) {
-      user = { id: fallback.id, email: '', displayName: '' } as AuthUser;
+      user = { id: fallback.id, email: '', displayName: '', role: 'user' } as AuthUser;
     }
   }
   const tier = user ? 'authenticated' : 'unauthenticated';

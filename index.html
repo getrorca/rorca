@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Rorca</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <script>
       // Prevent flash: apply saved theme before React hydrates
       (function() {
@@ -16,15 +19,15 @@
       /* Critical CSS — inlined so shell skeleton renders before JS loads.
          Matches tokens.css variables + Shell/Sidebar layout exactly. */
       :root, [data-theme="dark"] {
-        --bg: #0f0f11; --panel: #1c1c21; --border: #3f3f46;
-        --text: #fafafa; --text-muted: #a1a1aa; --accent: #6366f1;
+        --bg: #09090b; --panel: #121214; --border: #27272a;
+        --text: #fafafa; --text-muted: #a1a1aa; --accent: #4f46e5;
       }
       [data-theme="light"] {
-        --bg: #f5f5f5; --panel: #ffffff; --border: #d4d4d8;
-        --text: #18181b; --text-muted: #71717a; --accent: #4f46e5;
+        --bg: #fafafa; --panel: #ffffff; --border: #e4e4e7;
+        --text: #09090b; --text-muted: #71717a; --accent: #4f46e5;
       }
       *, *::before, *::after { box-sizing: border-box; margin: 0; }
-      body { background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+      body { background: var(--bg); color: var(--text); font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif; }
       .shell-skeleton { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
       .shell-skeleton__header {
         height: 48px; display: flex; align-items: center; justify-content: space-between;

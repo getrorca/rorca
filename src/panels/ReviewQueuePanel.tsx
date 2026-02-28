@@ -23,6 +23,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
+import AppHeader from '../components/AppHeader';
 import { InlineStoryEditor } from '../components/InlineStoryEditor';
 import { StoryComments } from '../components/StoryComments';
 import DependencyGraph from '../components/DependencyGraph';
@@ -385,162 +386,125 @@ export default function ReviewQueuePanel() {
   const selectedSpec = filteredSpecs.find((s) => s.id === selectedId);
 
   return (
-    <div className="flex h-full">
-      {/* ─── Left column: Spec list ──────────────────────────────────── */}
-      <div className="w-full xl:w-[380px] xl:shrink-0 xl:border-r xl:border-border flex flex-col overflow-hidden">
-        <div className="px-4 py-3 border-b border-border shrink-0">
-          <h2 className="text-sm font-semibold text-text">
-            Pending Review
-          </h2>
-          <p className="text-xs text-muted mt-0.5">
-            {filteredSpecs.length} of {specs.length} {specs.length === 1 ? 'spec' : 'specs'}
-          </p>
-          <div className="flex gap-1 mt-2">
-            {REVIEW_FILTERS.map((f) => {
-              const count = f.id === 'all'
-                ? specs.length
-                : specs.filter(s => (s.reviewStatus ?? 'draft') === f.id).length;
-              return (
-                <button
-                  key={f.id}
-                  onClick={() => setReviewFilter(f.id)}
-                  className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
-                    reviewFilter === f.id
-                      ? 'bg-accent/15 text-accent border border-accent/30'
-                      : 'text-muted border border-transparent hover:text-text hover:border-border'
+    <div className="flex flex-col h-full bg-bg">
+      <AppHeader
+        breadcrumbs={
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-[var(--text)] text-sm tracking-tight">
+              {workspaceId ? 'Workspace' : 'Pending'}
+            </span>
+            <ChevronRight size={14} className="text-muted" />
+            <span className="text-sm text-muted">Review Queue</span>
+          </div>
+        }
+      />
+      <div className="flex flex-1 min-h-0">
+        {/* ─── Left column: Spec list ──────────────────────────────────── */}
+        <div className="w-full xl:w-[380px] xl:shrink-0 xl:border-r xl:border-border flex flex-col overflow-hidden">
+          <div className="px-4 py-3 border-b border-border shrink-0">
+            <h2 className="text-sm font-semibold text-text">
+              Pending Review
+            </h2>
+            <p className="text-xs text-muted mt-0.5">
+              {filteredSpecs.length} of {specs.length} {specs.length === 1 ? 'spec' : 'specs'}
+            </p>
+            <div className="flex gap-1 mt-2">
+              {REVIEW_FILTERS.map((f) => {
+                const count = f.id === 'all'
+                  ? specs.length
+                  : specs.filter(s => (s.reviewStatus ?? 'draft') === f.id).length;
+                return (
+                  <button
+                    key={f.id}
+                    onClick={() => setReviewFilter(f.id)}
+                    className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${reviewFilter === f.id
+                        ? 'bg-accent/15 text-accent border border-accent/30'
+                        : 'text-muted border border-transparent hover:text-text hover:border-border'
+                      }`}
+                  >
+                    {f.label}
+                    {count > 0 && <span className="ml-1 opacity-70">({count})</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {filteredSpecs.map((spec) => (
+              <button
+                key={spec.id}
+                onClick={() => {
+                  if (hasUnsavedEdits && spec.id !== selectedId) {
+                    if (!window.confirm('You have unsaved story edits. Discard them?')) return;
+                    setHasUnsavedEdits(false);
+                  }
+                  setSelectedId(spec.id === selectedId ? null : spec.id);
+                }}
+                className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${spec.id === selectedId
+                    ? 'bg-accent/10'
+                    : 'hover:bg-panel'
                   }`}
-                >
-                  {f.label}
-                  {count > 0 && <span className="ml-1 opacity-70">({count})</span>}
-                </button>
-              );
-            })}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block w-2 h-2 rounded-full bg-warning shrink-0" />
+                    <span className="text-[10px] font-medium text-muted uppercase tracking-wide">
+                      US
+                    </span>
+                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
+                      {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
+                    </span>
+                    {(() => {
+                      const rs = spec.reviewStatus ?? 'draft';
+                      const cfg = REVIEW_STATUS_CONFIG[rs];
+                      const Icon = cfg.icon;
+                      return (
+                        <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded border ${cfg.className}`}>
+                          <Icon size={10} />
+                          {cfg.label}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {spec.assignee && <AssigneeAvatar assignee={spec.assignee} size="sm" />}
+                    {spec.readinessPercent != null && (
+                      <ReadinessRing percent={spec.readinessPercent} size={28} />
+                    )}
+                    <span className="text-[10px] text-muted flex items-center gap-1">
+                      <Clock size={10} />
+                      {relativeTime(spec.generatedAt)}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-mono text-text truncate pr-2">
+                    {spec.id}
+                  </span>
+                  <ChevronRight
+                    size={14}
+                    className={`shrink-0 text-muted transition-transform ${spec.id === selectedId ? 'rotate-90' : ''
+                      }`}
+                  />
+                </div>
+                {spec.tags && spec.tags.length > 0 && (
+                  <div className="mt-1">
+                    <TagChipsReadonly tags={spec.tags} />
+                  </div>
+                )}
+              </button>
+            ))}
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
-          {filteredSpecs.map((spec) => (
-            <button
-              key={spec.id}
-              onClick={() => {
-                if (hasUnsavedEdits && spec.id !== selectedId) {
-                  if (!window.confirm('You have unsaved story edits. Discard them?')) return;
-                  setHasUnsavedEdits(false);
-                }
-                setSelectedId(spec.id === selectedId ? null : spec.id);
-              }}
-              className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${
-                spec.id === selectedId
-                  ? 'bg-accent/10'
-                  : 'hover:bg-panel'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <div className="flex items-center gap-2">
-                  <span className="inline-block w-2 h-2 rounded-full bg-warning shrink-0" />
-                  <span className="text-[10px] font-medium text-muted uppercase tracking-wide">
-                    US
-                  </span>
-                  <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
-                    {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
-                  </span>
-                  {(() => {
-                    const rs = spec.reviewStatus ?? 'draft';
-                    const cfg = REVIEW_STATUS_CONFIG[rs];
-                    const Icon = cfg.icon;
-                    return (
-                      <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded border ${cfg.className}`}>
-                        <Icon size={10} />
-                        {cfg.label}
-                      </span>
-                    );
-                  })()}
-                </div>
-                <div className="flex items-center gap-2">
-                  {spec.assignee && <AssigneeAvatar assignee={spec.assignee} size="sm" />}
-                  {spec.readinessPercent != null && (
-                    <ReadinessRing percent={spec.readinessPercent} size={28} />
-                  )}
-                  <span className="text-[10px] text-muted flex items-center gap-1">
-                    <Clock size={10} />
-                    {relativeTime(spec.generatedAt)}
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-mono text-text truncate pr-2">
-                  {spec.id}
-                </span>
-                <ChevronRight
-                  size={14}
-                  className={`shrink-0 text-muted transition-transform ${
-                    spec.id === selectedId ? 'rotate-90' : ''
-                  }`}
-                />
-              </div>
-              {spec.tags && spec.tags.length > 0 && (
-                <div className="mt-1">
-                  <TagChipsReadonly tags={spec.tags} />
-                </div>
-              )}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ─── Right column: Spec preview (xl+ only, or replaces list) ─ */}
-      <div className="hidden xl:flex flex-col flex-1 overflow-hidden">
-        {!selectedId || !specDetail ? (
-          <div className="flex items-center justify-center h-full text-muted text-sm">
-            {detailLoading ? 'Loading spec...' : 'Select a spec to preview'}
-          </div>
-        ) : (
-          <SpecPreview
-            spec={specDetail}
-            summary={selectedSpec!}
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            rejectingId={rejectingId}
-            rejectReason={rejectReason}
-            actionLoading={actionLoading}
-            onRejectReasonChange={setRejectReason}
-            onStartReject={() => setRejectingId(selectedId)}
-            onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
-            onConfirmReject={() => handleReject(selectedId)}
-            onApprove={() => handleApprove(selectedId)}
-            onRequestReview={() => handleRequestReview(selectedId)}
-            reviewingId={reviewingId}
-            reviewComment={reviewComment}
-            onReviewCommentChange={setReviewComment}
-            onStartReview={() => setReviewingId(selectedId)}
-            onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
-            onConfirmReview={(action) => handleReview(selectedId, action)}
-            workspaceId={workspaceId!}
-            onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
-            onDirtyChange={setHasUnsavedEdits}
-          />
-        )}
-      </div>
-
-      {/* ─── Mobile/tablet: detail as overlay when selected ────────── */}
-      {selectedId && specDetail && (
-        <div className="xl:hidden fixed inset-0 z-40 bg-bg flex flex-col">
-          <div className="flex items-center px-4 py-3 border-b border-border shrink-0">
-            <button
-              onClick={() => {
-                if (hasUnsavedEdits) {
-                  if (!window.confirm('You have unsaved story edits. Discard them?')) return;
-                  setHasUnsavedEdits(false);
-                }
-                setSelectedId(null); setRejectingId(null); setRejectReason(''); setReviewingId(null); setReviewComment('');
-              }}
-              className="text-xs text-accent hover:text-accent-hover transition-colors mr-3"
-            >
-              &larr; Back
-            </button>
-            <span className="text-sm font-mono text-text truncate">{selectedId}</span>
-          </div>
-          <div className="flex-1 overflow-hidden">
+        {/* ─── Right column: Spec preview (xl+ only, or replaces list) ─ */}
+        <div className="hidden xl:flex flex-col flex-1 overflow-hidden">
+          {!selectedId || !specDetail ? (
+            <div className="flex items-center justify-center h-full text-muted text-sm">
+              {detailLoading ? 'Loading spec...' : 'Select a spec to preview'}
+            </div>
+          ) : (
             <SpecPreview
               spec={specDetail}
               summary={selectedSpec!}
@@ -565,27 +529,74 @@ export default function ReviewQueuePanel() {
               onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
               onDirtyChange={setHasUnsavedEdits}
             />
-          </div>
+          )}
         </div>
-      )}
 
-      {/* ─── Keyboard-triggered confirmation dialog ────────────────── */}
-      {dialogMode && selectedId && (
-        <SpecConfirmDialog
-          mode={dialogMode}
-          specName={selectedSpec?.specName ?? selectedId}
-          loading={actionLoading}
-          onConfirm={(reason) => {
-            if (dialogMode === 'approve') handleDialogApprove();
-            else if (dialogMode === 'reject') handleDialogReject(reason);
-          }}
-          onCancel={() => setDialogMode(null)}
-          onGoToForge={() => { setDialogMode(null); setSelectedId(null); setSpecDetail(null); }}
-          onTriggerRun={() => { setDialogMode(null); setSelectedId(null); setSpecDetail(null); }}
-        />
-      )}
+        {/* ─── Mobile/tablet: detail as overlay when selected ────────── */}
+        {selectedId && specDetail && (
+          <div className="xl:hidden fixed inset-0 z-40 bg-bg flex flex-col">
+            <div className="flex items-center px-4 py-3 border-b border-border shrink-0">
+              <button
+                onClick={() => {
+                  if (hasUnsavedEdits) {
+                    if (!window.confirm('You have unsaved story edits. Discard them?')) return;
+                    setHasUnsavedEdits(false);
+                  }
+                  setSelectedId(null); setRejectingId(null); setRejectReason(''); setReviewingId(null); setReviewComment('');
+                }}
+                className="text-xs text-accent hover:text-accent-hover transition-colors mr-3"
+              >
+                &larr; Back
+              </button>
+              <span className="text-sm font-mono text-text truncate">{selectedId}</span>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <SpecPreview
+                spec={specDetail}
+                summary={selectedSpec!}
+                activeTab={activeTab}
+                onTabChange={setActiveTab}
+                rejectingId={rejectingId}
+                rejectReason={rejectReason}
+                actionLoading={actionLoading}
+                onRejectReasonChange={setRejectReason}
+                onStartReject={() => setRejectingId(selectedId)}
+                onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
+                onConfirmReject={() => handleReject(selectedId)}
+                onApprove={() => handleApprove(selectedId)}
+                onRequestReview={() => handleRequestReview(selectedId)}
+                reviewingId={reviewingId}
+                reviewComment={reviewComment}
+                onReviewCommentChange={setReviewComment}
+                onStartReview={() => setReviewingId(selectedId)}
+                onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
+                onConfirmReview={(action) => handleReview(selectedId, action)}
+                workspaceId={workspaceId!}
+                onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
+                onDirtyChange={setHasUnsavedEdits}
+              />
+            </div>
+          </div>
+        )}
 
-      <ToastContainer toasts={toasts} onDismiss={dismiss} />
+        {/* ─── Keyboard-triggered confirmation dialog ────────────────── */}
+        {dialogMode && selectedId && (
+          <SpecConfirmDialog
+            mode={dialogMode}
+            specName={selectedSpec?.specName ?? selectedId}
+            loading={actionLoading}
+            onConfirm={(reason) => {
+              if (dialogMode === 'approve') handleDialogApprove();
+              else if (dialogMode === 'reject') handleDialogReject(reason);
+            }}
+            onCancel={() => setDialogMode(null)}
+            onGoToForge={() => { setDialogMode(null); setSelectedId(null); setSpecDetail(null); }}
+            onTriggerRun={() => { setDialogMode(null); setSelectedId(null); setSpecDetail(null); }}
+          />
+        )}
+
+        <ToastContainer toasts={toasts} onDismiss={dismiss} />
+      </div>
     </div>
   );
 }
@@ -670,7 +681,7 @@ function SpecPreview({
           }
           prevCommentCountRef.current = total;
         })
-        .catch(() => {});
+        .catch(() => { });
     };
 
     checkNewComments();
@@ -808,11 +819,10 @@ function SpecPreview({
           <button
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
-            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 ${
-              activeTab === tab.id
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 ${activeTab === tab.id
                 ? 'text-text border-accent'
                 : 'text-muted hover:text-text border-transparent'
-            }`}
+              }`}
           >
             {tab.label}
             {tab.badge && (
@@ -1046,14 +1056,14 @@ function PreviewStoriesTab({
         }
         setStoryAssignees(map);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [specId, workspaceId]);
 
   // Fetch unresolved comment counts per story
   useEffect(() => {
     apiFetch<{ counts: Record<string, number> }>(`/api/specs/${specId}/comments/counts`)
       .then(data => setCommentCounts(data.counts))
-      .catch(() => {});
+      .catch(() => { });
   }, [specId]);
 
   // Sync when prop changes
@@ -1157,13 +1167,12 @@ function PreviewStoriesTab({
             <span className="text-xs text-muted">
               Total: <span className="font-semibold text-text">{totalComplexity} pts</span>
             </span>
-            <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${
-              avgComplexity <= 2
+            <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${avgComplexity <= 2
                 ? 'bg-success/15 text-success'
                 : avgComplexity <= 3
-                ? 'bg-warning/15 text-warning'
-                : 'bg-error/15 text-error'
-            }`}>
+                  ? 'bg-warning/15 text-warning'
+                  : 'bg-error/15 text-error'
+              }`}>
               Avg {avgComplexity.toFixed(1)}
             </span>
           </div>

@@ -17,6 +17,29 @@ import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
 
+const BRIEF_STOP_WORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+  'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been',
+  'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+  'could', 'should', 'may', 'might', 'shall', 'can', 'this', 'that',
+  'these', 'those', 'i', 'we', 'you', 'it', 'they', 'me', 'us', 'him',
+  'her', 'them', 'my', 'our', 'your', 'its', 'their', 'as', 'if', 'so',
+  'not', 'no', 'up', 'out', 'all', 'just', 'also', 'then', 'than',
+]);
+
+/** Auto-generate a kebab-case slug from brief text, stripping stop words. Max 60 chars. */
+function briefToSlug(text: string): string {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !BRIEF_STOP_WORDS.has(w));
+  if (words.length === 0) return 'untitled-spec';
+  let slug = words.slice(0, 8).join('-');
+  if (slug.length > 60) slug = words.slice(0, 5).join('-');
+  return slug.slice(0, 60).replace(/-$/, '');
+}
+
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
 function resolveVaultCreds(userId: string, model: string): { apiKey?: string; baseUrl?: string } {
   // Try provider inferred from model registry first
@@ -339,10 +362,10 @@ interface SpecDiffResult {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [workspaceId, title, brief]
+ *             required: [workspaceId, brief]
  *             properties:
  *               workspaceId: { type: string }
- *               title: { type: string, example: "User Authentication" }
+ *               title: { type: string, description: "Optional — auto-generated from brief if omitted", example: "User Authentication" }
  *               brief: { type: string, example: "Add login/register with JWT tokens" }
  *               storyCount: { type: integer, default: 5 }
  *               model: { type: string, example: "claude-sonnet-4-5-20250929" }
@@ -376,11 +399,13 @@ router.post('/generate', async (req: Request, res: Response) => {
     const storyCount: number = Math.min(500, Math.max(1, parseInt(req.body.storyCount) || 8));
     const requestedModel: string | undefined = req.body.model;
 
-    // 1. Validate required fields
-    if (!workspaceId || !title || !brief) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, title (or specName), brief (or specBrief)' });
+    // 1. Validate required fields (title is optional — auto-generated from brief)
+    if (!workspaceId || !brief) {
+      res.status(400).json({ error: 'Missing required fields: workspaceId, brief (or specBrief)' });
       return;
     }
+
+    const effectiveTitle = title || brief;
 
     // 1b. Validate model if provided (allow pass-through for openai-compat provider IDs)
     // No validation gate — any model string is accepted. Unknown models route to openai-compat.
@@ -500,7 +525,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
       `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
-      `Spec title: ${title}`,
+      `Spec title: ${effectiveTitle}`,
       `Spec brief: ${brief}`,
       '',
       'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
@@ -534,7 +559,7 @@ router.post('/generate', async (req: Request, res: Response) => {
 
       const ocResult = await generateSpecViaOpenCode({
         workspacePath: workspace.path as string,
-        title,
+        title: effectiveTitle,
         brief,
         storyCount,
         storyPrefix,
@@ -621,15 +646,17 @@ router.post('/generate', async (req: Request, res: Response) => {
     // 10. Merge diagrams (algorithmic overwrites LLM for storyDeps)
     const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
 
-    // 11. Build slug
-    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    // 11. Build slug — use title if provided, otherwise auto-generate from brief
+    const slug = title
+      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      : briefToSlug(brief);
 
     // 12. WAL event
     const model = resolvedModel;
     db.prepare(
       `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', ?, ?)`
     ).run(slug, JSON.stringify({
-      title, domain, storyCount: parsed.stories.length, provider: usedProvider, model,
+      title: effectiveTitle, domain, storyCount: parsed.stories.length, provider: usedProvider, model,
       hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
       inputTokens: tokenUsage.inputTokens, outputTokens: tokenUsage.outputTokens,
     }));
@@ -655,7 +682,7 @@ router.post('/generate', async (req: Request, res: Response) => {
     try {
       const writeResult = writeSpec(workspace.path as string, {
         slug,
-        title,
+        title: effectiveTitle,
         stories: parsed.stories as any,
         diagrams: allDiagrams as any,
         mermaidDiagram: mermaidDiagram || undefined,
@@ -671,7 +698,7 @@ router.post('/generate', async (req: Request, res: Response) => {
     // 15. Return response
     res.json({
       slug,
-      title,
+      title: effectiveTitle,
       stories: parsed.stories,
       diagrams: allDiagrams,
       mermaidDiagram,
