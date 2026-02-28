@@ -299,6 +299,7 @@ export default function PipelineMonitorPanel() {
     run: PipelineRun;
     stories: StoryResult[];
     specStories?: Array<{ id: string; title: string; agent?: string; reroute?: RerouteInfo }>;
+    runState?: { resumedFromStory?: string | null; currentStory?: string | null; completedStories?: Array<{ storyId: string }>; failedStories?: Array<{ storyId: string }>; skippedStories?: Array<{ storyId: string }> } | null;
   } | null>(null);
   const [expandedStory, setExpandedStory] = useState<string | null>(null);
   const [logLines, setLogLines] = useState<string[]>([]);
@@ -964,6 +965,12 @@ export default function PipelineMonitorPanel() {
                     <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-500/20 text-purple-400 flex items-center gap-1">
                       <RotateCcw className="w-3 h-3" />
                       retry of #{liveRun.retried_from_run_id}
+                    </span>
+                  )}
+                  {selectedRunDetail?.runState?.resumedFromStory && (
+                    <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-amber-500/20 text-amber-400 flex items-center gap-1">
+                      <RefreshCw className="w-3 h-3" />
+                      Resumed from {selectedRunDetail.runState.resumedFromStory}
                     </span>
                   )}
                   {(liveRun.status === 'failed' || liveRun.status === 'partial_failure') && (
