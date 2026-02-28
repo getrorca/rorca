@@ -431,6 +431,42 @@ function removeCodexAgentsMd(state: CodexAgentsMdState): void {
   } catch { /* best-effort cleanup */ }
 }
 
+/** FR-005: When a pipeline run finishes with status='done', snapshot spec version as 'completed'. */
+function markSpecCompleted(specPath: string): void {
+  try {
+    const slug = path.basename(specPath, '.json');
+    // Check if latest spec_versions entry is already 'completed'
+    const latestVersion = db.prepare(
+      `SELECT status FROM spec_versions WHERE spec_slug = ? ORDER BY version DESC LIMIT 1`
+    ).get(slug) as { status: string } | undefined;
+    if (latestVersion?.status === 'completed') return; // already marked
+
+    // Read spec content from filesystem (approved dir is the canonical location)
+    // spec_path stored in pipeline_runs is relative like 'forge/specs/approved/slug.json'
+    // We just need the slug for the version snapshot
+    const run = db.prepare(
+      `SELECT pr.workspace_id, w.path as workspace_path FROM pipeline_runs pr
+       JOIN workspaces w ON w.id = pr.workspace_id
+       WHERE pr.spec_path = ? ORDER BY pr.id DESC LIMIT 1`
+    ).get(specPath) as { workspace_id: string; workspace_path: string } | undefined;
+    if (!run) return;
+
+    const absSpecPath = path.join(run.workspace_path, specPath);
+    if (!fs.existsSync(absSpecPath)) return;
+
+    const content = fs.readFileSync(absSpecPath, 'utf8');
+    const nextVer = ((db.prepare(
+      'SELECT MAX(version) as max_ver FROM spec_versions WHERE spec_slug = ?'
+    ).get(slug) as { max_ver: number | null } | undefined)?.max_ver ?? 0) + 1;
+
+    db.prepare(
+      `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, 'completed')`
+    ).run(slug, nextVer, content);
+  } catch {
+    // Non-fatal — completed status is also derived from pipeline_runs at query time
+  }
+}
+
 const router = Router();
 
 // ─── In-memory output buffers (runId → live stdout/stderr stream) ─────────────
@@ -1341,6 +1377,9 @@ router.post('/trigger', async (req: Request, res: Response) => {
         `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
       ).run(status, runId);
 
+      // FR-005: Mark spec as completed when run succeeds
+      if (status === 'done') markSpecCompleted(specPath);
+
       // Run post-run hooks with RUN_STATUS and RUN_ID env vars
       const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
       const postRunResults = runHooks(workspaceId, 'post_run', cwd, postRunEnv);
@@ -1988,6 +2027,9 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       db.prepare(
         `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
       ).run(status, runId);
+
+      // FR-005: Mark spec as completed when run succeeds
+      if (status === 'done') markSpecCompleted(relativeSpecPath);
 
       const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
       const postRunResults = runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
@@ -2749,6 +2791,9 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       db.prepare(
         `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
       ).run(finalStatus, newRunId);
+
+      // FR-005: Mark spec as completed when retry succeeds
+      if (finalStatus === 'done') markSpecCompleted(originalRun.spec_path);
 
       const walResult = db.prepare(
         `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
