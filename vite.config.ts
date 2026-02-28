@@ -4,6 +4,9 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  // appType 'spa' (default) enables history API fallback — Vite serves index.html
+  // for all non-file requests, so browser refresh on /forge, /pipeline, etc. works.
+  appType: 'spa',
   server: {
     port: 5210,
   },
