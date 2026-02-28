@@ -51,6 +51,8 @@ import {
   findCapableEngine,
   type CapabilityStory,
 } from './tool-capability-checker';
+import { route as routeContext, writeContextFile, type ContextStory } from './context-router';
+import { loadRorcaConfig } from './rorca-config';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -70,6 +72,8 @@ interface UserStory {
   timeoutMinutes?: number;
   /** Per-story agent override. If unset, uses the run-level agentType. */
   agent?: AgentType;
+  /** Tags for context routing (CIE-004). Matched against routing.tags rules. */
+  tags?: string[];
 }
 
 interface SpecJson {
@@ -338,9 +342,20 @@ function buildPrompt(
   cwd: string,
   playbook?: string,
   agentType?: AgentType,
+  contextFilePath?: string,
 ): string {
   const ac = getAcceptance(story);
   const acSection = ac ? `\nAcceptance Criteria:\n${ac}` : '';
+
+  // CIE-004: Read compiled context file and prepend to prompt
+  let contextPreamble = '';
+  if (contextFilePath) {
+    try {
+      contextPreamble = fs.readFileSync(contextFilePath, 'utf-8');
+    } catch {
+      // Non-fatal — proceed without routed context
+    }
+  }
 
   // OpenCode reads skill files from .opencode/skills/<name>/SKILL.md — instruct it to load direction stack
   const openCodeSkillInstruction = agentType === 'opencode'
@@ -357,13 +372,14 @@ function buildPrompt(
   if (mode === 'journey') {
     const journeySkill = playbook ? readWorkspaceFile(cwd, playbook) : '';
     return [
+      contextPreamble,
       'You are simulating real users navigating the application. Read CLAUDE.md for architecture.',
       openCodeSkillInstruction,
       codexAgentsInstruction,
       '', journeySkill, '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   }
 
   if (mode === 'qa') {
@@ -371,6 +387,7 @@ function buildPrompt(
       ? `IMPORTANT: Read ${playbook} first for test patterns, conventions, and section references mentioned in the description.`
       : '';
     return [
+      contextPreamble,
       'You are writing tests for this project. Read CLAUDE.md for architecture and gotchas.',
       openCodeSkillInstruction,
       codexAgentsInstruction,
@@ -389,20 +406,21 @@ function buildPrompt(
       '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   }
 
   // Implementation mode
   const skillContent = readWorkspaceFile(cwd, '.claude', 'skills', 'rorca.md')
     || readWorkspaceFile(cwd, '.claude', 'skills', 'dimitri.md');
   return [
+    contextPreamble,
     'Follow this workflow for implementation:',
     openCodeSkillInstruction,
     codexAgentsInstruction,
     '', skillContent, '', '---', '',
     `Your task (${story.id}):`,
     story.description, acSection,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 // ─── Agent Subprocess Spawning ──────────────────────────────────────────────
@@ -1330,7 +1348,29 @@ async function executeStory(
   if (worktreeInfo) console.log(`  Worktree: ${worktreeInfo.worktreePath}`);
   console.log(`  Timeout: ${timeoutMin}m`);
 
-  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent);
+  // CIE-004: Route context for this story
+  let contextFilePath: string | undefined;
+  try {
+    const rorcaConfig = loadRorcaConfig(config.cwd);
+    const contextStory: ContextStory = {
+      id: story.id,
+      title: story.title,
+      description: story.description,
+      acceptanceCriteria: story.acceptanceCriteria,
+      dependsOn: story.dependsOn,
+      tags: story.tags,
+    };
+    const contextPayload = routeContext(contextStory, rorcaConfig.routing, effectiveCwd);
+    if (contextPayload.totalTokens > 0) {
+      contextFilePath = writeContextFile(contextPayload);
+      console.log(`  [context] Routed ${contextPayload.totalTokens} tokens (${contextPayload.globals.length}g/${contextPayload.scoped.length}s/${contextPayload.tagged.length}t)`);
+    }
+  } catch (err: any) {
+    // Non-fatal — proceed without routed context
+    console.warn(`  [context] Router failed: ${err.message}`);
+  }
+
+  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath);
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
   fs.writeFileSync(promptLogFile, prompt);

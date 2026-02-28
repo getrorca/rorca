@@ -87,7 +87,8 @@
       "dependsOn": [
         "CIE-003"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CIE-005",
