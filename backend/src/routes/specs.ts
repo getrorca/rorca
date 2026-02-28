@@ -396,7 +396,8 @@ router.post('/generate', async (req: Request, res: Response) => {
     const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
     const title: string = req.body.title || req.body.specName;
     const brief: string = req.body.brief || req.body.specBrief;
-    const storyCount: number = Math.min(500, Math.max(1, parseInt(req.body.storyCount) || 8));
+    const rawCount = parseInt(req.body.storyCount);
+    const storyCount: number = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
     const requestedModel: string | undefined = req.body.model;
 
     // 1. Validate required fields (title is optional — auto-generated from brief)
@@ -524,7 +525,9 @@ router.post('/generate', async (req: Request, res: Response) => {
       synthesized,
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
-      `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
+      storyCount === 0
+        ? 'TASK: Generate a software specification JSON. Generate an appropriate number of user stories (typically 3-20) based on the scope and complexity of the brief. Use fewer stories for focused features and more for large system changes.'
+        : `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
       `Spec title: ${effectiveTitle}`,
       `Spec brief: ${brief}`,
       '',
@@ -535,7 +538,9 @@ router.post('/generate', async (req: Request, res: Response) => {
       wantDiagrams ? diagramSchema : '',
       '',
       `Rules:`,
-      `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
+      storyCount === 0
+        ? `- Number stories sequentially starting from ${storyPrefix}-001`
+        : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
       '- Each story needs 3-5 specific testable acceptanceCriteria',
       '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
       '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
@@ -753,7 +758,8 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
 
   // Generate title from brief if not provided
   const title = item.title || item.brief.slice(0, 60).replace(/[^a-zA-Z0-9 ]/g, '').trim();
-  const storyCount = Math.min(500, Math.max(1, item.storyCount || 8));
+  const rawBatchCount = parseInt(String(item.storyCount));
+  const storyCount = rawBatchCount === 0 ? 0 : Math.min(500, Math.max(1, rawBatchCount || 8));
 
   // Fetch direction layers
   const l1Row = db.prepare(
@@ -810,7 +816,9 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     synthesized,
     ...(templateContext ? [templateContext, '---'] : []),
     '---',
-    `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
+    storyCount === 0
+      ? 'TASK: Generate a software specification JSON. Generate an appropriate number of user stories (typically 3-20) based on the scope and complexity of the brief. Use fewer stories for focused features and more for large system changes.'
+      : `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
     `Spec title: ${title}`,
     `Spec brief: ${item.brief}`,
     '',
@@ -820,7 +828,9 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}]}`,
     '',
     `Rules:`,
-    `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
+    storyCount === 0
+      ? `- Number stories sequentially starting from ${storyPrefix}-001`
+      : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
     '- Each story needs 3-5 specific testable acceptanceCriteria',
     '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
     '- Stories should be concrete and implementable, not vague',
