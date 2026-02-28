@@ -1,19 +1,14 @@
-import { Link } from 'react-router-dom';
+import { Link, NavLink } from 'react-router-dom';
 import { Layers, Zap, Github, Keyboard, User, CreditCard, ArrowLeft } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
-import { useActivePanel } from '../routes';
 
 interface SettingsSidebarProps {
-    activeSettingsTab?: SettingsTab;
     onNavigate: (panel: PanelId) => void;
-    onNavigateSettings: (tab: SettingsTab) => void;
     directionDirty?: boolean;
 }
 
-export default function SettingsSidebar({ activeSettingsTab, onNavigate, onNavigateSettings, directionDirty }: SettingsSidebarProps) {
-    const activePanel = useActivePanel();
-
+export default function SettingsSidebar({ onNavigate, directionDirty }: SettingsSidebarProps) {
     const TABS: { id: SettingsTab; label: string; icon: typeof Layers }[] = [
         { id: 'direction', label: 'Direction Stack', icon: Layers },
         { id: 'providers', label: 'Model & Providers', icon: Zap },
@@ -45,25 +40,29 @@ export default function SettingsSidebar({ activeSettingsTab, onNavigate, onNavig
                     </div>
                     <div className="space-y-[1px]">
                         {TABS.map((item) => {
-                            const isActive = (activePanel === 'settings' && activeSettingsTab === item.id) || (activePanel === item.id);
                             const Icon = item.icon;
                             return (
-                                <button
+                                <NavLink
                                     key={item.id}
-                                    onClick={() => onNavigateSettings(item.id)}
-                                    className={`w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] transition-colors ${isActive
-                                        ? 'text-[var(--text)] bg-surface-200 font-medium'
-                                        : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
+                                    to={`/settings/${item.id}`}
+                                    className={({ isActive }) =>
+                                        `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] transition-colors ${isActive
+                                            ? 'text-[var(--text)] bg-surface-200 font-medium'
+                                            : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
                                         }`}
                                 >
-                                    <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
-                                    <span className="truncate">{item.label}</span>
-                                    {item.id === 'direction' && directionDirty && (
-                                        <span className="ml-auto px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
-                                            Unsaved
-                                        </span>
+                                    {({ isActive }) => (
+                                        <>
+                                            <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
+                                            <span className="truncate">{item.label}</span>
+                                            {item.id === 'direction' && directionDirty && (
+                                                <span className="ml-auto px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
+                                                    Unsaved
+                                                </span>
+                                            )}
+                                        </>
                                     )}
-                                </button>
+                                </NavLink>
                             );
                         })}
                     </div>

@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-02-28T22:15:51.171Z",
+  "lastUpdatedAt": "2026-02-28T22:27:06.508Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-02-28T22:15:51.171Z",
       "agentType": "claude",
       "elapsedMs": 311235
+    },
+    {
+      "storyId": "FR-004",
+      "title": "Settings Sub-Routes and SPA Fallback",
+      "status": "passed",
+      "startedAt": "2026-02-28T22:16:00.409Z",
+      "finishedAt": "2026-02-28T22:27:06.507Z",
+      "agentType": "claude",
+      "elapsedMs": 666098
     }
   ],
   "failedStories": [],

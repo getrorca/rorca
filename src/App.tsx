@@ -222,7 +222,9 @@ function AppRoutes() {
         <Route path="activity" element={<PanelRoute panel="activity" />} />
         <Route path="github" element={<PanelRoute panel="github" />} />
         <Route path="workspace-settings" element={<PanelRoute panel="workspace-settings" />} />
-        <Route path="settings" element={<PanelRoute panel="settings" />} />
+        {/* FR-004: Settings with nested sub-tab routes */}
+        <Route path="settings" element={<Navigate to="/settings/direction" replace />} />
+        <Route path="settings/:tab" element={<PanelRoute panel="settings" />} />
         {/* Slide-over nested routes — render Hub underneath, SlideOver opens on top */}
         <Route path="runs/:runId" element={<PanelRoute panel="hub" />} />
         <Route path="specs/:specId/review" element={<PanelRoute panel="hub" />} />
@@ -236,7 +238,7 @@ function AppRoutes() {
 /** Renders the correct panel component based on the panel prop */
 function PanelRoute({ panel }: { panel: PanelId }) {
   const navigate = useAppNavigate();
-  const { navigateToRun, reviewSpecId, navigateToSpecReview, forgeBrief, handleForgeBriefConsumed, settingsTab } = useAppContentContext();
+  const { navigateToRun, reviewSpecId, navigateToSpecReview, forgeBrief, handleForgeBriefConsumed } = useAppContentContext();
 
   return (
     <ErrorBoundary key={panel} label={PANEL_LABELS[panel] || 'Panel'}>
@@ -248,7 +250,6 @@ function PanelRoute({ panel }: { panel: PanelId }) {
         onNavigateToSpecReview={navigateToSpecReview}
         forgeBrief={forgeBrief}
         onForgeBriefConsumed={handleForgeBriefConsumed}
-        settingsTab={settingsTab}
       />
     </ErrorBoundary>
   );
@@ -262,14 +263,13 @@ interface ActivePanelProps {
   onNavigateToSpecReview: (specId: string) => void;
   forgeBrief: string | null;
   onForgeBriefConsumed: () => void;
-  settingsTab: SettingsTab | undefined;
 }
 
-function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed, settingsTab }: ActivePanelProps) {
+function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed }: ActivePanelProps) {
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
     case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
-    case 'stack': return <SettingsPanel initialTab={settingsTab} />;
+    case 'stack': return <SettingsPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'memory': return <MemoryPanel />;
     case 'queue': return <ReviewQueuePanel />;
@@ -290,7 +290,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'activity': return <ActivityFeedPanel />;
     case 'github': return <GitHubSettingsPanel />;
     case 'workspace-settings': return <WorkspaceSettingsPanel />;
-    case 'settings': return <SettingsPanel initialTab={settingsTab} />;
+    case 'settings': return <SettingsPanel />;
     default: return null;
   }
 }
@@ -308,7 +308,6 @@ interface AppContentContextValue {
   forgeBrief: string | null;
   handleSendToForge: (brief: string) => void;
   handleForgeBriefConsumed: () => void;
-  settingsTab: SettingsTab | undefined;
   navigateToSettingsTab: (tab: SettingsTab) => void;
 }
 
@@ -330,7 +329,6 @@ function AppLayout() {
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
   const [queueCount, setQueueCount] = useState(0);
 
   // Derive activeRunId from URL path /runs/:runId
@@ -380,13 +378,12 @@ function AppLayout() {
   // Navigate to a panel — uses router
   const handleNavigate = useCallback((panel: PanelId) => {
     navigate(panel);
-    if (panel !== 'settings') setSettingsTab(undefined);
   }, [navigate]);
 
+  // FR-004: Navigate to a specific settings sub-tab via URL
   const navigateToSettingsTab = useCallback((tab: SettingsTab) => {
-    setSettingsTab(tab);
-    handleNavigate('settings');
-  }, [handleNavigate]);
+    routerNavigate(`/settings/${tab}`);
+  }, [routerNavigate]);
 
   // Global keyboard shortcuts
   const hotkeys = useMemo<HotkeyBinding[]>(() => [
@@ -418,9 +415,8 @@ function AppLayout() {
     forgeBrief,
     handleSendToForge,
     handleForgeBriefConsumed,
-    settingsTab,
     navigateToSettingsTab,
-  }), [navigateToRun, navigateBackFromRun, activeRunId, reviewSpecId, navigateToSpecReview, forgeBrief, handleSendToForge, handleForgeBriefConsumed, settingsTab, navigateToSettingsTab]);
+  }), [navigateToRun, navigateBackFromRun, activeRunId, reviewSpecId, navigateToSpecReview, forgeBrief, handleSendToForge, handleForgeBriefConsumed, navigateToSettingsTab]);
 
   return (
     <AppContentContext.Provider value={contextValue}>
@@ -429,9 +425,7 @@ function AppLayout() {
           <ResizableSidebar>
             {isSettingsContext ? (
               <SettingsSidebar
-                activeSettingsTab={settingsTab}
                 onNavigate={handleNavigate}
-                onNavigateSettings={navigateToSettingsTab}
               />
             ) : (
               <Sidebar

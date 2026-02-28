@@ -1,6 +1,10 @@
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, useParams } from 'react-router-dom';
 import { useCallback } from 'react';
 import type { PanelId } from './components/Sidebar';
+import type { SettingsTab } from './panels/SettingsPanel';
+
+/** Valid settings sub-tabs for URL validation */
+const VALID_SETTINGS_TABS: readonly SettingsTab[] = ['direction', 'providers', 'github', 'shortcuts', 'account', 'billing'] as const;
 
 /**
  * Maps every PanelId to its URL path segment.
@@ -53,6 +57,8 @@ export function pathToPanelId(pathname: string): PanelId {
   // Nested slide-over routes resolve to the underlying panel
   if (/^\/runs\/\d+/.test(pathname)) return 'hub';
   if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'hub';
+  // FR-004: /settings/* nested routes all resolve to 'settings' panel
+  if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
   return PATH_TO_PANEL[pathname] ?? 'hub';
 }
 
@@ -79,4 +85,17 @@ export function useAppNavigate() {
 export function useActivePanel(): PanelId {
   const location = useLocation();
   return pathToPanelId(location.pathname);
+}
+
+/**
+ * FR-004: Derive the active settings tab from the route param.
+ * Must be used inside a route with a :tab param (e.g. /settings/:tab).
+ * Returns 'direction' as fallback for invalid/missing tab.
+ */
+export function useActiveSettingsTab(): SettingsTab {
+  const { tab } = useParams<{ tab: string }>();
+  if (tab && (VALID_SETTINGS_TABS as readonly string[]).includes(tab)) {
+    return tab as SettingsTab;
+  }
+  return 'direction';
 }
