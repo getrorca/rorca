@@ -2,7 +2,7 @@
   "specId": "rorca-context-intent-engine",
   "runId": 795,
   "startedAt": "2026-02-28T17:47:44.308Z",
-  "lastUpdatedAt": "2026-02-28T18:02:29.158Z",
+  "lastUpdatedAt": "2026-02-28T18:17:08.822Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -372,6 +372,15 @@
       "finishedAt": "2026-02-28T18:02:29.158Z",
       "agentType": "claude",
       "elapsedMs": 878671
+    },
+    {
+      "storyId": "CIE-018",
+      "title": "Context/Intent Engine Integration Tests",
+      "status": "passed",
+      "startedAt": "2026-02-28T18:02:38.696Z",
+      "finishedAt": "2026-02-28T18:17:08.822Z",
+      "agentType": "claude",
+      "elapsedMs": 870126
     }
   ],
   "failedStories": [],
