@@ -180,8 +180,78 @@ router.delete('/entry', (req: Request, res: Response) => {
 /**
  * @swagger
  * /api/memory/proposals:
+ *   get:
+ *     summary: Get cached memory proposals for a workspace
+ *     description: Returns persisted proposals from memory_proposals table. Supports filtering by status.
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: true
+ *       - name: status
+ *         in: query
+ *         description: Filter by status (pending, approved, rejected, dismissed). Default pending.
+ *       - name: runId
+ *         in: query
+ *         description: Filter by run ID
+ */
+router.get('/proposals', (req: Request, res: Response) => {
+  const { workspaceId, status, runId } = req.query;
+  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+
+  let sql = 'SELECT * FROM memory_proposals WHERE workspace_id = ?';
+  const params: (string | number)[] = [workspaceId as string];
+
+  if (status) {
+    sql += ' AND status = ?';
+    params.push(status as string);
+  } else {
+    sql += " AND status = 'pending'";
+  }
+
+  if (runId) {
+    sql += ' AND run_id = ?';
+    params.push(parseInt(runId as string, 10));
+  }
+
+  sql += ' ORDER BY proposed_at DESC';
+
+  const rows = db.prepare(sql).all(...params) as Array<{
+    id: number;
+    proposal_id: string;
+    run_id: number;
+    workspace_id: string;
+    category: string;
+    title: string;
+    rule: string;
+    context: string;
+    source_story: string;
+    status: string;
+    proposed_at: string;
+    resolved_at: string | null;
+  }>;
+
+  const items = rows.map(r => ({
+    proposalId: r.proposal_id,
+    runId: r.run_id,
+    date: r.proposed_at.slice(0, 10),
+    category: r.category,
+    title: r.title,
+    rule: r.rule,
+    context: r.context,
+    source: r.source_story,
+    status: r.status,
+    proposedAt: r.proposed_at,
+    resolvedAt: r.resolved_at,
+  }));
+
+  res.json({ items, total: items.length });
+});
+
+/**
+ * @swagger
+ * /api/memory/proposals:
  *   post:
- *     summary: Approve or reject a proposed memory entry from post-run synthesis
+ *     summary: Approve, reject, or edit proposed memory entries from post-run synthesis
  */
 router.post('/proposals', (req: Request, res: Response) => {
   const { workspaceId, proposals } = req.body as {
@@ -204,6 +274,10 @@ router.post('/proposals', (req: Request, res: Response) => {
   const ledgerPath = getLedgerPath(workspaceId);
   const results: Array<{ proposalId: string; action: string; success: boolean }> = [];
 
+  const updateStmt = db.prepare(
+    `UPDATE memory_proposals SET status = ?, resolved_at = datetime('now') WHERE proposal_id = ? AND workspace_id = ?`
+  );
+
   for (const p of proposals) {
     if (p.action === 'approve') {
       const entryToAppend: MemoryEntry = {
@@ -211,9 +285,11 @@ router.post('/proposals', (req: Request, res: Response) => {
         date: p.entry.date || todayDate(),
       };
       append(wsPath, entryToAppend, ledgerPath);
+      updateStmt.run('approved', p.proposalId, workspaceId);
       results.push({ proposalId: p.proposalId, action: 'approve', success: true });
     } else if (p.action === 'reject') {
       logRejected(wsPath, p.entry, p.proposalId);
+      updateStmt.run('rejected', p.proposalId, workspaceId);
       results.push({ proposalId: p.proposalId, action: 'reject', success: true });
     } else if (p.action === 'edit') {
       const edited: MemoryEntry = {
@@ -222,11 +298,80 @@ router.post('/proposals', (req: Request, res: Response) => {
         date: p.entry.date || todayDate(),
       };
       append(wsPath, edited, ledgerPath);
+      // Also update the DB row with the edited content
+      db.prepare(
+        `UPDATE memory_proposals SET status = 'approved', resolved_at = datetime('now'), title = ?, rule = ?, context = ?, category = ? WHERE proposal_id = ? AND workspace_id = ?`
+      ).run(edited.title, edited.rule, edited.context, edited.category, p.proposalId, workspaceId);
       results.push({ proposalId: p.proposalId, action: 'edit', success: true });
     }
   }
 
   res.json({ results });
+});
+
+/**
+ * @swagger
+ * /api/memory/proposals/dismiss:
+ *   post:
+ *     summary: Dismiss proposals (user can return to review later)
+ */
+router.post('/proposals/dismiss', (req: Request, res: Response) => {
+  const { workspaceId, proposalIds } = req.body as {
+    workspaceId: string;
+    proposalIds: string[];
+  };
+
+  if (!workspaceId || !proposalIds || !Array.isArray(proposalIds)) {
+    return res.status(400).json({ error: 'workspaceId and proposalIds array required' });
+  }
+
+  const stmt = db.prepare(
+    `UPDATE memory_proposals SET status = 'dismissed', resolved_at = datetime('now') WHERE proposal_id = ? AND workspace_id = ?`
+  );
+
+  let dismissed = 0;
+  for (const id of proposalIds) {
+    const r = stmt.run(id, workspaceId);
+    dismissed += r.changes;
+  }
+
+  res.json({ dismissed });
+});
+
+/**
+ * @swagger
+ * /api/memory/proposals/undismiss:
+ *   post:
+ *     summary: Restore dismissed proposals back to pending for re-review
+ */
+router.post('/proposals/undismiss', (req: Request, res: Response) => {
+  const { workspaceId, proposalIds } = req.body as {
+    workspaceId: string;
+    proposalIds?: string[];
+  };
+
+  if (!workspaceId) {
+    return res.status(400).json({ error: 'workspaceId required' });
+  }
+
+  let restored = 0;
+  if (proposalIds && proposalIds.length > 0) {
+    const stmt = db.prepare(
+      `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE proposal_id = ? AND workspace_id = ? AND status = 'dismissed'`
+    );
+    for (const id of proposalIds) {
+      const r = stmt.run(id, workspaceId);
+      restored += r.changes;
+    }
+  } else {
+    // Restore all dismissed for this workspace
+    const r = db.prepare(
+      `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE workspace_id = ? AND status = 'dismissed'`
+    ).run(workspaceId);
+    restored = r.changes;
+  }
+
+  res.json({ restored });
 });
 
 /**

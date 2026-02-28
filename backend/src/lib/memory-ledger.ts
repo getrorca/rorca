@@ -326,13 +326,21 @@ export function getContextSnippet(workspacePath: string, n: number = 20, ledgerP
 
 // ─── Post-Run Synthesis Prompt ──────────────────────────────────────────────
 
+export interface SynthesisContext {
+  runStatus: string;
+  diffs: string;
+  walEvents: string;
+  errorMessages: string;
+}
+
 /**
  * Build the prompt for post-run memory synthesis.
- * Given story results and diffs, asks the LLM to propose new ledger entries.
+ * Given story results, diffs, WAL events, and errors, asks the LLM to propose new ledger entries.
  */
 export function buildSynthesisPrompt(
   storyResults: Array<{ id: string; title: string; status: string; diff?: string }>,
   existingEntries: MemoryEntry[],
+  ctx?: SynthesisContext,
 ): string {
   const existingTitles = existingEntries.map(e => `- [${e.category}] ${e.title}`).join('\n');
   const storyBlock = storyResults.map(s => {
@@ -340,16 +348,34 @@ export function buildSynthesisPrompt(
     return `### ${s.id}: ${s.title} (${s.status})${diffSection}`;
   }).join('\n\n');
 
-  return `You are analyzing completed pipeline stories to extract reusable decisions, patterns, and gotchas for the project memory ledger.
+  const runStatusSection = ctx?.runStatus ? `\n## Run Status\nThe pipeline run finished with status: **${ctx.runStatus}**\n` : '';
 
+  const diffsSection = ctx?.diffs ? `\n## Git Diffs (commits from this run)\n\`\`\`\n${ctx.diffs}\n\`\`\`\n` : '';
+
+  const walSection = ctx?.walEvents ? `\n## WAL Event Timeline\n\`\`\`\n${ctx.walEvents}\n\`\`\`\n` : '';
+
+  const errorSection = ctx?.errorMessages ? `\n## Error Messages (failed stories)\n\`\`\`\n${ctx.errorMessages}\n\`\`\`\n` : '';
+
+  return `You are analyzing a completed pipeline run to extract reusable decisions, patterns, and gotchas for the project memory ledger.
+${runStatusSection}
 ## Existing Memory Entries
 ${existingTitles || '(none)'}
 
 ## Completed Stories
 ${storyBlock}
-
+${diffsSection}${walSection}${errorSection}
 ## Instructions
-Review the story results and diffs above. Propose new memory ledger entries for decisions, patterns, conventions, or gotchas that would be valuable for future stories. Each entry must be:
+Review the story results, diffs, timeline, and errors above. Propose new memory ledger entries for decisions, patterns, conventions, or gotchas that would be valuable for future stories.
+
+Auto-detect categories from the data:
+- **Bug Fix**: From failed→passed patterns or error resolution
+- **Convention**: From repeated code patterns across stories
+- **Architecture**: From structural changes (new files, directory patterns)
+- **Gotcha**: From error messages, timeouts, or unexpected failures
+- **Pattern**: From recurring implementation approaches
+- **Decision**: From significant design choices visible in diffs
+
+Each entry must be:
 - **Actionable**: A clear rule, not just an observation
 - **Non-duplicate**: Not already captured in existing entries above
 - **Categorized**: One of Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha
