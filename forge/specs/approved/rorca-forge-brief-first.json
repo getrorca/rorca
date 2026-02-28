@@ -41,9 +41,8 @@
       "dependsOn": [
         "FG-001"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story FG-002"
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "FG-003",
@@ -62,9 +61,7 @@
         "FG-001",
         "FG-002"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story FG-003"
+      "passes": false
     },
     {
       "id": "FG-004",
@@ -83,9 +80,7 @@
         "FG-002",
         "FG-003"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story FG-004"
+      "passes": false
     },
     {
       "id": "FG-005",
@@ -102,9 +97,7 @@
         "FG-001",
         "FG-002"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story FG-005"
+      "passes": false
     },
     {
       "id": "FG-006",
@@ -119,9 +112,7 @@
       "dependsOn": [
         "FG-002"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story FG-006"
+      "passes": false
     }
   ]
 }

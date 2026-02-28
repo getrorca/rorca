@@ -109,13 +109,13 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   // The effective slug that will be used (manual specName takes precedence)
   const effectiveSlug = useMemo(() => specName || previewSlug, [specName, previewSlug]);
 
-  // Auto-resize textarea between 6 and 16 rows
+  // Auto-resize textarea between 4 and 16 rows
   const autoResizeBrief = useCallback(() => {
     const el = briefRef.current;
     if (!el) return;
     el.style.height = 'auto';
     const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
-    const minH = lineHeight * 6;
+    const minH = lineHeight * 4;
     const maxH = lineHeight * 16;
     el.style.height = `${Math.min(maxH, Math.max(minH, el.scrollHeight))}px`;
   }, []);
@@ -127,6 +127,13 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
   // Auto-resize on mount and when brief changes
   useEffect(() => { autoResizeBrief(); }, [specBrief, autoResizeBrief]);
+
+  // Auto-focus brief on mount
+  useEffect(() => {
+    if (!initialBrief) {
+      setTimeout(() => briefRef.current?.focus(), 50);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Apply initialBrief from command palette
   useEffect(() => {
@@ -334,235 +341,11 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
           {/* Left pane: Form (~50% width) */}
           <div className="flex-1 flex flex-col bg-bg min-w-0">
             <div className="flex-1 overflow-y-auto">
-              <div className="max-w-xl mx-auto px-6 py-6 space-y-8">
+              <div className="max-w-xl mx-auto px-6 py-6 space-y-6">
 
-                {/* Section 1: Spec Identity */}
+                {/* Section 1: Brief (primary input — first and most prominent) */}
                 <section>
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted mb-4">
-                    Spec Identity
-                  </h3>
-                  <div className="space-y-4">
-                    <Field label="Domain">
-                      <input
-                        type="text"
-                        value={domain}
-                        onChange={(e) => setDomain(e.target.value)}
-                        placeholder="backend, frontend, infra"
-                        className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
-                      />
-                    </Field>
-                    <Field label="Target Workspace">
-                      <span className="inline-flex items-center px-2.5 py-1 rounded text-xs font-medium bg-accent/10 text-accent border border-accent/20">
-                        {workspace?.name ?? workspaceId}
-                      </span>
-                    </Field>
-                  </div>
-                </section>
-
-                {/* Section 2: Advanced Options (collapsed by default) */}
-                <section>
-                  <button
-                    onClick={() => setOverridesOpen(!overridesOpen)}
-                    aria-expanded={overridesOpen}
-                    aria-label="Toggle advanced options"
-                    className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-text transition-colors w-full"
-                  >
-                    <svg
-                      className={`w-3 h-3 transition-transform ${overridesOpen ? 'rotate-90' : ''}`}
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                    Advanced Options
-                  </button>
-                  {overridesOpen && (
-                    <div className="mt-4 space-y-4">
-                      <Field label="Spec Name (optional)" error={specNameError}>
-                        <input
-                          type="text"
-                          value={specName}
-                          onChange={(e) => setSpecName(e.target.value)}
-                          onBlur={() => validateSpecName(specName)}
-                          placeholder="auto-generated from brief"
-                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
-                        />
-                        <p className="text-xs text-muted/60 mt-1">
-                          Leave blank to auto-generate from your brief
-                        </p>
-                      </Field>
-                      <Field label="L4 Spec Brief">
-                        <textarea
-                          rows={4}
-                          value={l4Override}
-                          onChange={(e) => setL4Override(e.target.value)}
-                          placeholder="One paragraph describing what this spec builds"
-                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
-                        />
-                      </Field>
-                      <Field label="L5 Story Annotations">
-                        <textarea
-                          rows={4}
-                          value={l5Override}
-                          onChange={(e) => setL5Override(e.target.value)}
-                          placeholder="Per-story hints, constraints, or design decisions"
-                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
-                        />
-                      </Field>
-                      <p className="text-xs text-muted/70">
-                        These override L4/L5 from the Direction Stack Composer for this generation only
-                      </p>
-                    </div>
-                  )}
-                </section>
-
-                {/* Section 3: Spec Parameters */}
-                <section>
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted mb-4">
-                    Spec Parameters
-                  </h3>
-                  <div className="space-y-4">
-                    <Field label={
-                      <span className="flex items-center gap-2">
-                        LLM Model
-                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${activeProvider === 'claude-cli'
-                            ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                            : 'bg-accent/10 text-accent border border-accent/20'
-                          }`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${activeProvider === 'claude-cli' ? 'bg-green-500' : 'bg-accent'
-                            }`} />
-                          {activeProvider === 'claude-cli' ? 'Subscription' :
-                            activeProvider === 'anthropic' ? 'Anthropic API' :
-                              activeProvider === 'openai-compat' ? 'OpenAI Compat' :
-                                activeProvider === 'openrouter' ? 'OpenRouter' :
-                                  activeProvider}
-                        </span>
-                      </span>
-                    }>
-                      <select
-                        value={selectedModel || defaultModelId || ''}
-                        onChange={(e) => setSelectedModel(e.target.value)}
-                        className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center]"
-                        aria-label="Select LLM model"
-                      >
-                        {availableModels.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.label} — {m.provider}{m.recommended ? ' (Recommended)' : ''} · ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
-
-                    <div className="flex gap-4">
-                      <Field label="Story Count" className="w-40">
-                        <div className="flex gap-2">
-                          <select
-                            value={showCustomInput ? 'custom' : String(storyCount)}
-                            onChange={(e) => handleStoryCountSelect(e.target.value)}
-                            className="flex-1 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center]"
-                            aria-label="Select story count"
-                          >
-                            {STORY_COUNT_PRESETS.map((n) => (
-                              <option key={n} value={n}>{n} stories</option>
-                            ))}
-                            <option value="custom">Custom</option>
-                          </select>
-                          {showCustomInput && (
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={storyCountRaw}
-                              onChange={(e) => handleCustomCountChange(e.target.value)}
-                              onBlur={handleCustomCountBlur}
-                              className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center"
-                              aria-label="Custom story count"
-                              autoFocus
-                            />
-                          )}
-                        </div>
-                      </Field>
-                      <Field label="Story Prefix" className="w-28">
-                        <input
-                          type="text"
-                          maxLength={4}
-                          value={storyPrefix}
-                          onChange={(e) => handleStoryPrefixChange(e.target.value)}
-                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors font-mono"
-                        />
-                      </Field>
-                    </div>
-
-                    <div className="space-y-3">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={includeDiagram}
-                          onChange={(e) => setIncludeDiagram(e.target.checked)}
-                          className="w-4 h-4 rounded border-border bg-panel accent-accent"
-                        />
-                        <span className="text-sm text-text">Include diagram</span>
-                      </label>
-
-                      {includeDiagram && (
-                        <div className="ml-6 space-y-2">
-                          <RadioOption
-                            name="diagramType"
-                            value="flowchart"
-                            checked={diagramType === 'flowchart'}
-                            onChange={() => setDiagramType('flowchart')}
-                            label="Mermaid flowchart"
-                          />
-                          <RadioOption
-                            name="diagramType"
-                            value="sequenceDiagram"
-                            checked={diagramType === 'sequenceDiagram'}
-                            onChange={() => setDiagramType('sequenceDiagram')}
-                            label="Mermaid sequenceDiagram"
-                          />
-                          <RadioOption
-                            name="diagramType"
-                            value="ascii"
-                            checked={diagramType === 'ascii'}
-                            onChange={() => setDiagramType('ascii')}
-                            label="ASCII block"
-                          />
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="space-y-2">
-                      <span className="text-xs font-medium text-muted">Output Format</span>
-                      <div className="space-y-2">
-                        <RadioOption
-                          name="outputFormat"
-                          value="json"
-                          checked={outputFormat === 'json'}
-                          onChange={() => setOutputFormat('json')}
-                          label="JSON for run-loop.sh"
-                        />
-                        <RadioOption
-                          name="outputFormat"
-                          value="markdown"
-                          checked={outputFormat === 'markdown'}
-                          onChange={() => setOutputFormat('markdown')}
-                          label="Markdown spec doc"
-                        />
-                        <RadioOption
-                          name="outputFormat"
-                          value="both"
-                          checked={outputFormat === 'both'}
-                          onChange={() => setOutputFormat('both')}
-                          label="Both"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </section>
-
-                {/* Section 4: Spec Brief (main input) */}
-                <section>
-                  <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center justify-between mb-3">
                     <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
                       Spec Brief
                     </h3>
@@ -573,16 +356,14 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                       Start from template &rarr;
                     </button>
                   </div>
-                  <Field label="What does this spec build?">
-                    <textarea
-                      ref={briefRef}
-                      rows={6}
-                      value={specBrief}
-                      onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
-                      placeholder="Describe what you want to build..."
-                      className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
-                    />
-                  </Field>
+                  <textarea
+                    ref={briefRef}
+                    rows={4}
+                    value={specBrief}
+                    onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
+                    placeholder="Describe what you want to build..."
+                    className="w-full px-3 py-3 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors resize-none font-mono"
+                  />
                   <div className="flex items-center justify-between mt-1.5">
                     <div className="flex items-center gap-3">
                       <span className={`text-xs ${estimatedTokens >= 2000 ? 'text-warning' : 'text-muted/60'}`}>
@@ -598,14 +379,16 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                       </span>
                     )}
                   </div>
-                  {effectiveSlug && (
-                    <p className="text-xs text-muted/60 mt-2 font-mono truncate">
-                      {effectiveSlug}
-                    </p>
-                  )}
                 </section>
 
-                {/* Generate Button / Progress Indicator */}
+                {/* Section 2: Auto-generated spec name preview */}
+                {effectiveSlug && (
+                  <p className="text-xs text-muted/60 font-mono truncate -mt-3">
+                    {effectiveSlug}
+                  </p>
+                )}
+
+                {/* Section 3: Generate Spec + Quick Run buttons */}
                 <div className="space-y-2">
                   {isGenerating || (generateError && !generatedSpec) ? (
                     <SpecForgeProgress
@@ -651,6 +434,226 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                     </>
                   ) : null}
                 </div>
+
+                {/* Section 4: Advanced Options (collapsed by default) */}
+                <section>
+                  <button
+                    onClick={() => setOverridesOpen(!overridesOpen)}
+                    aria-expanded={overridesOpen}
+                    aria-label="Toggle advanced options"
+                    className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-text transition-colors w-full"
+                  >
+                    <svg
+                      className={`w-3 h-3 transition-transform ${overridesOpen ? 'rotate-90' : ''}`}
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                    Advanced Options
+                  </button>
+                  {overridesOpen && (
+                    <div className="mt-4 space-y-6">
+                      {/* Spec Identity */}
+                      <div className="space-y-4">
+                        <h4 className="text-xs font-medium text-muted/80">Spec Identity</h4>
+                        <Field label="Spec Name (optional)" error={specNameError}>
+                          <input
+                            type="text"
+                            value={specName}
+                            onChange={(e) => setSpecName(e.target.value)}
+                            onBlur={() => validateSpecName(specName)}
+                            placeholder="auto-generated from brief"
+                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
+                          />
+                          <p className="text-xs text-muted/60 mt-1">
+                            Leave blank to auto-generate from your brief
+                          </p>
+                        </Field>
+                        <Field label="Domain">
+                          <input
+                            type="text"
+                            value={domain}
+                            onChange={(e) => setDomain(e.target.value)}
+                            placeholder="backend, frontend, infra"
+                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
+                          />
+                        </Field>
+                        <Field label="Target Workspace">
+                          <span className="inline-flex items-center px-2.5 py-1 rounded text-xs font-medium bg-accent/10 text-accent border border-accent/20">
+                            {workspace?.name ?? workspaceId}
+                          </span>
+                        </Field>
+                      </div>
+
+                      {/* Direction Stack Overrides */}
+                      <div className="space-y-4">
+                        <h4 className="text-xs font-medium text-muted/80">Direction Stack Overrides</h4>
+                        <Field label="L4 Spec Brief">
+                          <textarea
+                            rows={4}
+                            value={l4Override}
+                            onChange={(e) => setL4Override(e.target.value)}
+                            placeholder="One paragraph describing what this spec builds"
+                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
+                          />
+                        </Field>
+                        <Field label="L5 Story Annotations">
+                          <textarea
+                            rows={4}
+                            value={l5Override}
+                            onChange={(e) => setL5Override(e.target.value)}
+                            placeholder="Per-story hints, constraints, or design decisions"
+                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
+                          />
+                        </Field>
+                        <p className="text-xs text-muted/70">
+                          These override L4/L5 from the Direction Stack Composer for this generation only
+                        </p>
+                      </div>
+
+                      {/* Spec Parameters */}
+                      <div className="space-y-4">
+                        <h4 className="text-xs font-medium text-muted/80">Spec Parameters</h4>
+                        <Field label={
+                          <span className="flex items-center gap-2">
+                            LLM Model
+                            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${activeProvider === 'claude-cli'
+                                ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                                : 'bg-accent/10 text-accent border border-accent/20'
+                              }`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${activeProvider === 'claude-cli' ? 'bg-green-500' : 'bg-accent'
+                                }`} />
+                              {activeProvider === 'claude-cli' ? 'Subscription' :
+                                activeProvider === 'anthropic' ? 'Anthropic API' :
+                                  activeProvider === 'openai-compat' ? 'OpenAI Compat' :
+                                    activeProvider === 'openrouter' ? 'OpenRouter' :
+                                      activeProvider}
+                            </span>
+                          </span>
+                        }>
+                          <select
+                            value={selectedModel || defaultModelId || ''}
+                            onChange={(e) => setSelectedModel(e.target.value)}
+                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center]"
+                            aria-label="Select LLM model"
+                          >
+                            {availableModels.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.label} — {m.provider}{m.recommended ? ' (Recommended)' : ''} · ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+
+                        <div className="flex gap-4">
+                          <Field label="Story Count" className="w-40">
+                            <div className="flex gap-2">
+                              <select
+                                value={showCustomInput ? 'custom' : String(storyCount)}
+                                onChange={(e) => handleStoryCountSelect(e.target.value)}
+                                className="flex-1 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center]"
+                                aria-label="Select story count"
+                              >
+                                {STORY_COUNT_PRESETS.map((n) => (
+                                  <option key={n} value={n}>{n} stories</option>
+                                ))}
+                                <option value="custom">Custom</option>
+                              </select>
+                              {showCustomInput && (
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  value={storyCountRaw}
+                                  onChange={(e) => handleCustomCountChange(e.target.value)}
+                                  onBlur={handleCustomCountBlur}
+                                  className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center"
+                                  aria-label="Custom story count"
+                                  autoFocus
+                                />
+                              )}
+                            </div>
+                          </Field>
+                          <Field label="Story Prefix" className="w-28">
+                            <input
+                              type="text"
+                              maxLength={4}
+                              value={storyPrefix}
+                              onChange={(e) => handleStoryPrefixChange(e.target.value)}
+                              className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors font-mono"
+                            />
+                          </Field>
+                        </div>
+
+                        <div className="space-y-3">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={includeDiagram}
+                              onChange={(e) => setIncludeDiagram(e.target.checked)}
+                              className="w-4 h-4 rounded border-border bg-panel accent-accent"
+                            />
+                            <span className="text-sm text-text">Include diagram</span>
+                          </label>
+
+                          {includeDiagram && (
+                            <div className="ml-6 space-y-2">
+                              <RadioOption
+                                name="diagramType"
+                                value="flowchart"
+                                checked={diagramType === 'flowchart'}
+                                onChange={() => setDiagramType('flowchart')}
+                                label="Mermaid flowchart"
+                              />
+                              <RadioOption
+                                name="diagramType"
+                                value="sequenceDiagram"
+                                checked={diagramType === 'sequenceDiagram'}
+                                onChange={() => setDiagramType('sequenceDiagram')}
+                                label="Mermaid sequenceDiagram"
+                              />
+                              <RadioOption
+                                name="diagramType"
+                                value="ascii"
+                                checked={diagramType === 'ascii'}
+                                onChange={() => setDiagramType('ascii')}
+                                label="ASCII block"
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-2">
+                          <span className="text-xs font-medium text-muted">Output Format</span>
+                          <div className="space-y-2">
+                            <RadioOption
+                              name="outputFormat"
+                              value="json"
+                              checked={outputFormat === 'json'}
+                              onChange={() => setOutputFormat('json')}
+                              label="JSON for run-loop.sh"
+                            />
+                            <RadioOption
+                              name="outputFormat"
+                              value="markdown"
+                              checked={outputFormat === 'markdown'}
+                              onChange={() => setOutputFormat('markdown')}
+                              label="Markdown spec doc"
+                            />
+                            <RadioOption
+                              name="outputFormat"
+                              value="both"
+                              checked={outputFormat === 'both'}
+                              onChange={() => setOutputFormat('both')}
+                              label="Both"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </section>
 
                 {/* Inline spec preview after generation */}
                 {generatedSpec && !isGenerating && (
