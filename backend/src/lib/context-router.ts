@@ -14,6 +14,7 @@ import * as os from 'os';
 import micromatch from 'micromatch';
 import type { RoutingConfig, RoutingScope } from './rorca-config';
 import { getContextSnippet } from './memory-ledger';
+import type { MonorepoPackage } from './workspace-echolocation';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -91,6 +92,55 @@ export function extractPathMentions(story: ContextStory): string[] {
   }
 
   return [...paths];
+}
+
+// ─── CIE-017: Cross-App Story Detection ──────────────────────────────────────
+
+/**
+ * Detect which monorepo apps a story references.
+ * Matches by:
+ * 1. Explicit path mentions (apps/web/...) — already handled by extractPathMentions
+ * 2. App/package directory name mentions in story text (e.g., "web app", "api service")
+ * 3. Package name mentions (e.g., "@acme/ui")
+ *
+ * Returns synthetic path references that will match scope globs.
+ */
+export function detectCrossAppPaths(
+  story: ContextStory,
+  apps: MonorepoPackage[],
+): string[] {
+  if (apps.length === 0) return [];
+
+  const texts = [
+    story.title,
+    story.description,
+    ...(story.acceptanceCriteria ?? []),
+  ].filter(Boolean).join('\n').toLowerCase();
+
+  const syntheticPaths: string[] = [];
+
+  for (const app of apps) {
+    const dirName = path.basename(app.path).toLowerCase();
+    const packageName = app.name.toLowerCase();
+    // Check for directory name reference (e.g., "the web app", "api server")
+    // Use word boundary to avoid false positives (e.g., "web" matching "webfetch")
+    const dirPattern = new RegExp(`\\b${escapeRegExp(dirName)}\\b`, 'i');
+    if (dirPattern.test(texts)) {
+      // Add a synthetic path that will match the scope glob
+      syntheticPaths.push(`${app.path}/index`);
+    } else if (packageName !== dirName) {
+      // Also check the full package name (e.g., "@acme/ui")
+      if (texts.includes(packageName)) {
+        syntheticPaths.push(`${app.path}/index`);
+      }
+    }
+  }
+
+  return syntheticPaths;
+}
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ─── Core Router ────────────────────────────────────────────────────────────
@@ -203,11 +253,14 @@ export function enforceBudget(
 /**
  * Route context for a story: compile globals + scoped + tagged files,
  * resolve conflicts, enforce token budget, return ContextPayload.
+ *
+ * @param monorepoApps - Optional: pass monorepo app list for cross-app detection (CIE-017)
  */
 export function route(
   story: ContextStory,
   config: RoutingConfig,
   workspacePath: string,
+  monorepoApps?: MonorepoPackage[],
 ): ContextPayload {
   const scored: ScoredFile[] = [];
 
@@ -227,6 +280,14 @@ export function route(
 
   // 2. Path-based scoping — predict paths from story text, match against scope globs
   const predictedPaths = extractPathMentions(story);
+
+  // CIE-017: Cross-app detection — if story references multiple monorepo apps by name,
+  // add synthetic paths so their scopes get matched
+  if (monorepoApps && monorepoApps.length > 0) {
+    const crossAppPaths = detectCrossAppPaths(story, monorepoApps);
+    predictedPaths.push(...crossAppPaths);
+  }
+
   const matchedScopes = matchScopes(predictedPaths, config.scopes);
 
   // Also match story dependsOn paths (dependency chains often share file areas)

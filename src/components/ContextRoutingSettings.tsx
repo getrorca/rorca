@@ -19,6 +19,7 @@ import {
   Save, Loader2, Check, ChevronRight, ChevronDown,
   Folder, FolderOpen, FileText, Plus, Trash2, X,
   Code, Eye, Download, Upload, Wand2, Tag, AlertCircle,
+  Boxes, Layers,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 
@@ -69,6 +70,36 @@ interface SkillFile {
 interface ValidationError {
   path: string;
   message: string;
+}
+
+// CIE-017: Monorepo types
+interface MonorepoStackItem {
+  name: string;
+  version?: string;
+  source: string;
+}
+
+interface MonorepoApp {
+  path: string;
+  name: string;
+  stack: MonorepoStackItem[];
+  inferredSkills: string[];
+}
+
+interface MonorepoScope {
+  path: string;
+  inject: string[];
+  priority: number;
+  managed: 'rorca' | 'manual' | 'hybrid';
+}
+
+interface MonorepoDiscoveryResult {
+  tool: string | null;
+  apps: MonorepoApp[];
+  scopes: MonorepoScope[];
+  agentsMd: string;
+  applied: boolean;
+  scopesAdded?: number;
 }
 
 interface Props {
@@ -407,6 +438,8 @@ export default function ContextRoutingSettings({ workspaceId, showToast }: Props
           onRemoveTag={removeTag}
           onUpdateTag={updateTag}
           onUpdateRouting={updateRouting}
+          showToast={showToast}
+          onScopesApplied={loadData}
         />
       ) : (
         <JsonEditor
@@ -449,12 +482,15 @@ interface VisualEditorProps {
   onRemoveTag: (idx: number) => void;
   onUpdateTag: (idx: number, patch: Partial<RoutingTag>) => void;
   onUpdateRouting: (patch: Partial<RoutingConfig>) => void;
+  showToast: (message: string, type?: 'success' | 'error') => void;
+  onScopesApplied: () => void;
 }
 
 function VisualEditor({
   config, skills, workspaceId, selectedPath,
   onSelectPath, onAddScope, onRemoveScope, onUpdateScope,
   onAddTag, onRemoveTag, onUpdateTag, onUpdateRouting,
+  showToast, onScopesApplied,
 }: VisualEditorProps) {
   return (
     <div className="space-y-6">
@@ -475,6 +511,13 @@ function VisualEditor({
           ))}
         </div>
       </section>
+
+      {/* CIE-017: Monorepo Discovery */}
+      <MonorepoDiscoveryPanel
+        workspaceId={workspaceId}
+        showToast={showToast}
+        onScopesApplied={onScopesApplied}
+      />
 
       {/* Directory tree + scope rules (side by side) */}
       <section>
@@ -924,6 +967,305 @@ function TagRuleCard({
         <Trash2 size={14} />
       </button>
     </div>
+  );
+}
+
+// ─── CIE-017: Monorepo Discovery Panel ──────────────────────────────────────
+
+/** Group apps by their parent directory (apps/, packages/, etc.) for tree rendering. */
+function groupAppsByParent(apps: MonorepoApp[]): Map<string, MonorepoApp[]> {
+  const groups = new Map<string, MonorepoApp[]>();
+  for (const app of apps) {
+    const parts = app.path.split('/');
+    const parent = parts.length > 1 ? parts[0] : '.';
+    const existing = groups.get(parent) ?? [];
+    existing.push(app);
+    groups.set(parent, existing);
+  }
+  return groups;
+}
+
+function MonorepoDiscoveryPanel({
+  workspaceId,
+  showToast,
+  onScopesApplied,
+}: {
+  workspaceId: string;
+  showToast: (message: string, type?: 'success' | 'error') => void;
+  onScopesApplied: () => void;
+}) {
+  const [discovering, setDiscovering] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState<MonorepoDiscoveryResult | null>(null);
+  const [expandedApps, setExpandedApps] = useState<Set<string>>(new Set());
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [showAgentsMd, setShowAgentsMd] = useState(false);
+
+  const discover = async () => {
+    setDiscovering(true);
+    setResult(null);
+    try {
+      const data = await apiFetch<MonorepoDiscoveryResult>(
+        `/api/workspaces/${workspaceId}/monorepo/discover`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'preview' }) }
+      );
+      setResult(data);
+      if (data.apps.length > 0) {
+        setExpandedApps(new Set(data.apps.map(a => a.path)));
+        const groups = groupAppsByParent(data.apps);
+        setExpandedGroups(new Set(groups.keys()));
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Discovery failed';
+      showToast(msg, 'error');
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const apply = async () => {
+    setApplying(true);
+    try {
+      const data = await apiFetch<MonorepoDiscoveryResult>(
+        `/api/workspaces/${workspaceId}/monorepo/discover`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'apply' }) }
+      );
+      setResult(data);
+      showToast(`Applied ${data.scopesAdded ?? 0} new scope rules + CLAUDE.md monorepo section`);
+      onScopesApplied();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Apply failed';
+      showToast(msg, 'error');
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const toggleApp = (appPath: string) => {
+    setExpandedApps(prev => {
+      const next = new Set(prev);
+      if (next.has(appPath)) next.delete(appPath);
+      else next.add(appPath);
+      return next;
+    });
+  };
+
+  const toggleGroup = (group: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  };
+
+  const appGroups = result ? groupAppsByParent(result.apps) : new Map<string, MonorepoApp[]>();
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider flex items-center gap-1.5">
+            <Boxes size={12} /> Monorepo Discovery
+          </h3>
+          <p className="text-xs text-muted mt-1">
+            Auto-detect apps, stacks, and generate per-app scope rules, AGENTS.md roles, and CLAUDE.md monorepo section.
+          </p>
+        </div>
+        <button
+          onClick={discover}
+          disabled={discovering}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+        >
+          {discovering ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+          {discovering ? 'Scanning...' : 'Discover'}
+        </button>
+      </div>
+
+      {result && result.apps.length > 0 && (
+        <div className="border border-border rounded bg-bg overflow-hidden">
+          {/* Header */}
+          <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-panel">
+            <div className="flex items-center gap-2 text-xs">
+              <Layers size={12} className="text-accent" />
+              <span className="text-[var(--text)] font-medium">
+                {result.apps.length} app{result.apps.length !== 1 ? 's' : ''} in {appGroups.size} director{appGroups.size !== 1 ? 'ies' : 'y'}
+              </span>
+              {result.tool && (
+                <span className="px-1.5 py-0.5 bg-accent/10 text-accent rounded font-mono text-[10px]">
+                  {result.tool}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowAgentsMd(!showAgentsMd)}
+                className={`text-xs px-2 py-1 rounded transition-colors ${
+                  showAgentsMd ? 'bg-accent/10 text-accent' : 'text-muted hover:text-[var(--text)]'
+                }`}
+              >
+                AGENTS.md
+              </button>
+              {!result.applied && (
+                <button
+                  onClick={apply}
+                  disabled={applying}
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 transition-colors"
+                >
+                  {applying ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} />}
+                  Apply Scopes
+                </button>
+              )}
+              {result.applied && (
+                <span className="flex items-center gap-1 text-xs text-green-500">
+                  <Check size={10} /> Applied
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Monorepo tree */}
+          {!showAgentsMd ? (
+            <div className="p-2">
+              {/* Root node */}
+              <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-muted">
+                <Folder size={12} className="text-muted" />
+                <span className="font-mono">/</span>
+                {result.tool && <span className="text-[10px] text-muted italic ml-1">({result.tool})</span>}
+              </div>
+
+              {/* Group directories */}
+              {[...appGroups.entries()].map(([group, apps], groupIdx) => {
+                const isGroupExpanded = expandedGroups.has(group);
+                const isLastGroup = groupIdx === appGroups.size - 1;
+
+                return (
+                  <div key={group} className="ml-2">
+                    {/* Tree connector + group folder */}
+                    <button
+                      onClick={() => toggleGroup(group)}
+                      className="w-full flex items-center gap-1 px-2 py-1 text-left hover:bg-surface-100 rounded transition-colors"
+                    >
+                      <span className="text-border text-xs font-mono w-4 text-center shrink-0">
+                        {isLastGroup ? '└' : '├'}
+                      </span>
+                      {isGroupExpanded
+                        ? <ChevronDown size={10} className="text-muted shrink-0" />
+                        : <ChevronRight size={10} className="text-muted shrink-0" />
+                      }
+                      <FolderOpen size={12} className="text-accent shrink-0" />
+                      <span className="text-xs font-mono text-[var(--text)] font-medium">{group}/</span>
+                      <span className="text-[10px] text-muted ml-1">
+                        {apps.length} app{apps.length !== 1 ? 's' : ''}
+                      </span>
+                    </button>
+
+                    {/* App children */}
+                    {isGroupExpanded && apps.map((app, appIdx) => {
+                      const appName = app.path.split('/').slice(1).join('/') || app.path;
+                      const isAppExpanded = expandedApps.has(app.path);
+                      const isLastApp = appIdx === apps.length - 1;
+
+                      return (
+                        <div key={app.path} className="ml-6">
+                          {/* App node */}
+                          <button
+                            onClick={() => toggleApp(app.path)}
+                            className="w-full flex items-center gap-1 px-2 py-1 text-left hover:bg-surface-100 rounded transition-colors"
+                          >
+                            <span className="text-border text-xs font-mono w-4 text-center shrink-0">
+                              {isLastApp ? '└' : '├'}
+                            </span>
+                            {isAppExpanded
+                              ? <ChevronDown size={10} className="text-muted shrink-0" />
+                              : <ChevronRight size={10} className="text-muted shrink-0" />
+                            }
+                            <Folder size={12} className="text-accent shrink-0" />
+                            <span className="text-xs font-mono text-[var(--text)]">{appName}</span>
+                            <span className="text-[10px] text-muted ml-1">({app.name})</span>
+                            <span className="ml-auto flex items-center gap-1">
+                              {app.stack.slice(0, 3).map(s => (
+                                <span key={s.name} className="px-1 py-0.5 text-[9px] bg-panel border border-border rounded">
+                                  {s.name}
+                                </span>
+                              ))}
+                              {app.stack.length > 3 && (
+                                <span className="text-[9px] text-muted">+{app.stack.length - 3}</span>
+                              )}
+                            </span>
+                          </button>
+
+                          {/* App details (expanded) */}
+                          {isAppExpanded && (
+                            <div className={`ml-10 pb-2 pt-1 space-y-2 ${!isLastApp ? 'border-l border-border' : ''}`}>
+                              {/* Stack */}
+                              {app.stack.length > 0 && (
+                                <div className="pl-3">
+                                  <span className="text-[10px] text-muted uppercase tracking-wider">Stack:</span>
+                                  <div className="flex flex-wrap gap-1 mt-1">
+                                    {app.stack.map(s => (
+                                      <span key={s.name} className="px-1.5 py-0.5 text-[10px] bg-panel border border-border rounded">
+                                        {s.name}
+                                        {s.version && <span className="text-muted ml-0.5">v{s.version}</span>}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Inferred skills */}
+                              {app.inferredSkills.length > 0 && (
+                                <div className="pl-3">
+                                  <span className="text-[10px] text-muted uppercase tracking-wider">Inferred skills:</span>
+                                  <div className="flex flex-wrap gap-1 mt-1">
+                                    {app.inferredSkills.map(s => (
+                                      <span key={s} className="px-1.5 py-0.5 text-[10px] bg-accent/10 text-accent border border-accent/20 rounded font-mono">
+                                        {s}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Scope rule preview */}
+                              <div className="pl-3">
+                                <span className="text-[10px] text-muted uppercase tracking-wider">Scope rule:</span>
+                                <div className="mt-1 px-2 py-1.5 bg-panel border border-border rounded text-[10px] font-mono text-muted">
+                                  <span className="text-[var(--text)]">{app.path}/**</span>
+                                  {' → '}
+                                  {app.inferredSkills.length > 0
+                                    ? app.inferredSkills.map(s => `.rorca/skills/${s}`).join(', ')
+                                    : '(no skills to inject)'
+                                  }
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            /* AGENTS.md preview */
+            <div className="p-3">
+              <pre className="text-[11px] font-mono text-muted bg-panel border border-border rounded p-3 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">
+                {result.agentsMd}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      {result && result.apps.length === 0 && (
+        <div className="text-xs text-muted py-4 text-center border border-dashed border-border rounded">
+          No monorepo structure detected. Expected: turbo.json, nx.json, pnpm-workspace.yaml,
+          or apps/packages directories with package.json files.
+        </div>
+      )}
+    </section>
   );
 }
 

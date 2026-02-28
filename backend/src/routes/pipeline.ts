@@ -1125,18 +1125,29 @@ router.post('/trigger', async (req: Request, res: Response) => {
     }
 
     // CIE-016: Compute and store predicted context preview for post-run comparison
+    // CIE-017: Include monorepo apps for cross-app story detection
     try {
       const { loadRorcaConfig: loadCfg } = require('../lib/rorca-config') as typeof import('../lib/rorca-config');
       const { route: routeCtx } = require('../lib/context-router') as typeof import('../lib/context-router');
+      const { loadMonorepoApps: loadApps } = require('../lib/workspace-echolocation') as typeof import('../lib/workspace-echolocation');
       const rorcaCfg = loadCfg(workspace.path);
+      let triggerMonorepoApps: import('../lib/workspace-echolocation').MonorepoPackage[] | undefined;
+      try {
+        const apps = loadApps(workspace.path);
+        if (apps.length > 0) triggerMonorepoApps = apps;
+      } catch { /* non-fatal */ }
+
       const specForCtx = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
       const ctxStories = (specForCtx.userStories ?? [])
         .filter((s: any) => !s.passes && !s.excluded)
-        .map((s: any) => ({
-          storyId: s.id,
-          totalTokens: routeCtx(s, rorcaCfg.routing, workspace.path).totalTokens,
-          injectedFiles: routeCtx(s, rorcaCfg.routing, workspace.path).injectedFiles,
-        }));
+        .map((s: any) => {
+          const routed = routeCtx(s, rorcaCfg.routing, workspace.path, triggerMonorepoApps);
+          return {
+            storyId: s.id,
+            totalTokens: routed.totalTokens,
+            injectedFiles: routed.injectedFiles,
+          };
+        });
       db.prepare('UPDATE pipeline_runs SET context_preview = ? WHERE id = ?')
         .run(JSON.stringify({ tokenBudget: rorcaCfg.routing.tokenBudget, stories: ctxStories }), runId);
     } catch { /* non-fatal — context preview is best-effort */ }
@@ -1439,14 +1450,23 @@ router.post('/context-preview', (req: Request, res: Response) => {
     const tokenBudget = routingConfig.tokenBudget;
 
     // Import context-router functions
-    const { route, estimateTokens, extractPathMentions, matchScopes, matchTags } =
+    const { route, estimateTokens, extractPathMentions, matchScopes, matchTags, detectCrossAppPaths } =
       require('../lib/context-router') as typeof import('../lib/context-router');
+
+    // CIE-017: Load monorepo apps for cross-app story detection
+    const { loadMonorepoApps } = require('../lib/workspace-echolocation') as typeof import('../lib/workspace-echolocation');
+    let monorepoApps: import('../lib/workspace-echolocation').MonorepoPackage[] | undefined;
+    try {
+      const apps = loadMonorepoApps(workspace.path);
+      if (apps.length > 0) monorepoApps = apps;
+    } catch { /* non-fatal */ }
 
     // Build per-story preview
     const stories: Array<{
       storyId: string;
       title: string;
       predictedPaths: string[];
+      crossAppPaths: string[];
       globalFiles: Array<{ path: string; tokens: number }>;
       scopedFiles: Array<{ path: string; tokens: number; matchedScope: string }>;
       taggedFiles: Array<{ path: string; tokens: number; matchedTag: string }>;
@@ -1463,12 +1483,15 @@ router.post('/context-preview', (req: Request, res: Response) => {
     for (const story of specJson.userStories) {
       if (story.passes || story.excluded) continue;
 
-      // Run the full routing pipeline
-      const payload = route(story, routingConfig, workspace.path);
+      // Run the full routing pipeline (CIE-017: pass monorepo apps for cross-app detection)
+      const payload = route(story, routingConfig, workspace.path, monorepoApps);
 
       // Re-run routing in detail mode to get per-file breakdown
       const predictedPaths = extractPathMentions(story);
-      const matchedScopes = matchScopes(predictedPaths, routingConfig.scopes);
+      // CIE-017: Detect cross-app references in monorepo stories
+      const crossAppPaths = monorepoApps ? detectCrossAppPaths(story, monorepoApps) : [];
+      const allPredictedPaths = [...predictedPaths, ...crossAppPaths];
+      const matchedScopes = matchScopes(allPredictedPaths, routingConfig.scopes);
       const storyTags = story.tags ?? [];
       const matchedTagRules = matchTags(storyTags, routingConfig.tags);
 
@@ -1530,6 +1553,7 @@ router.post('/context-preview', (req: Request, res: Response) => {
         storyId: story.id,
         title: story.title,
         predictedPaths,
+        crossAppPaths,
         globalFiles,
         scopedFiles,
         taggedFiles,
@@ -1548,6 +1572,7 @@ router.post('/context-preview', (req: Request, res: Response) => {
       globalFileCount: routingConfig.global.length,
       scopeCount: routingConfig.scopes.length,
       tagCount: routingConfig.tags.length,
+      monorepo: monorepoApps ? { detected: true, appCount: monorepoApps.length } : { detected: false },
       stories,
     });
   } catch (error: any) {
