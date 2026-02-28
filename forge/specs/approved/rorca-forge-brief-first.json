@@ -99,7 +99,8 @@
         "FG-001",
         "FG-002"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "FG-006",

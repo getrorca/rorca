@@ -260,7 +260,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       label: 'New Spec',
       category: 'action',
       description: 'Create a new spec in Spec Forge',
-      action: () => { onNavigate('forge'); onClose(); },
+      action: () => { onSendToForge?.(''); onNavigate('forge'); onClose(); },
     });
     items.push({
       id: 'action:direction',
