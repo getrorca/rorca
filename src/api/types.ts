@@ -15,7 +15,7 @@ export interface ApiOptions {
 
 // ─── Spec types ───────────────────────────────────────────────────────────────
 
-export type SpecStatus = 'pending' | 'approved' | 'rejected';
+export type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
 export type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
 
 export interface Story {
