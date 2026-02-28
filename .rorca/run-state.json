@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-02-28T22:10:30.622Z",
+  "lastUpdatedAt": "2026-02-28T22:15:51.171Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-02-28T22:10:30.622Z",
       "agentType": "claude",
       "elapsedMs": 377698
+    },
+    {
+      "storyId": "FR-003",
+      "title": "SlideOver Deep Linking via Nested Routes",
+      "status": "passed",
+      "startedAt": "2026-02-28T22:10:39.936Z",
+      "finishedAt": "2026-02-28T22:15:51.171Z",
+      "agentType": "claude",
+      "elapsedMs": 311235
     }
   ],
   "failedStories": [],
