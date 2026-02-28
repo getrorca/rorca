@@ -1,16 +1,18 @@
+import { Link } from 'react-router-dom';
 import { Layers, Zap, Github, Keyboard, User, CreditCard, ArrowLeft } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
+import { useActivePanel } from '../routes';
 
 interface SettingsSidebarProps {
-    activePanel: PanelId;
     activeSettingsTab?: SettingsTab;
     onNavigate: (panel: PanelId) => void;
     onNavigateSettings: (tab: SettingsTab) => void;
     directionDirty?: boolean;
 }
 
-export default function SettingsSidebar({ activePanel, activeSettingsTab, onNavigate, onNavigateSettings, directionDirty }: SettingsSidebarProps) {
+export default function SettingsSidebar({ activeSettingsTab, onNavigate, onNavigateSettings, directionDirty }: SettingsSidebarProps) {
+    const activePanel = useActivePanel();
 
     const TABS: { id: SettingsTab; label: string; icon: typeof Layers }[] = [
         { id: 'direction', label: 'Direction Stack', icon: Layers },
@@ -25,13 +27,14 @@ export default function SettingsSidebar({ activePanel, activeSettingsTab, onNavi
         <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
             {/* Top Section: Back to App */}
             <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
-                <button
-                    onClick={() => onNavigate('hub')}
+                <Link
+                    to="/"
+                    onClick={(e) => { e.preventDefault(); onNavigate('hub'); }}
                     className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-[var(--text)] hover:bg-surface-100 transition-colors"
                 >
                     <ArrowLeft size={14} className="text-muted shrink-0" />
                     <span className="font-medium truncate">Back to Rorca</span>
-                </button>
+                </Link>
             </div>
 
             {/* Settings Navigation Sections */}

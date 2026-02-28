@@ -41,7 +41,8 @@
       "dependsOn": [
         "FR-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "FR-003",

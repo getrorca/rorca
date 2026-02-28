@@ -441,14 +441,12 @@ function AppLayout() {
           <ResizableSidebar>
             {isSettingsContext ? (
               <SettingsSidebar
-                activePanel={activePanel}
                 activeSettingsTab={settingsTab}
                 onNavigate={handleNavigate}
                 onNavigateSettings={navigateToSettingsTab}
               />
             ) : (
               <Sidebar
-                activePanel={activePanel}
                 onNavigate={handleNavigate}
                 mobileOpen={mobileNavOpen}
                 onMobileClose={() => setMobileNavOpen(false)}
