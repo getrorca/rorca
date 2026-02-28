@@ -342,6 +342,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE story_results ADD COLUMN worktree_branch TEXT');
   }
 
+  // WE-003: Add blocked_by column to story_results for tracking upstream blockers (idempotent)
+  const srColsWE003 = db.pragma('table_info(story_results)') as { name: string }[];
+  if (!srColsWE003.some(c => c.name === 'blocked_by')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN blocked_by TEXT');
+  }
+
   // EQ-007: Add author_name column to story_comments for guest reviewers (idempotent)
   const scCols = db.pragma('table_info(story_comments)') as { name: string }[];
   if (!scCols.some(c => c.name === 'author_name')) {
