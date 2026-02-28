@@ -44,6 +44,7 @@ import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
 import HubPanel from './panels/HubPanel';
 import RunViewPanel from './panels/RunViewPanel';
 import SpecReviewPanel from './panels/SpecReviewPanel';
+import MemoryPanel from './panels/MemoryPanel';
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
@@ -165,6 +166,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
     case 'stack': return <SettingsPanel initialTab={settingsTab} />;
     case 'team-direction': return <TeamDirectionPanel />;
+    case 'memory': return <MemoryPanel />;
     case 'queue': return <ReviewQueuePanel />;
     case 'pipeline': return <PipelineMonitorPanel />;
     case 'worktrees': return <WorktreesPanel />;
@@ -214,6 +216,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
   'workspace-settings': 'Workspace Settings',
   settings: 'Settings',
   'spec-review': 'Spec Review',
+  memory: 'Memory Ledger',
 };
 
 function AppContent() {

@@ -36,6 +36,8 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   github: '/github',
   'workspace-settings': '/workspace-settings',
   settings: '/settings',
+  // CIE-005: Memory Ledger
+  memory: '/memory',
   // Slide-over only (not a real route, but needs an entry)
   'spec-review': '/spec-review',
 };
