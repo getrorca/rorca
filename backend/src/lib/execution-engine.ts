@@ -53,6 +53,7 @@ import {
 } from './tool-capability-checker';
 import { route as routeContext, writeContextFile, type ContextStory } from './context-router';
 import { loadRorcaConfig } from './rorca-config';
+import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -343,6 +344,7 @@ function buildPrompt(
   playbook?: string,
   agentType?: AgentType,
   contextFilePath?: string,
+  roleSection?: string,
 ): string {
   const ac = getAcceptance(story);
   const acSection = ac ? `\nAcceptance Criteria:\n${ac}` : '';
@@ -376,6 +378,7 @@ function buildPrompt(
       'You are simulating real users navigating the application. Read CLAUDE.md for architecture.',
       openCodeSkillInstruction,
       codexAgentsInstruction,
+      roleSection ?? '',
       '', journeySkill, '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
@@ -391,6 +394,7 @@ function buildPrompt(
       'You are writing tests for this project. Read CLAUDE.md for architecture and gotchas.',
       openCodeSkillInstruction,
       codexAgentsInstruction,
+      roleSection ?? '',
       '', playbookInstruction, '',
       '## Workflow',
       '1. Read the relevant AGENTS.md in each directory you\'ll modify',
@@ -417,6 +421,7 @@ function buildPrompt(
     'Follow this workflow for implementation:',
     openCodeSkillInstruction,
     codexAgentsInstruction,
+    roleSection ?? '',
     '', skillContent, '', '---', '',
     `Your task (${story.id}):`,
     story.description, acSection,
@@ -1370,7 +1375,25 @@ async function executeStory(
     console.warn(`  [context] Router failed: ${err.message}`);
   }
 
-  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath);
+  // CIE-006: Load AGENTS.md roles and match to this story
+  let roleSection: string | undefined;
+  let assignedRole: ReturnType<typeof matchRole>[0] | undefined;
+  try {
+    const { roles } = loadAgentsMd(effectiveCwd);
+    if (roles.length > 0) {
+      const matches = matchRole(story.description, story.acceptanceCriteria, roles);
+      if (matches.length > 0) {
+        assignedRole = matches[0];
+        roleSection = buildRolePromptSection(assignedRole.role);
+        console.log(`  [agents] Assigned role: ${assignedRole.role.name} (score: ${assignedRole.score})`);
+      }
+    }
+  } catch (err: any) {
+    // Non-fatal — proceed without role constraints
+    console.warn(`  [agents] Role matching failed: ${err.message}`);
+  }
+
+  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection);
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
   fs.writeFileSync(promptLogFile, prompt);
@@ -1572,6 +1595,31 @@ async function executeStory(
 
       console.log(`Committing ${story.id}...`);
       gitCommitStory(effectiveCwd, story.id, story.title, mode);
+
+      // CIE-006: Post-commit violation detection
+      if (assignedRole) {
+        try {
+          const changedFiles = getLastCommitFiles(effectiveCwd);
+          const report = detectViolations(changedFiles, assignedRole.role, story.id);
+          if (report.violations.length > 0) {
+            console.warn(`  [agents] ${report.violations.length} violation(s) for ${story.id} (role: ${report.roleName}):`);
+            for (const v of report.violations) {
+              console.warn(`    - ${v.file} matched avoids pattern: ${v.pattern}`);
+            }
+            // Emit violation WAL event (warning, not blocking)
+            if (workspaceId) {
+              await emitWalEvent(config.port, 'story_violation', workspaceId, {
+                run_id: config.runId,
+                story_id: story.id,
+                role_name: report.roleName,
+                violations: report.violations,
+              }, story.id);
+            }
+          }
+        } catch (err: any) {
+          console.warn(`  [agents] Violation check failed: ${err.message}`);
+        }
+      }
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_passed', workspaceId, {
