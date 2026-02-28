@@ -428,14 +428,35 @@ export default function TriggerPopover({
             })()}
 
             {/* Budget exceeded warning */}
-            {contextPreview.anyExceeded && (
-              <div className="flex items-start gap-1.5 text-amber-500">
-                <AlertTriangle size={11} className="shrink-0 mt-0.5" />
-                <span className="text-[10px] leading-tight">
-                  {contextPreview.stories.filter(s => s.exceeded).length} {contextPreview.stories.filter(s => s.exceeded).length === 1 ? 'story exceeds' : 'stories exceed'} the {formatTokenCount(contextPreview.tokenBudget)} token budget — files were dropped
-                </span>
-              </div>
-            )}
+            {contextPreview.anyExceeded && (() => {
+              const anyRealDrops = contextPreview.stories.some(s => s.droppedFiles.length > 0);
+              const onlyGlobalsOverBudget = !anyRealDrops;
+              const isClaudeAgent = agentConfig?.agentType === 'claude';
+              const exceededCount = contextPreview.stories.filter(s => s.exceeded).length;
+
+              if (onlyGlobalsOverBudget && isClaudeAgent) {
+                // Global files (CLAUDE.md) are large but nothing was actually dropped.
+                // Claude CLI auto-injects CLAUDE.md natively — this is not a real problem.
+                return (
+                  <div className="flex items-start gap-1.5 text-blue-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                    <span className="text-[10px] leading-tight">
+                      Global files exceed the {formatTokenCount(contextPreview.tokenBudget)} CIE budget, but CLAUDE.md is auto-injected by the Claude CLI — supplemental context unaffected.{' '}
+                      <span className="opacity-60">Raise <code className="font-mono">routing.tokenBudget</code> in .rorca/config.json to suppress.</span>
+                    </span>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="flex items-start gap-1.5 text-amber-500">
+                  <AlertTriangle size={11} className="shrink-0 mt-0.5" />
+                  <span className="text-[10px] leading-tight">
+                    {exceededCount} {exceededCount === 1 ? 'story' : 'stories'}: supplemental context files were dropped to fit the {formatTokenCount(contextPreview.tokenBudget)} token budget.
+                  </span>
+                </div>
+              );
+            })()}
 
             {/* Per-story breakdown */}
             <div className="space-y-0.5 max-h-40 overflow-y-auto">
@@ -451,10 +472,10 @@ export default function TriggerPopover({
                     }
                     <span className="text-[10px] font-mono text-muted shrink-0">{story.storyId}</span>
                     <span className="text-[10px] text-[var(--text)] truncate flex-1">{story.title}</span>
-                    <span className={`text-[10px] tabular-nums shrink-0 ${story.exceeded ? 'text-amber-500 font-medium' : 'text-muted'}`}>
+                    <span className={`text-[10px] tabular-nums shrink-0 ${story.exceeded ? (story.droppedFiles.length > 0 ? 'text-amber-500 font-medium' : 'text-blue-400') : 'text-muted'}`}>
                       {formatTokenCount(story.totalTokens)}
                     </span>
-                    {story.exceeded && <AlertTriangle size={9} className="text-amber-500 shrink-0" />}
+                    {story.exceeded && story.droppedFiles.length > 0 && <AlertTriangle size={9} className="text-amber-500 shrink-0" />}
                   </button>
 
                   {/* Expanded story detail */}

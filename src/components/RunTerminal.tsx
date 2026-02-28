@@ -121,6 +121,76 @@ const lightTheme = {
   brightWhite: '#1e1e1e',
 };
 
+// ─── stream-json → readable text formatter (for Raw terminal display) ────────
+
+/**
+ * Convert a Claude `--output-format stream-json` line to human-readable text.
+ * Returns null to suppress the line entirely (e.g. system init, tool results).
+ * Returns the original line for non-JSON content (run-loop output, etc.).
+ */
+function formatStreamJsonForDisplay(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed) return '';
+  if (!trimmed.startsWith('{')) return line; // Not JSON — pass through
+
+  try {
+    const ev = JSON.parse(trimmed);
+
+    // System init — suppress
+    if (ev.type === 'system') return null;
+
+    // Assistant message with content blocks (tool_use + text)
+    if (ev.type === 'assistant' && ev.message?.content) {
+      const parts: string[] = [];
+      for (const block of ev.message.content) {
+        if (block.type === 'text' && block.text) {
+          // Show assistant thinking/text (truncated)
+          const text = block.text.trim();
+          if (text) parts.push(text.length > 500 ? text.slice(0, 500) + '...' : text);
+        } else if (block.type === 'tool_use') {
+          const name: string = block.name ?? '';
+          const input = block.input ?? {};
+          switch (name) {
+            case 'Read':     parts.push(`📖 Read ${input.file_path ?? ''}`); break;
+            case 'Write':    parts.push(`📝 Write ${input.file_path ?? ''}`); break;
+            case 'Edit':     parts.push(`✏️  Edit ${input.file_path ?? ''}`); break;
+            case 'Bash':     parts.push(`🔧 Bash: ${(input.command ?? '').slice(0, 200)}`); break;
+            case 'Glob':     parts.push(`🔍 Glob: ${input.pattern ?? ''}`); break;
+            case 'Grep':     parts.push(`🔍 Grep: ${input.pattern ?? ''}`); break;
+            case 'Task':     parts.push(`🧠 Task: ${input.description ?? ''}`); break;
+            case 'TodoWrite': parts.push('📋 TodoWrite'); break;
+            case 'WebFetch': parts.push(`🌐 WebFetch: ${input.url ?? ''}`); break;
+            case 'WebSearch': parts.push(`🌐 WebSearch: ${input.query ?? ''}`); break;
+            default:         parts.push(`🔧 ${name}`);
+          }
+        }
+      }
+      return parts.length > 0 ? parts.join('\n') : null;
+    }
+
+    // Result event (final summary)
+    if (ev.type === 'result') {
+      if (ev.subtype === 'success') {
+        const r = typeof ev.result === 'string' ? ev.result.slice(0, 300) : '';
+        return `\n✅ Completed${r ? ': ' + r.split('\n')[0].slice(0, 200) : ''}`;
+      }
+      if (ev.subtype === 'error') {
+        return `\n❌ Error: ${ev.error ?? 'unknown'}`;
+      }
+      return null;
+    }
+
+    // User message (prompt injection by run-loop) — suppress
+    if (ev.type === 'user') return null;
+
+    // Anything else — suppress unknown JSON events
+    return null;
+  } catch {
+    // Not valid JSON despite starting with { — pass through
+    return line;
+  }
+}
+
 // ─── Verbose text parser (claude --verbose output format) ────────────────────
 
 /** Strip ANSI escape codes */
@@ -489,18 +559,34 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         const binary = atob(e.data);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        term.write(bytes);
 
-        // Client-side semantic parsing from raw verbose output
+        // Convert stream-json lines to readable text before writing to xterm
         const text = new TextDecoder().decode(bytes);
         lineBuffer += text;
         const parts = lineBuffer.split('\n');
         lineBuffer = parts.pop() ?? '';
+
+        const displayLines: string[] = [];
         const newSteps: SemanticStep[] = [];
+
         for (const part of parts) {
+          // Client-side semantic parsing
           const step = parseVerboseLine(part);
           if (step) newSteps.push(step);
+
+          // Format stream-json for readable raw display
+          const formatted = formatStreamJsonForDisplay(part);
+          if (formatted !== null) {
+            displayLines.push(formatted);
+          }
         }
+
+        // Write formatted text to xterm (instead of raw JSON bytes)
+        if (displayLines.length > 0) {
+          const output = displayLines.join('\r\n') + '\r\n';
+          term.write(output);
+        }
+
         if (newSteps.length > 0) {
           setSteps(prev => [...prev, ...newSteps]);
         }

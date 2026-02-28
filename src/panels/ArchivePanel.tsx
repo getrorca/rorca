@@ -173,6 +173,33 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
 
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
+  // ─── Resizable split pane ────────────────────────────────────────
+  const [leftWidth, setLeftWidth] = useState(380);
+  const isDragging = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartWidth = useRef(0);
+
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = leftWidth;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDragging.current) return;
+      const delta = ev.clientX - dragStartX.current;
+      const next = Math.min(Math.max(dragStartWidth.current + delta, 260), 700);
+      setLeftWidth(next);
+    };
+    const onMouseUp = () => {
+      isDragging.current = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [leftWidth]);
+
   // ─── Debounce search ────────────────────────────────────────────
   useEffect(() => {
     clearTimeout(debounceRef.current);
@@ -373,8 +400,8 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
       <div className="flex flex-1 overflow-hidden">
         {/* ─── Left: Split List ────────────────────────────────────────── */}
         <div
-          className={`flex-col border-r border-border transition-all duration-300 ${selectedId ? 'w-1/3 min-w-[320px] max-w-[500px]' : 'w-full'
-            }`}
+          className="flex-col border-r border-border flex-shrink-0"
+          style={{ width: selectedId ? leftWidth : '100%' }}
         >
           <div className="flex flex-col h-full bg-panel">
             {/* Results */}
@@ -540,22 +567,30 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
               )}
             </div>
           </div>
-
-          {/* ─── Right: Spec Detail ─────────────────────────────────── */}
-          {selectedId && (
-            <SpecPreviewDrawer
-              specId={selectedId}
-              summary={selectedSpec ?? null}
-              detail={specDetail}
-              detailLoading={detailLoading}
-              onClose={() => { setSelectedId(null); setSpecDetail(null); }}
-              onNavigate={onNavigate}
-              onTagsChange={(newTags) => {
-                setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, tags: newTags } : s));
-              }}
-            />
-          )}
         </div>
+
+        {/* ─── Draggable divider ───────────────────────────────────────── */}
+        {selectedId && (
+          <div
+            onMouseDown={handleDividerMouseDown}
+            className="w-1 shrink-0 bg-border hover:bg-accent/60 cursor-col-resize transition-colors active:bg-accent"
+          />
+        )}
+
+        {/* ─── Right: Spec Detail ─────────────────────────────────────── */}
+        {selectedId && (
+          <SpecPreviewDrawer
+            specId={selectedId}
+            summary={selectedSpec ?? null}
+            detail={specDetail}
+            detailLoading={detailLoading}
+            onClose={() => { setSelectedId(null); setSpecDetail(null); }}
+            onNavigate={onNavigate}
+            onTagsChange={(newTags) => {
+              setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, tags: newTags } : s));
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -823,15 +858,7 @@ function SpecPreviewDrawer({
   const cfg = summary ? STATUS_CONFIG[summary.status] : null;
 
   return (
-    <>
-      {/* Backdrop (click to close) */}
-      <div
-        className="fixed inset-0 z-40 bg-black/20 xl:hidden"
-        onClick={onClose}
-      />
-
-      {/* Drawer */}
-      <div className="fixed right-0 top-0 bottom-0 z-50 w-[480px] max-w-full bg-bg border-l border-border flex flex-col shadow-2xl animate-[slideInRight_200ms_ease-out]">
+    <div className="flex-1 flex flex-col overflow-hidden bg-bg border-l border-border">
         {/* Header */}
         <div className="px-4 py-3 border-b border-border shrink-0">
           <div className="flex items-center justify-between mb-1">
@@ -1279,9 +1306,8 @@ function SpecPreviewDrawer({
             )}
           </div>
         )}
-      </div>
       {showPricing && <PricingModal onClose={() => setShowPricing(false)} />}
-    </>
+    </div>
   );
 }
 
