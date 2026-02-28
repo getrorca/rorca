@@ -40,7 +40,7 @@ import AppHeader from '../components/AppHeader';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
-type SpecStatus = 'pending' | 'approved' | 'rejected';
+type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
 type StatusFilter = 'all' | SpecStatus;
 type PreviewTab = 'stories' | 'graph' | 'diagram' | 'json' | 'history';
 
@@ -88,12 +88,19 @@ const PAGE_SIZE = 20;
 
 const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
   { id: 'all', label: 'All' },
-  { id: 'pending', label: 'Pending' },
+  { id: 'completed', label: 'Completed' },
   { id: 'approved', label: 'Approved' },
+  { id: 'pending', label: 'Pending' },
   { id: 'rejected', label: 'Rejected' },
 ];
 
 const STATUS_CONFIG: Record<SpecStatus, { label: string; icon: typeof CheckCircle2; className: string; dotClass: string }> = {
+  completed: {
+    label: 'COMPLETED',
+    icon: CheckCircle2,
+    className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+    dotClass: 'bg-emerald-500',
+  },
   approved: {
     label: 'APPROVED',
     icon: CheckCircle2,
@@ -331,10 +338,11 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                   backgroundPosition: 'right 8px center',
                 }}
               >
-                <option value="all">Any Status</option>
-                <option value="success">Success</option>
-                <option value="error">Failed</option>
-                <option value="needs_review">Needs Review</option>
+                {STATUS_FILTERS.map(f => (
+                  <option key={f.id} value={f.id}>
+                    {f.id === 'all' ? 'Any Status' : f.label}
+                  </option>
+                ))}
               </select>
 
               {/* Tag Filter */}
@@ -937,8 +945,8 @@ function SpecPreviewDrawer({
         {/* Footer actions */}
         {detail && summary?.status !== 'rejected' && (
           <div className="px-4 py-3 border-t border-border shrink-0 bg-bg space-y-2">
-            {/* Run in Pipeline button — approved specs only */}
-            {summary?.status === 'approved' && (
+            {/* Run in Pipeline button — approved or completed specs */}
+            {(summary?.status === 'approved' || summary?.status === 'completed') && (
               <div className="relative">
                 {runState === 'conflict' ? (
                   <div className="rounded border border-warning/30 bg-warning/10 p-3 space-y-2">

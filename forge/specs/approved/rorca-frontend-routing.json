@@ -23,7 +23,8 @@
         "Shell layout (sidebar + content area) wraps all routes as a layout route"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "FR-002",
@@ -37,7 +38,9 @@
         "Clicking sidebar items changes the URL in the browser address bar",
         "Browser back/forward buttons navigate between previously visited panels"
       ],
-      "dependsOn": ["FR-001"],
+      "dependsOn": [
+        "FR-001"
+      ],
       "passes": false
     },
     {
@@ -53,7 +56,9 @@
         "Direct URL access to /runs/:runId works (shows SlideOver over Hub)",
         "Pipeline start SSE events that auto-open run view use navigate()"
       ],
-      "dependsOn": ["FR-001"],
+      "dependsOn": [
+        "FR-001"
+      ],
       "passes": false
     },
     {
@@ -69,7 +74,9 @@
         "Browser refresh on /settings/models re-renders the correct tab",
         "activeSettingsTab state in App.tsx is removed — settings tab derived from route params"
       ],
-      "dependsOn": ["FR-002"],
+      "dependsOn": [
+        "FR-002"
+      ],
       "passes": false
     },
     {
@@ -88,7 +95,8 @@
         "Spec files remain in forge/specs/approved/ — no filesystem move on completion"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }

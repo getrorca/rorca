@@ -2,7 +2,7 @@
   "specId": "rorca-context-intent-engine",
   "runId": 795,
   "startedAt": "2026-02-28T17:47:44.308Z",
-  "lastUpdatedAt": "2026-02-28T18:17:08.822Z",
+  "lastUpdatedAt": "2026-02-28T21:44:14.515Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -381,6 +381,15 @@
       "finishedAt": "2026-02-28T18:17:08.822Z",
       "agentType": "claude",
       "elapsedMs": 870126
+    },
+    {
+      "storyId": "FR-005",
+      "title": "Spec Completion Status in Archive",
+      "status": "passed",
+      "startedAt": "2026-02-28T21:35:09.089Z",
+      "finishedAt": "2026-02-28T21:44:14.515Z",
+      "agentType": "claude",
+      "elapsedMs": 545426
     }
   ],
   "failedStories": [],
