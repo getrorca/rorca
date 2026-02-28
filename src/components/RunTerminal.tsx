@@ -472,6 +472,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     // Connect to live output stream
     const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/output`);
     esRef.current = es;
+    let lineBuffer = '';
 
     // Listen for run metadata (agent type detection)
     es.addEventListener('run_meta', (e: MessageEvent) => {

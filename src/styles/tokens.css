@@ -1,27 +1,30 @@
-/* Default: dark theme */
+/* Default: dark theme (King Mode) */
 :root,
 [data-theme="dark"] {
-  --bg: #0f0f11;
-  --panel: #1c1c21;
-  --border: #3f3f46;
+  --bg: #09090b;
+  --panel: #121214;
+  --surface-200: #18181b;
+  --border: #27272a;
   --text: #fafafa;
   --text-muted: #a1a1aa;
-  --accent: #6366f1;
-  --accent-hover: #818cf8;
-  --success: #22c55e;
+  --accent: #4f46e5;
+  --accent-hover: #7c3aed;
+  --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
 }
 
 [data-theme="light"] {
-  --bg: #f5f5f5;
+  /* Light mode loosely mapped, King Mode prioritizes the dark theme */
+  --bg: #fafafa;
   --panel: #ffffff;
-  --border: #d4d4d8;
-  --text: #18181b;
+  --surface-200: #f4f4f5;
+  --border: #e4e4e7;
+  --text: #09090b;
   --text-muted: #71717a;
   --accent: #4f46e5;
   --accent-hover: #4338ca;
-  --success: #16a34a;
-  --warning: #d97706;
-  --error: #dc2626;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --error: #ef4444;
 }

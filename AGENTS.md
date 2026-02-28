@@ -1,78 +1,150 @@
 # AGENTS.md — Rorca Root
 
+File governance, behavioral rules, and agent persona zones for the Rorca codebase.
+
 ## Project Overview
-Rorca is an AI spec orchestration dashboard. 
-- **Landing Page** (`/landing-page`): Next.js 14 + Tailwind v4 + Framer Motion on :3002
+Rorca is an AI spec orchestration and pipeline management platform for autonomous software development.
 - **Dashboard** (`/src`): React 18 + Vite + Tailwind on :5210
 - **Backend** (`/backend`): Express.js + SQLite on :3030
-- **LLM Engine**: `claude --print` and OpenCode (V2-capable)
+- **Landing Page** (`/landing-page`): Next.js 14 + Tailwind v4 + Framer Motion on :3002
+- **Execution Engine**: `claude --print` (Claude sub), `opencode run` (75+ providers), `codex` (ChatGPT sub)
 
-## Key Architecture Decisions
-- **No hot-reload on backend**: Every backend change requires `lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev`
-- **better-sqlite3 is synchronous**: Never use async/await for DB operations. `.get()` → T|undefined, `.all()` → T[], `.run()` → RunResult
-- **WAL events are the event bus**: Every state change (spec approved, run started, story passed) must emit a `wal_events` row — this drives the SSE pipeline monitor
-- **Workspaces store filesystem paths**: `workspaces.path` is an absolute path to the project repo (e.g. `/Users/dimitriteravanessian/rorca`). Backend uses this to find spec files and pass as working directory to `execution-engine.ts`
-- **execution-engine.ts is the canonical execution engine**: `backend/src/lib/execution-engine.ts` — TypeScript, handles claude / opencode / codex agent paths. Replaces the bash `run-loop.sh` / `run-loop.ts` entirely.
+## File Ownership Zones
+
+### Frontend (`src/`)
+- **Owner**: Frontend specialist
+- **Rules**:
+  - All API calls through `src/lib/apiFetch` — never raw `fetch`
+  - Panel components in `src/panels/` (one per sidebar nav item)
+  - Shared UI in `src/components/` (Shell, Sidebar, SlideOver, RunTerminal, CommandPalette, etc.)
+  - State via React Context (`src/contexts/`) — WorkspaceContext, AuthContext, ThemeContext, ToastContext
+  - CSS custom properties for theming — no hardcoded hex, use tokens from `src/styles/tokens.css`
+  - `PanelId` type in `Sidebar.tsx` is canonical source of truth for navigation
+  - Context-aware sidebars: `SettingsSidebar` renders for settings/analytics panels, main `Sidebar` for everything else
+
+### Backend Routes (`backend/src/routes/`)
+- **Owner**: Backend specialist
+- **Rules**:
+  - One file per resource (specs.ts, pipeline.ts, workspaces.ts, run-queue.ts, etc.)
+  - JSDoc `@swagger` annotations on every public endpoint (feeds `/api/docs`)
+  - Throw `AppError` subclasses — never raw `Error` or manual `res.status().json()` for errors
+  - Use `paginate()` for list endpoints
+  - Validate input at route boundary, trust internal code after
+
+### Backend Libs (`backend/src/lib/`)
+- **Owner**: Architect
+- **Rules**:
+  - `sse-hub.ts` — pub/sub hub, never bypass with direct `res.write()` for SSE
+  - `direction-stack.ts` — `synthesize()` merges L1→L5, L4/L5 from spec not DB
+  - `llm-client.ts` — `chatComplete()` returns `ChatResult { text, usage }` — NEVER treat as string
+  - `errors.ts` — hierarchy: ValidationError(400), AuthError(401), ForbiddenError(403), NotFoundError(404), ConflictError(409), UnprocessableError(422)
+
+### Database (`backend/src/db/`)
+- **Owner**: Database specialist
+- **Rules**:
+  - `better-sqlite3` is **synchronous** — never `await` DB calls
+  - `.get()` → `T | undefined`, `.all()` → `T[]`, `.run()` → `RunResult`
+  - Migrations are SQL in `migrations/`, numbered sequentially (001–036+)
+  - Column additions: use `pragma table_info` check (SQLite lacks `ADD COLUMN IF NOT EXISTS`)
+  - WAL mode + FK constraints always on
+
+### Execution Engine (`backend/src/lib/execution-engine.ts`)
+- **Owner**: Architect
+- **Criticality**: HIGH — core pipeline, changes require extra scrutiny
+- **Rules**:
+  - Never modify env var stripping (4 Claude vars) without understanding why
+  - `buildPrompt()` is the single place where story context is assembled — persona overlays inject here (future)
+  - Three execution paths (claude/opencode/codex) must stay symmetrical — same tool set, same output contract
+  - Story timeout, retry logic, WAL event emission are safety-critical
+  - `run-loop.ts` is legacy — `execution-engine.ts` is the canonical engine
+
+### Styles (`src/styles/`)
+- **Owner**: Frontend / UX Designer
+- **Rules**:
+  - `tokens.css` — CSS custom properties (colors, spacing, radii)
+  - `index.css` — global styles, animations, utility classes
+  - Theme switching via CSS variable swap — no Tailwind `dark:` prefix
+  - `tailwind.config.ts` maps CSS variables to utility classes
 
 ## Critical Gotchas
 
 ### Spec Path Construction (CRITICAL — has caused bugs)
 ```typescript
-// WRONG — wrong subdir and uses specName (title) not slug
+// WRONG — wrong subdir, uses specName (title) not slug
 specPath: `specs/approved/${spec.specName}.json`
 // CORRECT
-specPath: `ralph/specs/approved/${spec.id}.json`
-// Backend resolves: path.join(workspace.path, 'scripts', specPath)
-// → workspace.path/scripts/ralph/specs/approved/slug.json ✓
+specPath: `forge/specs/approved/${spec.id}.json`
+// Backend resolves: path.join(workspace.path, specPath)
 ```
 
 ### spec.id vs spec.specName
-- `spec.id` = filename slug (e.g. `rorca-feature-enhancements`) — use for API calls and path construction
-- `spec.specName` = human-readable title (e.g. "Rorca Feature Enhancements") — display only
+- `spec.id` = filename slug (`rorca-feature-enhancements`) — use for API calls and paths
+- `spec.specName` = human title ("Rorca Feature Enhancements") — display only
 
 ### chatComplete Return Type
-`chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }`. **Always use `.text`** — never treat the result as a string directly.
+`chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }`. **Always use `.text`**.
 
 ### Claude Env Vars for Nested Invocation
-When spawning `claude` as a child process, unset ALL 4 vars:
+When spawning `claude` as child process, strip ALL 4:
 `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_AGENT_SDK_VERSION`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`
-Unsetting only CLAUDECODE is not enough.
 
 ### CLAUDE_BIN Full Path Required
-NVM PATH isn't inherited by Node child processes. Always resolve the full claude path via `CLAUDE_BIN` env var or hardcoded fallback in `llm-client.ts`.
+NVM PATH isn't inherited by Node child processes. Resolve full path via `CLAUDE_BIN` env var.
 
 ### Stale Pipeline Runs
-Runs stay `status='running'` after backend restart even though their processes are dead. Diagnose:
 ```sql
 SELECT id, pid, status FROM pipeline_runs WHERE status='running';
+-- Fix: UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE id=?;
 ```
-Fix: `UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE id=?`
+
+### Auth Middleware — Intentionally Bypassed
+`authRequired` in `server.ts` is **commented out** on purpose. Rorca is local single-user. Do NOT re-enable.
 
 ### xterm.js Package Name
-Use `@xterm/xterm` and `@xterm/addon-fit` (the new scoped packages), NOT the old `xterm` package.
+Use `@xterm/xterm` + `@xterm/addon-fit` (scoped packages), NOT old `xterm`.
+
+### SlideOver Navigation Pattern
+Run View and Spec Review use `SlideOver` component (portal-rendered modal), not full-page panels. Hash-based deep linking: `#/run/:runId`. Navigation via hash change, not panel switch.
 
 ## Dev Commands
 ```bash
-npm run dev                           # Start frontend + backend
-lsof -ti:3030 | xargs kill -9        # Kill backend
+npm run dev                           # Start frontend + backend concurrently
+lsof -ti:3030 | xargs kill -9        # Kill backend (no hot-reload)
 cd backend && npm run dev             # Restart backend
-bash -c "cd /Users/dimitriteravanessian/rorca && npx tsc --noEmit" && bash -c "cd /Users/dimitriteravanessian/rorca/backend && npx tsc --noEmit"
+cd backend && npm test                # Jest test suite
+npx vitest run                        # Frontend tests (Vitest, not Jest)
+npx tsc --noEmit                      # Frontend type check
+cd backend && npx tsc --noEmit        # Backend type check
 ```
 
-## Database (SQLite at backend/rorca.db)
-Tables: `workspaces` | `direction_layers` | `pipeline_runs` | `story_results` | `wal_events` | `workspace_context` | `spec_versions` | `templates`
+## Agent Persona Zones (Future — rorca-agent-personas spec)
 
-WAL mode + FK constraints enabled on every connection (see `backend/src/db/index.ts`).
+When the persona system is built, ownership zones map to persona assignments:
 
-## Implemented Features (as of Feb 2026)
-- Spec Forge: generate → Review Queue → approve/reject → Archive
-- Direction Stack: 5-layer context cascade (L1 global brain → L5 story annotations)
-- Spec Versions: `spec_versions` table, diff endpoint, auto-version on regenerate
-- Template Library: workspace-agnostic reusable spec structures
-- LLM Model Selection: ChatResult type, SUPPORTED_MODELS, model resolution chain
-- Pipeline Trigger UI: "Run in Pipeline" button in Archive → invokes `execution-engine.ts` via `POST /api/pipeline/trigger`
-- Conflict Detection: active run → prompt for worktree → autoWorktree option
-- Worktree Merge: "Merge to main" button in Worktrees panel
-- xterm.js Terminal: live subprocess stdout/stderr in Pipeline Monitor Terminal tab
-- Add More Stories: POST /api/specs/:id/add-stories generates N more with correct numbering
-- Archive Badges: repoName + branchName badges on spec cards
+| Zone | Primary Persona | Adversarial Reviewers |
+|------|----------------|----------------------|
+| `src/` | Frontend | UX Designer, Best Practices |
+| `backend/src/routes/` | Backend | Security, Red Team |
+| `backend/src/db/` | Database | Security, Assumption Buster |
+| `backend/src/lib/execution-engine.ts` | Architect | Red Team, Devil's Advocate |
+| `src/styles/` | UX Designer | Best Practices |
+| `forge/specs/` | Spec Writer | Spec Verifier, Assumption Buster |
+
+### Persona Categories
+- **Primary** (1–5 orchestrators): Architect, PM, Lead Dev
+- **Adversarial** (challengers): Red Team, Assumption Buster ("the idiot in the room"), Devil's Advocate
+- **Specialist** (domain experts): Frontend, Backend, Database, Security, SRE, UX Designer, QA
+- **Review** (quality gates): Spec Writer, Spec Verifier, Best Practices
+
+Persona definitions will live in `.rorca/personas/` with `_primary/`, `_adversarial/`, `_specialist/`, `_review/` subdirectories. Each persona is a markdown file injected into `buildPrompt()` as a direction layer overlay.
+
+## Convention System (Future — rorca-convention-packs spec)
+
+### Greenfield Flow
+Convention pack → scaffolds project + CLAUDE.md + `.rorca/` + Direction Stack (L0-L3) → then write brief → spec gen has full context.
+
+### Brownfield Flow
+Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if missing) + AGENTS.md → human reviews → then write brief.
+
+### Convention Drift
+`rorca conventions check` compares code against declared conventions. Pre-execution hook candidate.

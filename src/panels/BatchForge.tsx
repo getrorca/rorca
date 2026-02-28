@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
+import { titleToSlug, KEBAB_RE } from '../lib/slugify';
 
 /* ─── Types ──────────────────────────────────────────────────────── */
 
@@ -27,12 +28,6 @@ interface BatchSummary {
   completed: number;
   failed: number;
   total: number;
-}
-
-const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
-
-function titleToSlug(title: string): string {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 /* ─── Main Component ─────────────────────────────────────────────── */
