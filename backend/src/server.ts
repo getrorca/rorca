@@ -39,11 +39,13 @@ import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
+import { startFileWatcher } from './lib/file-watcher';
 import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
 import { rateLimiter } from './lib/rate-limiter';
 import { publicReviewRouter, specReviewRouter } from './routes/review';
+import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { db } from './db/index';
@@ -114,6 +116,7 @@ app.use(rateLimiter);
 
 // ─── Protected routes ───
 app.use('/api/workspaces', workspacesRouter);
+app.use('/api/workspace', fileWatchRouter);
 app.use('/api/direction', directionRouter);
 app.use('/api/specs', specsRouter);
 // EQ-007: Review link creation (auth-protected, mounted under /api/specs)
@@ -184,6 +187,8 @@ if (process.env.NODE_ENV !== 'test') {
     cleanupOldLogs();
     // V2-099: Run EXPLAIN QUERY PLAN audit at startup
     runQueryPlanAudit(db);
+    // CIE-009: Start file watchers for all registered workspaces
+    startFileWatcher();
   });
 }
 
