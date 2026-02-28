@@ -482,6 +482,31 @@ export function runMigrations() {
       )
     `);
   }
+
+  // FR-005: Add 'completed' to spec_versions status CHECK constraint (idempotent)
+  const specVersionsSql = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_versions'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (specVersionsSql && !specVersionsSql.includes('completed')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE spec_versions_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec_slug TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        content_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','completed')),
+        rejection_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(spec_slug, version)
+      );
+      INSERT INTO spec_versions_new (id, spec_slug, version, content_json, status, rejection_reason, created_at)
+        SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at FROM spec_versions;
+      DROP TABLE spec_versions;
+      ALTER TABLE spec_versions_new RENAME TO spec_versions;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 runMigrations();
