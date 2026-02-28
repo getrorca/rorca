@@ -1,16 +1,17 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Settings2, Layers, Github, Variable, Play, Webhook,
-  Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users,
+  Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { useToast, ToastContainer } from '../components/Toast';
 import AgentsEditorSection from '../components/AgentsEditorSection';
+import ContextRoutingSettings from '../components/ContextRoutingSettings';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type WsSettingsTab = 'general' | 'direction' | 'github' | 'env-vars' | 'pipeline' | 'hooks' | 'agents';
+type WsSettingsTab = 'general' | 'direction' | 'context' | 'github' | 'env-vars' | 'pipeline' | 'hooks' | 'agents';
 
 interface WorkspaceDetail {
   id: string;
@@ -40,13 +41,14 @@ interface GithubStatus {
 }
 
 const TABS: { id: WsSettingsTab; label: string; icon: typeof Settings2 }[] = [
-  { id: 'general',   label: 'General',         icon: Settings2 },
-  { id: 'direction', label: 'Direction Stack',  icon: Layers    },
-  { id: 'github',    label: 'GitHub',           icon: Github    },
-  { id: 'env-vars',  label: 'Env Vars',         icon: Variable  },
-  { id: 'pipeline',  label: 'Pipeline',         icon: Play      },
-  { id: 'hooks',     label: 'Hooks',            icon: Webhook   },
-  { id: 'agents',    label: 'Agents',           icon: Users     },
+  { id: 'general',   label: 'General',           icon: Settings2 },
+  { id: 'direction', label: 'Direction Stack',    icon: Layers    },
+  { id: 'context',   label: 'Workspace Context',  icon: Route     },
+  { id: 'github',    label: 'GitHub',             icon: Github    },
+  { id: 'env-vars',  label: 'Env Vars',           icon: Variable  },
+  { id: 'pipeline',  label: 'Pipeline',           icon: Play      },
+  { id: 'hooks',     label: 'Hooks',              icon: Webhook   },
+  { id: 'agents',    label: 'Agents',             icon: Users     },
 ];
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -112,6 +114,7 @@ export default function WorkspaceSettingsPanel() {
         <div className="flex-1 overflow-y-auto p-4 sm:p-6">
           {activeTab === 'general'   && <GeneralSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'direction' && <DirectionSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'context'   && <ContextRoutingSettings workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'github'    && <GithubSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'env-vars'  && <EnvVarsSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'pipeline'  && <PipelineSection workspaceId={workspaceId} showToast={showToast} />}
