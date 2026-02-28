@@ -31,6 +31,8 @@ export interface ContextPayload {
   scoped: string[];
   tagged: string[];
   totalTokens: number;
+  /** File paths that were injected (for usage tracking) */
+  injectedFiles: string[];
 }
 
 interface ScoredFile {
@@ -285,8 +287,9 @@ export function route(
   const scoped = budgeted.filter(f => f.source === 'scoped').map(f => f.content);
   const tagged = budgeted.filter(f => f.source === 'tagged').map(f => f.content);
   const totalTokens = budgeted.reduce((sum, f) => sum + f.tokens, 0);
+  const injectedFiles = budgeted.map(f => f.filePath);
 
-  return { globals, scoped, tagged, totalTokens };
+  return { globals, scoped, tagged, totalTokens, injectedFiles };
 }
 
 // ─── Context File Writer ────────────────────────────────────────────────────
