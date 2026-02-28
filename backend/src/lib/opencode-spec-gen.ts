@@ -91,7 +91,9 @@ function buildSpecGenPrompt(opts: {
     ...(templateContext ? ['=== REFERENCE TEMPLATE ===', templateContext, '=== END TEMPLATE ===', ''] : []),
     `Spec title: ${title}`,
     `Spec brief: ${brief}`,
-    `Generate exactly ${storyCount} user stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}.`,
+    storyCount === 0
+      ? `Generate an appropriate number of user stories (typically 3-20) based on the scope and complexity of the brief. Use fewer stories for focused features and more for large system changes. Number stories sequentially starting from ${storyPrefix}-001.`
+      : `Generate exactly ${storyCount} user stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}.`,
     '',
     'OUTPUT REQUIREMENT:',
     'After exploring the codebase, your FINAL message must contain ONLY a raw JSON object.',
@@ -102,7 +104,9 @@ function buildSpecGenPrompt(opts: {
     diagramInstruction,
     '',
     'Rules:',
-    `- Generate exactly ${storyCount} stories`,
+    storyCount === 0
+      ? `- Number stories sequentially starting from ${storyPrefix}-001`
+      : `- Generate exactly ${storyCount} stories`,
     '- Each story needs 3-5 specific testable acceptanceCriteria',
     '- dependsOn lists story IDs this story requires first (empty array if none)',
     '- Analyze story CONTENT to determine dependencies — shared state, APIs, UI components, DB schemas',
