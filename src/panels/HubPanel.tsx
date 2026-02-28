@@ -11,6 +11,7 @@ import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import type { PanelId } from '../components/Sidebar';
 import AgentBadge from '../components/AgentBadge';
+import MemoryUpdatesCard from '../components/MemoryUpdatesCard';
 import AppHeader from '../components/AppHeader';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -1288,6 +1289,13 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
           {workspaceId && (
             <section>
               <WorkspaceHealthCard workspaceId={workspaceId} />
+            </section>
+          )}
+
+          {/* Memory Ledger Updates */}
+          {workspaceId && (
+            <section>
+              <MemoryUpdatesCard workspaceId={workspaceId} onNavigateToMemory={() => onNavigate('memory')} />
             </section>
           )}
 

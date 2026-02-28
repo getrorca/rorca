@@ -38,6 +38,7 @@ import billingRouter, { webhookRouter as billingWebhookRouter } from './routes/b
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { startQueueConsumer } from './lib/queue-consumer';
+import { startMemorySynthesis } from './lib/memory-synthesis';
 import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
@@ -49,6 +50,7 @@ import { db } from './db/index';
 import runQueueRouter from './routes/run-queue';
 import configRouter from './routes/config';
 import copilotRouter from './routes/copilot';
+import memoryRouter from './routes/memory';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 
@@ -142,6 +144,7 @@ app.use('/api/billing', billingRouter);
 app.use('/api/run-queue', runQueueRouter);
 app.use('/api/config', configRouter);
 app.use('/api/copilot', copilotRouter);
+app.use('/api/memory', memoryRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
@@ -165,6 +168,9 @@ startNotificationDispatcher();
 
 // RQ-002: Subscribe queue consumer to auto-trigger next run on completion
 startQueueConsumer();
+
+// CIE-005: Subscribe memory synthesis to generate ledger entries after successful runs
+startMemorySynthesis();
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {

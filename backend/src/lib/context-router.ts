@@ -13,6 +13,7 @@ import * as path from 'path';
 import * as os from 'os';
 import micromatch from 'micromatch';
 import type { RoutingConfig, RoutingScope } from './rorca-config';
+import { getContextSnippet } from './memory-ledger';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -294,7 +295,7 @@ export function route(
  * Write compiled context payload to a temp file for injection into agent subprocess.
  * Returns the absolute path to the temp file.
  */
-export function writeContextFile(payload: ContextPayload): string {
+export function writeContextFile(payload: ContextPayload, workspacePath?: string, memoryEntryCount?: number): string {
   const sections: string[] = [];
 
   if (payload.globals.length > 0) {
@@ -310,6 +311,16 @@ export function writeContextFile(payload: ContextPayload): string {
   if (payload.tagged.length > 0) {
     sections.push('\n# === RORCA TAGGED CONTEXT ===\n');
     sections.push(payload.tagged.join('\n\n---\n\n'));
+  }
+
+  // CIE-005: Inject recent memory ledger entries
+  if (workspacePath) {
+    const n = memoryEntryCount ?? 20;
+    const memorySnippet = getContextSnippet(workspacePath, n);
+    if (memorySnippet) {
+      sections.push('\n# === RORCA MEMORY LEDGER ===\n');
+      sections.push(memorySnippet);
+    }
   }
 
   const content = sections.join('\n');
