@@ -4,7 +4,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import PricingModal from './PricingModal';
 import { useHelpTips } from '../contexts/HelpTipsContext';
-import AddWorkspaceModal from './AddWorkspaceModal';
+import AppHeader from './AppHeader';
 import ThemeToggle from './ThemeToggle';
 import NotificationBell from './NotificationBell';
 import { useNetworkOffline, NetworkIndicator } from './NetworkBanner';
@@ -12,81 +12,13 @@ import { apiFetch } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from './Sidebar';
 
-// ─── Workspace Selector ─────────────────────────────────────────────────────
-
-function WorkspaceSelector() {
-  const { workspaceId, setWorkspaceId, workspaces, addWorkspace } = useWorkspace();
-  const [open, setOpen] = useState(false);
-  const [showAddModal, setShowAddModal] = useState(false);
-
-  const selected = workspaces.find((w) => w.id === workspaceId);
-  // On mobile (<640px), truncate to first word of workspace name
-  const fullName = selected?.name ?? 'Select workspace';
-  const shortName = fullName.split(/[\s-]/)[0] || fullName;
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen(!open)}
-        aria-label="Select workspace"
-        aria-expanded={open}
-        className="flex items-center gap-2 px-3 py-1.5 rounded text-sm bg-bg border border-border hover:border-accent transition-colors min-h-[44px] sm:min-h-0"
-      >
-        <span className="truncate max-w-[80px] sm:max-w-[160px]">
-          <span className="sm:hidden">{shortName}</span>
-          <span className="hidden sm:inline">{fullName}</span>
-        </span>
-        <svg className="w-3 h-3 text-muted shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="fixed left-3 right-3 top-14 sm:absolute sm:left-0 sm:right-auto sm:top-auto sm:mt-1 sm:w-56 bg-panel border border-border rounded shadow-lg z-50">
-            {workspaces.map((w) => (
-              <button
-                key={w.id}
-                onClick={() => { setWorkspaceId(w.id); setOpen(false); }}
-                className={`w-full text-left px-3 py-2 text-sm hover:bg-bg transition-colors ${
-                  w.id === workspaceId ? 'text-accent' : 'text-[var(--text)]'
-                }`}
-              >
-                {w.name}
-              </button>
-            ))}
-            {workspaces.length > 0 && <div className="border-t border-border" />}
-            <button
-              onClick={() => { setOpen(false); setShowAddModal(true); }}
-              className="w-full text-left px-3 py-2 text-sm text-muted hover:bg-bg transition-colors"
-            >
-              + Add Workspace
-            </button>
-          </div>
-        </>
-      )}
-
-      {showAddModal && (
-        <AddWorkspaceModal
-          onClose={() => setShowAddModal(false)}
-          onSuccess={(ws) => {
-            addWorkspace(ws);
-            setShowAddModal(false);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
 // ─── Run Pill ────────────────────────────────────────────────────────────────
 
 type RunPillState = 'idle' | 'running' | 'done';
 
 const AUTO_HIDE_MS = 30_000;
 
-function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
+export function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
   const { activeRuns, workspaceId, refreshActiveRuns } = useWorkspace();
   const activeRun = activeRuns[0] ?? null;
   const activeRunId = activeRun?.id ?? null;
@@ -185,20 +117,10 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
     };
   }, []);
 
-  // Nothing to show
+  // Nothing to show if no active run
   if (!visible && !activeRun) {
-    return (
-      <button
-        onClick={() => onNavigate?.('forge')}
-        className="flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] sm:min-h-0 rounded text-sm font-medium text-accent bg-accent/10 border border-accent/30 hover:bg-accent/20 transition-colors"
-      >
-        <Plus size={14} />
-        <span className="hidden sm:inline">New Spec</span>
-      </button>
-    );
+    return null;
   }
-
-  if (!visible) return null;
 
   const isDone = pillState === 'done';
   const label = isDone
@@ -208,11 +130,10 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
   return (
     <button
       onClick={() => activeRunId ? onNavigate?.('pipeline') : undefined}
-      className={`flex items-center gap-2 px-3 py-1.5 min-h-[44px] sm:min-h-0 rounded text-sm font-medium transition-colors ${
-        isDone
-          ? 'text-green-600 bg-green-500/10 border border-green-500/30 hover:bg-green-500/20'
-          : 'text-[var(--text)] bg-accent/10 border border-accent/30 hover:bg-accent/20'
-      }`}
+      className={`flex items-center gap-2 px-3 py-1.5 min-h-[44px] sm:min-h-0 rounded text-sm font-medium transition-colors ${isDone
+        ? 'text-green-600 bg-green-500/10 border border-green-500/30 hover:bg-green-500/20'
+        : 'text-[var(--text)] bg-accent/10 border border-accent/30 hover:bg-accent/20'
+        }`}
       title={isDone ? 'Run completed' : 'View active run'}
     >
       {isDone ? (
@@ -233,7 +154,7 @@ function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
 
 // ─── User Menu ───────────────────────────────────────────────────────────────
 
-function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
+export function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
   const { user, logout } = useAuth();
   const [open, setOpen] = useState(false);
 
@@ -283,16 +204,15 @@ function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
 
 // ─── Minor Controls ──────────────────────────────────────────────────────────
 
-function ShowTipsToggle() {
+export function ShowTipsToggle() {
   const { showTips, setShowTips } = useHelpTips();
   return (
     <button
       onClick={() => setShowTips(!showTips)}
-      className={`flex items-center gap-1 px-2 py-1.5 rounded text-xs transition-colors ${
-        showTips
-          ? 'text-accent bg-accent/10 hover:bg-accent/20'
-          : 'text-muted hover:text-[var(--text)] hover:bg-bg'
-      }`}
+      className={`flex items-center gap-1 px-2 py-1.5 rounded text-xs transition-colors ${showTips
+        ? 'text-accent bg-accent/10 hover:bg-accent/20'
+        : 'text-muted hover:text-[var(--text)] hover:bg-bg'
+        }`}
       title={showTips ? 'Hide help tips' : 'Show help tips'}
       aria-label={showTips ? 'Hide help tips' : 'Show help tips'}
     >
@@ -309,7 +229,7 @@ const PLAN_COLORS: Record<string, string> = {
   team: 'text-purple-600 bg-purple-500/10 border-purple-500/30',
 };
 
-function PlanBadge() {
+export function PlanBadge() {
   const { user } = useAuth();
   const [showPricing, setShowPricing] = useState(false);
   const plan = user?.plan || 'free';
@@ -334,53 +254,32 @@ function PlanBadge() {
 
 interface ShellProps {
   sidebar?: React.ReactNode;
+  header?: React.ReactNode; // Optional custom header override from pages
   children?: React.ReactNode;
   onMenuToggle?: () => void;
   showMenuButton?: boolean;
   onNavigate?: (panel: PanelId) => void;
 }
 
-export default function Shell({ sidebar, children, onMenuToggle, showMenuButton, onNavigate }: ShellProps) {
+export default function Shell({ sidebar, header, children, onMenuToggle, showMenuButton, onNavigate }: ShellProps) {
   const offline = useNetworkOffline();
 
   return (
-    <div className="h-screen flex flex-col bg-bg overflow-x-hidden">
+    <div className="h-screen flex bg-bg overflow-x-hidden w-full">
       <a href="#main-content" className="skip-to-content">
         Skip to content
       </a>
-      {/* Top Bar — 48px */}
-      <header className="h-12 flex items-center justify-between px-3 sm:px-4 bg-panel border-b border-border shrink-0">
-        {/* Left: hamburger + wordmark + workspace */}
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          {showMenuButton && (
-            <button
-              onClick={onMenuToggle}
-              className="md:hidden w-11 h-11 flex items-center justify-center text-muted hover:text-[var(--text)] transition-colors -ml-1"
-              aria-label="Open navigation menu"
-            >
-              <Menu size={20} />
-            </button>
-          )}
-          <span className="font-mono font-bold text-accent text-sm tracking-tight select-none shrink-0">rorca</span>
-          <WorkspaceSelector />
-        </div>
 
-        {/* Right: network + plan + tips + notifications + theme + run pill + user */}
-        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-          <NetworkIndicator offline={offline} />
-          <div className="hidden sm:block"><PlanBadge /></div>
-          <div className="hidden sm:block"><ShowTipsToggle /></div>
-          <NotificationBell onNavigate={onNavigate} />
-          <div className="hidden sm:block"><ThemeToggle /></div>
-          <RunPill onNavigate={onNavigate} />
-          <UserMenu onNavigate={onNavigate} />
-        </div>
-      </header>
+      {/* Sidebar - Now spans full height on the left */}
+      {sidebar}
 
-      {/* Body */}
-      <div className="flex flex-1 min-h-0">
-        {sidebar}
-        <main id="main-content" className="flex-1 overflow-hidden contain-layout">
+      {/* Main Content Area (Column) */}
+      <div className="flex flex-col flex-1 min-w-0 overflow-hidden bg-bg">
+        {/* If a custom header is provided, render it. Default global header is removed per Linear-style layout. */}
+        {header && header}
+
+        {/* Body Main Canvas */}
+        <main id="main-content" className="flex-1 min-h-0 min-w-0 overflow-y-auto contain-layout bg-bg relative">
           {children}
         </main>
       </div>

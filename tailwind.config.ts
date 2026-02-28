@@ -7,6 +7,7 @@ const config: Config = {
       colors: {
         bg: 'var(--bg)',
         panel: 'var(--panel)',
+        'surface-200': 'var(--surface-200)',
         border: 'var(--border)',
         accent: 'var(--accent)',
         'accent-hover': 'var(--accent-hover)',

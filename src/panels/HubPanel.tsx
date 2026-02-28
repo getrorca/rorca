@@ -1,15 +1,17 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, Menu } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, AlertCircle, Search } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
 // TriggerPopover removed — Ready-to-Run cards now trigger directly
-import { ToastContainer } from '../components/Toast';
+import { ToastContainer, useToast } from '../components/Toast';
+import { HubSkeleton } from '../components/Skeleton';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import type { PanelId } from '../components/Sidebar';
 import AgentBadge from '../components/AgentBadge';
+import AppHeader from '../components/AppHeader';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -159,8 +161,8 @@ function UpdatedFooter({ lastUpdated }: { lastUpdated: Date | null }) {
   const secsAgo = Math.floor((Date.now() - lastUpdated.getTime()) / 1000);
   const label =
     secsAgo < 10 ? 'Updated just now' :
-    secsAgo < 60 ? `Updated ${secsAgo}s ago` :
-    `Updated ${Math.floor(secsAgo / 60)}m ago`;
+      secsAgo < 60 ? `Updated ${secsAgo}s ago` :
+        `Updated ${Math.floor(secsAgo / 60)}m ago`;
 
   return (
     <p className="mt-2 text-[11px] text-muted/60 text-right select-none">{label}</p>
@@ -274,13 +276,13 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
   const borderTransitionClass = completionBorder === 'success'
     ? 'border-emerald-500 border-l-emerald-500'
     : completionBorder === 'failure'
-    ? 'border-red-500 border-l-red-500'
-    : `border-border ${BORDER_LEFT[effectiveStatus] || 'border-l-gray-500'}`;
+      ? 'border-red-500 border-l-red-500'
+      : `border-border ${BORDER_LEFT[effectiveStatus] || 'border-l-gray-500'}`;
 
   return (
     <button
       onClick={() => onNavigateToRun?.(run.id)}
-      className={`w-full text-left p-4 bg-panel border border-l-4 ${borderTransitionClass} rounded-lg hover:border-accent/50 transition-[border-color] duration-1000 group animate-slide-down-in`}
+      className={`w-full text-left p-4 hover:bg-surface-200 transition-colors duration-200 group animate-slide-down-in border-l-[3px] ${borderTransitionClass}`}
     >
       {/* Header row: status + run ID + actions */}
       <div className="flex items-center justify-between mb-2">
@@ -349,11 +351,10 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
         aria-label={`Run progress: ${passed} of ${total} stories passed`}
       >
         <div
-          className={`h-full rounded-full transition-all duration-500 ${
-            effectiveStatus === 'failed' ? 'bg-red-500' :
+          className={`h-full rounded-full transition-all duration-500 ${effectiveStatus === 'failed' ? 'bg-red-500' :
             effectiveStatus === 'done' ? 'bg-emerald-500' :
-            'bg-blue-500'
-          }`}
+              'bg-blue-500'
+            }`}
           style={{ width: `${progressPct}%` }}
         />
       </div>
@@ -399,7 +400,7 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
   return (
     <button
       onClick={() => onNavigateToSpecReview ? onNavigateToSpecReview(spec.id) : onNavigate('queue')}
-      className="w-full text-left p-4 bg-panel border border-border rounded-lg hover:border-accent/50 transition-colors group flex flex-col gap-2"
+      className="w-full text-left py-4 hover:bg-surface-200 transition-colors group flex flex-col gap-2 px-2"
     >
       {/* Title + chevron */}
       <div className="flex items-start justify-between gap-2">
@@ -455,14 +456,19 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
 
 // ─── Ready-to-Run Card ──────────────────────────────────────────────────────
 
-function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate, onQueueRefresh }: {
+function ReadyToRunCard({ spec, workspaceId, defaultParallelism, workspaceBusy, workspaceName, onTriggered, onNavigate, onQueueRefresh }: {
   spec: SpecSummary;
   workspaceId: string;
   defaultParallelism: number;
+  workspaceBusy: boolean;
+  workspaceName: string;
+  onTriggered: (specId: string) => void;
   onNavigate: (panel: PanelId) => void;
   onQueueRefresh?: () => void;
 }) {
+  const specPath = `forge/specs/approved/${spec.id}.json`;
   const [triggerState, setTriggerState] = useState<'idle' | 'triggering' | 'success' | 'error'>('idle');
+  const [showPopover, setShowPopover] = useState(false);
   const [queueLoading, setQueueLoading] = useState(false);
   const { show: showToast } = useGlobalToast();
 
@@ -513,7 +519,7 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate, onQ
   };
 
   return (
-    <div className="p-4 bg-panel border border-border rounded-lg space-y-3">
+    <div className="py-4 px-2 space-y-3 hover:bg-surface-200 transition-colors group">
       {/* Title + story count badge */}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
@@ -522,25 +528,12 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate, onQ
         </div>
       </div>
       <div className="relative">
-        {showPopover && (
-          <TriggerPopover
-            defaultParallelism={defaultParallelism}
-            loading={triggerState === 'triggering'}
-            queueLoading={queueLoading}
-            onTrigger={handleTrigger}
-            onAddToQueue={handleAddToQueue}
-            onClose={() => setShowPopover(false)}
-            onNavigate={onNavigate}
-            specPath={`forge/specs/approved/${spec.id}.json`}
-            workspaceId={workspaceId}
-          />
-        )}
         {triggerState === 'success' ? (
           <div className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
             <CheckCircle size={12} />
             Launching...
           </div>
-        </div>
+        ) : null}
         {/* Workspace badge */}
         <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-bg text-muted border border-border">
           <FolderGit2 size={10} />
@@ -559,11 +552,10 @@ function ReadyToRunCard({ spec, workspaceId, defaultParallelism, onNavigate, onQ
           onClick={handleTrigger}
           disabled={workspaceBusy || triggerState === 'triggering'}
           title={workspaceBusy ? 'A run is already active for this workspace' : specPath}
-          className={`flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium transition-opacity ${
-            workspaceBusy
-              ? 'bg-yellow-500/10 text-yellow-600 border border-yellow-500/30 cursor-not-allowed'
-              : 'bg-accent text-white hover:opacity-90 disabled:opacity-60'
-          }`}
+          className={`flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium transition-opacity ${workspaceBusy
+            ? 'bg-yellow-500/10 text-yellow-600 border border-yellow-500/30 cursor-not-allowed'
+            : 'bg-accent text-white hover:opacity-90 disabled:opacity-60'
+            }`}
         >
           {workspaceBusy ? (
             <><AlertCircle size={14} /> Workspace busy</>
@@ -634,6 +626,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [activeRun, setActiveRun] = useState<PipelineRun | null>(null);
   const [totalStories, setTotalStories] = useState(0);
   const [pendingSpecs, setPendingSpecs] = useState<SpecSummary[]>([]);
+  const [pendingSearchQuery, setPendingSearchQuery] = useState('');
   const [approvedSpecs, setApprovedSpecs] = useState<SpecSummary[]>([]);
   const [recentRuns, setRecentRuns] = useState<PipelineRun[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -641,6 +634,14 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [defaultParallelism, setDefaultParallelism] = useState(1);
   const [queueLength, setQueueLength] = useState(0);
   const [nextQueueSpecName, setNextQueueSpecName] = useState<string | null>(null);
+  const [justCompletedRunIds, setJustCompletedRunIds] = useState<Set<number>>(new Set());
+  const { toasts: completionToasts, show: showCompletionToastRaw, dismiss: dismissCompletionToast } = useToast();
+  const showCompletionToast = useCallback((status: string, label: string) => {
+    showCompletionToastRaw(
+      status === 'completed' ? `✓ ${label} completed` : `✗ ${label} failed`,
+      status === 'completed' ? 'success' : 'error',
+    );
+  }, [showCompletionToastRaw]);
 
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
@@ -838,132 +839,162 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
               Set direction
             </button>
           </div>
-          <button
-            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
-            className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors mt-4"
-          >
-            <Menu size={12} />
-            All panels
-          </button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      {/* Completion toast — top-right slide-in */}
-      <ToastContainer toasts={completionToasts} onDismiss={dismissCompletionToast} position="top-right" />
+    <div className="h-full flex flex-col overflow-hidden bg-bg">
+      <AppHeader
+        breadcrumbs={
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-[var(--text)] text-sm tracking-tight">
+              {selectedWorkspace?.name ?? 'Hub'}
+            </span>
+            <ChevronRight size={14} className="text-muted" />
+            <span className="text-sm text-muted">Overview</span>
+          </div>
+        }
+      />
+      <div className="h-full overflow-y-auto">
+        {/* Completion toast — top-right slide-in */}
+        <ToastContainer toasts={completionToasts} onDismiss={dismissCompletionToast} position="top-right" />
 
-      <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8">
-        {/* Active Run */}
-        {hasActiveRun && (
-          <section>
-            <SectionHeader icon={Play} label="Active Run" />
-            <ActiveRunCard
-              run={activeRun}
-              totalStories={totalStories}
-              onNavigateToRun={onNavigateToRun}
-              onRunCompleted={(status) => {
-                showCompletionToast(status, specLabel(activeRun.spec_path));
-                setJustCompletedRunIds(prev => new Set(prev).add(activeRun.id));
-              }}
-            />
-          </section>
-        )}
+        <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8">
+          {/* Active Run */}
+          {hasActiveRun && (
+            <section>
+              <SectionHeader icon={Play} label="Active Run" />
+              <ActiveRunCard
+                run={activeRun}
+                totalStories={totalStories}
+                onNavigateToRun={onNavigateToRun}
+                onRunCompleted={(status) => {
+                  showCompletionToast(status, specLabel(activeRun.spec_path));
+                  setJustCompletedRunIds(prev => new Set(prev).add(activeRun.id));
+                }}
+              />
+            </section>
+          )}
 
-        {/* Queue Status */}
-        {queueLength > 0 && (
-          <section>
-            <div className="flex items-center justify-between">
-              <SectionHeader icon={ListPlus} label="Queue" badge={queueLength} noMargin />
-              <button
-                onClick={() => onNavigate('pipeline')}
-                className="flex items-center gap-1 text-xs text-accent hover:underline"
-              >
-                View Queue <ArrowRight size={12} />
-              </button>
-            </div>
-            <p className="text-sm text-muted mt-2">
-              {queueLength} {queueLength === 1 ? 'spec' : 'specs'} queued
-              {nextQueueSpecName && (
-                <> &mdash; next: <span className="text-[var(--text)] font-medium capitalize">{nextQueueSpecName}</span></>
-              )}
-            </p>
-          </section>
-        )}
+          {/* Queue Status */}
+          {queueLength > 0 && (
+            <section>
+              <div className="flex items-center justify-between">
+                <SectionHeader icon={ListPlus} label="Queue" badge={queueLength} noMargin />
+                <button
+                  onClick={() => onNavigate('pipeline')}
+                  className="flex items-center gap-1 text-xs text-accent hover:underline"
+                >
+                  View Queue <ArrowRight size={12} />
+                </button>
+              </div>
+              <p className="text-sm text-muted mt-2">
+                {queueLength} {queueLength === 1 ? 'spec' : 'specs'} queued
+                {nextQueueSpecName && (
+                  <> &mdash; next: <span className="text-[var(--text)] font-medium capitalize">{nextQueueSpecName}</span></>
+                )}
+              </p>
+            </section>
+          )}
 
-        {/* Pending Reviews */}
-        {hasPending && (
-          <section>
-            <SectionHeader icon={ListChecks} label="Pending Reviews" badge={pendingSpecs.length} />
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {pendingSpecs.map((spec) => (
-                <PendingReviewCard
-                  key={spec.id}
-                  spec={spec}
-                  workspaceId={workspaceId!}
-                  onNavigate={onNavigate}
-                  onNavigateToSpecReview={onNavigateToSpecReview}
-                  onAction={(specId) => {
-                    setPendingSpecs((prev) => prev.filter((s) => s.id !== specId));
-                  }}
-                />
-              ))}
-            </div>
-            <UpdatedFooter lastUpdated={lastUpdated} />
-          </section>
-        )}
+          {/* Pending Reviews */}
+          {hasPending && (
+            <section>
+              <div className="flex items-center justify-between mb-3">
+                <SectionHeader icon={ListChecks} label="Pending Reviews" badge={pendingSpecs.length} noMargin />
+                <div className="relative group w-48 transition-all focus-within:w-64">
+                  <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
+                    <Search size={14} className="text-muted group-focus-within:text-[var(--text)] transition-colors" />
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Filter missing specs..."
+                    value={pendingSearchQuery}
+                    onChange={(e) => setPendingSearchQuery(e.target.value)}
+                    className="block w-full pl-8 pr-3 py-1.5 text-xs bg-bg border border-border rounded-md text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent transition-all duration-200"
+                  />
+                </div>
+              </div>
+              {(() => {
+                const filtered = pendingSpecs.filter(spec =>
+                  spec.specName.toLowerCase().includes(pendingSearchQuery.toLowerCase()) ||
+                  spec.id.toLowerCase().includes(pendingSearchQuery.toLowerCase())
+                );
 
-        {/* Ready to Run */}
-        {hasApproved && (
-          <section>
-            <SectionHeader icon={Rocket} label="Ready to Run" badge={approvedSpecs.length} />
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {approvedSpecs.map((spec) => (
-                <ReadyToRunCard
-                  key={spec.id}
-                  spec={spec}
-                  workspaceId={workspaceId!}
-                  defaultParallelism={defaultParallelism}
-                  onNavigate={onNavigate}
-                  onQueueRefresh={fetchQueueStatus}
-                />
-              ))}
-            </div>
-          </section>
-        )}
+                return filtered.length > 0 ? (
+                  <ul className="flex flex-col divide-y divide-border border-y border-border m-0 p-0 list-none">
+                    {filtered.map((spec, i) => (
+                      <li key={spec.id} className={`animate-stagger-item stagger-${Math.min(i + 1, 8)}`}>
+                        <PendingReviewCard
+                          spec={spec}
+                          workspaceId={workspaceId!}
+                          onNavigate={onNavigate}
+                          onNavigateToSpecReview={onNavigateToSpecReview}
+                          onAction={(specId) => {
+                            setPendingSpecs((prev) => prev.filter((s) => s.id !== specId));
+                          }}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="py-8 text-center border-y border-border">
+                    <p className="text-sm text-muted">No pending specs match your search.</p>
+                  </div>
+                );
+              })()}
+              <UpdatedFooter lastUpdated={lastUpdated} />
+            </section>
+          )}
 
-        {/* Recent Runs */}
-        {hasRecent && (
-          <section>
-            <div className="flex items-center justify-between mb-3">
-              <SectionHeader icon={Clock} label="Recent Runs" noMargin />
-              <button
-                onClick={() => onNavigate('archive')}
-                className="flex items-center gap-1 text-xs text-accent hover:underline"
-              >
-                View all <ArrowRight size={12} />
-              </button>
-            </div>
-            <div className="bg-panel border border-border rounded-lg divide-y divide-border">
-              {recentRuns.map((run) => (
-                <RecentRunRow key={run.id} run={run} onNavigateToRun={onNavigateToRun} justCompleted={justCompletedRunIds.has(run.id)} />
-              ))}
-            </div>
-            <UpdatedFooter lastUpdated={lastUpdated} />
-          </section>
-        )}
+          {/* Ready to Run */}
+          {hasApproved && (
+            <section>
+              <SectionHeader icon={Rocket} label="Ready to Run" badge={approvedSpecs.length} />
+              <ul className="flex flex-col divide-y divide-border border-y border-border m-0 p-0 list-none">
+                {approvedSpecs.map((spec, i) => (
+                  <li key={spec.id} className={`animate-stagger-item stagger-${Math.min(i + 1 + pendingSpecs.length, 8)}`}>
+                    <ReadyToRunCard
+                      spec={spec}
+                      workspaceId={workspaceId!}
+                      defaultParallelism={defaultParallelism}
+                      workspaceBusy={hasActiveRun}
+                      workspaceName={selectedWorkspace?.name ?? ''}
+                      onTriggered={() => fetchData()}
+                      onNavigate={onNavigate}
+                      onQueueRefresh={fetchQueueStatus}
+                    />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
-        {/* Footer: subtle link to nav drawer */}
-        <div className="flex justify-center pt-2 pb-4">
-          <button
-            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
-            className="inline-flex items-center gap-1.5 text-xs text-muted/60 hover:text-muted transition-colors"
-          >
-            <Menu size={12} />
-            All panels
-          </button>
+          {/* Recent Runs */}
+          {hasRecent && (
+            <section>
+              <div className="flex items-center justify-between mb-3">
+                <SectionHeader icon={Clock} label="Recent Runs" noMargin />
+                <button
+                  onClick={() => onNavigate('archive')}
+                  className="flex items-center gap-1 text-xs text-accent hover:underline"
+                >
+                  View all <ArrowRight size={12} />
+                </button>
+              </div>
+              <ul className="flex flex-col divide-y divide-border border-y border-border m-0 p-0 list-none">
+                {recentRuns.map((run, i) => (
+                  <li key={run.id} className={`animate-stagger-item stagger-${Math.min(i + 1, 8)}`}>
+                    <RecentRunRow run={run} onNavigateToRun={onNavigateToRun} justCompleted={justCompletedRunIds.has(run.id)} />
+                  </li>
+                ))}
+              </ul>
+              <UpdatedFooter lastUpdated={lastUpdated} />
+            </section>
+          )}
+
         </div>
       </div>
     </div>

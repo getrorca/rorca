@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal } from 'lucide-react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal, Crown, Users, ChevronUp, Download, ExternalLink, FileText, CreditCard } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
@@ -125,70 +125,14 @@ export default function SettingsPanel({ initialTab }: { initialTab?: SettingsTab
   ];
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
-      <div className="p-4 sm:p-6 border-b border-border shrink-0">
-        <h1 className="text-lg font-semibold text-[var(--text)]">Settings</h1>
-        <p className="text-xs text-muted mt-1">Direction stack, providers, integrations, and account</p>
-      </div>
-
-      <div className="flex flex-1 min-h-0">
-        {/* Tab sidebar */}
-        <nav className="w-48 shrink-0 border-r border-border bg-panel p-2 hidden sm:block">
-          {TABS.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setActiveTab(id)}
-              aria-current={activeTab === id ? 'page' : undefined}
-              className={`w-full flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors ${
-                activeTab === id
-                  ? 'bg-accent/10 text-accent'
-                  : 'text-muted hover:text-[var(--text)] hover:bg-bg'
-              }`}
-            >
-              <Icon size={16} />
-              <span className="flex-1 text-left">{label}</span>
-              {id === 'direction' && directionDirty && (
-                <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
-                  Unsaved
-                </span>
-              )}
-            </button>
-          ))}
-        </nav>
-
-        {/* Mobile tab bar */}
-        <div className="sm:hidden flex border-b border-border bg-panel shrink-0 overflow-x-auto">
-          {TABS.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setActiveTab(id)}
-              aria-current={activeTab === id ? 'page' : undefined}
-              className={`flex items-center justify-center gap-1 px-3 py-2 text-xs whitespace-nowrap transition-colors ${
-                activeTab === id
-                  ? 'text-accent border-b-2 border-accent'
-                  : 'text-muted'
-              }`}
-            >
-              <Icon size={14} />
-              {label}
-              {id === 'direction' && directionDirty && (
-                <span className="ml-1 px-1 py-0.5 text-[9px] font-medium rounded bg-warning/15 text-warning">
-                  Unsaved
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-          {activeTab === 'direction' && <DirectionStackSection l1={l1} l2={l2} l3={l3} />}
-          {activeTab === 'providers' && <ProvidersAndDisplaySection />}
-          {activeTab === 'github' && <GitHubSettingsPanel />}
-          {activeTab === 'shortcuts' && <ShortcutsSection />}
-          {activeTab === 'account' && <AccountSection />}
-          {activeTab === 'billing' && <BillingSection />}
-        </div>
+    <div className="h-full flex flex-col overflow-y-auto">
+      <div className="flex-1 p-4 sm:p-6 mx-auto w-full max-w-4xl">
+        {activeTab === 'direction' && <DirectionStackSection l1={l1} l2={l2} l3={l3} />}
+        {activeTab === 'providers' && <ProvidersAndDisplaySection />}
+        {activeTab === 'github' && <GitHubSettingsPanel />}
+        {activeTab === 'shortcuts' && <ShortcutsSection />}
+        {activeTab === 'account' && <AccountSection />}
+        {activeTab === 'billing' && <BillingSection />}
       </div>
     </div>
   );
@@ -398,20 +342,18 @@ function ClaudeAuthStatus() {
   const expiringWarning = auth.expiresAt && (auth.expiresAt - Date.now()) < 24 * 60 * 60 * 1000 && auth.expiresAt > Date.now();
 
   return (
-    <div className={`border rounded-lg p-4 transition-colors ${
-      auth.connected
+    <div className={`border rounded-lg p-4 transition-colors ${auth.connected
         ? expiringWarning
           ? 'border-amber-500/30 bg-amber-500/5'
           : 'border-green-500/30 bg-green-500/5'
         : 'border-amber-500/30 bg-amber-500/5'
-    }`}>
+      }`}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className={`w-2.5 h-2.5 rounded-full ${
-            auth.connected
+          <div className={`w-2.5 h-2.5 rounded-full ${auth.connected
               ? expiringWarning ? 'bg-amber-400' : 'bg-green-400'
               : 'bg-amber-400'
-          }`} />
+            }`} />
           <div>
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-[var(--text)]">Claude Account</span>
@@ -562,16 +504,14 @@ function CodexAuthStatus() {
   const planDisplay = auth.plan ? auth.plan.charAt(0).toUpperCase() + auth.plan.slice(1) : null;
 
   return (
-    <div className={`border rounded-lg p-4 transition-colors ${
-      auth.connected
+    <div className={`border rounded-lg p-4 transition-colors ${auth.connected
         ? 'border-green-500/30 bg-green-500/5'
         : 'border-amber-500/30 bg-amber-500/5'
-    }`}>
+      }`}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className={`w-2.5 h-2.5 rounded-full ${
-            auth.connected ? 'bg-green-400' : 'bg-amber-400'
-          }`} />
+          <div className={`w-2.5 h-2.5 rounded-full ${auth.connected ? 'bg-green-400' : 'bg-amber-400'
+            }`} />
           <div>
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-[var(--text)]">ChatGPT Account</span>
@@ -686,7 +626,7 @@ function ExecutionEngineSection() {
       setGrouped(modelData.grouped);
       setOllamaStatus(ollama);
       setCopilotStatus({ connected: cfg.copilotConnected, githubUsername: cfg.copilotUsername, connectedAt: null });
-    }).catch(() => {})
+    }).catch(() => { })
       .finally(() => setLoading(false));
     fetchCopilotStatus();
   }, [fetchCopilotStatus]);
@@ -865,8 +805,7 @@ function ExecutionEngineSection() {
         </div>
         {/* Status badge */}
         <div className="flex items-center gap-2">
-          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${
-            config?.agentType === 'codex'
+          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${config?.agentType === 'codex'
               ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
               : config?.agentType === 'opencode'
                 ? config?.agentModel === 'github/copilot'
@@ -875,15 +814,14 @@ function ExecutionEngineSection() {
                     ? 'bg-green-500/10 text-green-400 border border-green-500/20'
                     : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
                 : 'bg-accent/10 text-accent border border-accent/20'
-          }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${
-              config?.agentType === 'codex'
+            }`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${config?.agentType === 'codex'
                 ? 'bg-emerald-400'
                 : config?.agentType === 'opencode'
                   ? config?.agentModel === 'github/copilot' ? 'bg-[#8b949e]'
                     : config?.agentModel?.startsWith('ollama/') ? 'bg-green-400' : 'bg-purple-400'
                   : 'bg-accent'
-            }`} />
+              }`} />
             {config?.agentType === 'codex'
               ? 'Codex CLI'
               : config?.agentType === 'opencode'
@@ -918,16 +856,14 @@ function ExecutionEngineSection() {
       <div className="flex gap-3">
         <button
           onClick={() => setSelectedType('claude')}
-          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
-            selectedType === 'claude'
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${selectedType === 'claude'
               ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
               : 'border-border bg-bg hover:border-accent/30'
-          }`}
+            }`}
         >
           <div className="flex items-center gap-2 mb-1">
-            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
-              selectedType === 'claude' ? 'border-accent' : 'border-border'
-            }`}>
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${selectedType === 'claude' ? 'border-accent' : 'border-border'
+              }`}>
               {selectedType === 'claude' && <div className="w-1.5 h-1.5 rounded-full bg-accent" />}
             </div>
             <span className="text-sm font-medium text-[var(--text)]">Claude Subscription</span>
@@ -939,16 +875,14 @@ function ExecutionEngineSection() {
 
         <button
           onClick={() => setSelectedType('opencode')}
-          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
-            selectedType === 'opencode'
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${selectedType === 'opencode'
               ? 'border-purple-500/60 bg-purple-500/5 ring-1 ring-purple-500/30'
               : 'border-border bg-bg hover:border-purple-500/30'
-          }`}
+            }`}
         >
           <div className="flex items-center gap-2 mb-1">
-            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
-              selectedType === 'opencode' ? 'border-purple-500' : 'border-border'
-            }`}>
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${selectedType === 'opencode' ? 'border-purple-500' : 'border-border'
+              }`}>
               {selectedType === 'opencode' && <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />}
             </div>
             <span className="text-sm font-medium text-[var(--text)]">OpenCode (API Key)</span>
@@ -960,16 +894,14 @@ function ExecutionEngineSection() {
 
         <button
           onClick={() => setSelectedType('codex')}
-          className={`flex-1 border rounded-lg p-4 text-left transition-all ${
-            selectedType === 'codex'
+          className={`flex-1 border rounded-lg p-4 text-left transition-all ${selectedType === 'codex'
               ? 'border-emerald-500/60 bg-emerald-500/5 ring-1 ring-emerald-500/30'
               : 'border-border bg-bg hover:border-emerald-500/30'
-          }`}
+            }`}
         >
           <div className="flex items-center gap-2 mb-1">
-            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${
-              selectedType === 'codex' ? 'border-emerald-500' : 'border-border'
-            }`}>
+            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${selectedType === 'codex' ? 'border-emerald-500' : 'border-border'
+              }`}>
               {selectedType === 'codex' && <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
             </div>
             <span className="text-sm font-medium text-[var(--text)]">Codex CLI (ChatGPT subscription)</span>
@@ -988,11 +920,10 @@ function ExecutionEngineSection() {
 
       {/* OpenCode installation status */}
       {selectedType === 'opencode' && config && (
-        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${
-          config.opencodeInstalled
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${config.opencodeInstalled
             ? 'bg-green-500/10 border border-green-500/20 text-green-400'
             : 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
-        }`}>
+          }`}>
           {config.opencodeInstalled ? (
             <>
               <CheckCircle2 size={14} />
@@ -1009,11 +940,10 @@ function ExecutionEngineSection() {
 
       {/* Ollama status (shown when OpenCode selected) */}
       {selectedType === 'opencode' && ollamaStatus && (
-        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${
-          ollamaStatus.available
+        <div className={`flex items-center gap-2 px-3 py-2 rounded text-xs ${ollamaStatus.available
             ? 'bg-green-500/10 border border-green-500/20 text-green-400'
             : 'bg-zinc-500/10 border border-zinc-500/20 text-zinc-400'
-        }`}>
+          }`}>
           {ollamaStatus.available ? (
             <>
               <CheckCircle2 size={14} />
@@ -1057,16 +987,16 @@ function ExecutionEngineSection() {
               {openRouterConnected && Object.entries(openRouterGrouped)
                 .sort(([a], [b]) => a.localeCompare(b))
                 .map(([family, familyModels]) => (
-                <optgroup key={`or-${family}`} label={`OpenRouter — ${family}`}>
-                  {familyModels.map(m => (
-                    <option key={`or-${m.id}`} value={`openrouter/${m.id}`}>
-                      {m.name}{m.free && m.contextWindow >= 8192 ? ' [Free]' : ''} — {m.contextWindow >= 1000000
-                        ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
-                        : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
+                  <optgroup key={`or-${family}`} label={`OpenRouter — ${family}`}>
+                    {familyModels.map(m => (
+                      <option key={`or-${m.id}`} value={`openrouter/${m.id}`}>
+                        {m.name}{m.free && m.contextWindow >= 8192 ? ' [Free]' : ''} — {m.contextWindow >= 1000000
+                          ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
+                          : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
             </select>
             <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
           </div>
@@ -1087,11 +1017,10 @@ function ExecutionEngineSection() {
 
       {/* GitHub Copilot connection status (shown when OpenCode selected) */}
       {selectedType === 'opencode' && (
-        <div className={`border rounded-lg p-4 transition-colors ${
-          copilotStatus.connected
+        <div className={`border rounded-lg p-4 transition-colors ${copilotStatus.connected
             ? 'border-green-500/30 bg-green-500/5'
             : 'border-border bg-bg'
-        }`}>
+          }`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Github size={18} className={copilotStatus.connected ? 'text-green-400' : 'text-muted'} />
@@ -1156,11 +1085,10 @@ function ExecutionEngineSection() {
 
       {/* OpenRouter provider card (OC-027) */}
       {selectedType === 'opencode' && (
-        <div className={`border rounded-lg p-4 transition-colors ${
-          openRouterConnected
+        <div className={`border rounded-lg p-4 transition-colors ${openRouterConnected
             ? 'border-orange-500/30 bg-orange-500/5'
             : 'border-border bg-bg'
-        }`}>
+          }`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Globe size={18} className={openRouterConnected ? 'text-orange-400' : 'text-muted'} />
@@ -1272,16 +1200,16 @@ function ExecutionEngineSection() {
                   {Object.entries(openRouterGrouped)
                     .sort(([a], [b]) => a.localeCompare(b))
                     .map(([family, familyModels]) => (
-                    <optgroup key={family} label={family}>
-                      {familyModels.map(m => (
-                        <option key={m.id} value={`openrouter/${m.id}`}>
-                          {m.name}{m.free ? ' [Free]' : ''} — {m.contextWindow >= 1000000
-                            ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
-                            : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
+                      <optgroup key={family} label={family}>
+                        {familyModels.map(m => (
+                          <option key={m.id} value={`openrouter/${m.id}`}>
+                            {m.name}{m.free ? ' [Free]' : ''} — {m.contextWindow >= 1000000
+                              ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
+                              : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
                 </select>
                 <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
               </div>
@@ -1476,9 +1404,8 @@ function ProvidersSection() {
           const isDefault = defaultProvider === p.id;
 
           return (
-            <div key={p.id} className={`border rounded p-4 transition-colors ${
-              isDefault ? 'border-accent/40 bg-accent/5' : 'border-border bg-bg'
-            }`}>
+            <div key={p.id} className={`border rounded p-4 transition-colors ${isDefault ? 'border-accent/40 bg-accent/5' : 'border-border bg-bg'
+              }`}>
               {/* Provider header */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -1529,11 +1456,10 @@ function ProvidersSection() {
 
               {/* Test result */}
               {testResult && testResult.provider === p.id && (
-                <div className={`mt-3 px-3 py-2 rounded text-xs flex items-center gap-2 ${
-                  testResult.ok
+                <div className={`mt-3 px-3 py-2 rounded text-xs flex items-center gap-2 ${testResult.ok
                     ? 'bg-green-500/10 border border-green-500/20 text-green-400'
                     : 'bg-red-500/10 border border-red-500/20 text-red-400'
-                }`}>
+                  }`}>
                   {testResult.ok ? (
                     <>
                       <CheckCircle2 size={14} />
@@ -1677,11 +1603,10 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
 
   return (
     <div
-      className={`border rounded p-3 transition-colors cursor-pointer ${
-        isSelected
+      className={`border rounded p-3 transition-colors cursor-pointer ${isSelected
           ? 'border-accent/60 bg-accent/5'
           : 'border-border bg-bg hover:border-accent/30'
-      }`}
+        }`}
       onClick={onSelect}
     >
       <div className="flex items-start justify-between gap-2">
@@ -1717,11 +1642,10 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
         </button>
       </div>
       {testResult && testResult.modelId === model.id && (
-        <div className={`mt-2 px-2 py-1.5 rounded text-[11px] flex items-center gap-1.5 ${
-          testResult.ok
+        <div className={`mt-2 px-2 py-1.5 rounded text-[11px] flex items-center gap-1.5 ${testResult.ok
             ? 'bg-green-500/10 border border-green-500/20 text-green-400'
             : 'bg-red-500/10 border border-red-500/20 text-red-400'
-        }`}>
+          }`}>
           {testResult.ok ? (
             <>
               <CheckCircle2 size={12} />
@@ -1783,7 +1707,7 @@ function DisplaySection() {
         setWorkspaceModel(l3Data.preferredModel);
         setWorkspaceModelInitial(l3Data.preferredModel);
       }
-    }).catch(() => {})
+    }).catch(() => { })
       .finally(() => setLoading(false));
   }, [workspaceId]);
 
@@ -1875,11 +1799,10 @@ function DisplaySection() {
             <button
               key={m}
               onClick={() => setMode(m)}
-              className={`px-4 py-2 text-sm rounded border transition-colors capitalize ${
-                mode === m
+              className={`px-4 py-2 text-sm rounded border transition-colors capitalize ${mode === m
                   ? 'bg-accent/10 border-accent text-accent'
                   : 'border-border text-muted hover:text-[var(--text)] hover:border-accent/50'
-              }`}
+                }`}
             >
               {m}
             </button>
@@ -2213,11 +2136,10 @@ function BillingSection() {
             return (
               <div
                 key={planId}
-                className={`border rounded-lg p-4 flex flex-col ${
-                  isCurrent
+                className={`border rounded-lg p-4 flex flex-col ${isCurrent
                     ? 'border-accent/60 bg-accent/5'
                     : 'border-border bg-bg hover:border-accent/30'
-                } transition-colors`}
+                  } transition-colors`}
               >
                 <div className="flex items-center gap-2 mb-2">
                   <Icon size={16} className={isCurrent ? 'text-accent' : 'text-muted'} />
@@ -2653,7 +2575,7 @@ function NotificationsSection() {
   useEffect(() => {
     apiFetch<{ preferences: NotificationPreferences }>('/api/notifications/preferences')
       .then(data => setPrefs(data.preferences))
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => setLoading(false));
   }, []);
 
@@ -2969,7 +2891,7 @@ function ModelRoutingSection() {
         setConfig(data);
         setDirty(false);
       })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => setLoading(false));
   }, [workspaceId]);
 
@@ -3041,11 +2963,10 @@ function ModelRoutingSection() {
               <button
                 key={mode}
                 onClick={() => update('router', mode)}
-                className={`border rounded-lg p-3 text-left transition-all ${
-                  config.router === mode
+                className={`border rounded-lg p-3 text-left transition-all ${config.router === mode
                     ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
                     : 'border-border bg-bg hover:border-accent/30'
-                }`}
+                  }`}
               >
                 <span className="text-xs font-medium text-[var(--text)]">{info.label}</span>
                 <p className="text-[10px] text-muted mt-0.5 leading-tight">{info.description}</p>
@@ -3336,14 +3257,12 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
       role="switch"
       aria-checked={checked}
       onClick={onChange}
-      className={`relative w-9 h-5 rounded-full transition-colors ${
-        checked ? 'bg-accent' : 'bg-border'
-      }`}
+      className={`relative w-9 h-5 rounded-full transition-colors ${checked ? 'bg-accent' : 'bg-border'
+        }`}
     >
       <span
-        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
-          checked ? 'left-[18px]' : 'left-0.5'
-        }`}
+        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${checked ? 'left-[18px]' : 'left-0.5'
+          }`}
       />
     </button>
   );

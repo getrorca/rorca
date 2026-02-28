@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -19,6 +19,7 @@ import WorktreesPanel from './WorktreesPanel';
 import FinOpsTab from '../components/FinOpsTab';
 import type { PanelId } from '../components/Sidebar';
 import { RunViewTerminalSkeleton } from '../components/Skeleton';
+import AppHeader from '../components/AppHeader';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -65,13 +66,13 @@ interface CommitEntry {
 type RunViewTab = 'terminal' | 'stories' | 'graph' | 'finops' | 'compare' | 'worktrees' | 'commits';
 
 const TABS: { id: RunViewTab; label: string; icon: typeof TerminalIcon }[] = [
-  { id: 'terminal',  label: 'Terminal',  icon: TerminalIcon },
-  { id: 'stories',   label: 'Stories',   icon: List },
-  { id: 'graph',     label: 'Graph',     icon: GitBranch },
-  { id: 'finops',    label: 'FinOps',    icon: DollarSign },
-  { id: 'compare',   label: 'Compare',   icon: ArrowLeftRight },
+  { id: 'terminal', label: 'Terminal', icon: TerminalIcon },
+  { id: 'stories', label: 'Stories', icon: List },
+  { id: 'graph', label: 'Graph', icon: GitBranch },
+  { id: 'finops', label: 'FinOps', icon: DollarSign },
+  { id: 'compare', label: 'Compare', icon: ArrowLeftRight },
   { id: 'worktrees', label: 'Worktrees', icon: FolderGit2 },
-  { id: 'commits',   label: 'Commits',   icon: GitCommitHorizontal },
+  { id: 'commits', label: 'Commits', icon: GitCommitHorizontal },
 ];
 
 const VALID_TABS = new Set<string>(TABS.map((t) => t.id));
@@ -649,84 +650,82 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
 
   return (
     <div className="h-full flex flex-col">
-      {/* Header bar */}
-      <div className="shrink-0 px-3 md:px-4 py-2.5 md:py-3 border-b border-border bg-panel flex items-center gap-2 md:gap-3">
-        <button
-          onClick={onBack}
-          className="p-1.5 rounded-lg hover:bg-bg transition-colors text-muted hover:text-[var(--text)] min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center"
-          title="Back to Hub"
-          aria-label="Back to Hub"
-        >
-          <ArrowLeft size={18} />
-        </button>
-
-        <div className="flex items-center gap-1.5 md:gap-2 min-w-0 flex-1">
-          <h1 className="text-xs md:text-sm font-semibold text-[var(--text)] truncate capitalize">
-            {specLabel(run.spec_path)}
-          </h1>
-          <span className="text-[10px] md:text-xs text-muted font-mono shrink-0">#{run.id}</span>
-          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`} aria-live="polite">
-            {STATUS_BADGE_LABELS[effectiveStatus] || effectiveStatus}
-          </span>
-          {run.parallelism != null && run.parallelism > 1 && !isMobile && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 bg-purple-500/10 text-purple-500">
-              <Layers size={10} />
-              Parallelism: {run.parallelism}
+      <AppHeader
+        breadcrumbs={
+          <div className="flex items-center gap-1.5 md:gap-2 min-w-0">
+            <h1 className="text-xs md:text-sm font-semibold text-[var(--text)] truncate capitalize">
+              {specLabel(run.spec_path)}
+            </h1>
+            <span className="text-[10px] md:text-xs text-muted font-mono shrink-0">#{run.id}</span>
+            <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${STATUS_BADGE_STYLES[effectiveStatus] || 'bg-gray-500/10 text-gray-400'}`} aria-live="polite">
+              {STATUS_BADGE_LABELS[effectiveStatus] || effectiveStatus}
             </span>
-          )}
-          {/* Agent badge */}
-          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${
-            run.agentType === 'opencode' ? 'bg-cyan-500/10 text-cyan-500' : 'bg-orange-500/10 text-orange-500'
-          }`}>
-            {run.agentType === 'opencode'
-              ? run.agentModel?.split('/').pop() || 'OpenCode'
-              : 'Claude'}
-          </span>
-        </div>
-
-        {/* Pipeline controls */}
-        <div className="flex items-center gap-1 md:gap-1.5 shrink-0">
-          {/* Pause / Resume */}
-          <button
-            onClick={handlePauseResume}
-            disabled={!isActive || pauseLoading}
-            title={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
-            aria-label={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
-            className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${
-              isActive && !pauseLoading
+            {run.parallelism != null && run.parallelism > 1 && !isMobile && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 bg-purple-500/10 text-purple-500">
+                <Layers size={10} />
+                Parallelism: {run.parallelism}
+              </span>
+            )}
+            {/* Agent badge */}
+            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${run.agentType === 'opencode' ? 'bg-cyan-500/10 text-cyan-500' : 'bg-orange-500/10 text-orange-500'
+              }`}>
+              {run.agentType === 'opencode'
+                ? run.agentModel?.split('/').pop() || 'OpenCode'
+                : 'Claude'}
+            </span>
+          </div>
+        }
+        actions={
+          <div className="flex items-center gap-1 md:gap-1.5 shrink-0 justify-end flex-wrap pb-1 pt-1 pr-2">
+            {/* Pause / Resume */}
+            <button
+              onClick={handlePauseResume}
+              disabled={!isActive || pauseLoading}
+              title={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
+              aria-label={effectiveStatus === 'paused' ? 'Resume run' : 'Pause run'}
+              className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${isActive && !pauseLoading
                 ? 'hover:bg-bg text-muted hover:text-[var(--text)]'
                 : 'text-muted/30 cursor-not-allowed'
-            }`}
-          >
-            {pauseLoading ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : effectiveStatus === 'paused' ? (
-              <Play size={16} />
-            ) : (
-              <Pause size={16} />
-            )}
-          </button>
+                }`}
+            >
+              {pauseLoading ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : effectiveStatus === 'paused' ? (
+                <Play size={16} />
+              ) : (
+                <Pause size={16} />
+              )}
+            </button>
 
-          {/* Kill */}
-          <button
-            onClick={() => setShowKillConfirm(true)}
-            disabled={!isActive || killLoading}
-            title="Kill run"
-            aria-label="Kill run"
-            className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${
-              isActive && !killLoading
+            {/* Kill */}
+            <button
+              onClick={() => setShowKillConfirm(true)}
+              disabled={!isActive || killLoading}
+              title="Kill run"
+              aria-label="Kill run"
+              className={`p-1.5 rounded-lg transition-colors min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center ${isActive && !killLoading
                 ? 'hover:bg-red-500/10 text-muted hover:text-red-400'
                 : 'text-muted/30 cursor-not-allowed'
-            }`}
-          >
-            {killLoading ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Square size={16} />
-            )}
-          </button>
-        </div>
-      </div>
+                }`}
+            >
+              {killLoading ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Square size={16} />
+              )}
+            </button>
+            <div className="w-px h-4 bg-border mx-1" />
+            <button
+              onClick={onBack}
+              className="p-1.5 rounded-lg hover:bg-bg transition-colors text-muted hover:text-[var(--text)] min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0 flex items-center justify-center"
+              title="Close details"
+              aria-label="Close"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        }
+      />
 
       {/* Kill confirmation dialog */}
       {showKillConfirm && (
@@ -746,11 +745,10 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               key={tab.id}
               onClick={() => handleTabChange(tab.id)}
               aria-current={isActiveTab ? 'page' : undefined}
-              className={`flex items-center gap-1.5 px-3 py-2.5 md:py-2 text-xs font-medium whitespace-nowrap border-b-2 transition-colors shrink-0 ${
-                isActiveTab
-                  ? 'border-accent text-accent'
-                  : 'border-transparent text-muted hover:text-[var(--text)]'
-              }`}
+              className={`flex items-center gap-1.5 px-3 py-2.5 md:py-2 text-xs font-medium whitespace-nowrap border-b-2 transition-colors shrink-0 ${isActiveTab
+                ? 'border-accent text-accent'
+                : 'border-transparent text-muted hover:text-[var(--text)]'
+                }`}
             >
               <Icon size={14} />
               {tab.label}
@@ -782,11 +780,10 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               disabled={!hitlContext.trim() || hitlSending}
               title="Send context and resume"
               aria-label="Send context and resume"
-              className={`self-end px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors ${
-                hitlContext.trim() && !hitlSending
-                  ? 'bg-amber-500 text-white hover:bg-amber-600'
-                  : 'bg-amber-500/20 text-amber-500/40 cursor-not-allowed'
-              }`}
+              className={`self-end px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors ${hitlContext.trim() && !hitlSending
+                ? 'bg-amber-500 text-white hover:bg-amber-600'
+                : 'bg-amber-500/20 text-amber-500/40 cursor-not-allowed'
+                }`}
             >
               {hitlSending ? (
                 <Loader2 size={14} className="animate-spin" />
@@ -820,11 +817,10 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
               <button
                 onClick={handleRetryFailed}
                 disabled={retryLoading}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                  retryLoading
-                    ? 'bg-red-500/20 text-red-500/40 cursor-not-allowed'
-                    : 'bg-red-500 text-white hover:bg-red-600'
-                }`}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${retryLoading
+                  ? 'bg-red-500/20 text-red-500/40 cursor-not-allowed'
+                  : 'bg-red-500 text-white hover:bg-red-600'
+                  }`}
               >
                 {retryLoading ? (
                   <Loader2 size={12} className="animate-spin" />

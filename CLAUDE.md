@@ -57,7 +57,7 @@ Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 - Backend: Express.js + TypeScript + SQLite (`better-sqlite3`, WAL mode, FK on)
 - Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex --approval-mode auto-edit` (ChatGPT sub)
 - Spec generation: OpenCode (autonomous codebase exploration) OR SDK fallback (`SPEC_PROVIDER` env var)
-- MCP: 5 tools exposing Rorca to Claude Code sessions
+- MCP: API-first (OpenAPI spec → auto-generated MCP tools via HTTP transport on :3030)
 
 **Ports**: Frontend 5210, Backend 3030, FinOps sim 5200
 
@@ -192,8 +192,8 @@ rorca/
 └── backend/rorca.db         # SQLite database (auto-created)
 ```
 
-### Sidebar Navigation Sections (defined in `src/components/Sidebar.tsx`)
-The `PanelId` type and `NAV_SECTIONS` array are the canonical source of truth for which panels exist and how they're organized:
+### Sidebar Navigation (defined in `src/components/Sidebar.tsx`)
+`PanelId` and `NAV_SECTIONS` are the canonical source of truth. `spec-review` is a valid PanelId but not in NAV_SECTIONS (opened via slide-over).
 
 | Section | Panels (PanelId) |
 |---------|-----------------|
@@ -202,6 +202,8 @@ The `PanelId` type and `NAV_SECTIONS` array are the canonical source of truth fo
 | Direction | `stack`, `team-direction` |
 | Analytics | `usage`, `costs`, `models`, `velocity`, `completion`, `roi`, `health` |
 | System | `audit-log`, `activity`, `github`, `workspace-settings`, `settings` |
+
+**Context-aware sidebars**: When `activePanel` is in `['settings', 'workspace-settings', 'github', 'stack']`, `App.tsx` renders `SettingsSidebar` instead of the main `Sidebar`. `SettingsSidebar` has 6 tabs: `direction | providers | github | shortcuts | account | billing` (typed as `SettingsTab`). A "Back to Rorca" button exits settings context.
 
 ## Database Tables
 
@@ -393,10 +395,23 @@ The Pipeline Monitor (`/api/pipeline/stream` SSE) polls `wal_events` every 3s. S
 ### SQLite Migration Pattern
 Migrations are SQL files in `backend/src/db/migrations/`. They run in numeric order on first startup. For column additions (SQLite lacks `ADD COLUMN IF NOT EXISTS`), use `pragma table_info` check in `db/index.ts` instead of a migration file.
 
-### MCP Tools (5 total)
+### MCP Architecture — API-First, MCP-Second
+Rorca follows an **API-first** approach: Express routes are the source of truth, MCP tools are auto-generated from the OpenAPI spec. This eliminates hand-written MCP wrappers and version skew.
+
+```
+Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/openapi.json)
+                                                → MCP auto-generated from OpenAPI
+                                                → Served over HTTP on same :3030 port
+```
+
+**Current state**: 5 hand-written stdio MCP tools in `backend/src/mcp/server.ts`:
 `rorca_get_context` | `rorca_generate_spec` | `rorca_list_specs` | `rorca_approve_spec` | `rorca_pipeline_status`
 
-Setup: `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+Setup (stdio, legacy): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+
+**Target state**: MCP Streamable HTTP transport at `http://localhost:3030/mcp`, auto-generated from OpenAPI spec. All API routes become MCP tools automatically. Stdio server kept as offline fallback.
+
+**Why HTTP over stdio**: With HTTP transport, MCP clients always get the latest tools — no npm caching, no package updates, no version skew. The API spec is the single source of truth for REST, MCP, VS Code extension, and any future CLI. See: [openapi-mcp-generator](https://github.com/harsha-iiiv/openapi-mcp-generator), [FastMCP OpenAPI](https://gofastmcp.com/integrations/openapi).
 
 ### Multi-Workspace Support
 `workspaces.path` stores the absolute filesystem path of each project. Backend uses this to:
@@ -603,17 +618,29 @@ Escalation cascade on failure:
 **Claude/Codex subscription paths**: Cascading not applicable — `claude --print` and `codex --approval-mode auto-edit` use the same subscription regardless of story complexity. Quality difference is negligible for most stories; Opus is the recommended tier for all implementation runs.
 
 ## Spec Pipeline — Run Order
-`rorca-v2-platform` complete (113/117 stories — V2-089–092 excluded). Pending specs in `forge/specs/pending/`:
 
-1. `rorca-ui-redesign` (65 stories) — **approve now**, Opus 4-6
-2. `rorca-opencode-integration` (24 stories) — OpenCode execution path + Codex CLI (ChatGPT sub) + spec gen + story complexity scorer + model cascading (Haiku→Sonnet→Opus) + FinOps dashboard, Opus 4-6
-3. `rorca-context-intent-engine` (18 stories) — .rorca/ directory, virtual context routing, episodic memory, file watchers, scaffold gen, Opus 4-6
+**Completed (249 stories passed):**
+- `prd-rorca-phase1b` through `prd-rorca-phase5` (30 stories, archived, 100%)
+- `rorca-feature-enhancements` (17 stories, 7 passed — early spec, superseded by v2-platform)
+- `rorca-v2-platform` (117 stories, 113 passed — V2-082 failed, V2-089–092 excluded)
+- `rorca-ui-redesign` (28 stories, 100%)
+- `rorca-opencode-integration` (35 stories, 100% — includes Run Queue RQ-001–004 + Nav Drawer NAV-001–004)
+- `rorca-execution-quality` (14 stories, 100% — wave execution, semantic logging, objective gates)
+- `rorca-ui-redesign-p2` (22 stories, 100% — polish, animations, accessibility, performance)
+
+**Stale / Duplicate (can be deleted):**
+- `rorca-nav-drawer` (4 stories) — already completed as NAV-001–004 in rorca-opencode-integration
+- `rorca-run-queue` (4 stories) — already completed as RQ-001–004 in rorca-opencode-integration
+
+**Pending (not yet executed):**
+1. `rorca-context-intent-engine` (18 stories) — .rorca/ directory, virtual context routing, episodic memory, file watchers, scaffold gen, Opus 4-6
+2. `rorca-convention-agents` (22 stories) — Convention packs + agent personas + multi-pass spec gen (6-pass pipeline), adversarial review, convention drift detection, MCP HTTP transport, OpenAPI audit, Opus 4-6
+3. `rorca-integrations` (52 stories) — GitHub first (launch blocker), Linear/Vercel/Slack post-launch, Opus 4-6
 4. `rorca-e2e-testing` (58 stories) — Playwright E2E, finds AND fixes bugs, Sonnet 4-6
-5. `rorca-integrations` (52 stories) — GitHub first (launch blocker), Linear/Vercel/Slack post-launch, Opus 4-6
 
-**Why this order**: OpenCode before context engine (context engine uses OpenCode for synthesis + scaffold gen). Context engine before E2E so Playwright tests the complete system including routing engine. GitHub only launch blocker in integrations.
+**Why this order**: CIE creates `.rorca/` directory infrastructure that convention-agents builds on top of. Convention-agents before integrations so personas can review integration code (security, red-team). Integrations before E2E because E2E tests integration flows (GitHub, Linear, Vercel, Slack). E2E testing runs last to test the complete system.
 
-**Why V2-089–092 excluded**: Superseded by `rorca-ui-redesign` which covers all panel redesigns plus the navigation shell. Running both creates throwaway work.
+**Why V2-089–092 excluded**: Superseded by `rorca-ui-redesign` which covers all panel redesigns plus the navigation shell.
 
 ## UI Redesign Architecture (rorca-ui-redesign)
 The redesign replaces the 10-icon sidebar with a 4-screen architecture:
@@ -664,6 +691,191 @@ MEMORY.md (ledger)
 - **"Eject to Config"**: Progressive disclosure — `.rorca/config.json` generated on demand for advanced users who want to customize routing, thresholds, or cascades.
 - **Chokidar file watchers**: Real-time filesystem → UI sync when users edit context files externally. Bi-directional Direction Stack ↔ CLAUDE.md sync with approval.
 - **Trojan horse strategy**: Rorca's filesystem-native output (CLAUDE.md, MEMORY.md, AGENTS.md) makes ALL other AI tools (Cursor, Copilot, raw Claude Code) smarter. Ambient dependency = sticky retention without lock-in.
+
+## Workspace Onboarding Flows
+
+Two paths converge to the same outcome: a workspace with rich context in Direction Stack + CLAUDE.md + `.rorca/`.
+
+### Greenfield (No Existing Code)
+1. "New Project" in Rorca → create git repo
+2. Choose convention pack (or blank) → scaffolds project structure, CLAUDE.md, `.rorca/`
+3. Direction Stack auto-populated from pack (L1 engineering, L2 domain, L3 project)
+4. Write brief → spec generation has full context
+5. Pipeline runs against a structured, convention-rich project
+
+**Key**: Scaffolding step BEFORE first spec. Story 1 implements features, not project setup. Without a pack, Story 1 must choose framework + scaffold + implement — fragile and prone to convention drift across later stories.
+
+### Brownfield (Existing Codebase / GitHub Fork)
+1. Fork/clone repo
+2. "Add Workspace" in Rorca → point to directory
+3. Automatic context extraction: reads codebase → generates L3, CLAUDE.md (if missing), AGENTS.md
+4. Human reviews extracted conventions (approve/edit/reject — same flow as spec review)
+5. Write brief → fully context-aware spec generation
+6. Pipeline runs with deep understanding of existing project
+
+**Key**: Convention extraction (bottom-up) vs convention injection (top-down for greenfield).
+
+| | Greenfield | Brownfield |
+|---|---|---|
+| Direction | Top-down — inject conventions from pack | Bottom-up — extract conventions from codebase |
+| Source of truth | Convention pack chosen by user | Existing codebase analyzed by agent |
+| CLAUDE.md | Generated from pack template | Generated from codebase analysis |
+| First story | Implements feature (scaffold exists) | Implements feature (codebase exists) |
+
+## Convention Pack System
+
+**Status**: Not built. Planned as `rorca-convention-packs` spec (post-CIE).
+
+Convention packs are the "framework" for AI-assisted development. Like Next.js encodes web conventions, packs encode development conventions for Rorca. The core insight (Terraform analogy): the hard part isn't the tooling — it's the lack of conventions. Every team reinvents project structure, patterns, and standards. Packs encode those decisions.
+
+### Pack Structure
+```
+packs/<pack-name>/
+├── pack.json                # Metadata, compatibility, dependencies
+├── direction/
+│   ├── L1-engineering.md    # Engineering principles
+│   └── L2-domain.md         # Domain conventions (e.g. SaaS, CLI, mobile)
+├── personas/                # Agent persona definitions (see Agent Persona System)
+├── conventions/             # Per-library convention guides (tailwind.md, prisma.md, etc.)
+├── templates/               # Spec templates for common features (auth, billing, CRUD)
+├── scaffold/                # Project scaffolding files (boilerplate, config)
+└── AGENTS.md                # File governance template for this stack
+```
+
+### Lifecycle (API-first)
+All pack operations are Express API routes with `@swagger` annotations → available as MCP tools automatically via OpenAPI-to-MCP generation.
+- `POST /api/packs/install` → populates `.rorca/` + Direction Stack + scaffold
+- `POST /api/packs/fork` → customize a community pack (workspace-local copy)
+- `GET /api/packs` → list installed packs
+- `DELETE /api/packs/:name` → uninstall pack + clean up direction layers
+- Community packs shared via Marketplace panel (extends existing `marketplace_templates` table)
+- Pack conventions are **L0** (lowest priority, overridable by L1+)
+- UI-primary: Marketplace panel for browsing/installing. MCP tools auto-generated from the same API routes for Claude Code session access. No separate CLI package to maintain.
+
+### Convention Inference (Brownfield Alternative)
+`rorca conventions discover` — agent analyzes existing codebase:
+1. Reads package.json, config files → identifies stack
+2. Scans file structure → infers architecture
+3. Reads existing CLAUDE.md/README → extracts conventions
+4. Analyzes code patterns → generates convention observations
+5. Produces Direction Stack L3 + CLAUDE.md + AGENTS.md
+6. Human reviews before use (approve/edit/reject)
+
+### Convention Drift Detection
+`rorca conventions check` — compares current code against declared conventions. Like `terraform plan` for development patterns. Can run as pre-execution pipeline hook. Reports drift: "L2 says 'always use Prisma' but `legacy.ts` uses raw SQL."
+
+## Agent Persona System
+
+**Status**: Not built. Planned as `rorca-agent-personas` spec (post-CIE).
+
+Every story currently runs with the same prompt personality. The persona system assigns specialized agent identities to stories and review passes.
+
+### Persona Categories
+
+**Primary** (1–5 orchestrators):
+- **Architect** — structural decisions, dependency graphs
+- **PM** — brief → spec translation, story prioritization
+- **Lead Dev** — implementation orchestration
+
+**Adversarial** (sub-agents that challenge):
+- **Red Team** — attack vector discovery, security scanning
+- **Assumption Buster** — "the idiot in the room" — challenges implicit assumptions
+- **Devil's Advocate** — argues against proposed approaches
+
+**Specialist** (20-30 domain experts, sub-agents):
+- Frontend, Backend, Database, Security, SRE, UX Designer, QA
+
+**Review** (quality gates):
+- **Spec Writer** — generates exhaustive, detailed specs
+- **Spec Verifier** — consistency checks, dependency validation
+- **Best Practices** — library/framework convention enforcement
+
+### Persona File Format
+```
+.rorca/personas/
+├── _primary/
+│   ├── architect.md
+│   └── pm.md
+├── _adversarial/
+│   ├── red-team.md
+│   ├── assumption-buster.md
+│   └── devils-advocate.md
+├── _specialist/
+│   ├── frontend.md
+│   ├── backend.md
+│   ├── database.md
+│   ├── security.md
+│   ├── sre.md
+│   ├── ux-designer.md
+│   └── qa.md
+└── _review/
+    ├── spec-writer.md
+    ├── spec-verifier.md
+    └── best-practices.md
+```
+
+### Attachment to Stories
+```json
+{
+  "id": "US-007",
+  "title": "Add Stripe webhook handler",
+  "persona": "backend",
+  "reviewers": ["security", "red-team"]
+}
+```
+
+Execution engine runs story with `backend` persona, then runs review passes with `security` and `red-team` against the diff. `buildPrompt()` in `execution-engine.ts` injects persona file as additional context layer.
+
+### Review Pipeline (Adversarial Agents)
+After implementation, before merge:
+```
+Story diff → [Security persona] → flags issues
+           → [Red Team persona] → adversarial review
+           → [Best Practices persona] → convention compliance
+           → Results aggregated in story_comments table
+```
+Each reviewer can flag blocking issues that prevent story from passing.
+
+## Multi-Pass Spec Generation Pipeline
+
+**Status**: Not built. Planned as `rorca-spec-pipeline` spec (post-agent-personas).
+
+Current spec generation: one LLM call. Proposed: 6 sequential agent passes, each refining the previous output. Goal: specs so detailed that a blind person can implement them — every state, every edge case, every button label explicit.
+
+```
+Pass 1: PM Agent
+  Brief → high-level spec (10-20 stories, coarse)
+
+Pass 2: Spec Writer Agent
+  Each story → decomposed into micro-stories (exhaustive granularity)
+  "Add auth" → 15 atomic tasks: schema, middleware, login route, token refresh,
+  password reset, email verification, rate limiting, session management, logout,
+  CSRF protection, input validation, error messages, success states, loading states,
+  empty states
+
+Pass 3: UX Designer Agent
+  Each story → explicit visual descriptions
+  Text models can't see — describe EVERYTHING: button labels, field names,
+  layout positions, loading spinners, empty state copy, error message text
+
+Pass 4: Best Practices Agent
+  Each story → library convention annotations
+  "Use Tailwind space-y-4 not manual margin. Use shadcn/ui Button, not raw <button>."
+  Auto-generated from convention pack or extracted conventions
+
+Pass 5: Adversarial Review (Assumption Buster + Devil's Advocate)
+  Review entire spec for: contradictions between stories, missing edge cases,
+  implicit assumptions, missing error/loading/empty states
+
+Pass 6: Spec Verifier
+  Final consistency check: acceptance criteria are testable, no circular deps,
+  every dependsOn target exists, no orphaned stories
+```
+
+Forge panel shows progress through passes. Each pass creates a spec version (tracked in `spec_versions`). Human reviewer sees full audit trail: which persona added/modified what.
+
+### Why Exhaustive Granularity Matters
+Text models produce text, not visuals. A spec that says "add a login page" forces the implementing agent to make 50 implicit decisions. A spec that says "add a login page with email field (placeholder: 'you@example.com'), password field (type=password, show/hide toggle), submit button (label: 'Sign in', disabled while loading, shows spinner), 'Forgot password?' link (navigates to /forgot-password), error toast on 401 (message: 'Invalid email or password')" produces deterministic output across any model or agent.
 
 ## Integration Roadmap (rorca-integrations)
 **Launch blocker**: GitHub only. All others are post-launch additions.
