@@ -350,7 +350,8 @@
         "CIE-004",
         "CIE-012"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CIE-017",
