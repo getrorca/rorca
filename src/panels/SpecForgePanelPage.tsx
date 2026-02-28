@@ -81,11 +81,12 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [storyCount, setStoryCount] = useState(() => {
     try {
       const saved = localStorage.getItem('rorca:forge:storyCount');
-      if (saved) { const n = parseInt(saved, 10); if (!isNaN(n) && n >= 1) return n; }
+      if (saved) { const n = parseInt(saved, 10); if (!isNaN(n) && n >= 0) return n; }
     } catch { /* ignore */ }
-    return 8;
+    return 0; // Auto
   });
-  const isCustomCount = !STORY_COUNT_PRESETS.includes(storyCount as typeof STORY_COUNT_PRESETS[number]);
+  const isAutoCount = storyCount === 0;
+  const isCustomCount = !isAutoCount && !STORY_COUNT_PRESETS.includes(storyCount as typeof STORY_COUNT_PRESETS[number]);
   const [showCustomInput, setShowCustomInput] = useState(isCustomCount);
   const [storyCountRaw, setStoryCountRaw] = useState(String(storyCount));
   const [storyPrefix, setStoryPrefix] = useState('US');
@@ -200,7 +201,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     if (specName) count++;
     if (domain) count++;
     if (selectedModel) count++;
-    if (storyCount !== 8) count++;
+    if (storyCount !== 0) count++;
     if (storyPrefix !== 'US') count++;
     if (!includeDiagram) count++;
     if (diagramType !== 'flowchart') count++;
@@ -213,7 +214,11 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const handleStoryCountSelect = (value: string) => {
     if (value === 'custom') {
       setShowCustomInput(true);
-      setStoryCountRaw(String(storyCount));
+      setStoryCountRaw(String(storyCount || 8));
+    } else if (value === '0') {
+      setShowCustomInput(false);
+      setStoryCount(0);
+      setStoryCountRaw('0');
     } else {
       setShowCustomInput(false);
       const n = parseInt(value, 10);
@@ -239,6 +244,15 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const handleStoryPrefixChange = (value: string) => {
     setStoryPrefix(value.toUpperCase().slice(0, 4));
   };
+
+  // Defaults summary line (reactive)
+  const defaultsSummary = useMemo(() => {
+    const storyLabel = storyCount === 0 ? 'Auto stories' : `${storyCount} stories`;
+    const effectiveModelId = selectedModel || defaultModelId || 'claude-sonnet-4-5-20250929';
+    const modelLabel = availableModels.find(m => m.id === effectiveModelId)?.label || effectiveModelId;
+    const formatLabel = outputFormat === 'json' ? 'JSON output' : outputFormat === 'markdown' ? 'Markdown output' : 'Both formats';
+    return `${storyLabel}  ·  ${modelLabel}  ·  ${formatLabel}`;
+  }, [storyCount, selectedModel, defaultModelId, availableModels, outputFormat]);
 
   // Quick Run state
   const [isQuickRunning, setIsQuickRunning] = useState(false);
@@ -429,6 +443,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
                 {/* Section 3: Generate Spec + Quick Run buttons */}
                 <div className="space-y-2">
+                  <p className="text-xs text-muted/60 text-center">{defaultsSummary}</p>
                   {isGenerating || (generateError && !generatedSpec) ? (
                     <SpecForgeProgress
                       isActive={isGenerating}
@@ -607,6 +622,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                                 className="flex-1 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center]"
                                 aria-label="Select story count"
                               >
+                                <option value="0">Auto</option>
                                 {STORY_COUNT_PRESETS.map((n) => (
                                   <option key={n} value={n}>{n} stories</option>
                                 ))}
