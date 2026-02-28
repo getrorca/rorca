@@ -38,8 +38,8 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   settings: '/settings',
   // CIE-005: Memory Ledger
   memory: '/memory',
-  // Slide-over only (not a real route, but needs an entry)
-  'spec-review': '/spec-review',
+  // Slide-over (also proper nested routes now)
+  'spec-review': '/specs',
 };
 
 /** Reverse lookup: URL path → PanelId */
@@ -50,6 +50,9 @@ for (const [panel, path] of Object.entries(PANEL_ROUTES)) {
 
 /** Resolve current URL path to a PanelId. Returns 'hub' for unknown paths. */
 export function pathToPanelId(pathname: string): PanelId {
+  // Nested slide-over routes resolve to the underlying panel
+  if (/^\/runs\/\d+/.test(pathname)) return 'hub';
+  if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'hub';
   return PATH_TO_PANEL[pathname] ?? 'hub';
 }
 

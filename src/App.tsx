@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef, useCallback, Suspense } from 'react';
-import { Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { HelpTipsProvider } from './contexts/HelpTipsContext';
@@ -223,6 +223,9 @@ function AppRoutes() {
         <Route path="github" element={<PanelRoute panel="github" />} />
         <Route path="workspace-settings" element={<PanelRoute panel="workspace-settings" />} />
         <Route path="settings" element={<PanelRoute panel="settings" />} />
+        {/* Slide-over nested routes — render Hub underneath, SlideOver opens on top */}
+        <Route path="runs/:runId" element={<PanelRoute panel="hub" />} />
+        <Route path="specs/:specId/review" element={<PanelRoute panel="hub" />} />
         {/* Catch-all — redirect to hub */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
@@ -321,14 +324,22 @@ function useAppContentContext(): AppContentContextValue {
 function AppLayout() {
   const activePanel = useActivePanel();
   const navigate = useAppNavigate();
-  const [activeRunId, setActiveRunId] = useState<number | null>(null);
-  const [reviewSpecId, setReviewSpecId] = useState<string | null>(null);
+  const routerNavigate = useRouterNavigate();
+  const location = useLocation();
   const { workspaceId } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
   const [queueCount, setQueueCount] = useState(0);
+
+  // Derive activeRunId from URL path /runs/:runId
+  const runMatch = location.pathname.match(/^\/runs\/(\d+)/);
+  const activeRunId = runMatch ? Number(runMatch[1]) : null;
+
+  // Derive reviewSpecId from URL path /specs/:specId/review
+  const specMatch = location.pathname.match(/^\/specs\/([^/]+)\/review/);
+  const reviewSpecId = specMatch ? specMatch[1] : null;
 
   // CIE-009: Toast on external context file changes
   useFileWatchSSE();
@@ -346,36 +357,17 @@ function AppLayout() {
     return () => clearInterval(interval);
   }, [workspaceId]);
 
-  // Parse run ID from URL hash on mount (e.g. #/run/42)
-  useEffect(() => {
-    const parseHash = () => {
-      const match = window.location.hash.match(/^#\/run\/(\d+)$/);
-      if (match) {
-        setActiveRunId(Number(match[1]));
-      }
-    };
-    parseHash();
-    window.addEventListener('hashchange', parseHash);
-    return () => window.removeEventListener('hashchange', parseHash);
-  }, []);
-
   const navigateToRun = useCallback((runId: number) => {
-    setActiveRunId(runId);
-    window.location.hash = `/run/${runId}`;
-  }, []);
+    routerNavigate(`/runs/${runId}`);
+  }, [routerNavigate]);
 
   const navigateBackFromRun = useCallback(() => {
-    setActiveRunId(null);
-    window.location.hash = '';
-  }, []);
+    routerNavigate(-1);
+  }, [routerNavigate]);
 
   const navigateToSpecReview = useCallback((specId: string) => {
-    setReviewSpecId(specId);
-    if (activeRunId !== null) {
-      setActiveRunId(null);
-      window.location.hash = '';
-    }
-  }, [activeRunId]);
+    routerNavigate(`/specs/${specId}/review`);
+  }, [routerNavigate]);
 
   const handleSendToForge = useCallback((brief: string) => {
     setForgeBrief(brief);
@@ -385,15 +377,11 @@ function AppLayout() {
     setForgeBrief(null);
   }, []);
 
-  // Override navigate to clear run view and settings tab
+  // Navigate to a panel — uses router
   const handleNavigate = useCallback((panel: PanelId) => {
     navigate(panel);
     if (panel !== 'settings') setSettingsTab(undefined);
-    if (activeRunId !== null) {
-      setActiveRunId(null);
-      window.location.hash = '';
-    }
-  }, [navigate, activeRunId]);
+  }, [navigate]);
 
   const navigateToSettingsTab = useCallback((tab: SettingsTab) => {
     setSettingsTab(tab);
@@ -476,9 +464,9 @@ function AppLayout() {
           )}
         </SlideOver>
 
-        <SlideOver isOpen={reviewSpecId !== null} onClose={() => setReviewSpecId(null)} hideHeader={true}>
+        <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromRun} hideHeader={true}>
           {reviewSpecId !== null && (
-            <SpecReviewPanel specId={reviewSpecId} onBack={() => setReviewSpecId(null)} onNavigate={handleNavigate} />
+            <SpecReviewPanel specId={reviewSpecId} onBack={navigateBackFromRun} onNavigate={handleNavigate} />
           )}
         </SlideOver>
 
