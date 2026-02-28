@@ -23,11 +23,11 @@ type Tab = 'stories' | 'diagram' | 'save' | 'context';
 
 /* ─── Main Component ──────────────────────────────────────────────── */
 
-export default function SpecForgeOutput({ spec }: { spec: GeneratedSpec | null }) {
+export default function SpecForgeOutput({ spec, onOpenTemplatePicker }: { spec: GeneratedSpec | null; onOpenTemplatePicker?: () => void }) {
   const [activeTab, setActiveTab] = useState<Tab>('stories');
 
   if (!spec) {
-    return <EmptyState />;
+    return <EmptyState onOpenTemplatePicker={onOpenTemplatePicker} />;
   }
 
   const tabs: { id: Tab; label: string; badge?: string }[] = [
@@ -80,17 +80,25 @@ export default function SpecForgeOutput({ spec }: { spec: GeneratedSpec | null }
 
 /* ─── Empty State ─────────────────────────────────────────────────── */
 
-function EmptyState() {
+function EmptyState({ onOpenTemplatePicker }: { onOpenTemplatePicker?: () => void }) {
   return (
     <div className="flex items-center justify-center h-full">
       <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
         <Wand2 size={64} className="text-muted/40" strokeWidth={1.2} />
         <div>
           <p className="text-sm font-medium text-text mb-1">
-            Configure and generate your first spec
+            Write a brief and hit Generate
           </p>
-          <p className="text-xs text-muted">The output will appear here</p>
+          <p className="text-xs text-muted">Your generated spec will appear here</p>
         </div>
+        {onOpenTemplatePicker && (
+          <button
+            onClick={onOpenTemplatePicker}
+            className="text-xs text-accent hover:text-accent-hover transition-colors"
+          >
+            Start from template &rarr;
+          </button>
+        )}
       </div>
     </div>
   );

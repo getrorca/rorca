@@ -753,7 +753,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
           {/* Right pane: Output tabs */}
           <div className="flex-1 flex flex-col bg-bg min-w-0">
-            <SpecForgeOutput spec={generatedSpec} />
+            <SpecForgeOutput spec={generatedSpec} onOpenTemplatePicker={() => setShowTemplatePicker(true)} />
           </div>
         </div>
       )}
