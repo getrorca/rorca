@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, AlertCircle, Search, HeartPulse, RefreshCw } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, ChevronDown, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, AlertCircle, Search, HeartPulse, RefreshCw, Wand2, FileText, Save, X, Eye } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
@@ -618,6 +618,64 @@ function RecentRunRow({ run, onNavigateToRun, justCompleted }: {
   );
 }
 
+// ─── Scaffold Types ──────────────────────────────────────────────────────────
+
+interface ScaffoldFile {
+  relativePath: string;
+  content: string;
+  alreadyExists: boolean;
+}
+
+interface ScaffoldPreview {
+  files: ScaffoldFile[];
+  stackSummary: string;
+  generatedAt: string;
+}
+
+// ─── Scaffold File Editor ────────────────────────────────────────────────────
+
+function ScaffoldFileEditor({ file, onChange }: {
+  file: ScaffoldFile;
+  onChange: (content: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const lineCount = file.content.split('\n').length;
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full text-left px-3 py-2 flex items-center justify-between hover:bg-surface-200 transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <FileText size={14} className="text-muted shrink-0" />
+          <span className="text-xs font-mono text-[var(--text)] truncate">{file.relativePath}</span>
+          {file.alreadyExists && (
+            <span className="px-1 py-0.5 text-[9px] font-medium rounded bg-yellow-500/10 text-yellow-600 shrink-0">
+              overwrites
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[10px] text-muted">{lineCount} lines</span>
+          {expanded ? <ChevronDown size={12} className="text-muted" /> : <ChevronRight size={12} className="text-muted" />}
+        </div>
+      </button>
+      {expanded && (
+        <div className="border-t border-border">
+          <textarea
+            value={file.content}
+            onChange={(e) => onChange(e.target.value)}
+            className="w-full min-h-[200px] max-h-[500px] px-3 py-2 text-xs font-mono bg-bg text-[var(--text)] resize-y focus:outline-none"
+            spellCheck={false}
+            rows={Math.min(lineCount + 2, 25)}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Workspace Health Card ───────────────────────────────────────────────────
 
 function scoreColor(score: number): string {
@@ -638,6 +696,13 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
 
+  // Scaffold generation state
+  const [scaffoldState, setScaffoldState] = useState<'idle' | 'generating' | 'preview' | 'writing' | 'done' | 'error'>('idle');
+  const [scaffoldFiles, setScaffoldFiles] = useState<ScaffoldFile[]>([]);
+  const [scaffoldSummary, setScaffoldSummary] = useState('');
+  const [scaffoldError, setScaffoldError] = useState<string | null>(null);
+  const { show: showToast } = useGlobalToast();
+
   const fetchHealth = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -656,6 +721,56 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     fetchHealth();
   }, [fetchHealth]);
+
+  const handleGenerateScaffold = async () => {
+    setScaffoldState('generating');
+    setScaffoldError(null);
+    try {
+      const preview = await apiFetch<ScaffoldPreview>(`/api/workspaces/${workspaceId}/scaffold`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'preview' }),
+      });
+      setScaffoldFiles(preview.files);
+      setScaffoldSummary(preview.stackSummary);
+      setScaffoldState('preview');
+      setExpanded(true);
+    } catch (err: any) {
+      setScaffoldError(err.message || 'Scaffold generation failed');
+      setScaffoldState('error');
+    }
+  };
+
+  const handleWriteScaffold = async () => {
+    setScaffoldState('writing');
+    try {
+      const result = await apiFetch<{ filesWritten: string[]; filesSkipped: string[] }>(`/api/workspaces/${workspaceId}/scaffold`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: 'write',
+          files: scaffoldFiles.map(f => ({ relativePath: f.relativePath, content: f.content })),
+        }),
+      });
+      setScaffoldState('done');
+      showToast(
+        `Scaffolding written: ${result.filesWritten.length} files committed`,
+        'success',
+      );
+      // Re-scan to update health score
+      fetchHealth();
+    } catch (err: any) {
+      setScaffoldError(err.message || 'Failed to write scaffold files');
+      setScaffoldState('error');
+    }
+  };
+
+  const handleUpdateFile = (index: number, content: string) => {
+    setScaffoldFiles(prev => prev.map((f, i) => i === index ? { ...f, content } : f));
+  };
+
+  const hasMissingContextFiles = report && report.missing.length > 0;
+  const showScaffoldPrompt = hasMissingContextFiles && report.stack.length > 0 && scaffoldState === 'idle';
 
   if (loading) {
     return (
@@ -749,8 +864,137 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
         )}
       </button>
 
-      {/* Expanded details */}
-      {expanded && (
+      {/* Scaffold generation prompt — shown when missing context files + stack detected */}
+      {showScaffoldPrompt && (
+        <div className="border-t border-border px-4 py-3 bg-accent/5">
+          <div className="flex items-start gap-3">
+            <Wand2 size={16} className="text-accent shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-[var(--text)]">
+                I detected {report.stack.slice(0, 3).map(s => s.name).join(' + ')}{report.stack.length > 3 ? ` + ${report.stack.length - 3} more` : ''}. Generate context scaffolding?
+              </p>
+              <p className="text-xs text-muted mt-1">
+                Creates bespoke CLAUDE.md, AGENTS.md, .rorca/config.json, and skill files tailored to your codebase.
+              </p>
+              <div className="flex flex-wrap gap-1 mt-2">
+                {['CLAUDE.md', 'AGENTS.md', '.rorca/config.json', '.rorca/skills/'].map(f => (
+                  <span key={f} className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-emerald-500/10 text-emerald-600">
+                    {f}
+                  </span>
+                ))}
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleGenerateScaffold(); }}
+                className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent/90 transition-colors"
+              >
+                <Wand2 size={12} />
+                Generate scaffolding
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Scaffold generating spinner */}
+      {scaffoldState === 'generating' && (
+        <div className="border-t border-border px-4 py-6 flex flex-col items-center gap-2">
+          <Loader2 size={20} className="text-accent animate-spin" />
+          <p className="text-xs text-muted">Analyzing codebase and generating scaffolding...</p>
+          <p className="text-[10px] text-muted/60">This may take 30-60 seconds</p>
+        </div>
+      )}
+
+      {/* Scaffold preview — inline file editors */}
+      {scaffoldState === 'preview' && expanded && (
+        <div className="border-t border-border px-4 py-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Eye size={14} className="text-accent" />
+              <p className="text-xs font-medium text-[var(--text)]">
+                Preview — {scaffoldFiles.length} files for {scaffoldSummary}
+              </p>
+            </div>
+            <button
+              onClick={() => { setScaffoldState('idle'); setScaffoldFiles([]); }}
+              className="p-1 rounded hover:bg-bg transition-colors"
+              title="Cancel"
+            >
+              <X size={12} className="text-muted" />
+            </button>
+          </div>
+
+          <p className="text-[10px] text-muted">
+            Review and edit files below. Click &quot;Write to disk&quot; to save all files and commit.
+          </p>
+
+          <div className="space-y-2">
+            {scaffoldFiles.map((file, i) => (
+              <ScaffoldFileEditor
+                key={file.relativePath}
+                file={file}
+                onChange={(content) => handleUpdateFile(i, content)}
+              />
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={handleWriteScaffold}
+              className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[36px] text-xs font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
+            >
+              <Save size={12} />
+              Write to disk
+            </button>
+            <button
+              onClick={() => { setScaffoldState('idle'); setScaffoldFiles([]); }}
+              className="inline-flex items-center gap-1.5 px-3 py-2 min-h-[36px] text-xs font-medium rounded-md border border-border text-muted hover:bg-bg transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Scaffold writing spinner */}
+      {scaffoldState === 'writing' && (
+        <div className="border-t border-border px-4 py-4 flex items-center gap-2">
+          <Loader2 size={14} className="text-accent animate-spin" />
+          <p className="text-xs text-muted">Writing files and committing...</p>
+        </div>
+      )}
+
+      {/* Scaffold done */}
+      {scaffoldState === 'done' && (
+        <div className="border-t border-border px-4 py-3">
+          <div className="flex items-center gap-2">
+            <CheckCircle size={14} className="text-emerald-500" />
+            <p className="text-xs text-emerald-600 font-medium">
+              Scaffolding written and committed successfully
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Scaffold error */}
+      {scaffoldState === 'error' && (
+        <div className="border-t border-border px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <XCircle size={14} className="text-red-500" />
+              <p className="text-xs text-red-500">{scaffoldError}</p>
+            </div>
+            <button
+              onClick={() => { setScaffoldState('idle'); setScaffoldError(null); }}
+              className="text-xs text-accent hover:underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Expanded details (original health report details) */}
+      {expanded && scaffoldState !== 'preview' && (
         <div className="border-t border-border px-4 py-3 space-y-3">
           {/* Missing files */}
           {report.missing.length > 0 && (
