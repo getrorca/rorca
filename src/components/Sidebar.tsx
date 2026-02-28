@@ -4,14 +4,14 @@ import {
   Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight,
   Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
   BarChart3, HeartPulse, ScrollText, Calculator, Settings, Settings2,
-  Plus, X, Search, ChevronDown,
+  Plus, X, Search, ChevronDown, BookOpen,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
 import NotificationBell from './NotificationBell';
 import { UserMenu } from './Shell';
 
-export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review';
+export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory';
 
 interface NavItem {
   id: PanelId;
@@ -52,6 +52,7 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { id: 'stack', label: 'Direction Stack', icon: Layers },
       { id: 'team-direction', label: 'Team Direction', icon: Users },
+      { id: 'memory', label: 'Memory Ledger', icon: BookOpen },
     ],
   },
   {
