@@ -822,9 +822,7 @@ export default function PipelineMonitorPanel() {
         breadcrumbs={
           <div className="flex items-center gap-2">
             <span className="font-medium text-[var(--text)] text-sm tracking-tight">
-              {window.location.hash.includes('workspaceId=')
-                ? 'Workspace'
-                : 'Pipeline'}
+              Pipeline
             </span>
             <ChevronRight size={14} className="text-muted" />
             <span className="text-sm text-muted">Queue & Runs</span>

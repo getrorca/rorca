@@ -81,13 +81,6 @@ const TABS: { id: RunViewTab; label: string; icon: typeof TerminalIcon }[] = [
   { id: 'commits', label: 'Commits', icon: GitCommitHorizontal },
 ];
 
-const VALID_TABS = new Set<string>(TABS.map((t) => t.id));
-
-function getTabFromHash(): RunViewTab {
-  const hash = window.location.hash.replace('#', '');
-  return VALID_TABS.has(hash) ? (hash as RunViewTab) : 'terminal';
-}
-
 // ─── Status styling ─────────────────────────────────────────────────────────
 
 const STATUS_BADGE_STYLES: Record<string, string> = {
@@ -331,7 +324,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const isMobile = useIsMobile();
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<RunViewTab>(getTabFromHash);
+  const [activeTab, setActiveTab] = useState<RunViewTab>('terminal');
   const terminalRef = useRef<RunTerminalHandle>(null);
   const [pauseLoading, setPauseLoading] = useState(false);
   const [killLoading, setKillLoading] = useState(false);
@@ -353,20 +346,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     return TABS;
   }, [isMobile]);
 
-  // Sync tab selection to URL hash
   const handleTabChange = useCallback((tab: RunViewTab) => {
     setActiveTab(tab);
-    window.location.hash = tab;
-  }, []);
-
-  // Listen for hash changes (back/forward navigation)
-  useEffect(() => {
-    const onHashChange = () => {
-      const tab = getTabFromHash();
-      setActiveTab(tab);
-    };
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
   // SSE for live status updates
@@ -580,9 +561,9 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
         storyIds: [...failedStoryIds],
         workspaceId: workspaceId ?? undefined,
       });
-      // Navigate to the new retry run
+      // Navigate to the new retry run — reload clears stale state
       if (result.runId) {
-        window.location.hash = 'terminal';
+        handleTabChange('terminal');
         window.location.reload();
       }
     } catch (err) {
