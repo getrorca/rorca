@@ -40,7 +40,8 @@
         "A spec with 3+ independent Wave 0 stories auto-selects wave parallel"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "WE-003",
