@@ -1058,6 +1058,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [queueLength, setQueueLength] = useState(0);
   const [nextQueueSpecName, setNextQueueSpecName] = useState<string | null>(null);
   const [justCompletedRunIds, setJustCompletedRunIds] = useState<Set<number>>(new Set());
+  const [violations, setViolations] = useState<Array<{ story_id: string; role_name: string; violations: Array<{ file: string; pattern: string }>; run_id: number; created_at: string }>>([]);
   const { toasts: completionToasts, show: showCompletionToastRaw, dismiss: dismissCompletionToast } = useToast();
   const showCompletionToast = useCallback((status: string, label: string) => {
     showCompletionToastRaw(
@@ -1119,6 +1120,12 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     } else {
       setTotalStories(0);
     }
+
+    // Fetch recent violations
+    apiFetch<{ items: Array<{ story_id: string; role_name: string; violations: Array<{ file: string; pattern: string }>; run_id: number; created_at: string }> }>(
+      `/api/agents/violations?workspaceId=${workspaceId}&limit=10`,
+      { silent: true },
+    ).then(v => setViolations(v.items)).catch(() => setViolations([]));
 
     setLastUpdated(new Date());
     setLoaded(true);
@@ -1312,6 +1319,33 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                   setJustCompletedRunIds(prev => new Set(prev).add(activeRun.id));
                 }}
               />
+            </section>
+          )}
+
+          {/* Agent Violations */}
+          {violations.length > 0 && (
+            <section>
+              <SectionHeader icon={AlertCircle} label="Agent Violations" badge={violations.length} />
+              <div className="space-y-2">
+                {violations.slice(0, 5).map((v, i) => (
+                  <div key={i} className="bg-amber-500/5 border border-amber-500/20 rounded-lg px-4 py-3">
+                    <div className="flex items-center gap-2 text-sm">
+                      <AlertCircle size={14} className="text-amber-500 shrink-0" />
+                      <span className="font-medium text-[var(--text)]">{v.story_id}</span>
+                      <span className="text-muted text-xs">({v.role_name})</span>
+                    </div>
+                    <ul className="mt-1.5 space-y-0.5">
+                      {v.violations.map((viol, vi) => (
+                        <li key={vi} className="text-xs text-muted pl-5">
+                          <code className="text-amber-400">{viol.file}</code>
+                          <span className="text-muted"> matched avoids </span>
+                          <code className="text-muted">{viol.pattern}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
             </section>
           )}
 

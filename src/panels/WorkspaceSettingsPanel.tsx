@@ -1,15 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Settings2, Layers, Github, Variable, Play, Webhook,
-  Save, Loader2, Check, FolderOpen, Plus, Trash2, X,
+  Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { useToast, ToastContainer } from '../components/Toast';
+import AgentsEditorSection from '../components/AgentsEditorSection';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type WsSettingsTab = 'general' | 'direction' | 'github' | 'env-vars' | 'pipeline' | 'hooks';
+type WsSettingsTab = 'general' | 'direction' | 'github' | 'env-vars' | 'pipeline' | 'hooks' | 'agents';
 
 interface WorkspaceDetail {
   id: string;
@@ -45,6 +46,7 @@ const TABS: { id: WsSettingsTab; label: string; icon: typeof Settings2 }[] = [
   { id: 'env-vars',  label: 'Env Vars',         icon: Variable  },
   { id: 'pipeline',  label: 'Pipeline',         icon: Play      },
   { id: 'hooks',     label: 'Hooks',            icon: Webhook   },
+  { id: 'agents',    label: 'Agents',           icon: Users     },
 ];
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -114,6 +116,7 @@ export default function WorkspaceSettingsPanel() {
           {activeTab === 'env-vars'  && <EnvVarsSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'pipeline'  && <PipelineSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'hooks'     && <HooksSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'agents'    && <AgentsEditorSection workspaceId={workspaceId} showToast={showToast} />}
         </div>
       </div>
 
