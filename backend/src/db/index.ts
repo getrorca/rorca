@@ -560,6 +560,15 @@ export function runMigrations() {
     db.exec(`ALTER TABLE convention_packs ADD COLUMN forked_from TEXT`);
   }
 
+  // CA-011: Add review_persona and review_type columns to story_comments for adversarial review (idempotent)
+  const scColsCA011 = db.pragma('table_info(story_comments)') as { name: string }[];
+  if (scColsCA011.length > 0 && !scColsCA011.some(c => c.name === 'review_persona')) {
+    db.exec('ALTER TABLE story_comments ADD COLUMN review_persona TEXT');
+  }
+  if (scColsCA011.length > 0 && !scColsCA011.some(c => c.name === 'review_type')) {
+    db.exec("ALTER TABLE story_comments ADD COLUMN review_type TEXT");
+  }
+
   // FR-005: Add 'completed' to spec_versions status CHECK constraint (idempotent)
   const specVersionsSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_versions'`
