@@ -6,6 +6,12 @@ export interface DiagramOutput {
   ascii: string;
 }
 
+export interface SuggestedSkill {
+  name: string;
+  relevance: number; // 1-10
+  reason: string;
+}
+
 export interface GeneratedStory {
   id: string;
   title: string;
@@ -15,6 +21,9 @@ export interface GeneratedStory {
   complexity?: number;
   priority?: number;  // 1=urgent, 2=high, 3=normal (default), 4=low
   timeoutMinutes?: number;  // 5-120, default 45
+  suggestedSkills?: SuggestedSkill[];
+  suggestedPersona?: string;
+  suggestedReviewers?: string[];
 }
 
 export interface GeneratedSpec {
@@ -56,6 +65,9 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
       ...(s.complexity != null ? { complexity: s.complexity } : {}),
       ...(s.priority != null ? { priority: s.priority } : {}),
       ...(s.timeoutMinutes != null ? { timeoutMinutes: s.timeoutMinutes } : {}),
+      ...(s.suggestedSkills?.length ? { suggestedSkills: s.suggestedSkills } : {}),
+      ...(s.suggestedPersona ? { suggestedPersona: s.suggestedPersona } : {}),
+      ...(s.suggestedReviewers?.length ? { suggestedReviewers: s.suggestedReviewers } : {}),
       passes: false
     })),
     ...(spec.mermaidDiagram ? { mermaidDiagram: spec.mermaidDiagram } : {}),
