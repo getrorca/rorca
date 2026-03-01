@@ -159,6 +159,16 @@ export class PersonaRegistry {
   }
 
   /**
+   * Compact catalog for LLM prompt injection.
+   * Format: "[category] name: description" per line.
+   */
+  getPersonaCatalogForPrompt(): string {
+    return this.personas
+      .map(p => `[${p.metadata.category}] ${p.metadata.name}: ${p.metadata.description}`)
+      .join('\n');
+  }
+
+  /**
    * Get all personas in a category.
    */
   getByCategory(category: PersonaCategory): Persona[] {
