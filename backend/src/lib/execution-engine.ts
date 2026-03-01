@@ -96,6 +96,8 @@ interface UserStory {
   persona?: string;
   /** CA-009: Reviewer persona names for post-implementation review passes. */
   reviewers?: string[];
+  /** SK-002: LLM-suggested skills from spec generation. */
+  suggestedSkills?: Array<{ name: string; relevance: number; reason: string }>;
 }
 
 interface SpecJson {
@@ -358,6 +360,82 @@ function readWorkspaceFile(cwd: string, ...segments: string[]): string {
   }
 }
 
+// ─── SK-003: Skill Loading & Injection ──────────────────────────────────────
+
+interface ResolvedSkill {
+  name: string;
+  relevance: number;
+  content: string;
+  tokens: number;
+}
+
+/**
+ * Load skill files from .rorca/skills/ matching the story's suggestedSkills.
+ * Returns skills sorted by relevance (highest first), with token budget enforcement.
+ *
+ * For Claude agent: skips skills that also exist in .claude/skills/ (natively auto-discovered).
+ * The rorca.md workflow skill is treated as a meta-skill with relevance 10 (always included
+ * in the prompt via the existing skillContent mechanism — NOT duplicated here).
+ */
+function loadMatchedSkills(
+  cwd: string,
+  suggestedSkills: Array<{ name: string; relevance: number; reason: string }>,
+  agentType: AgentType,
+  tokenBudget: number,
+): ResolvedSkill[] {
+  const skillsDir = path.join(cwd, '.rorca', 'skills');
+  if (!fs.existsSync(skillsDir)) return [];
+
+  // Sort by relevance descending (highest first)
+  const sorted = [...suggestedSkills].sort((a, b) => b.relevance - a.relevance);
+
+  const resolved: ResolvedSkill[] = [];
+  let usedTokens = 0;
+
+  for (const skill of sorted) {
+    // Skip the rorca.md meta-skill — it's already injected via the existing skillContent path
+    if (skill.name === 'rorca' || skill.name === 'rorca.md') continue;
+
+    // Claude agent: skip skills that exist in .claude/skills/ (auto-discovered natively)
+    if (agentType === 'claude') {
+      const claudeSkillPath = path.join(cwd, '.claude', 'skills', `${skill.name}.md`);
+      if (fs.existsSync(claudeSkillPath)) continue;
+    }
+
+    // Try loading from .rorca/skills/<name>.md
+    const skillPath = path.join(skillsDir, `${skill.name}.md`);
+    let content = '';
+    try {
+      content = fs.readFileSync(skillPath, 'utf8').trim();
+    } catch {
+      // Skill file not found — skip silently
+      continue;
+    }
+
+    if (!content) continue;
+
+    const tokens = Math.ceil(content.length / 4); // Same heuristic as context-router estimateTokens
+    if (usedTokens + tokens > tokenBudget) {
+      // Budget exceeded — stop adding skills
+      break;
+    }
+
+    usedTokens += tokens;
+    resolved.push({ name: skill.name, relevance: skill.relevance, content, tokens });
+  }
+
+  return resolved;
+}
+
+/** Format resolved skills into a prompt section. */
+function formatSkillsSection(skills: ResolvedSkill[]): string {
+  if (skills.length === 0) return '';
+  const parts = skills.map(s =>
+    `## Skill: ${s.name} (relevance: ${s.relevance})\n${s.content}`
+  );
+  return '\n' + parts.join('\n\n') + '\n';
+}
+
 function buildPrompt(
   story: UserStory,
   mode: 'impl' | 'qa' | 'journey',
@@ -367,6 +445,7 @@ function buildPrompt(
   contextFilePath?: string,
   roleSection?: string,
   personaRegistry?: PersonaRegistry,
+  skillsSection?: string,
 ): string {
   const ac = getAcceptance(story);
   const acSection = ac ? `\nAcceptance Criteria:\n${ac}` : '';
@@ -404,6 +483,9 @@ function buildPrompt(
     }
   }
 
+  // SK-003: Matched skills section (injected AFTER roleSection, BEFORE personaSection)
+  const matchedSkills = skillsSection ?? '';
+
   if (mode === 'journey') {
     const journeySkill = playbook ? readWorkspaceFile(cwd, playbook) : '';
     return [
@@ -412,6 +494,7 @@ function buildPrompt(
       openCodeSkillInstruction,
       codexAgentsInstruction,
       roleSection ?? '',
+      matchedSkills,
       '', journeySkill,
       personaSection,
       '', '---', '',
@@ -430,6 +513,7 @@ function buildPrompt(
       openCodeSkillInstruction,
       codexAgentsInstruction,
       roleSection ?? '',
+      matchedSkills,
       '', playbookInstruction, '',
       '## Workflow',
       '1. Read the relevant AGENTS.md in each directory you\'ll modify',
@@ -450,6 +534,7 @@ function buildPrompt(
   }
 
   // Implementation mode
+  // Injection order: contextPreamble → mode → agent instructions → roleSection → matched skills → persona → story task
   const skillContent = readWorkspaceFile(cwd, '.claude', 'skills', 'rorca.md')
     || readWorkspaceFile(cwd, '.claude', 'skills', 'dimitri.md');
   return [
@@ -458,6 +543,7 @@ function buildPrompt(
     openCodeSkillInstruction,
     codexAgentsInstruction,
     roleSection ?? '',
+    matchedSkills,
     '', skillContent,
     personaSection,
     '', '---', '',
@@ -1480,7 +1566,21 @@ async function executeStory(
     console.warn(`  [agents] Role matching failed: ${err.message}`);
   }
 
-  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry);
+  // SK-003: Load matched skills from .rorca/skills/ based on story.suggestedSkills
+  const SKILL_TOKEN_BUDGET = 4000; // ~16KB of skill content max
+  let resolvedSkills: ResolvedSkill[] = [];
+  let skillsSection = '';
+  if (story.suggestedSkills && story.suggestedSkills.length > 0) {
+    resolvedSkills = loadMatchedSkills(effectiveCwd, story.suggestedSkills, effectiveAgent, SKILL_TOKEN_BUDGET);
+    skillsSection = formatSkillsSection(resolvedSkills);
+    if (resolvedSkills.length > 0) {
+      const totalSkillTokens = resolvedSkills.reduce((sum, s) => sum + s.tokens, 0);
+      console.log(`  [skills] Injected ${resolvedSkills.length} skill(s): ${resolvedSkills.map(s => `${s.name}(${s.relevance})`).join(', ')} (${totalSkillTokens} tokens)`);
+    }
+  }
+  const activeSkillNames = resolvedSkills.map(s => s.name);
+
+  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry, skillsSection);
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
   fs.writeFileSync(promptLogFile, prompt);
@@ -1499,6 +1599,7 @@ async function executeStory(
       ...(currentModel !== config.agentModel ? { model_override: currentModel, model_tier: escState?.currentTier } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
       ...(injectedContextFiles.length > 0 ? { context_files: injectedContextFiles } : {}),
+      ...(activeSkillNames.length > 0 ? { active_skills: activeSkillNames } : {}),
     }, story.id);
   }
 
@@ -1508,6 +1609,7 @@ async function executeStory(
   const storyResultExtra = worktreeInfo
     ? { worktreePath: worktreeInfo.worktreePath, worktreeBranch: worktreeInfo.branchName }
     : {};
+  const activeSkillsExtra = activeSkillNames.length > 0 ? { activeSkills: activeSkillNames } : {};
 
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
@@ -1593,7 +1695,7 @@ async function executeStory(
             reason: 'rate_limit_exhausted', attempts: rateLimitAttempts,
             log_file: storyLogFile,
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
         }
         return 'failed';
       }
@@ -1691,7 +1793,7 @@ async function executeStory(
             ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
             log_file: storyLogFile,
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
         }
 
         if (currentRetries >= MAX_RETRIES) {
@@ -1751,7 +1853,7 @@ async function executeStory(
           run_id: config.runId, story_id: story.id, story_title: story.title,
           agent_type: effectiveAgent,
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
       }
       return 'passed';
     }
@@ -1775,7 +1877,7 @@ async function executeStory(
           reason: 'timeout', timeout_minutes: timeoutMin,
           log_file: storyLogFile,
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
       }
       return 'failed';
     }
@@ -1805,7 +1907,7 @@ async function executeStory(
           agent_type: effectiveAgent, exit_code: result.exitCode,
           log_file: storyLogFile,
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
       }
       return 'failed';
     }
@@ -1886,7 +1988,7 @@ async function executeStory(
             agent_type: effectiveAgent,
             log_file: storyLogFile,
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
         }
         return 'failed';
       }
@@ -1924,7 +2026,7 @@ async function executeStory(
           agent_type: effectiveAgent,
           log_file: storyLogFile,
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
       }
       return 'failed';
     }

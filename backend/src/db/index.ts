@@ -348,6 +348,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE story_results ADD COLUMN blocked_by TEXT');
   }
 
+  // SK-003: Add active_skills column to story_results for tracking injected skills (idempotent)
+  const srColsSK003 = db.pragma('table_info(story_results)') as { name: string }[];
+  if (!srColsSK003.some(c => c.name === 'active_skills')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN active_skills TEXT');
+  }
+
   // EQ-007: Add author_name column to story_comments for guest reviewers (idempotent)
   const scCols = db.pragma('table_info(story_comments)') as { name: string }[];
   if (!scCols.some(c => c.name === 'author_name')) {
