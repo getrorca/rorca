@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-02-28T22:27:06.508Z",
+  "lastUpdatedAt": "2026-03-01T02:14:09.353Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-02-28T22:27:06.507Z",
       "agentType": "claude",
       "elapsedMs": 666098
+    },
+    {
+      "storyId": "CA-005",
+      "title": "Convention Inference Agent — Brownfield Context Extraction",
+      "status": "passed",
+      "startedAt": "2026-03-01T01:59:27.695Z",
+      "finishedAt": "2026-03-01T02:14:09.352Z",
+      "agentType": "claude",
+      "elapsedMs": 881657
     }
   ],
   "failedStories": [],
