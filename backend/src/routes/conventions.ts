@@ -42,6 +42,8 @@ function emitWalEvent(eventType: string, workspaceId: string, payload: Record<st
  *   post:
  *     tags: [Conventions]
  *     summary: Discover conventions in a workspace codebase
+ *     operationId: discoverConventions
+ *     description: Spawns an analysis agent to scan the workspace codebase and generate a convention proposal.
  *     requestBody:
  *       required: true
  *       content:
@@ -115,6 +117,8 @@ router.post('/discover', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Conventions]
  *     summary: List convention proposals for a workspace
+ *     operationId: listConventionProposals
+ *     description: Returns all convention proposals for the specified workspace, ordered by creation date descending.
  *     parameters:
  *       - in: path
  *         name: workspaceId
@@ -157,6 +161,8 @@ router.get('/proposals/:workspaceId', (req: Request, res: Response) => {
  *   post:
  *     tags: [Conventions]
  *     summary: Approve and apply a convention proposal
+ *     operationId: approveConventionProposal
+ *     description: Applies the proposal's L3 direction layer, AGENTS.md, and per-library convention guides to the workspace.
  *     parameters:
  *       - in: path
  *         name: id
@@ -263,6 +269,8 @@ router.post('/proposals/:id/approve', (req: Request, res: Response) => {
  *   post:
  *     tags: [Conventions]
  *     summary: Reject a convention proposal
+ *     operationId: rejectConventionProposal
+ *     description: Marks a pending convention proposal as rejected without applying any changes.
  *     parameters:
  *       - in: path
  *         name: id
@@ -312,6 +320,7 @@ router.post('/proposals/:id/reject', (req: Request, res: Response) => {
  *   post:
  *     tags: [Conventions]
  *     summary: Run convention drift detection on a workspace
+ *     operationId: checkConventionDrift
  *     description: Spawns a drift analysis agent that reads .rorca/conventions/*.md and direction stack L0-L3, samples up to 50 source files, and checks for violations.
  *     requestBody:
  *       required: true
@@ -390,6 +399,8 @@ router.post('/check', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Conventions]
  *     summary: Get the latest drift report for a workspace
+ *     operationId: getLatestDriftReport
+ *     description: Returns the most recent convention drift report for the specified workspace.
  *     parameters:
  *       - in: path
  *         name: workspaceId

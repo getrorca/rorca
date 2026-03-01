@@ -67,8 +67,43 @@ export interface VaultKeyResult {
   baseUrl: string | null;
 }
 
-// ─── POST /api/vault/keys ───────────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/vault/keys:
+ *   post:
+ *     tags: [Vault]
+ *     summary: Store a new API key
+ *     operationId: createVaultKey
+ *     description: Encrypts and stores an API key in the vault using AES-256-GCM. The key is associated with the authenticated user and a specific provider.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [provider, key]
+ *             properties:
+ *               provider: { type: string, enum: [anthropic, openai, openrouter, openai-compat] }
+ *               key: { type: string, description: "Raw API key to encrypt and store" }
+ *               label: { type: string, description: "Optional human-readable label" }
+ *               base_url: { type: string, description: "Optional base URL for OpenAI-compatible providers" }
+ *     responses:
+ *       201:
+ *         description: Key stored successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 provider: { type: string }
+ *                 label: { type: string }
+ *                 base_url: { type: string, nullable: true }
+ *                 masked_key: { type: string }
+ *                 created_at: { type: string, format: date-time }
+ *       400: { description: "Missing or invalid provider/key" }
+ *       401: { description: "No user found" }
+ */
 router.post('/', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(401).json({ error: 'No user found' }); return; }
@@ -109,8 +144,36 @@ router.post('/', (req: Request, res: Response) => {
   });
 });
 
-// ─── GET /api/vault/keys ────────────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/vault/keys:
+ *   get:
+ *     tags: [Vault]
+ *     summary: List stored API keys
+ *     operationId: listVaultKeys
+ *     description: Returns all API keys stored by the authenticated user. Keys are masked (only last 4 characters visible) for security.
+ *     responses:
+ *       200:
+ *         description: List of stored keys
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 keys:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       provider: { type: string }
+ *                       label: { type: string }
+ *                       base_url: { type: string, nullable: true }
+ *                       masked_key: { type: string }
+ *                       spend_total_usd: { type: number }
+ *                       last_used_at: { type: string, format: date-time, nullable: true }
+ *                       created_at: { type: string, format: date-time }
+ */
 router.get('/', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.json({ keys: [] }); return; }
@@ -133,8 +196,33 @@ router.get('/', (req: Request, res: Response) => {
   res.json({ keys });
 });
 
-// ─── DELETE /api/vault/keys/:id ─────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/vault/keys/{id}:
+ *   delete:
+ *     tags: [Vault]
+ *     summary: Delete a stored API key
+ *     operationId: deleteVaultKey
+ *     description: Permanently deletes an API key from the vault. Only the key owner can delete it. Returns the total spend tracked for the deleted key.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Vault key ID
+ *     responses:
+ *       200:
+ *         description: Key deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 deleted: { type: boolean }
+ *                 spend_total_usd: { type: number }
+ *       401: { description: "No user found" }
+ *       404: { description: "Key not found" }
+ */
 router.delete('/:id', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(401).json({ error: 'No user found' }); return; }
@@ -155,8 +243,40 @@ router.delete('/:id', (req: Request, res: Response) => {
   res.json({ deleted: true, spend_total_usd: existing.spend_total_usd });
 });
 
-// ─── POST /api/vault/keys/test — Test connection to a provider ───────────────
-
+/**
+ * @swagger
+ * /api/vault/keys/test:
+ *   post:
+ *     tags: [Vault]
+ *     summary: Test provider connection
+ *     operationId: testVaultKeyConnection
+ *     description: Tests connectivity to an LLM provider by sending a minimal prompt. For non-CLI providers, uses the stored vault key. Returns latency and a truncated response.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [provider]
+ *             properties:
+ *               provider: { type: string, enum: [claude-cli, anthropic, openai-compat, openrouter] }
+ *     responses:
+ *       200:
+ *         description: Connection test succeeded
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 latencyMs: { type: integer }
+ *                 response: { type: string }
+ *                 usage: { type: object }
+ *       400: { description: "Missing or invalid provider, or no API key stored" }
+ *       401: { description: "No user found" }
+ *       500: { description: "Failed to decrypt stored API key" }
+ *       502: { description: "Connection test failed" }
+ */
 router.post('/test', async (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(401).json({ error: 'No user found' }); return; }
@@ -224,8 +344,31 @@ router.post('/test', async (req: Request, res: Response) => {
   }
 });
 
-// ─── GET /api/vault/keys/default-provider — Get default provider for workspace ─
-
+/**
+ * @swagger
+ * /api/vault/keys/default-provider:
+ *   get:
+ *     tags: [Vault]
+ *     summary: Get default provider for a workspace
+ *     operationId: getDefaultProvider
+ *     description: Returns the default LLM provider configured for a specific workspace. Falls back to 'claude-cli' if no default is set.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Default provider
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 provider: { type: string }
+ *       400: { description: "workspaceId query param is required" }
+ */
 router.get('/default-provider', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   const { workspaceId } = req.query;
@@ -244,8 +387,37 @@ router.get('/default-provider', (req: Request, res: Response) => {
   res.json({ provider: row?.provider ?? 'claude-cli' });
 });
 
-// ─── PUT /api/vault/keys/default-provider — Set default provider for workspace ─
-
+/**
+ * @swagger
+ * /api/vault/keys/default-provider:
+ *   put:
+ *     tags: [Vault]
+ *     summary: Set default provider for a workspace
+ *     operationId: setDefaultProvider
+ *     description: Sets or updates the default LLM provider for a specific workspace. Emits a WAL event on change.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, provider]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               provider: { type: string, enum: [claude-cli, anthropic, openai-compat, openrouter] }
+ *     responses:
+ *       200:
+ *         description: Default provider updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 provider: { type: string }
+ *       400: { description: "Missing workspaceId or invalid provider" }
+ *       401: { description: "No user found" }
+ */
 router.put('/default-provider', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(401).json({ error: 'No user found' }); return; }
@@ -282,8 +454,33 @@ router.put('/default-provider', (req: Request, res: Response) => {
   res.json({ ok: true, provider });
 });
 
-// ─── GET /api/vault/keys/providers — Provider status overview ───────────────
-
+/**
+ * @swagger
+ * /api/vault/keys/providers:
+ *   get:
+ *     tags: [Vault]
+ *     summary: List provider status overview
+ *     operationId: listProviderStatus
+ *     description: Returns a list of all supported LLM providers with their configuration status, indicating whether a vault key or environment variable is present.
+ *     responses:
+ *       200:
+ *         description: Provider status list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 providers:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       name: { type: string }
+ *                       configured: { type: boolean }
+ *                       hasKey: { type: boolean }
+ *                       baseUrl: { type: string, nullable: true }
+ */
 router.get('/providers', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
 

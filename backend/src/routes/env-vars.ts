@@ -17,8 +17,41 @@ interface EnvVarRow {
 
 const SECRET_MASK = '••••••';
 
-// ─── GET /api/workspaces/:id/env-vars — List env vars (secrets masked) ──────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/env-vars:
+ *   get:
+ *     tags: [Environment Variables]
+ *     summary: List environment variables for a workspace
+ *     operationId: listEnvVars
+ *     description: Returns all environment variables for the specified workspace. Secret values are masked with dots.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of environment variables
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 envVars:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       key: { type: string }
+ *                       value: { type: string }
+ *                       isSecret: { type: boolean }
+ *                       createdAt: { type: string }
+ *                       updatedAt: { type: string }
+ *       404:
+ *         description: Workspace not found
+ */
 router.get('/', (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
@@ -49,8 +82,40 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/workspaces/:id/env-vars — Create or update an env var ────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/env-vars:
+ *   post:
+ *     tags: [Environment Variables]
+ *     summary: Create or update an environment variable
+ *     operationId: upsertEnvVar
+ *     description: Creates a new environment variable or updates an existing one if the key already exists. Values are stored AES-256-GCM encrypted.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [key, value]
+ *             properties:
+ *               key: { type: string, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+ *               value: { type: string }
+ *               isSecret: { type: boolean, default: true }
+ *     responses:
+ *       200:
+ *         description: Environment variable updated
+ *       201:
+ *         description: Environment variable created
+ *       400:
+ *         description: Missing or invalid key/value
+ *       404:
+ *         description: Workspace not found
+ */
 router.post('/', (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
@@ -121,8 +186,29 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── DELETE /api/workspaces/:id/env-vars/:key — Remove an env var ───────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/env-vars/{key}:
+ *   delete:
+ *     tags: [Environment Variables]
+ *     summary: Delete an environment variable
+ *     operationId: deleteEnvVar
+ *     description: Permanently removes an environment variable from the workspace by its key name.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: key
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       204:
+ *         description: Environment variable deleted
+ *       404:
+ *         description: Environment variable not found
+ */
 router.delete('/:key', (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;

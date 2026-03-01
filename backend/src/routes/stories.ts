@@ -57,6 +57,8 @@ function getSpecTags(specId: string, workspaceId: string): string[] {
  *   get:
  *     tags: [Stories]
  *     summary: Search stories across all specs
+ *     operationId: searchStoriesAcrossSpecs
+ *     description: Searches story titles, descriptions, and acceptance criteria across all specs in one or more workspaces.
  *     parameters:
  *       - in: query
  *         name: q
