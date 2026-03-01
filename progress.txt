@@ -3,7 +3,7 @@
 Spec: rorca-frontend-routing
 Run ID: 833
 Started: 2026-02-28T22:04:07.575Z
-Last Updated: 2026-03-01T03:46:09.315Z
+Last Updated: 2026-03-01T03:42:31.622Z
 
 ## Completed Stories (6)
 - FR-002: Migrate Sidebar and Programmatic Navigation — DONE (claude, 378s)
@@ -11,4 +11,4 @@ Last Updated: 2026-03-01T03:46:09.315Z
 - FR-004: Settings Sub-Routes and SPA Fallback — DONE (claude, 666s)
 - CA-007: Agent Persona Schema and File Format — DONE (claude, 419s)
 - SK-001: Skill Catalog and Registry — DONE (claude, 460s)
-- CA-012: Multi-Pass Spec Generation — PM and Spec Writer Passes (Passes 1-2) — DONE (claude, 1447s)
+- SK-002: LLM-Driven Skill + Persona Matching in Spec Generation — DONE (claude, 990s)
