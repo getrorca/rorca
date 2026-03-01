@@ -502,6 +502,25 @@ export function runMigrations() {
     `);
   }
 
+  // SK-001: installed_skills table for SkillRegistry persistence (idempotent)
+  const installedSkillsExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='installed_skills'`
+  ).get();
+  if (!installedSkillsExists) {
+    db.exec(`
+      CREATE TABLE installed_skills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        content TEXT NOT NULL,
+        installed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX idx_installed_skills_name ON installed_skills(name);
+    `);
+  }
+
   // FR-005: Add 'completed' to spec_versions status CHECK constraint (idempotent)
   const specVersionsSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_versions'`
