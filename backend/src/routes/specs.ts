@@ -16,6 +16,8 @@ import { getEffectiveUser } from '../lib/get-user';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
+import { PersonaRegistry } from '../lib/agent-personas';
+import { SkillRegistry } from '../lib/skill-registry';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -373,6 +375,7 @@ interface SpecDiffResult {
  *               diagramTypes: { type: array, items: { type: string } }
  *               storyAnnotations: { type: string }
  *               templateId: { type: string }
+ *               multiPass: { type: boolean, default: false, description: "Enable multi-pass spec generation (Pass 1: PM coarse stories, Pass 2: Spec Writer micro-stories)" }
  *     responses:
  *       200:
  *         description: Generated spec
@@ -391,6 +394,56 @@ interface SpecDiffResult {
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace not found" }
  */
+// ─── Multi-pass helpers ─────────────────────────────────────────────────────
+
+/** Load a default persona's prompt text from the default-personas/ directory. */
+function loadDefaultPersonaPrompt(personaName: string): string | null {
+  const baseDir = path.resolve(__dirname, '../../../default-personas');
+  // Search all category subdirs for <personaName>.md
+  const categories = ['_primary', '_adversarial', '_specialist', '_review'];
+  for (const cat of categories) {
+    const filePath = path.join(baseDir, cat, `${personaName}.md`);
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      // Extract body after frontmatter
+      const fmMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/);
+      return fmMatch ? fmMatch[1].trim() : content.trim();
+    }
+  }
+  return null;
+}
+
+/** Parse raw LLM response text into JSON, stripping markdown fences if present. */
+function parseLLMJson(raw: string): unknown {
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const jsonStr = fenceMatch ? fenceMatch[1].trim() : raw.trim();
+  const jsonStart = jsonStr.indexOf('{');
+  return JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+}
+
+/** Emit a spec_generation_pass WAL event and broadcast via SSE. */
+function emitPassEvent(
+  specId: string,
+  pass: number,
+  status: 'started' | 'completed',
+  workspaceId?: string,
+): void {
+  const payload = JSON.stringify({ pass, status });
+  const result = db.prepare(
+    `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_generation_pass', ?, ?, ?)`
+  ).run(specId, workspaceId ?? null, payload);
+  broadcastAll({
+    id: Number(result.lastInsertRowid),
+    ts: new Date().toISOString(),
+    event_type: 'spec_generation_pass',
+    workspace_id: workspaceId ?? null,
+    spec_id: specId,
+    story_id: null,
+    actor: 'system',
+    payload,
+  });
+}
+
 router.post('/generate', async (req: Request, res: Response) => {
   try {
     const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
@@ -399,6 +452,7 @@ router.post('/generate', async (req: Request, res: Response) => {
     const rawCount = parseInt(req.body.storyCount);
     const storyCount: number = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
     const requestedModel: string | undefined = req.body.model;
+    const multiPass: boolean = req.body.multiPass === true;
 
     // 1. Validate required fields (title is optional — auto-generated from brief)
     if (!workspaceId || !brief) {
@@ -514,6 +568,23 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Do not use special chars like quotes inside node labels',
     ].join('\n') : '';
 
+    const baseJsonSchema = `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`;
+
+    const baseRules = [
+      storyCount === 0
+        ? `- Number stories sequentially starting from ${storyPrefix}-001`
+        : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
+      '- Each story needs 3-5 specific testable acceptanceCriteria',
+      '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
+      '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
+      '- Stories should be concrete and implementable, not vague',
+      '- Each story must have a "complexity" field: integer 1-5 (1=trivial one-liner, 2=simple, 3=moderate, 4=complex multi-file, 5=epic cross-cutting). Base on acceptance criteria count, description scope, and dependency depth',
+      '- Your entire response must be valid JSON parseable by JSON.parse()',
+      '- Include a "mermaidDiagram" field: a valid Mermaid flowchart (graph TD) showing story dependency relationships',
+      '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
+      '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
+    ];
+
     const fullPrompt = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
@@ -534,22 +605,11 @@ router.post('/generate', async (req: Request, res: Response) => {
       'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
       '',
       'JSON schema:',
-      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+      baseJsonSchema,
       wantDiagrams ? diagramSchema : '',
       '',
       `Rules:`,
-      storyCount === 0
-        ? `- Number stories sequentially starting from ${storyPrefix}-001`
-        : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
-      '- Each story needs 3-5 specific testable acceptanceCriteria',
-      '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
-      '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
-      '- Stories should be concrete and implementable, not vague',
-      '- Each story must have a "complexity" field: integer 1-5 (1=trivial one-liner, 2=simple, 3=moderate, 4=complex multi-file, 5=epic cross-cutting). Base on acceptance criteria count, description scope, and dependency depth',
-      '- Your entire response must be valid JSON parseable by JSON.parse()',
-      '- Include a "mermaidDiagram" field: a valid Mermaid flowchart (graph TD) showing story dependency relationships',
-      '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
-      '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
+      ...baseRules,
     ].join('\n');
 
     // 8. Route by agent type: OpenCode path vs SDK (llm-client) path
@@ -557,7 +617,214 @@ router.post('/generate', async (req: Request, res: Response) => {
     let tokenUsage = { inputTokens: 0, outputTokens: 0 };
     let usedProvider: string;
 
-    if (configuredAgentType === 'opencode') {
+    // Pre-compute slug early — needed for multi-pass version snapshots
+    const slug = title
+      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      : briefToSlug(brief);
+
+    if (multiPass) {
+      // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
+      console.log(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
+
+      const pmPromptText = loadDefaultPersonaPrompt('pm');
+      const specWriterPromptText = loadDefaultPersonaPrompt('spec-writer');
+
+      if (!pmPromptText || !specWriterPromptText) {
+        res.status(500).json({ error: 'Default persona files not found (pm.md, spec-writer.md). Ensure default-personas/ directory exists.' });
+        return;
+      }
+
+      const user = getEffectiveUser(req);
+      if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
+      const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+
+      // ── Pass 1: PM Agent — coarse high-level stories ──
+      emitPassEvent(slug, 1, 'started', workspaceId);
+
+      const pass1Prompt = [
+        '=== INSTRUCTIONS: READ THIS FIRST ===',
+        'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+        'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+        'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+        'If you output anything other than raw JSON, the system will fail.',
+        '=== END INSTRUCTIONS ===',
+        '',
+        '=== PERSONA: PM AGENT (Pass 1 — High-Level Spec) ===',
+        pmPromptText,
+        '=== END PERSONA ===',
+        '',
+        synthesized,
+        ...(templateContext ? [templateContext, '---'] : []),
+        '---',
+        'TASK: Generate a HIGH-LEVEL software specification JSON with coarse user stories (10-20 stories).',
+        'Each story should represent a meaningful feature area — NOT micro-tasks.',
+        'These will be decomposed into finer-grained stories in a subsequent pass.',
+        `Spec title: ${effectiveTitle}`,
+        `Spec brief: ${brief}`,
+        '',
+        'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
+        '',
+        'JSON schema:',
+        baseJsonSchema,
+        wantDiagrams ? diagramSchema : '',
+        '',
+        'Rules:',
+        `- Number stories sequentially starting from ${storyPrefix}-001`,
+        '- Generate 10-20 coarse stories covering the full scope of the brief',
+        '- Each story needs 3-5 specific testable acceptanceCriteria',
+        '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
+        '- IMPORTANT: Analyze story CONTENT to determine dependencies',
+        '- Stories should represent feature areas, not micro-tasks',
+        '- Each story must have a "complexity" field: integer 1-5',
+        '- Your entire response must be valid JSON parseable by JSON.parse()',
+        '- Include a "mermaidDiagram" field showing story dependency relationships',
+      ].join('\n');
+
+      let pass1Result: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
+      let pass1Usage = { inputTokens: 0, outputTokens: 0 };
+
+      const llmResult1 = await chatComplete(
+        [{ role: 'user', content: pass1Prompt }],
+        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+      );
+      pass1Usage = llmResult1.usage;
+      usedProvider = getActiveProvider();
+
+      try {
+        pass1Result = parseLLMJson(llmResult1.text) as typeof pass1Result;
+      } catch {
+        res.status(500).json({ error: 'Pass 1 (PM Agent) returned non-JSON', raw: llmResult1.text });
+        return;
+      }
+
+      if (!Array.isArray(pass1Result.stories)) {
+        res.status(500).json({ error: 'Pass 1 (PM Agent) returned invalid spec structure' });
+        return;
+      }
+
+      // Snapshot Pass 1 result as spec version
+      const pass1Spec = {
+        title: effectiveTitle,
+        generatedAt: new Date().toISOString(),
+        model: resolvedModel,
+        multiPassStage: 'pass1-pm',
+        userStories: pass1Result.stories,
+      };
+      snapshotVersion(slug, JSON.stringify(pass1Spec), 'pending');
+      emitPassEvent(slug, 1, 'completed', workspaceId);
+
+      console.log(`[Specs] Pass 1 complete: ${pass1Result.stories.length} coarse stories`);
+
+      // ── Pass 2: Spec Writer Agent — decompose into micro-stories ──
+      emitPassEvent(slug, 2, 'started', workspaceId);
+
+      // Discover installed skills for prompt context
+      let skillCatalog = '';
+      try {
+        const skillRegistry = new SkillRegistry();
+        skillRegistry.discover(workspace.path as string);
+        skillCatalog = skillRegistry.getCatalogForPrompt();
+      } catch {
+        // Skills not available — proceed without
+      }
+
+      const pass1StoriesJson = JSON.stringify(pass1Result.stories, null, 2);
+
+      const pass2Prompt = [
+        '=== INSTRUCTIONS: READ THIS FIRST ===',
+        'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+        'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+        'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+        'If you output anything other than raw JSON, the system will fail.',
+        '=== END INSTRUCTIONS ===',
+        '',
+        '=== PERSONA: SPEC WRITER AGENT (Pass 2 — Micro-Story Decomposition) ===',
+        specWriterPromptText,
+        '=== END PERSONA ===',
+        '',
+        synthesized,
+        '---',
+        'TASK: You are given a high-level spec with coarse user stories from Pass 1 (PM Agent).',
+        'Your job is to DECOMPOSE each coarse story into 2-5 atomic micro-stories with exhaustive acceptance criteria.',
+        'The output replaces the Pass 1 stories entirely — produce a flat array of all micro-stories.',
+        '',
+        `Spec title: ${effectiveTitle}`,
+        `Spec brief: ${brief}`,
+        '',
+        '=== PASS 1 OUTPUT (Coarse Stories) ===',
+        pass1StoriesJson,
+        '=== END PASS 1 OUTPUT ===',
+        '',
+        ...(skillCatalog ? [
+          '=== INSTALLED SKILL CATALOG ===',
+          'The following skills are available in this workspace. For each micro-story, suggest which skills would be useful.',
+          skillCatalog,
+          '=== END SKILL CATALOG ===',
+          '',
+        ] : []),
+        'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
+        '',
+        'JSON schema:',
+        `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3,"suggestedSkills":["react","tailwind"],"suggestedPersona":"frontend"}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+        wantDiagrams ? diagramSchema : '',
+        '',
+        'Rules:',
+        `- Re-number ALL stories sequentially starting from ${storyPrefix}-001`,
+        '- Each coarse story from Pass 1 should become 2-5 atomic micro-stories',
+        '- Each micro-story needs 3-8 specific, binary, testable acceptanceCriteria',
+        '- For UI stories: describe ALL visual states (loading, success, error, empty) with exact copy',
+        '- For API stories: specify HTTP method, path, request/response shapes, status codes',
+        '- dependsOn must reference IDs from YOUR output (the new micro-story IDs), not Pass 1 IDs',
+        '- Each story must have a "complexity" field: integer 1-5',
+        '- Each story must have a "suggestedPersona" field: the persona best suited to implement it (e.g. "frontend", "backend", "database", "security", "architect")',
+        ...(skillCatalog ? [
+          '- Each story must have a "suggestedSkills" field: array of skill names from the catalog that would help implement it (empty array if none apply)',
+        ] : [
+          '- Each story must have a "suggestedSkills" field: empty array [] (no skill catalog available)',
+        ]),
+        '- Your entire response must be valid JSON parseable by JSON.parse()',
+        '- Include a "mermaidDiagram" field showing the decomposed story dependency relationships',
+        '- Stories with no dependencies are root nodes. Use \\n for newlines in the mermaid string',
+      ].join('\n');
+
+      const llmResult2 = await chatComplete(
+        [{ role: 'user', content: pass2Prompt }],
+        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+      );
+      const pass2Usage = llmResult2.usage;
+
+      try {
+        parsed = parseLLMJson(llmResult2.text) as typeof parsed;
+      } catch {
+        res.status(500).json({ error: 'Pass 2 (Spec Writer Agent) returned non-JSON', raw: llmResult2.text });
+        return;
+      }
+
+      if (!Array.isArray(parsed.stories)) {
+        res.status(500).json({ error: 'Pass 2 (Spec Writer Agent) returned invalid spec structure' });
+        return;
+      }
+
+      // Snapshot Pass 2 result as spec version
+      const pass2Spec = {
+        title: effectiveTitle,
+        generatedAt: new Date().toISOString(),
+        model: resolvedModel,
+        multiPassStage: 'pass2-spec-writer',
+        userStories: parsed.stories,
+      };
+      snapshotVersion(slug, JSON.stringify(pass2Spec), 'pending');
+      emitPassEvent(slug, 2, 'completed', workspaceId);
+
+      console.log(`[Specs] Pass 2 complete: ${parsed.stories.length} micro-stories (decomposed from ${pass1Result.stories.length} coarse stories)`);
+
+      // Aggregate token usage from both passes
+      tokenUsage = {
+        inputTokens: pass1Usage.inputTokens + pass2Usage.inputTokens,
+        outputTokens: pass1Usage.outputTokens + pass2Usage.outputTokens,
+      };
+
+    } else if (configuredAgentType === 'opencode') {
       // ── OpenCode path: spawn `opencode run` with codebase exploration ──
       console.log(`[Specs] Generating via OpenCode (model: ${resolvedModel})`);
       usedProvider = 'opencode';
@@ -590,10 +857,7 @@ router.post('/generate', async (req: Request, res: Response) => {
         usedProvider = getActiveProvider();
 
         try {
-          const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-          const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-          const jsonStart = jsonStr.indexOf('{');
-          parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+          parsed = parseLLMJson(rawResponse) as typeof parsed;
         } catch {
           res.status(500).json({ error: 'LLM returned non-JSON (fallback after OpenCode failure)', raw: rawResponse });
           return;
@@ -625,10 +889,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       usedProvider = getActiveProvider();
 
       try {
-        const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-        const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-        const jsonStart = jsonStr.indexOf('{');
-        parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+        parsed = parseLLMJson(rawResponse) as typeof parsed;
       } catch {
         res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
         return;
@@ -651,11 +912,6 @@ router.post('/generate', async (req: Request, res: Response) => {
     // 10. Merge diagrams (algorithmic overwrites LLM for storyDeps)
     const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
 
-    // 11. Build slug — use title if provided, otherwise auto-generate from brief
-    const slug = title
-      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-      : briefToSlug(brief);
-
     // 12. WAL event
     const model = resolvedModel;
     db.prepare(
@@ -664,6 +920,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       title: effectiveTitle, domain, storyCount: parsed.stories.length, provider: usedProvider, model,
       hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
       inputTokens: tokenUsage.inputTokens, outputTokens: tokenUsage.outputTokens,
+      multiPass,
     }));
 
     // 13. Snapshot existing spec as a version if regenerating same slug
@@ -712,6 +969,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       usage: tokenUsage,
       specPath,
       diagramsPath,
+      ...(multiPass ? { multiPass: true, passCount: 2 } : {}),
     });
   } catch (error: any) {
     console.error('[Specs] Generate error:', error);
