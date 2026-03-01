@@ -5,7 +5,7 @@ import {
   Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight,
   Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
   BarChart3, HeartPulse, ScrollText, Calculator, Settings, Settings2,
-  Plus, X, Search, ChevronDown, BookOpen,
+  Plus, X, Search, ChevronDown, BookOpen, FileSearch,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -13,7 +13,7 @@ import NotificationBell from './NotificationBell';
 import { UserMenu } from './Shell';
 import { PANEL_ROUTES } from '../routes';
 
-export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory';
+export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory' | 'conventions';
 
 interface NavItem {
   id: PanelId;
@@ -55,6 +55,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: 'stack', label: 'Direction Stack', icon: Layers },
       { id: 'team-direction', label: 'Team Direction', icon: Users },
       { id: 'memory', label: 'Memory Ledger', icon: BookOpen },
+      { id: 'conventions', label: 'Conventions', icon: FileSearch },
     ],
   },
   {
