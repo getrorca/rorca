@@ -78,17 +78,35 @@ function emitWalEvent(eventType: string, payload: Record<string, unknown>): void
  *   get:
  *     tags: [Teams]
  *     summary: List teams the user belongs to
+ *     operationId: listTeams
+ *     description: Returns a paginated list of teams that the authenticated user is a member of.
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer }
+ *         description: Page number
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer }
+ *         description: Items per page
  *     responses:
  *       200:
- *         description: List of teams
+ *         description: Paginated list of teams
  *         content:
  *           application/json:
  *             schema:
- *               type: array
- *               items: { $ref: '#/components/schemas/Team' }
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items: { $ref: '#/components/schemas/Team' }
+ *                 total: { type: integer }
+ *       500: { description: "Internal server error" }
  *   post:
  *     tags: [Teams]
  *     summary: Create a new team
+ *     operationId: createTeam
+ *     description: Creates a new team with the given name and slug. The authenticated user becomes the owner and is added as an admin member.
  *     requestBody:
  *       required: true
  *       content:
@@ -105,7 +123,9 @@ function emitWalEvent(eventType: string, payload: Record<string, unknown>): void
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/Team' }
+ *       400: { description: "Invalid or missing name/slug" }
  *       409: { description: "Slug already taken" }
+ *       500: { description: "Internal server error" }
  */
 router.get('/', (req: Request, res: Response) => {
   try {
@@ -189,7 +209,50 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-// POST /api/teams/:id/invites — Send an email invitation (admin only)
+/**
+ * @swagger
+ * /api/teams/{id}/invites:
+ *   post:
+ *     tags: [Teams]
+ *     summary: Send a team invitation
+ *     operationId: createTeamInvite
+ *     description: Sends an email invitation to join the team. Requires admin role. Subject to free-tier pending invite limits.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Team ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               role: { type: string, enum: [admin, editor, viewer], default: editor }
+ *     responses:
+ *       201:
+ *         description: Invite created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 inviteId: { type: string }
+ *                 email: { type: string }
+ *                 role: { type: string }
+ *                 token: { type: string }
+ *                 expiresAt: { type: string, format: date-time }
+ *                 teamName: { type: string }
+ *       400: { description: "Email is required" }
+ *       404: { description: "Team not found" }
+ *       409: { description: "User is already a member or pending invite exists" }
+ *       429: { description: "Free tier pending invite limit reached" }
+ *       500: { description: "Internal server error" }
+ */
 router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
@@ -270,11 +333,14 @@ router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) 
  *   get:
  *     tags: [Teams]
  *     summary: List team members
+ *     operationId: listTeamMembers
+ *     description: Returns all members of the specified team with their roles and activity timestamps. Requires viewer role.
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
  *         schema: { type: string }
+ *         description: Team ID
  *     responses:
  *       200:
  *         description: Team members
@@ -286,6 +352,8 @@ router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) 
  *                 teamId: { type: string }
  *                 teamName: { type: string }
  *                 members: { type: array, items: { type: object } }
+ *       404: { description: "Team not found" }
+ *       500: { description: "Internal server error" }
  */
 router.get('/:id/members', requireRole('viewer'), (req: Request, res: Response) => {
   try {
@@ -327,7 +395,49 @@ router.get('/:id/members', requireRole('viewer'), (req: Request, res: Response) 
   }
 });
 
-// PATCH /api/teams/:id/members/:userId — Update a member's role (admin only)
+/**
+ * @swagger
+ * /api/teams/{id}/members/{userId}:
+ *   patch:
+ *     tags: [Teams]
+ *     summary: Update a team member's role
+ *     operationId: updateTeamMemberRole
+ *     description: Changes the role of an existing team member. Requires admin role.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Team ID
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema: { type: string }
+ *         description: User ID of the member to update
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [role]
+ *             properties:
+ *               role: { type: string, enum: [admin, editor, viewer] }
+ *     responses:
+ *       200:
+ *         description: Member role updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 teamId: { type: string }
+ *                 userId: { type: string }
+ *                 role: { type: string }
+ *       400: { description: "Invalid role" }
+ *       404: { description: "Member not found" }
+ *       500: { description: "Internal server error" }
+ */
 router.patch('/:id/members/:userId', requireRole('admin'), (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
@@ -360,7 +470,38 @@ router.patch('/:id/members/:userId', requireRole('admin'), (req: Request, res: R
   }
 });
 
-// DELETE /api/teams/:id/members/:userId — Remove a member (admin only)
+/**
+ * @swagger
+ * /api/teams/{id}/members/{userId}:
+ *   delete:
+ *     tags: [Teams]
+ *     summary: Remove a team member
+ *     operationId: removeTeamMember
+ *     description: Removes a member from the team. The team owner cannot be removed. Requires admin role.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Team ID
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema: { type: string }
+ *         description: User ID of the member to remove
+ *     responses:
+ *       200:
+ *         description: Member removed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       400: { description: "Cannot remove the team owner" }
+ *       404: { description: "Member not found" }
+ *       500: { description: "Internal server error" }
+ */
 router.delete('/:id/members/:userId', requireRole('admin'), (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
@@ -392,7 +533,44 @@ router.delete('/:id/members/:userId', requireRole('admin'), (req: Request, res: 
   }
 });
 
-// PATCH /api/teams/:id/settings — Update team settings (admin only)
+/**
+ * @swagger
+ * /api/teams/{id}/settings:
+ *   patch:
+ *     tags: [Teams]
+ *     summary: Update team settings
+ *     operationId: updateTeamSettings
+ *     description: Updates team settings such as the team name. Requires admin role.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Team ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string, description: "New team name" }
+ *     responses:
+ *       200:
+ *         description: Team settings updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 name: { type: string }
+ *                 slug: { type: string }
+ *       400: { description: "Team name is required" }
+ *       404: { description: "Team not found" }
+ *       500: { description: "Internal server error" }
+ */
 router.patch('/:id/settings', requireRole('admin'), (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
@@ -421,7 +599,35 @@ router.patch('/:id/settings', requireRole('admin'), (req: Request, res: Response
   }
 });
 
-// GET /api/teams/:id/direction — Fetch team-scoped L1/L2 direction layers
+/**
+ * @swagger
+ * /api/teams/{id}/direction:
+ *   get:
+ *     tags: [Teams]
+ *     summary: Get team direction layers
+ *     operationId: getTeamDirection
+ *     description: Fetches team-scoped L1 (engineering principles) and L2 (domain conventions) direction layers.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Team ID
+ *     responses:
+ *       200:
+ *         description: Team direction layers
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 teamId: { type: string }
+ *                 teamName: { type: string }
+ *                 l1: { type: string, description: "L1 engineering principles YAML" }
+ *                 l2: { type: string, description: "L2 domain conventions YAML" }
+ *       404: { description: "Team not found" }
+ *       500: { description: "Internal server error" }
+ */
 router.get('/:id/direction', requireRole('viewer'), (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
@@ -452,7 +658,44 @@ router.get('/:id/direction', requireRole('viewer'), (req: Request, res: Response
   }
 });
 
-// PUT /api/teams/:id/direction — Create or update team-level L1/L2 direction layers (admin only)
+/**
+ * @swagger
+ * /api/teams/{id}/direction:
+ *   put:
+ *     tags: [Teams]
+ *     summary: Update team direction layer
+ *     operationId: updateTeamDirection
+ *     description: Creates or updates a team-scoped L1 or L2 direction layer. YAML content is validated before saving. Requires admin role.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Team ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [layer, contentYaml]
+ *             properties:
+ *               layer: { type: integer, enum: [1, 2], description: "Direction layer (1=engineering, 2=domain)" }
+ *               contentYaml: { type: string, description: "YAML content for the direction layer" }
+ *     responses:
+ *       200:
+ *         description: Direction layer updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       400: { description: "Invalid layer value or missing contentYaml" }
+ *       404: { description: "Team not found" }
+ *       422: { description: "Invalid YAML syntax or schema validation failure" }
+ *       500: { description: "Internal server error" }
+ */
 router.put('/:id/direction', requireRole('admin'), (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
@@ -504,7 +747,40 @@ router.put('/:id/direction', requireRole('admin'), (req: Request, res: Response)
   }
 });
 
-// POST /api/teams/:id/direction/preview — Preview merged output for a team workspace
+/**
+ * @swagger
+ * /api/teams/{id}/direction/preview:
+ *   post:
+ *     tags: [Teams]
+ *     summary: Preview merged direction stack
+ *     operationId: previewTeamDirection
+ *     description: Synthesizes and previews the merged direction stack output for a team, optionally scoped to a workspace and spec brief. Merges global L1/L2, team L1/L2, and workspace L3 layers.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Team ID
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               workspaceId: { type: string, description: "Optional workspace ID to include L3 layer" }
+ *               specBrief: { type: string, description: "Optional spec brief text for L4 context" }
+ *     responses:
+ *       200:
+ *         description: Synthesized direction stack preview
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 synthesized: { type: string, description: "Merged direction stack content" }
+ *       404: { description: "Team not found" }
+ *       500: { description: "Internal server error" }
+ */
 router.post('/:id/direction/preview', requireRole('viewer'), (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;

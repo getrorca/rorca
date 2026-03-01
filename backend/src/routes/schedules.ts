@@ -25,8 +25,25 @@ function nextRunAt(cronExpression: string): string | null {
   }
 }
 
-// ─── GET /api/pipeline/schedules — List all schedules ─────────────────────────
-
+/**
+ * @swagger
+ * /api/pipeline/schedules:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: List pipeline schedules for a workspace
+ *     operationId: listPipelineSchedules
+ *     description: Returns all cron-based pipeline schedules for the specified workspace, including computed next run time.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated list of schedules
+ *       400:
+ *         description: Missing workspaceId query parameter
+ */
 router.get('/', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -53,8 +70,36 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/pipeline/schedules — Create a new schedule ─────────────────────
-
+/**
+ * @swagger
+ * /api/pipeline/schedules:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Create a new pipeline schedule
+ *     operationId: createPipelineSchedule
+ *     description: Creates a new cron-based schedule that automatically triggers pipeline runs for a specific spec.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, specId, cronExpression]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               specId: { type: string }
+ *               cronExpression: { type: string, description: "Standard cron expression" }
+ *               enabled: { type: boolean, default: true }
+ *     responses:
+ *       201:
+ *         description: Schedule created
+ *       400:
+ *         description: Missing required fields
+ *       404:
+ *         description: Workspace not found
+ *       422:
+ *         description: Invalid cron expression
+ */
 router.post('/', (req: Request, res: Response) => {
   try {
     const { workspaceId, specId, cronExpression, enabled } = req.body;
@@ -102,8 +147,39 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── PATCH /api/pipeline/schedules/:id — Update a schedule ────────────────────
-
+/**
+ * @swagger
+ * /api/pipeline/schedules/{id}:
+ *   patch:
+ *     tags: [Pipeline]
+ *     summary: Update a pipeline schedule
+ *     operationId: updatePipelineSchedule
+ *     description: Updates an existing pipeline schedule. Only provided fields are modified.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               cronExpression: { type: string }
+ *               enabled: { type: boolean }
+ *               specId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Schedule updated
+ *       400:
+ *         description: Invalid schedule ID
+ *       404:
+ *         description: Schedule not found
+ *       422:
+ *         description: Invalid cron expression
+ */
 router.patch('/:id', (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id), 10);
@@ -152,8 +228,33 @@ router.patch('/:id', (req: Request, res: Response) => {
   }
 });
 
-// ─── DELETE /api/pipeline/schedules/:id — Delete a schedule ───────────────────
-
+/**
+ * @swagger
+ * /api/pipeline/schedules/{id}:
+ *   delete:
+ *     tags: [Pipeline]
+ *     summary: Delete a pipeline schedule
+ *     operationId: deletePipelineSchedule
+ *     description: Permanently removes a pipeline schedule.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Schedule deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       400:
+ *         description: Invalid schedule ID
+ *       404:
+ *         description: Schedule not found
+ */
 router.delete('/:id', (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id), 10);

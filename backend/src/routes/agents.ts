@@ -33,6 +33,8 @@ function getWorkspacePath(workspaceId: string): string | null {
  * /api/agents:
  *   get:
  *     summary: Get AGENTS.md roles for a workspace
+ *     operationId: getAgentRoles
+ *     description: Returns the parsed AGENTS.md roles, raw content, and file existence status for the specified workspace.
  *     parameters:
  *       - name: workspaceId
  *         in: query
@@ -62,6 +64,8 @@ router.get('/', (req: Request, res: Response) => {
  * /api/agents:
  *   put:
  *     summary: Update AGENTS.md roles for a workspace
+ *     operationId: updateAgentRoles
+ *     description: Writes updated roles or raw content to the workspace AGENTS.md file.
  *     requestBody:
  *       required: true
  *       content:
@@ -118,6 +122,8 @@ router.put('/', (req: Request, res: Response) => {
  * /api/agents/generate:
  *   post:
  *     summary: Generate AGENTS.md from workspace directory structure (echolocation)
+ *     operationId: generateAgentRoles
+ *     description: Analyzes the workspace directory structure to auto-generate AGENTS.md file governance roles.
  *     requestBody:
  *       required: true
  *       content:
@@ -150,6 +156,8 @@ router.post('/generate', (req: Request, res: Response) => {
  * /api/agents/violations:
  *   get:
  *     summary: Query recent violations from WAL events
+ *     operationId: listAgentViolations
+ *     description: Returns AGENTS.md governance violations recorded in WAL events, optionally filtered by run ID.
  *     parameters:
  *       - name: workspaceId
  *         in: query

@@ -7,8 +7,25 @@ const router = Router();
 
 const VALID_HOOK_TYPES = ['pre_run', 'post_run', 'pre_story', 'post_story'];
 
-// ─── GET /api/pipeline/hooks — List hooks for a workspace ─────────────────────
-
+/**
+ * @swagger
+ * /api/pipeline/hooks:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: List pipeline hooks for a workspace
+ *     operationId: listPipelineHooks
+ *     description: Returns all pipeline lifecycle hooks (pre_run, post_run, pre_story, post_story) for the specified workspace.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated list of pipeline hooks
+ *       400:
+ *         description: Missing workspaceId query parameter
+ */
 router.get('/', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -29,8 +46,32 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/pipeline/hooks — Create a new hook ─────────────────────────────
-
+/**
+ * @swagger
+ * /api/pipeline/hooks:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Create a new pipeline hook
+ *     operationId: createPipelineHook
+ *     description: Creates a new pipeline lifecycle hook that runs a shell command at specific points in the pipeline execution.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, hookType, command]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               hookType: { type: string, enum: [pre_run, post_run, pre_story, post_story] }
+ *               command: { type: string }
+ *               enabled: { type: boolean, default: true }
+ *     responses:
+ *       201:
+ *         description: Hook created
+ *       400:
+ *         description: Missing required fields or invalid hookType
+ */
 router.post('/', (req: Request, res: Response) => {
   try {
     const { workspaceId, hookType, command, enabled } = req.body;
@@ -62,8 +103,37 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── PUT /api/pipeline/hooks/:id — Update a hook ─────────────────────────────
-
+/**
+ * @swagger
+ * /api/pipeline/hooks/{id}:
+ *   put:
+ *     tags: [Pipeline]
+ *     summary: Update a pipeline hook
+ *     operationId: updatePipelineHook
+ *     description: Updates an existing pipeline hook. Only provided fields are modified.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hookType: { type: string, enum: [pre_run, post_run, pre_story, post_story] }
+ *               command: { type: string }
+ *               enabled: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Hook updated
+ *       400:
+ *         description: Invalid hook ID or hookType
+ *       404:
+ *         description: Hook not found
+ */
 router.put('/:id', (req: Request, res: Response) => {
   try {
     const hookId = parseInt(String(req.params.id), 10);
@@ -101,8 +171,27 @@ router.put('/:id', (req: Request, res: Response) => {
   }
 });
 
-// ─── DELETE /api/pipeline/hooks/:id — Delete a hook ───────────────────────────
-
+/**
+ * @swagger
+ * /api/pipeline/hooks/{id}:
+ *   delete:
+ *     tags: [Pipeline]
+ *     summary: Delete a pipeline hook
+ *     operationId: deletePipelineHook
+ *     description: Permanently removes a pipeline hook.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       204:
+ *         description: Hook deleted
+ *       400:
+ *         description: Invalid hook ID
+ *       404:
+ *         description: Hook not found
+ */
 router.delete('/:id', (req: Request, res: Response) => {
   try {
     const hookId = parseInt(String(req.params.id), 10);

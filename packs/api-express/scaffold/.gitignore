@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# env files
+.env
+.env.local
+
+# database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+
+# coverage
+coverage/

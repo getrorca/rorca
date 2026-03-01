@@ -58,6 +58,8 @@ const IGNORED_DIRS = new Set([
  * /api/workspaces/{id}/directory-tree:
  *   get:
  *     summary: Get workspace directory tree (lazy-loaded by path)
+ *     operationId: getDirectoryTree
+ *     description: Returns a lazy-loaded directory listing for the given workspace, filtered to exclude common build/dependency directories.
  *     tags: [Context Routing]
  *     parameters:
  *       - name: id
@@ -125,6 +127,8 @@ router.get('/:id/directory-tree', (req: Request, res: Response) => {
  * /api/workspaces/{id}/skills:
  *   get:
  *     summary: List available .rorca/skills/*.md files
+ *     operationId: listSkillFiles
+ *     description: Lists all Markdown skill files in the workspace .rorca/skills/ directory with metadata.
  *     tags: [Context Routing]
  *     parameters:
  *       - name: id
@@ -186,6 +190,8 @@ router.get('/:id/skills', (req: Request, res: Response) => {
  * /api/workspaces/{id}/rorca-config:
  *   get:
  *     summary: Get the full .rorca/config.json (routing, context, orchestration, execution)
+ *     operationId: getRorcaConfig
+ *     description: Reads and returns the full .rorca/config.json with defaults applied for any missing fields.
  *     tags: [Context Routing]
  *     parameters:
  *       - name: id
@@ -216,6 +222,8 @@ router.get('/:id/rorca-config', (req: Request, res: Response) => {
  * /api/workspaces/{id}/rorca-config:
  *   put:
  *     summary: Save the full .rorca/config.json
+ *     operationId: updateRorcaConfig
+ *     description: Validates and writes the provided config object to .rorca/config.json, creating the directory if needed.
  *     tags: [Context Routing]
  *     parameters:
  *       - name: id
@@ -275,6 +283,8 @@ router.put('/:id/rorca-config', (req: Request, res: Response) => {
  * /api/workspaces/{id}/rorca-config/raw:
  *   get:
  *     summary: Get raw .rorca/config.json text content (for JSON editor)
+ *     operationId: getRorcaConfigRaw
+ *     description: Returns the raw JSON text of .rorca/config.json for use in a code editor, or pretty-printed defaults if the file does not exist.
  *     tags: [Context Routing]
  */
 router.get('/:id/rorca-config/raw', (req: Request, res: Response) => {
@@ -304,6 +314,8 @@ router.get('/:id/rorca-config/raw', (req: Request, res: Response) => {
  * /api/workspaces/{id}/rorca-config/raw:
  *   put:
  *     summary: Save raw JSON text to .rorca/config.json (with validation)
+ *     operationId: updateRorcaConfigRaw
+ *     description: Parses and validates raw JSON text, then writes it to .rorca/config.json preserving the user's formatting.
  *     tags: [Context Routing]
  */
 router.put('/:id/rorca-config/raw', (req: Request, res: Response) => {
@@ -356,6 +368,8 @@ router.put('/:id/rorca-config/raw', (req: Request, res: Response) => {
  * /api/workspaces/{id}/rorca-config/eject:
  *   post:
  *     summary: Generate default .rorca/config.json for a workspace that doesn't have one
+ *     operationId: ejectRorcaConfig
+ *     description: Creates a default .rorca/config.json in the workspace directory, enabling advanced configuration for the first time.
  *     tags: [Context Routing]
  */
 router.post('/:id/rorca-config/eject', (req: Request, res: Response) => {
@@ -388,6 +402,8 @@ router.post('/:id/rorca-config/eject', (req: Request, res: Response) => {
  * /api/workspaces/{id}/rorca-config/export:
  *   get:
  *     summary: Export .rorca/config.json as downloadable JSON
+ *     operationId: exportRorcaConfig
+ *     description: Returns the .rorca/config.json as a downloadable file attachment with Content-Disposition header.
  *     tags: [Context Routing]
  */
 router.get('/:id/rorca-config/export', (req: Request, res: Response) => {

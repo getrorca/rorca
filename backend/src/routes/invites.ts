@@ -47,7 +47,40 @@ function emitWalEvent(eventType: string, payload: Record<string, unknown>): void
   broadcastAll(walEvent);
 }
 
-// GET /api/invites/:token — Validate invite token and return team info (public, no auth)
+/**
+ * @swagger
+ * /api/invites/{token}:
+ *   get:
+ *     tags: [Teams]
+ *     summary: Validate an invite token
+ *     operationId: validateInviteToken
+ *     description: Validates a team invite token and returns the team info, invited email, role, and inviter name. This endpoint is public and does not require authentication.
+ *     parameters:
+ *       - in: path
+ *         name: token
+ *         required: true
+ *         schema: { type: string }
+ *         description: Raw invite token
+ *     responses:
+ *       200:
+ *         description: Invite details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 teamId: { type: string }
+ *                 teamName: { type: string }
+ *                 teamSlug: { type: string }
+ *                 email: { type: string }
+ *                 role: { type: string }
+ *                 invitedBy: { type: string }
+ *                 expiresAt: { type: string }
+ *       404:
+ *         description: Invalid invite token or team no longer exists
+ *       410:
+ *         description: Invite already accepted or expired
+ */
 router.get('/:token', (req: Request, res: Response) => {
   try {
     const rawToken = req.params.token as string;
@@ -96,7 +129,42 @@ router.get('/:token', (req: Request, res: Response) => {
   }
 });
 
-// POST /api/invites/:token/accept — Accept invite and join team (requires auth)
+/**
+ * @swagger
+ * /api/invites/{token}/accept:
+ *   post:
+ *     tags: [Teams]
+ *     summary: Accept a team invite
+ *     operationId: acceptInvite
+ *     description: Accepts a team invite token and adds the authenticated user as a team member. The user's email must match the invite email.
+ *     parameters:
+ *       - in: path
+ *         name: token
+ *         required: true
+ *         schema: { type: string }
+ *         description: Raw invite token
+ *     responses:
+ *       200:
+ *         description: Successfully joined the team
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 teamId: { type: string }
+ *                 teamName: { type: string }
+ *                 teamSlug: { type: string }
+ *                 role: { type: string }
+ *                 message: { type: string }
+ *       403:
+ *         description: Invite was sent to a different email address
+ *       404:
+ *         description: Invalid invite token
+ *       409:
+ *         description: Already a member of this team
+ *       410:
+ *         description: Invite already accepted or expired
+ */
 router.post('/:token/accept', authRequired, (req: Request, res: Response) => {
   try {
     const user = (req as Request & { user: AuthUser }).user;

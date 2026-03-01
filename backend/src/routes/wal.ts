@@ -17,19 +17,70 @@ interface WalEventRow {
 }
 
 /**
- * GET /api/wal
- * Query paginated WAL event log with filtering and search.
- *
- * Query params:
- *   limit       - max rows (1–200, default 50)
- *   offset      - pagination offset (default 0)
- *   event_type  - filter by event type (exact match)
- *   workspace_id - filter by workspace
- *   actor       - filter by actor (substring match, case-insensitive)
- *   from        - ISO-8601 date, events after this timestamp
- *   to          - ISO-8601 date, events before this timestamp
- *   q           - full-text search across event_type, spec_id, story_id, actor, payload
- *   sort        - 'newest' (default) or 'oldest'
+ * @swagger
+ * /api/wal:
+ *   get:
+ *     tags: [WAL]
+ *     summary: Query WAL event log
+ *     operationId: queryWalEvents
+ *     description: Returns a paginated, filterable list of WAL (Write-Ahead Log) events with full-text search support. Also returns distinct event types for filter dropdowns.
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *       - in: query
+ *         name: event_type
+ *         schema: { type: string }
+ *         description: Filter by event type (exact match)
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *       - in: query
+ *         name: actor
+ *         schema: { type: string }
+ *         description: Filter by actor (substring match, case-insensitive)
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date-time }
+ *         description: Events after this ISO-8601 timestamp
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date-time }
+ *         description: Events before this ISO-8601 timestamp
+ *       - in: query
+ *         name: q
+ *         schema: { type: string }
+ *         description: Full-text search across event_type, spec_id, story_id, actor, payload
+ *       - in: query
+ *         name: sort
+ *         schema: { type: string, enum: [newest, oldest], default: newest }
+ *     responses:
+ *       200:
+ *         description: Paginated WAL events with event type list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       ts: { type: string }
+ *                       event_type: { type: string }
+ *                       workspace_id: { type: string, nullable: true }
+ *                       spec_id: { type: string, nullable: true }
+ *                       story_id: { type: string, nullable: true }
+ *                       actor: { type: string }
+ *                       payload: { type: string, nullable: true }
+ *                 total: { type: integer }
+ *                 hasMore: { type: boolean }
+ *                 eventTypes: { type: array, items: { type: string } }
  */
 router.get('/', (req, res) => {
   const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 200 });
@@ -96,9 +147,38 @@ router.get('/', (req, res) => {
 });
 
 /**
- * POST /api/wal
- * Insert a WAL event (used by run-loop.ts to report story progress).
- * Broadcasts to all SSE subscribers.
+ * @swagger
+ * /api/wal:
+ *   post:
+ *     tags: [WAL]
+ *     summary: Insert a WAL event
+ *     operationId: insertWalEvent
+ *     description: Inserts a new WAL event and broadcasts it to all SSE subscribers. Used by run-loop.ts to report story progress.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [event_type]
+ *             properties:
+ *               event_type: { type: string }
+ *               workspace_id: { type: string }
+ *               spec_id: { type: string }
+ *               story_id: { type: string }
+ *               payload: { type: object }
+ *     responses:
+ *       201:
+ *         description: WAL event created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 id: { type: integer }
+ *       400:
+ *         description: Missing event_type
  */
 router.post('/', (req: Request, res: Response) => {
   try {

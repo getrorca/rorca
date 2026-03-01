@@ -35,6 +35,8 @@ const upload = multer({
  *   post:
  *     tags: [Context]
  *     summary: Extract context from paste/URL/Q&A for direction layers
+ *     operationId: extractContext
+ *     description: Extracts structured context from pasted text, a URL, or Q&A answers and converts it into direction layer YAML.
  *     requestBody:
  *       required: true
  *       content:
@@ -92,6 +94,8 @@ router.post('/extract', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Context]
  *     summary: Upload files for context extraction
+ *     operationId: uploadContextFiles
+ *     description: Accepts uploaded files and extracts structured context for use in direction layers.
  *     requestBody:
  *       required: true
  *       content:
@@ -160,10 +164,34 @@ router.post('/upload', upload.array('files'), async (req: Request, res: Response
   }
 });
 
-// ---------------------------------------------------------------------------
-// GET /api/context/fetch-preview?url=
-// ---------------------------------------------------------------------------
-
+/**
+ * @swagger
+ * /api/context/fetch-preview:
+ *   get:
+ *     tags: [Context]
+ *     summary: Fetch URL preview for context extraction
+ *     operationId: fetchContextPreview
+ *     description: Fetches a URL and returns a preview of its content for use in context extraction workflows.
+ *     parameters:
+ *       - in: query
+ *         name: url
+ *         required: true
+ *         schema: { type: string }
+ *         description: URL to fetch and preview
+ *     responses:
+ *       200:
+ *         description: URL content preview
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 title: { type: string }
+ *                 content: { type: string }
+ *                 url: { type: string }
+ *       400:
+ *         description: Missing url query parameter
+ */
 router.get('/fetch-preview', async (req: Request, res: Response) => {
   try {
     const url = req.query.url as string | undefined;

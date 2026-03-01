@@ -348,6 +348,12 @@ export function runMigrations() {
     db.exec('ALTER TABLE story_results ADD COLUMN blocked_by TEXT');
   }
 
+  // SK-003: Add active_skills column to story_results for tracking injected skills (idempotent)
+  const srColsSK003 = db.pragma('table_info(story_results)') as { name: string }[];
+  if (!srColsSK003.some(c => c.name === 'active_skills')) {
+    db.exec('ALTER TABLE story_results ADD COLUMN active_skills TEXT');
+  }
+
   // EQ-007: Add author_name column to story_comments for guest reviewers (idempotent)
   const scCols = db.pragma('table_info(story_comments)') as { name: string }[];
   if (!scCols.some(c => c.name === 'author_name')) {
@@ -481,6 +487,86 @@ export function runMigrations() {
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `);
+  }
+
+  // CA-001: convention_packs table for pack registry metadata (idempotent)
+  const conventionPacksExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='convention_packs'`
+  ).get();
+  if (!conventionPacksExists) {
+    db.exec(`
+      CREATE TABLE convention_packs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        pack_name TEXT NOT NULL,
+        pack_version TEXT NOT NULL,
+        installed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        pack_path TEXT NOT NULL,
+        UNIQUE(workspace_id, pack_name)
+      );
+      CREATE INDEX idx_convention_packs_workspace ON convention_packs(workspace_id);
+    `);
+  }
+
+  // SK-001: installed_skills table for SkillRegistry persistence (idempotent)
+  const installedSkillsExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='installed_skills'`
+  ).get();
+  if (!installedSkillsExists) {
+    db.exec(`
+      CREATE TABLE installed_skills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        content TEXT NOT NULL,
+        installed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX idx_installed_skills_name ON installed_skills(name);
+    `);
+  }
+
+  // CA-003: Expand direction_layers CHECK constraint to allow layer 0 (L0 = pack conventions)
+  const dirLayersSql = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='direction_layers'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (dirLayersSql && !dirLayersSql.includes('0,1,2,3')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE direction_layers_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT,
+        domain TEXT,
+        team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
+        layer INTEGER NOT NULL CHECK(layer IN (0,1,2,3)),
+        content_yaml TEXT NOT NULL DEFAULT '',
+        preferred_model TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX idx_direction_layers_new_unique
+        ON direction_layers_new(layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''));
+      INSERT INTO direction_layers_new (id, workspace_id, domain, team_id, layer, content_yaml, preferred_model, updated_at)
+        SELECT id, workspace_id, domain, team_id, layer, content_yaml, preferred_model, updated_at FROM direction_layers;
+      DROP TABLE direction_layers;
+      ALTER TABLE direction_layers_new RENAME TO direction_layers;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
+
+  // CA-004: Add forked_from column to convention_packs (for pack fork tracking)
+  const cpCols = db.prepare(`PRAGMA table_info(convention_packs)`).all() as Array<{ name: string }>;
+  if (cpCols.length > 0 && !cpCols.some(c => c.name === 'forked_from')) {
+    db.exec(`ALTER TABLE convention_packs ADD COLUMN forked_from TEXT`);
+  }
+
+  // CA-011: Add review_persona and review_type columns to story_comments for adversarial review (idempotent)
+  const scColsCA011 = db.pragma('table_info(story_comments)') as { name: string }[];
+  if (scColsCA011.length > 0 && !scColsCA011.some(c => c.name === 'review_persona')) {
+    db.exec('ALTER TABLE story_comments ADD COLUMN review_persona TEXT');
+  }
+  if (scColsCA011.length > 0 && !scColsCA011.some(c => c.name === 'review_type')) {
+    db.exec("ALTER TABLE story_comments ADD COLUMN review_type TEXT");
   }
 
   // FR-005: Add 'completed' to spec_versions status CHECK constraint (idempotent)

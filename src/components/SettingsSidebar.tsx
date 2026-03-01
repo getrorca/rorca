@@ -1,5 +1,5 @@
 import { Link, NavLink } from 'react-router-dom';
-import { Layers, Zap, Github, Keyboard, User, CreditCard, ArrowLeft } from 'lucide-react';
+import { Layers, Zap, Github, Keyboard, User, CreditCard, ArrowLeft, Drama } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
 
@@ -13,6 +13,7 @@ export default function SettingsSidebar({ onNavigate, directionDirty }: Settings
         { id: 'direction', label: 'Direction Stack', icon: Layers },
         { id: 'providers', label: 'Model & Providers', icon: Zap },
         { id: 'github', label: 'GitHub', icon: Github },
+        { id: 'personas', label: 'Personas', icon: Drama },
         { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
         { id: 'account', label: 'Account', icon: User },
         { id: 'billing', label: 'Billing', icon: CreditCard },
