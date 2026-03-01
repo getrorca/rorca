@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T03:14:56.879Z",
+  "lastUpdatedAt": "2026-03-01T03:46:09.315Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-01T03:14:56.879Z",
       "agentType": "claude",
       "elapsedMs": 459526
+    },
+    {
+      "storyId": "CA-012",
+      "title": "Multi-Pass Spec Generation — PM and Spec Writer Passes (Passes 1-2)",
+      "status": "passed",
+      "startedAt": "2026-03-01T03:22:01.894Z",
+      "finishedAt": "2026-03-01T03:46:09.315Z",
+      "agentType": "claude",
+      "elapsedMs": 1447421
     }
   ],
   "failedStories": [],
