@@ -260,5 +260,41 @@ publicReviewRouter.post('/:token/comments', (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/review/comment — Internal: execution engine review comments ──
+// CA-011: Used by execution-engine.ts to store adversarial review results.
+// No auth token required — only accessible from localhost (execution engine subprocess).
+
+publicReviewRouter.post('/comment', (req: Request, res: Response) => {
+  try {
+    const { spec_id, story_id, body, author_name, review_persona, review_type } = req.body;
+
+    if (!spec_id || !story_id || !body || typeof body !== 'string' || body.trim().length === 0) {
+      res.status(400).json({ error: 'spec_id, story_id, and body are required' });
+      return;
+    }
+
+    const id = crypto.randomUUID();
+    const displayName = (author_name && typeof author_name === 'string') ? author_name.trim() : 'Review Agent';
+
+    db.prepare(`
+      INSERT INTO story_comments (id, spec_id, story_id, user_id, body, author_name, review_persona, review_type)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+    `).run(
+      id,
+      spec_id,
+      story_id,
+      body.trim(),
+      displayName,
+      review_persona ?? null,
+      review_type ?? null,
+    );
+
+    res.status(201).json({ id, spec_id, story_id, author_name: displayName, review_persona, review_type });
+  } catch (error: any) {
+    console.error('[Review] Internal comment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export { specReviewRouter, publicReviewRouter };
 export default publicReviewRouter;

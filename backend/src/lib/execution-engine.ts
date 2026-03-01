@@ -1066,6 +1066,25 @@ function markStorySkipped(jsonPath: string, storyId: string): void {
   console.log(`Marked ${storyId} as skipped`);
 }
 
+/** CA-011: Revert a story's passed status to needs_revision (adversarial review blocked it). */
+function markStoryNeedsRevision(jsonPath: string, storyId: string): void {
+  const raw = fs.readFileSync(jsonPath, 'utf8');
+  const spec: SpecJson = JSON.parse(raw);
+  const stories = getStories(spec);
+
+  for (const s of stories) {
+    if (s.id === storyId) {
+      s.passes = false;
+      s.status = 'needs_revision';
+      s.notes = `Blocked by adversarial review — fix issues and re-run with --story ${storyId}`;
+      break;
+    }
+  }
+
+  fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+  console.log(`Marked ${storyId} as needs_revision`);
+}
+
 // ─── Git Commit ─────────────────────────────────────────────────────────────
 
 function gitCommitStory(
@@ -1393,6 +1412,290 @@ function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
     execSync(`git branch -D "${wt.branchName}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 10_000 });
   } catch { /* branch may already be gone */ }
   console.log(`  [worktree] Removed ${wt.worktreePath}`);
+}
+
+// ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
+
+interface ReviewIssue {
+  severity: 'info' | 'warning' | 'blocker';
+  description: string;
+  file?: string;
+  line?: number;
+}
+
+interface ReviewResult {
+  reviewerName: string;
+  issues: ReviewIssue[];
+  suggestions: string[];
+  blockers: ReviewIssue[];
+  raw: string;
+}
+
+/**
+ * Parse structured review output from an agent.
+ * Expects JSON with { issues, suggestions, blockers } at the top level.
+ * Falls back to treating the entire output as a single suggestion if unparseable.
+ */
+function parseReviewOutput(raw: string, reviewerName: string): ReviewResult {
+  const result: ReviewResult = {
+    reviewerName,
+    issues: [],
+    suggestions: [],
+    blockers: [],
+    raw,
+  };
+
+  // Try to extract JSON from the output (may be wrapped in markdown code fences)
+  const jsonMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) ?? raw.match(/(\{[\s\S]*\})/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1]);
+      if (Array.isArray(parsed.issues)) {
+        for (const issue of parsed.issues) {
+          const severity = ['info', 'warning', 'blocker'].includes(issue.severity) ? issue.severity : 'info';
+          result.issues.push({
+            severity: severity as ReviewIssue['severity'],
+            description: String(issue.description ?? issue.message ?? ''),
+            file: issue.file,
+            line: typeof issue.line === 'number' ? issue.line : undefined,
+          });
+        }
+      }
+      if (Array.isArray(parsed.suggestions)) {
+        result.suggestions = parsed.suggestions.map((s: unknown) => String(s));
+      }
+      if (Array.isArray(parsed.blockers)) {
+        for (const b of parsed.blockers) {
+          result.blockers.push({
+            severity: 'blocker',
+            description: String(b.description ?? b.message ?? b),
+            file: b.file,
+            line: typeof b.line === 'number' ? b.line : undefined,
+          });
+        }
+      }
+      return result;
+    } catch {
+      // JSON parse failed — fall through to raw handling
+    }
+  }
+
+  // Fallback: no parseable JSON, treat raw output as a single suggestion
+  if (raw.trim().length > 0) {
+    result.suggestions.push(raw.trim());
+  }
+  return result;
+}
+
+/**
+ * Build the review prompt for an adversarial reviewer persona.
+ * Includes the git diff, the persona's prompt text, and instructions
+ * to output structured JSON.
+ */
+function buildReviewPrompt(
+  storyId: string,
+  storyTitle: string,
+  diff: string,
+  persona: import('./agent-personas').Persona,
+): string {
+  return [
+    `## Adversarial Review Pass — ${persona.metadata.name}`,
+    '',
+    persona.promptText,
+    '',
+    '---',
+    '',
+    `You are reviewing changes for story ${storyId}: ${storyTitle}`,
+    '',
+    'Here is the git diff of the changes:',
+    '```diff',
+    diff,
+    '```',
+    '',
+    'Analyze the diff and provide your review as a JSON object with this structure:',
+    '```json',
+    '{',
+    '  "issues": [{ "severity": "info|warning|blocker", "description": "...", "file": "path", "line": 123 }],',
+    '  "suggestions": ["suggestion 1", "suggestion 2"],',
+    '  "blockers": [{ "description": "...", "file": "path", "line": 123 }]',
+    '}',
+    '```',
+    '',
+    'Rules:',
+    '- blockers: critical issues that MUST be fixed before merging (security vulnerabilities, data loss, broken functionality)',
+    '- issues: things worth noting but not necessarily blocking',
+    '- suggestions: improvements that could be made',
+    '- Output ONLY the JSON object. No additional commentary.',
+  ].join('\n');
+}
+
+/**
+ * Get the git diff for the last commit (the story's changes).
+ */
+function getLastCommitDiff(cwd: string): string {
+  try {
+    return execSync('git diff HEAD~1 HEAD', { cwd, encoding: 'utf-8', maxBuffer: 1024 * 1024 });
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Post a review result to the story_comments table via the backend API.
+ */
+async function postReviewComment(
+  port: number,
+  specId: string,
+  storyId: string,
+  review: ReviewResult,
+): Promise<void> {
+  const body = {
+    spec_id: specId,
+    story_id: storyId,
+    author_name: `[review] ${review.reviewerName}`,
+    review_persona: review.reviewerName,
+    review_type: 'adversarial',
+    body: formatReviewBody(review),
+  };
+
+  await retryPost(
+    `http://localhost:${port}/api/review/comment`,
+    body,
+    `review:${review.reviewerName}:${storyId}`,
+  );
+}
+
+/**
+ * Format a ReviewResult into a markdown body for storage in story_comments.
+ */
+function formatReviewBody(review: ReviewResult): string {
+  const parts: string[] = [`## Review by ${review.reviewerName}`];
+
+  if (review.blockers.length > 0) {
+    parts.push('', '### Blockers');
+    for (const b of review.blockers) {
+      parts.push(`- **BLOCKER**: ${b.description}${b.file ? ` (${b.file}${b.line ? `:${b.line}` : ''})` : ''}`);
+    }
+  }
+
+  if (review.issues.length > 0) {
+    parts.push('', '### Issues');
+    for (const i of review.issues) {
+      parts.push(`- [${i.severity}] ${i.description}${i.file ? ` (${i.file}${i.line ? `:${i.line}` : ''})` : ''}`);
+    }
+  }
+
+  if (review.suggestions.length > 0) {
+    parts.push('', '### Suggestions');
+    for (const s of review.suggestions) {
+      parts.push(`- ${s}`);
+    }
+  }
+
+  if (review.blockers.length === 0 && review.issues.length === 0 && review.suggestions.length === 0) {
+    parts.push('', 'No issues found.');
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * Run adversarial review passes for a story.
+ *
+ * Spawns one agent per reviewer persona, each receiving the story diff
+ * and the reviewer's persona prompt. Returns aggregated results.
+ *
+ * @returns Array of ReviewResults, one per reviewer. Empty if no reviewers or review disabled.
+ */
+async function runAdversarialReview(
+  story: UserStory,
+  config: EngineConfig,
+  effectiveCwd: string,
+  logDir: string,
+  personaRegistry: PersonaRegistry,
+  specId: string,
+  workspaceId: string | null,
+): Promise<ReviewResult[]> {
+  const reviewers = story.reviewers ?? [];
+  if (reviewers.length === 0) return [];
+
+  const rorcaConfig = loadRorcaConfig(config.cwd);
+  if (!rorcaConfig.execution.adversarialReview.enabled) return [];
+
+  const reviewTimeoutMin = rorcaConfig.execution.adversarialReview.reviewTimeoutMin;
+  const reviewTimeoutMs = reviewTimeoutMin * 60 * 1000;
+
+  const diff = getLastCommitDiff(effectiveCwd);
+  if (!diff.trim()) {
+    console.log(`  [review] No diff found for ${story.id} — skipping review passes`);
+    return [];
+  }
+
+  const results: ReviewResult[] = [];
+
+  for (const reviewerName of reviewers) {
+    const persona = personaRegistry.getPersona(reviewerName);
+    if (!persona) {
+      console.warn(`  [review] Reviewer persona "${reviewerName}" not found — skipping`);
+      continue;
+    }
+
+    console.log(`  [review] Running ${reviewerName} review for ${story.id}...`);
+
+    const reviewPrompt = buildReviewPrompt(story.id, story.title, diff, persona);
+    const reviewLogFile = path.join(logDir, `${story.id}_review_${reviewerName}.log`);
+
+    try {
+      const agentResult = await runAgent(
+        config.agentType,
+        reviewPrompt,
+        effectiveCwd,
+        reviewTimeoutMs,
+        reviewLogFile,
+        config.agentModel,
+        config.attachAddr,
+      );
+
+      // Read the log file to get the agent's output
+      let rawOutput = '';
+      try {
+        rawOutput = fs.readFileSync(reviewLogFile, 'utf-8');
+      } catch { /* empty output */ }
+
+      if (agentResult.exitCode !== 0) {
+        console.warn(`  [review] ${reviewerName} exited with code ${agentResult.exitCode} — treating as no blockers`);
+        results.push({
+          reviewerName,
+          issues: [],
+          suggestions: [`Review agent exited with code ${agentResult.exitCode}`],
+          blockers: [],
+          raw: rawOutput,
+        });
+        continue;
+      }
+
+      const review = parseReviewOutput(rawOutput, reviewerName);
+      results.push(review);
+
+      // Store review in story_comments
+      await postReviewComment(config.port, specId, story.id, review);
+
+      const blockerCount = review.blockers.length;
+      const issueCount = review.issues.length;
+      console.log(`  [review] ${reviewerName}: ${blockerCount} blocker(s), ${issueCount} issue(s), ${review.suggestions.length} suggestion(s)`);
+    } catch (err: any) {
+      console.warn(`  [review] ${reviewerName} review failed: ${err.message}`);
+      results.push({
+        reviewerName,
+        issues: [],
+        suggestions: [`Review failed: ${err.message}`],
+        blockers: [],
+        raw: '',
+      });
+    }
+  }
+
+  return results;
 }
 
 // ─── Story Execution ────────────────────────────────────────────────────────
@@ -1845,6 +2148,46 @@ async function executeStory(
           }
         } catch (err: any) {
           console.warn(`  [agents] Violation check failed: ${err.message}`);
+        }
+      }
+
+      // CA-011: Adversarial review passes (opt-in via .rorca/config.json adversarialReview.enabled)
+      if (personaRegistry && (story.reviewers?.length ?? 0) > 0) {
+        try {
+          const storySpecId = path.basename(config.jsonPath, '.json');
+          const reviewResults = await runAdversarialReview(
+            story, config, effectiveCwd, logDir, personaRegistry, storySpecId, workspaceId,
+          );
+
+          const totalBlockers = reviewResults.reduce((sum, r) => sum + r.blockers.length, 0);
+
+          if (totalBlockers > 0) {
+            console.log(`  [review] ${totalBlockers} blocker(s) found — marking ${story.id} as needs_revision`);
+
+            // Revert the passed status — story needs revision
+            markStoryNeedsRevision(config.jsonPath, story.id);
+
+            if (workspaceId) {
+              await emitWalEvent(config.port, 'story_review_blocked', workspaceId, {
+                run_id: config.runId,
+                story_id: story.id,
+                story_title: story.title,
+                agent_type: effectiveAgent,
+                reviewers: reviewResults.map(r => r.reviewerName),
+                total_blockers: totalBlockers,
+                blockers: reviewResults.flatMap(r => r.blockers.map(b => ({
+                  reviewer: r.reviewerName,
+                  description: b.description,
+                  file: b.file,
+                  line: b.line,
+                }))),
+              }, story.id);
+              await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'needs_revision', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+            }
+            return 'failed';
+          }
+        } catch (err: any) {
+          console.warn(`  [review] Adversarial review failed: ${err.message} — proceeding with pass`);
         }
       }
 
