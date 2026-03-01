@@ -24,6 +24,7 @@ import {
 import { apiFetch } from '../lib/apiFetch';
 import { renderMarkdown } from '../lib/renderMarkdown';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useGlobalToast } from '../contexts/ToastContext';
 
 /* ─── Marketplace Tab Type ─────────────────────────────────────── */
 
@@ -947,6 +948,7 @@ interface SkillSuggestion {
 
 function SkillsTab() {
   const { workspaceId } = useWorkspace();
+  const toast = useGlobalToast();
   const [activeCategory, setActiveCategory] = useState<SkillCategory>('All');
 
   // Installed / discovered skills (local)
@@ -966,6 +968,10 @@ function SkillsTab() {
 
   // Per-skill install state: name → 'installing' | 'done' | 'error'
   const [installState, setInstallState] = useState<Record<string, 'installing' | 'done' | 'error'>>({});
+
+  // Batch install state
+  const [batchInstalling, setBatchInstalling] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
 
   const searchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -1058,6 +1064,52 @@ function SkillsTab() {
 
   const isInstalled = (name: string) =>
     installedNames.has(name.toLowerCase()) || installState[name] === 'done';
+
+  // Uninstalled suggestions for the banner
+  const uninstalledSuggestions = suggestions.filter(s => {
+    const name = s.skill.replace(/\.md$/, '');
+    return !s.installed && !isInstalled(name);
+  });
+
+  // Unique tech names across all suggestions
+  const detectedTechs = [...new Set(suggestions.flatMap(s => s.triggeredBy))];
+
+  // ── Batch install all recommended ────────────────────────────────
+  const installAllRecommended = useCallback(async () => {
+    const toInstall = uninstalledSuggestions.map(s => s.skill.replace(/\.md$/, ''));
+    if (toInstall.length === 0 || batchInstalling) return;
+
+    setBatchInstalling(true);
+    setBatchProgress({ current: 0, total: toInstall.length });
+    let failCount = 0;
+
+    for (let i = 0; i < toInstall.length; i++) {
+      const name = toInstall[i];
+      setBatchProgress({ current: i + 1, total: toInstall.length });
+      setInstallState(s => ({ ...s, [name]: 'installing' }));
+      try {
+        await apiFetch('/api/skills/install-from-sh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, workspaceId }),
+        });
+        setInstallState(s => ({ ...s, [name]: 'done' }));
+      } catch {
+        setInstallState(s => ({ ...s, [name]: 'error' }));
+        toast.show(`Failed to install skill "${name}"`, 'error');
+        failCount++;
+      }
+    }
+
+    await Promise.all([fetchInstalled(), fetchSuggestions()]);
+    setBatchInstalling(false);
+
+    if (failCount === 0) {
+      toast.show(`All ${toInstall.length} skills installed`, 'success');
+    } else {
+      toast.show(`${toInstall.length - failCount} of ${toInstall.length} skills installed`, 'success');
+    }
+  }, [uninstalledSuggestions, batchInstalling, workspaceId, fetchInstalled, fetchSuggestions, toast]);
 
   // ── Render ──────────────────────────────────────────────────────
   return (
@@ -1162,6 +1214,53 @@ function SkillsTab() {
           </div>
         ) : (
           <>
+            {/* ── Install All Recommended banner ── */}
+            {!loadingSuggestions && uninstalledSuggestions.length > 0 && (
+              <div className="rounded-lg border border-accent/20 bg-accent/5 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-[var(--text)]">
+                      {batchInstalling
+                        ? `Installing ${batchProgress.current} of ${batchProgress.total}…`
+                        : `${uninstalledSuggestions.length} skill${uninstalledSuggestions.length !== 1 ? 's' : ''} recommended for your stack`
+                      }
+                    </p>
+                    {detectedTechs.length > 0 && !batchInstalling && (
+                      <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                        {detectedTechs.slice(0, 8).map(tech => (
+                          <span key={tech} className="px-1.5 py-0.5 text-[10px] rounded bg-accent/10 text-accent font-medium">
+                            {tech}
+                          </span>
+                        ))}
+                        {detectedTechs.length > 8 && (
+                          <span className="text-[10px] text-muted">+{detectedTechs.length - 8}</span>
+                        )}
+                      </div>
+                    )}
+                    {batchInstalling && (
+                      <div className="mt-2 h-1 w-full rounded-full bg-border overflow-hidden">
+                        <div
+                          className="h-full bg-accent rounded-full transition-all duration-300"
+                          style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={installAllRecommended}
+                    disabled={batchInstalling}
+                    className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
+                  >
+                    {batchInstalling
+                      ? <Loader2 size={13} className="animate-spin" />
+                      : <Download size={13} />
+                    }
+                    {batchInstalling ? 'Installing…' : 'Install All'}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* ── Suggested for your stack ── */}
             <div>
               <div className="flex items-center gap-2 mb-3">
