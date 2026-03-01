@@ -9,7 +9,7 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db/index';
-import { installPack } from '../lib/pack-installer';
+import { installPack, forkPack } from '../lib/pack-installer';
 import { PackRegistry } from '../lib/pack-registry';
 
 const router = Router();
@@ -155,6 +155,122 @@ router.post('/install', (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/packs/fork:
+ *   post:
+ *     tags: [Packs]
+ *     summary: Fork an installed pack for workspace-local customization
+ *     description: >
+ *       Copies an installed pack to .rorca/packs/<newName>/, updates pack.json
+ *       with the new name and a forkedFrom field referencing the original,
+ *       unregisters the source pack, and re-installs from the forked copy.
+ *       The forked pack is fully editable and replaces the original's L0 layers.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, sourcePack, newName]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Target workspace ID
+ *               sourcePack:
+ *                 type: string
+ *                 description: Name of the installed pack to fork
+ *               newName:
+ *                 type: string
+ *                 description: >
+ *                   Name for the forked pack (lowercase alphanumeric with dots/hyphens/underscores)
+ *     responses:
+ *       201:
+ *         description: Pack forked successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *                 newName:
+ *                   type: string
+ *                 newVersion:
+ *                   type: string
+ *                 forkedFrom:
+ *                   type: string
+ *                 forkedPackPath:
+ *                   type: string
+ *       400:
+ *         description: Missing required fields or invalid pack name
+ *       404:
+ *         description: Workspace or source pack not found
+ *       409:
+ *         description: Fork destination already exists
+ *       422:
+ *         description: Invalid pack structure after fork
+ */
+router.post('/fork', (req: Request, res: Response) => {
+  const { workspaceId, sourcePack, newName } = req.body;
+
+  if (!workspaceId || typeof workspaceId !== 'string') {
+    res.status(400).json({ error: 'Missing required field: workspaceId' });
+    return;
+  }
+
+  if (!sourcePack || typeof sourcePack !== 'string') {
+    res.status(400).json({ error: 'Missing required field: sourcePack' });
+    return;
+  }
+
+  if (!newName || typeof newName !== 'string') {
+    res.status(400).json({ error: 'Missing required field: newName' });
+    return;
+  }
+
+  // Resolve workspace
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+    { id: string; path: string; label: string } | undefined;
+
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  if (!fs.existsSync(workspace.path)) {
+    res.status(404).json({ error: 'Workspace path does not exist on disk' });
+    return;
+  }
+
+  try {
+    const result = forkPack(workspaceId, workspace.path, sourcePack, newName);
+
+    res.status(201).json({
+      ok: true,
+      newName: result.newName,
+      newVersion: result.newVersion,
+      forkedFrom: result.forkedFrom,
+      forkedPackPath: result.forkedPackPath,
+    });
+  } catch (err: any) {
+    if (err.statusCode === 400 || err.name === 'ValidationError') {
+      res.status(400).json({ error: err.message, details: err.details });
+      return;
+    }
+    if (err.statusCode === 404 || err.name === 'NotFoundError') {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    if (err.statusCode === 409 || err.name === 'ConflictError') {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    console.error('[Packs] Fork error:', err);
+    res.status(500).json({ error: 'Pack fork failed', details: err.message });
+  }
+});
+
+/**
+ * @swagger
  * /api/packs:
  *   get:
  *     tags: [Packs]
@@ -219,6 +335,7 @@ router.get('/', (req: Request, res: Response) => {
       packVersion: row.pack_version,
       installedAt: row.installed_at,
       packPath: row.pack_path,
+      forkedFrom: row.forked_from || null,
       valid: row.packJson !== null,
     })),
   });
