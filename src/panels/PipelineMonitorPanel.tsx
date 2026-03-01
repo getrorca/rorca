@@ -93,6 +93,8 @@ interface SpecStory {
   id: string;
   title: string;
   priority?: number;
+  passes?: boolean;
+  dependsOn?: string[];
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -387,21 +389,32 @@ export default function PipelineMonitorPanel() {
       .catch(console.error);
   }, [selectedRunId]);
 
-  // Fetch spec stories (with priority data) for the selected run
+  // Fetch spec stories (with priority + passes data) for the selected run.
+  // Polls every 10s while run is active so story pass/fail status updates live.
   useEffect(() => {
     if (!selectedRunDetail || !workspaceId) {
       setSpecStories([]);
       return;
     }
     const specPath = selectedRunDetail.run.spec_path;
-    // Extract specId from path like "forge/specs/approved/my-slug.json"
     const filename = specPath.split('/').pop() || '';
     const specId = filename.replace(/\.json$/, '');
     if (!specId) return;
 
-    apiFetch<{ userStories?: SpecStory[] }>(`/api/specs/${specId}?workspaceId=${workspaceId}`)
-      .then((data) => setSpecStories(data.userStories ?? []))
-      .catch(() => setSpecStories([]));
+    const fetchSpec = () => {
+      apiFetch<{ userStories?: SpecStory[] }>(`/api/specs/${specId}?workspaceId=${workspaceId}`)
+        .then((data) => setSpecStories(data.userStories ?? []))
+        .catch(() => setSpecStories([]));
+    };
+
+    fetchSpec();
+
+    // Poll while the run is active
+    const isActive = selectedRunDetail.run.status === 'running' || selectedRunDetail.run.status === 'paused';
+    if (isActive) {
+      const interval = setInterval(fetchSpec, 10_000);
+      return () => clearInterval(interval);
+    }
   }, [selectedRunDetail, workspaceId]);
 
   // Fetch commits for selected run
@@ -468,27 +481,28 @@ export default function PipelineMonitorPanel() {
 
     const fromSSE = deriveStoriesFromEvents(sseEvents);
 
-    // Merge: SSE overrides DB for same storyId
+    // Merge layers: spec (base) → DB → SSE (highest priority)
     const merged = new Map<string, DerivedStory>();
-    for (const s of fromDB) merged.set(s.storyId, s);
-    for (const s of fromSSE) merged.set(s.storyId, s);
 
-    // If we have spec data but no DB/SSE entries yet, seed from spec stories
-    if (specStories.length > 0 && merged.size === 0) {
-      for (const s of specStories) {
-        merged.set(s.id, {
-          storyId: s.id,
-          status: 'pending',
-          title: s.title,
-          elapsed: '',
-          startedAt: null,
-          priority: s.priority ?? 3,
-          inputTokens: null,
-          outputTokens: null,
-          escalation: null,
-        });
-      }
+    // Layer 1: Seed from spec stories — uses `passes` field for real-time status
+    for (const s of specStories) {
+      merged.set(s.id, {
+        storyId: s.id,
+        status: s.passes ? 'pass' : 'pending',
+        title: s.title,
+        elapsed: '',
+        startedAt: null,
+        priority: s.priority ?? 3,
+        inputTokens: null,
+        outputTokens: null,
+        escalation: null,
+      });
     }
+
+    // Layer 2: DB results override spec
+    for (const s of fromDB) merged.set(s.storyId, s);
+    // Layer 3: SSE events override DB
+    for (const s of fromSSE) merged.set(s.storyId, s);
 
     // Merge priority from spec into all entries
     for (const [id, story] of merged) {

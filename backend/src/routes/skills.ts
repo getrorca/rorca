@@ -10,9 +10,9 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as yaml from 'js-yaml';
 import { db } from '../db/index';
 import { SkillRegistry } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
@@ -188,6 +188,105 @@ router.post('/install', (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/skills/{name}/content:
+ *   get:
+ *     tags: [Skills]
+ *     summary: Get full markdown content for a skill
+ *     operationId: getSkillContent
+ *     description: |
+ *       Returns the full markdown content for a skill. Resolution order:
+ *       1) SkillRegistry.getSkill(name) — reads file content from filePath
+ *       2) Fallback: SELECT content FROM installed_skills WHERE LOWER(name) = LOWER(?)
+ *       3) 404 if not found
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Skill name to retrieve content for
+ *       - in: query
+ *         name: workspaceId
+ *         schema:
+ *           type: string
+ *         description: Optional workspace ID for filesystem skill discovery. Defaults to first workspace.
+ *     responses:
+ *       200:
+ *         description: Full skill content with metadata
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 name:
+ *                   type: string
+ *                 content:
+ *                   type: string
+ *                 description:
+ *                   type: string
+ *                 wordCount:
+ *                   type: number
+ *                 estimatedTokens:
+ *                   type: number
+ *       404:
+ *         description: Skill not found
+ */
+router.get('/:name/content', (req: Request, res: Response) => {
+  try {
+    const name = req.params.name as string;
+    const registry = new SkillRegistry();
+    const wsPath = resolveWorkspacePath(req);
+
+    // 1) Try filesystem via SkillRegistry
+    if (wsPath) {
+      registry.discover(wsPath);
+    }
+    const skill = registry.getSkill(name);
+
+    if (skill) {
+      // Read file content if filePath exists, otherwise use promptText
+      let content = skill.promptText;
+      if (skill.filePath && fs.existsSync(skill.filePath)) {
+        content = fs.readFileSync(skill.filePath, 'utf-8');
+      }
+      const wordCount = content.split(/\s+/).filter(Boolean).length;
+      res.json({
+        name: skill.metadata.name,
+        content,
+        description: skill.metadata.description,
+        wordCount,
+        estimatedTokens: Math.ceil(wordCount * 1.3),
+      });
+      return;
+    }
+
+    // 2) Fallback: DB lookup
+    const dbSkill = db.prepare(
+      'SELECT name, description, content FROM installed_skills WHERE LOWER(name) = LOWER(?)'
+    ).get(name) as { name: string; description: string; content: string } | undefined;
+
+    if (dbSkill) {
+      const wordCount = dbSkill.content.split(/\s+/).filter(Boolean).length;
+      res.json({
+        name: dbSkill.name,
+        content: dbSkill.content,
+        description: dbSkill.description,
+        wordCount,
+        estimatedTokens: Math.ceil(wordCount * 1.3),
+      });
+      return;
+    }
+
+    // 3) Not found
+    res.status(404).json({ error: `Skill "${name}" not found` });
+  } catch (error: any) {
+    console.error('[Skills] Content error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
  * /api/skills/{name}:
  *   delete:
  *     tags: [Skills]
@@ -225,17 +324,30 @@ router.delete('/:name', (req: Request, res: Response) => {
   }
 });
 
+/** GitHub repos hosting SKILL.md files — tried in order. */
+const SKILL_GITHUB_SOURCES = [
+  'https://raw.githubusercontent.com/anthropics/skills/main/skills/{name}/SKILL.md',
+  'https://raw.githubusercontent.com/vercel-labs/skills/main/skills/{name}/SKILL.md',
+];
+
+/** Parse YAML frontmatter from markdown content. Returns null if no frontmatter. */
+function parseFrontmatter(content: string): { yaml: string; body: string } | null {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return null;
+  return { yaml: match[1], body: match[2] };
+}
+
 /**
  * @swagger
  * /api/skills/install-from-sh:
  *   post:
  *     tags: [Skills]
- *     summary: Install a skill via the skills.sh CLI
+ *     summary: Install a skill from the skills.sh registry via HTTP
  *     operationId: installSkillFromSh
  *     description: |
- *       Runs `npx skills add <name>` to fetch a skill from the skills.sh registry,
- *       then copies the result to `.rorca/skills/` and registers it in the DB.
- *       Requires `npx` to be available and network access to skills.sh.
+ *       Fetches a skill's SKILL.md directly from GitHub (anthropics/skills, then
+ *       vercel-labs/skills), saves to `.rorca/skills/` and `.claude/skills/`,
+ *       and registers it in the DB. No CLI dependency required.
  *     requestBody:
  *       required: true
  *       content:
@@ -253,29 +365,14 @@ router.delete('/:name', (req: Request, res: Response) => {
  *     responses:
  *       201:
  *         description: Skill installed successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 name:
- *                   type: string
- *                 description:
- *                   type: string
- *                 source:
- *                   type: string
- *                 filePath:
- *                   type: string
  *       400:
- *         description: Missing skill name
+ *         description: Missing skill name or no workspace
  *       404:
- *         description: Skill not found in skills.sh registry
- *       422:
- *         description: npx skills CLI not available or network error
- *       500:
- *         description: Internal server error
+ *         description: Skill not found in any registry
+ *       502:
+ *         description: Network error fetching skill
  */
-router.post('/install-from-sh', (req: Request, res: Response) => {
+router.post('/install-from-sh', async (req: Request, res: Response) => {
   try {
     const { name, workspaceId } = req.body;
 
@@ -284,9 +381,9 @@ router.post('/install-from-sh', (req: Request, res: Response) => {
       return;
     }
 
-    const skillName = name.trim();
+    const skillName = name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
-    // Resolve workspace path for file output
+    // Resolve workspace path
     const wsPath = workspaceId
       ? (db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined)?.path
       : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
@@ -296,100 +393,78 @@ router.post('/install-from-sh', (req: Request, res: Response) => {
       return;
     }
 
-    // Run npx skills add <name> in a temp directory, capture output
-    const tmpDir = path.join(wsPath, '.rorca', '_skills_tmp');
-    fs.mkdirSync(tmpDir, { recursive: true });
+    // Try each GitHub source in order
+    let content: string | null = null;
+    let sourceLabel = '';
+    let anyReachable = false;
 
-    let stdout: string;
-    try {
-      stdout = execSync(`npx skills add ${skillName}`, {
-        cwd: tmpDir,
-        encoding: 'utf-8',
-        timeout: 30_000,
-        env: { ...process.env, HOME: process.env.HOME },
-      });
-    } catch (execErr: any) {
-      // Clean up tmp dir
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    for (const srcTemplate of SKILL_GITHUB_SOURCES) {
+      const url = srcTemplate.replace('{name}', skillName);
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+        if (response.ok) {
+          content = await response.text();
+          // Extract owner/repo for source label
+          const ownerRepo = url.match(/raw\.githubusercontent\.com\/([^/]+\/[^/]+)/)?.[1] ?? 'github';
+          sourceLabel = `github:${ownerRepo}`;
+          anyReachable = true;
+          break;
+        }
+        if (response.status === 404) {
+          anyReachable = true; // reachable but skill not found here — try next
+        }
+      } catch {
+        // Network error on this source — try next
+      }
+    }
 
-      const stderr = execErr.stderr?.toString() || '';
-      const msg = execErr.message || '';
-
-      if (msg.includes('not found') || stderr.includes('not found') || msg.includes('ENOENT')) {
-        res.status(422).json({ error: 'npx skills CLI is not installed or not available in PATH' });
+    if (!content) {
+      if (!anyReachable) {
+        res.status(502).json({ error: 'Network error fetching skill from GitHub' });
         return;
       }
-      if (stderr.includes('404') || stderr.includes('not found') || msg.includes('No skill found')) {
-        res.status(404).json({ error: `Skill "${skillName}" not found in skills.sh registry` });
-        return;
-      }
-      if (stderr.includes('ETIMEDOUT') || stderr.includes('ENOTFOUND') || msg.includes('network')) {
-        res.status(422).json({ error: 'Network error connecting to skills.sh registry' });
-        return;
-      }
-
-      res.status(500).json({ error: `skills.sh CLI error: ${stderr || msg}` });
+      res.status(404).json({ error: `Skill "${skillName}" not found in GitHub skill repositories` });
       return;
     }
 
-    // Find the generated skill file(s) in tmp dir
-    const skillFiles = findMdFiles(tmpDir);
-    if (skillFiles.length === 0) {
-      // The CLI might have output the skill content to stdout instead of a file
-      // Try to use stdout as content directly
-      if (stdout && stdout.trim().length > 0) {
-        const skillsDir = path.join(wsPath, '.rorca', 'skills');
-        fs.mkdirSync(skillsDir, { recursive: true });
-        const targetPath = path.join(skillsDir, `${skillName}.md`);
-        fs.writeFileSync(targetPath, stdout.trim(), 'utf-8');
+    // Parse YAML frontmatter for metadata
+    let description = '';
+    let resolvedName = skillName;
 
-        // Register in DB
-        const registry = new SkillRegistry();
-        const skill = registry.install(skillName, stdout.trim(), 'skills.sh');
-
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-
-        res.status(201).json({
-          name: skill.metadata.name,
-          description: skill.metadata.description,
-          source: skill.source,
-          filePath: targetPath,
-        });
-        return;
+    const parsed = parseFrontmatter(content);
+    if (parsed) {
+      try {
+        const rawYaml = yaml.load(parsed.yaml) as Record<string, unknown> | null;
+        if (rawYaml && typeof rawYaml === 'object') {
+          if (typeof rawYaml['name'] === 'string') resolvedName = rawYaml['name'];
+          if (typeof rawYaml['description'] === 'string') description = rawYaml['description'];
+        }
+      } catch {
+        // use defaults
       }
-
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      res.status(500).json({ error: 'No skill file produced by skills.sh CLI' });
-      return;
     }
 
-    // Copy skill files to .rorca/skills/
-    const skillsDir = path.join(wsPath, '.rorca', 'skills');
-    fs.mkdirSync(skillsDir, { recursive: true });
+    // Save to both .rorca/skills/ and .claude/skills/
+    const rorcaSkillsDir = path.join(wsPath, '.rorca', 'skills');
+    const claudeSkillsDir = path.join(wsPath, '.claude', 'skills');
+    fs.mkdirSync(rorcaSkillsDir, { recursive: true });
+    fs.mkdirSync(claudeSkillsDir, { recursive: true });
 
+    const rorcaPath = path.join(rorcaSkillsDir, `${skillName}.md`);
+    const claudePath = path.join(claudeSkillsDir, `${skillName}.md`);
+    fs.writeFileSync(rorcaPath, content, 'utf-8');
+    fs.writeFileSync(claudePath, content, 'utf-8');
+
+    // Register in DB
     const registry = new SkillRegistry();
-    let lastSkill: { name: string; description: string; source: string; filePath: string } | null = null;
+    registry.install(skillName, content, sourceLabel);
 
-    for (const srcFile of skillFiles) {
-      const content = fs.readFileSync(srcFile, 'utf-8');
-      const fileName = path.basename(srcFile);
-      const targetPath = path.join(skillsDir, fileName);
-      fs.writeFileSync(targetPath, content, 'utf-8');
-
-      const baseName = path.basename(fileName, '.md');
-      const skill = registry.install(baseName, content, 'skills.sh');
-      lastSkill = {
-        name: skill.metadata.name,
-        description: skill.metadata.description,
-        source: skill.source,
-        filePath: targetPath,
-      };
-    }
-
-    // Clean up tmp dir
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-
-    res.status(201).json(lastSkill);
+    res.status(201).json({
+      name: resolvedName,
+      description,
+      source: sourceLabel,
+      filePath: rorcaPath,
+    });
   } catch (error: any) {
     console.error('[Skills] install-from-sh error:', error);
     res.status(500).json({ error: error.message });

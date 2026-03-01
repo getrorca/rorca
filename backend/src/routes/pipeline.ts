@@ -472,6 +472,228 @@ function markSpecCompleted(specPath: string): void {
   }
 }
 
+// ─── Auto-merge worktree on run completion ─────────────────────────────────────
+// Called after run_finished WAL event. Merges the run-level worktree branch back
+// into the main workspace branch automatically. Zero user action required.
+//
+// Strategy:
+//   1. Stash any uncommitted workspace changes
+//   2. Dry-run merge (safety pre-check) — bail out if real code conflicts detected
+//   3. Try --ff-only (no merge commit, cleanest)
+//   4. Fall back to --no-ff; auto-resolve tracking files (.rorca/run-state.json, progress.txt)
+//   5. If real code conflicts: abort + emit worktree_merge_failed WAL event (no merge attempted)
+//   6. On success: emit worktree_merged WAL event + remove the worktree directory
+//   7. Always restore stash
+
+// OutputBuffer is declared after the router — forward-declare the type here for use in autoMergeWorktree
+type MergeOutputBuffer = { chunks: string[]; done: boolean; subscribers: Set<(chunk: string) => void> };
+
+async function autoMergeWorktree(
+  workspacePath: string,
+  worktreePath: string,
+  branchName: string,
+  workspaceId: string,
+  runId: number,
+  buf: MergeOutputBuffer,
+  logPath: string,
+): Promise<void> {
+  const appendLog = (msg: string, color = '\x1b[36m') => {
+    const line = `\r\n${color}[auto-merge] ${msg}\x1b[0m\r\n`;
+    buf.chunks.push(line);
+    buf.subscribers.forEach(cb => cb(line));
+    try { fs.appendFileSync(logPath, line); } catch { /* best-effort */ }
+  };
+
+  // Skip if the worktree directory no longer exists (already manually merged/removed)
+  if (!fs.existsSync(worktreePath)) {
+    appendLog('Worktree already removed — skipping auto-merge', '\x1b[90m');
+    return;
+  }
+
+  const git = simpleGit(workspacePath);
+
+  // 1. Stash any uncommitted workspace changes so the merge can proceed
+  let stashed = false;
+  try {
+    const status = await git.status();
+    if (status.files.length > 0) {
+      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-before-merge-${branchName}`]);
+      stashed = true;
+      appendLog('Stashed uncommitted workspace changes');
+    }
+  } catch (err: any) {
+    appendLog(`Stash failed — proceeding without stash: ${err.message}`, '\x1b[33m');
+  }
+
+  // ── Tracking-only files that are always safe to resolve with --theirs ──────
+  const TRACKING_PATTERNS = [
+    '.rorca/run-state.json',
+    'progress.txt',
+    '.rorca/memory/runs/',
+  ];
+
+  // 2. Safety pre-check: dry-run merge to detect any conflicts BEFORE touching main
+  appendLog(`Pre-checking merge safety for ${branchName}...`);
+  let preCheckConflictFiles: string[] = [];
+  let preCheckIsClean = false;
+  try {
+    await git.merge([branchName, '--no-commit', '--no-ff']);
+    // Merged cleanly in dry-run (no CONFLICT markers) — abort it, proceed with real merge
+    preCheckIsClean = true;
+    try { await git.merge(['--abort']); } catch { /* nothing to abort on clean ff */ }
+  } catch (dryRunErr: any) {
+    if (
+      dryRunErr.message?.includes('CONFLICT') ||
+      dryRunErr.message?.includes('Automatic merge failed') ||
+      dryRunErr.message?.includes('fix conflicts')
+    ) {
+      // Collect conflict files before aborting
+      try {
+        const diffOut = await git.raw(['diff', '--name-only', '--diff-filter=U']);
+        preCheckConflictFiles = diffOut.trim().split('\n').filter(Boolean);
+      } catch { /* continue */ }
+      try { await git.merge(['--abort']); } catch { /* already clean */ }
+
+      // Only auto-resolve tracking files — real code conflicts block the merge
+      const realConflicts = preCheckConflictFiles.filter(
+        f => !TRACKING_PATTERNS.some(tp => f.includes(tp))
+      );
+
+      if (realConflicts.length === 0) {
+        // Only tracking files conflict — safe to merge with auto-resolution
+        preCheckIsClean = true;
+        appendLog(
+          `Pre-check: only tracking file conflicts (${preCheckConflictFiles.join(', ')}) — auto-resolvable`,
+          '\x1b[33m',
+        );
+      } else {
+        // Real code conflicts — do NOT auto-merge, report to UI
+        appendLog(
+          `Pre-check: merge UNSAFE — code conflicts in: ${realConflicts.join(', ')}`,
+          '\x1b[31m',
+        );
+        appendLog('Worktree preserved — resolve conflicts manually via the Worktrees panel', '\x1b[33m');
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merge_failed', ?, ?)`
+        ).run(workspaceId, JSON.stringify({
+          run_id: runId,
+          branchName,
+          worktreePath,
+          conflictFiles: realConflicts,
+          message: 'Auto-merge skipped — code conflicts detected. Resolve manually via Worktrees panel.',
+        }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+          walResult.lastInsertRowid
+        ) as WalEvent;
+        broadcastAll(walEvent);
+        return; // bail out — do NOT attempt the real merge
+      }
+    } else if (dryRunErr.message?.includes('Already up to date')) {
+      preCheckIsClean = true;
+      appendLog('Already up to date — nothing to merge', '\x1b[32m');
+    } else {
+      appendLog(`Pre-check error: ${dryRunErr.message}`, '\x1b[31m');
+      return; // unknown error — don't attempt the merge
+    }
+  }
+
+  if (!preCheckIsClean) return;
+
+  // 3. Pre-check passed — execute the real merge
+  let mergeSuccess = false;
+  try {
+    appendLog(`Merging ${branchName} into workspace...`);
+
+    // Try fast-forward first (no merge commit, cleanest)
+    try {
+      await git.merge([branchName, '--ff-only']);
+      appendLog('Merged via fast-forward — no conflicts', '\x1b[32m');
+      mergeSuccess = true;
+    } catch {
+      // ff-only failed — do no-ff merge with tracking-file auto-resolution
+      try {
+        await git.merge([branchName, '--no-ff', '--no-commit']);
+      } catch (mergeErr: any) {
+        // Expected if tracking files conflict — resolve them now
+        if (
+          mergeErr.message?.includes('CONFLICT') ||
+          mergeErr.message?.includes('Automatic merge failed')
+        ) {
+          // Auto-resolve tracking files (pre-check already confirmed only these conflict)
+          for (const file of preCheckConflictFiles) {
+            try {
+              await git.raw(['checkout', '--theirs', '--', file]);
+              await git.add(file);
+              appendLog(`Auto-resolved tracking file: ${file}`);
+            } catch { /* best-effort */ }
+          }
+        } else {
+          throw mergeErr;
+        }
+      }
+
+      // Commit the merge
+      try {
+        await git.commit(`merge: ${branchName} (auto)`);
+        appendLog('Merged (no-ff) — no conflicts', '\x1b[32m');
+        mergeSuccess = true;
+      } catch (commitErr: any) {
+        if (commitErr.message?.includes('nothing to commit') || commitErr.message?.includes('nothing added')) {
+          appendLog('Merged — already up to date', '\x1b[32m');
+          mergeSuccess = true;
+        } else {
+          try { await git.merge(['--abort']); } catch { /* already clean */ }
+          appendLog(`Commit failed: ${commitErr.message}`, '\x1b[31m');
+        }
+      }
+    }
+  } catch (unexpectedErr: any) {
+    try { await git.merge(['--abort']); } catch { /* already clean */ }
+    appendLog(`Unexpected merge error: ${unexpectedErr.message}`, '\x1b[31m');
+  } finally {
+    // 4. Always restore stash — even if merge failed
+    if (stashed) {
+      try {
+        await git.stash(['pop']);
+        appendLog('Restored stashed workspace changes');
+      } catch (popErr: any) {
+        appendLog(
+          `Stash pop conflict — run 'git stash pop' manually to restore your changes: ${popErr.message}`,
+          '\x1b[33m',
+        );
+      }
+    }
+  }
+
+  // 5. On success: emit WAL event + remove worktree directory
+  if (mergeSuccess) {
+    let mergeCommitSha = '';
+    try { mergeCommitSha = (await git.raw(['rev-parse', 'HEAD'])).trim(); } catch { /* non-fatal */ }
+
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merged', ?, ?)`
+    ).run(workspaceId, JSON.stringify({ run_id: runId, branchName, mergeCommitSha }));
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    // Remove the worktree directory — run is done, branch merged
+    try {
+      await git.raw(['worktree', 'remove', '--force', worktreePath]);
+      appendLog(`Worktree removed: ${path.basename(worktreePath)}`, '\x1b[32m');
+    } catch (rmErr: any) {
+      // Worktree removal is best-effort — not a failure
+      appendLog(`Worktree removal skipped: ${(rmErr as Error).message}`, '\x1b[33m');
+    }
+
+    // Clear worktree_path from pipeline_runs so UI knows it's merged
+    try {
+      db.prepare(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = ?`).run(runId);
+    } catch { /* non-fatal */ }
+  }
+}
+
 const router = Router();
 
 // ─── In-memory output buffers (runId → live stdout/stderr stream) ─────────────
@@ -1480,13 +1702,32 @@ router.post('/trigger', async (req: Request, res: Response) => {
       ) as WalEvent;
       broadcastAll(walEvent);
 
-      // Mark buffer done; notify subscribers; clean up buffer after 30 min (log file retained on disk)
-      buf.done = true;
-      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
-      buf.subscribers.clear();
-      setTimeout(() => {
-        outputBuffers.delete(runId);
-      }, 30 * 60 * 1000);
+      // Notify terminal that the process exited
+      const exitMsg = `\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`;
+      buf.chunks.push(exitMsg);
+      buf.subscribers.forEach(cb => cb(exitMsg));
+      fs.appendFileSync(logPath, exitMsg);
+
+      // Close the buffer — handles both worktree and non-worktree paths
+      const closeBuffer = () => {
+        buf.done = true;
+        buf.subscribers.clear();
+        setTimeout(() => { outputBuffers.delete(runId); }, 30 * 60 * 1000);
+      };
+
+      // Auto-merge worktree if run used one — safety pre-check included
+      if (worktreePath && branchName) {
+        autoMergeWorktree(workspace.path, worktreePath, branchName, workspaceId, runId, buf, logPath)
+          .then(closeBuffer)
+          .catch((err: Error) => {
+            const errMsg = `\r\n\x1b[31m[auto-merge] Unexpected error: ${err.message}\x1b[0m\r\n`;
+            buf.chunks.push(errMsg);
+            fs.appendFileSync(logPath, errMsg);
+            closeBuffer();
+          });
+      } else {
+        closeBuffer();
+      }
     });
 
     // OC-031: Include capability warnings in trigger response
@@ -2717,7 +2958,34 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       latestByStory.set(s.story_id, s);
     }
 
-    const failedStories = Array.from(latestByStory.values()).filter(s => s.status === 'fail');
+    // Fallback: if story_results is empty (subprocess HTTP calls failed), derive from spec JSON
+    if (latestByStory.size === 0 && originalRun.spec_path) {
+      try {
+        const wsRow = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(originalRun.workspace_id) as { path: string } | undefined;
+        if (wsRow) {
+          const specPath = path.join(wsRow.path, originalRun.spec_path);
+          if (fs.existsSync(specPath)) {
+            const specData = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+            const stories = specData.userStories || specData.phases?.flatMap((p: { stories: unknown[] }) => p.stories) || [];
+            for (const s of stories as Array<{ id: string; passes?: boolean }>) {
+              latestByStory.set(s.id, {
+                id: 0, run_id: originalRunId, story_id: s.id,
+                status: s.passes ? 'pass' : 'fail',
+                retries: 0, log_path: null, started_at: new Date().toISOString(), finished_at: null,
+                elapsed_seconds: null, input_tokens: null, output_tokens: null,
+                model_used: null, cost_usd: null,
+              } as StoryResultRow);
+            }
+            console.log(`[retry] Derived ${latestByStory.size} story statuses from spec JSON (story_results table was empty)`);
+          }
+        }
+      } catch (specErr: unknown) {
+        console.warn(`[retry] Could not derive stories from spec JSON: ${(specErr as Error).message}`);
+      }
+    }
+
+    // Include both 'fail' and 'skip' (blocked) stories as retryable
+    const failedStories = Array.from(latestByStory.values()).filter(s => s.status === 'fail' || s.status === 'skip');
     const passedStories = Array.from(latestByStory.values()).filter(s => s.status === 'pass');
 
     if (failedStories.length === 0) {
@@ -2749,13 +3017,17 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const cwd = originalRun.worktree_path || workspace.path;
     const retryRunLoopSh = path.join(cwd, 'forge', 'run-loop.sh');
     const retryRunLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
+    const retryExecutionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
+    const retryHasExecutionEngine = fs.existsSync(retryExecutionEngineTs);
     const retryHasBash = fs.existsSync(retryRunLoopSh);
     const retryHasTs = fs.existsSync(retryRunLoopTs);
-    if (!retryHasBash && !retryHasTs) {
-      res.status(422).json({ error: `run-loop.sh not found at ${retryRunLoopSh}` });
+    if (!retryHasExecutionEngine && !retryHasBash && !retryHasTs) {
+      res.status(422).json({ error: `No execution engine found` });
       return;
     }
-    const retryUseTs = !retryHasBash && retryHasTs;
+    // Prefer execution-engine.ts (same as regular trigger), fall back to legacy loops
+    const retryUseExecutionEngine = retryHasExecutionEngine;
+    const retryUseTs = !retryUseExecutionEngine && !retryHasBash && retryHasTs;
 
     // 6. Create a NEW pipeline_run linked to the original via retried_from_run_id
     const newRunResult = db.prepare(
@@ -2839,9 +3111,11 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
 
     const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
     const retryStoryIds = new Set(storiesToRetry.map(s => s.story_id));
+    // Include all stories (not just failed ones) so dependency resolution works correctly.
+    // Passed stories (passes:true) are skipped naturally by the engine. Filtering them out
+    // breaks dep checks — stories that depend on a passed-but-filtered story get stuck blocked.
     const retrySpec = {
       ...specJson,
-      userStories: specJson.userStories.filter((s: { id: string }) => retryStoryIds.has(s.id)),
     };
 
     // Write temporary retry spec
@@ -2864,12 +3138,34 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       env[k] = v;
     }
 
-    // 11. Spawn run-loop with the retry spec — detached, output to log file
+    // 11. Spawn execution engine with the retry spec — detached, output to log file
     const retryLogPath = workspaceLogPath(workspace.path, newRunId);
     db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(retryLogPath, newRunId);
     const retryLogFd = fs.openSync(retryLogPath, 'a');
     let child: ReturnType<typeof spawn>;
-    if (retryUseTs) {
+    if (retryUseExecutionEngine) {
+      // Universal execution engine (same priority as regular trigger)
+      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
+      const backendPort = process.env.PORT || '3030';
+      const engineArgs = [
+        retryExecutionEngineTs,
+        '--json', retrySpecPath,
+        '--cwd', cwd,
+        '--run-id', String(newRunId),
+        '--port', backendPort,
+        '--parallelism', '1',
+        '--agent', agentConfig.agentType,
+      ];
+      if (agentConfig.agentModel) {
+        engineArgs.push('--model', agentConfig.agentModel);
+      }
+      child = spawn(tsxBin, engineArgs, {
+        cwd,
+        stdio: ['ignore', retryLogFd, retryLogFd],
+        detached: true,
+        env,
+      });
+    } else if (retryUseTs) {
       const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
       const backendPort = process.env.PORT || '3030';
       child = spawn(tsxBin, [
@@ -2976,15 +3272,45 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       ) as WalEvent;
       broadcastAll(walEvent);
 
-      buf.done = true;
-      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`));
-      buf.subscribers.clear();
-      setTimeout(() => {
-        outputBuffers.delete(newRunId);
-      }, 30 * 60 * 1000);
+      // Notify terminal that the retry process exited
+      const retryExitMsg = `\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`;
+      buf.chunks.push(retryExitMsg);
+      buf.subscribers.forEach(cb => cb(retryExitMsg));
+      try { fs.appendFileSync(retryLogPath, retryExitMsg); } catch { /* best-effort */ }
 
       // Clean up temporary retry spec
       try { fs.unlinkSync(retrySpecPath); } catch { /* ignore */ }
+
+      // Close the buffer — handles both worktree and non-worktree paths
+      const closeRetryBuffer = () => {
+        buf.done = true;
+        buf.subscribers.clear();
+        setTimeout(() => { outputBuffers.delete(newRunId); }, 30 * 60 * 1000);
+      };
+
+      // Auto-merge worktree if run used one — safety pre-check included
+      const retryWorktreePath = originalRun.worktree_path as string | null;
+      const retryBranchName = originalRun.branch_name as string | null;
+      if (retryWorktreePath && retryBranchName) {
+        autoMergeWorktree(
+          workspace.path,
+          retryWorktreePath,
+          retryBranchName,
+          originalRun.workspace_id,
+          newRunId,
+          buf,
+          retryLogPath,
+        )
+          .then(closeRetryBuffer)
+          .catch((err: Error) => {
+            const errMsg = `\r\n\x1b[31m[auto-merge] Unexpected error: ${err.message}\x1b[0m\r\n`;
+            buf.chunks.push(errMsg);
+            try { fs.appendFileSync(retryLogPath, errMsg); } catch { /* best-effort */ }
+            closeRetryBuffer();
+          });
+      } else {
+        closeRetryBuffer();
+      }
     });
 
     res.status(201).json({

@@ -1,0 +1,49 @@
+{
+  "id": "rorca-convention-agents",
+  "specName": "Convention Pack System + Agent Persona Pipeline + Skills Integration",
+  "title": "rorca-convention-agents",
+  "model": "claude-opus-4-6",
+  "generatedAt": "2026-02-27T00:00:00.000Z",
+  "_notes": "Convention packs (greenfield scaffolding), convention inference (brownfield extraction), convention drift detection, agent persona system (15+ personas in 4 categories), adversarial review pipeline, multi-pass spec generation (6-pass), MCP HTTP transport migration (API-first, auto-generated MCP from OpenAPI), and LLM-driven skills integration (skills.sh registry, SkillRegistry, per-story skill+persona matching in spec gen, dual injection for claude/opencode/codex). Depends on rorca-context-intent-engine for .rorca/ directory, AGENTS.md, MEMORY.md, and virtual context routing infrastructure.",
+  "_relatesTo": "rorca-context-intent-engine (direct dependency — CIE provides .rorca/ infrastructure this spec builds on), rorca-opencode-integration (extends OC-019 complexity scorer), rorca-execution-quality (extends EQ-001 objective gates with adversarial review), rorca-v2-platform V2-102-V2-105 (extends direction stack wizard with convention inference)",
+  "_executionOrder": "After rorca-context-intent-engine (spec #3), before rorca-e2e-testing (spec #4). CIE creates .rorca/ directory, AGENTS.md, MEMORY.md, routing engine. This spec layers convention packs + personas + skills on top. E2E testing should run last to test the complete system including conventions, personas, and skills.",
+  "_skillsArchitecture": "Convention packs ARE Agent Skills bundles. Skills use the open standard: markdown with YAML frontmatter (name, description, triggers). LLM-driven matching replaces keyword heuristics — one LLM call during spec generation assigns both suggestedSkills and suggestedPersona per story using signal hierarchy: MEMORY.md (strongest) > AGENTS.md > Story text > Domain L2 > Stack detection (weakest). Installed skill catalog (~5-30 skills, ~750 tokens) injected into spec gen prompt. CA-010 (keyword persona assignment) removed — replaced by SK-002 (LLM-driven assignment).",
+  "_changesFromOriginal": "Removed CA-010 (keyword-based auto-persona assignment — replaced by SK-002 LLM-driven matching). Added SK-001 (Skill Registry), SK-002 (LLM-driven skill+persona matching in spec gen), SK-003 (skill injection in buildPrompt), SK-004 (skills.sh API integration + echolocation bridge), SK-005 (skill effectiveness analytics), SK-006 (skill content preview). Modified ACs on CA-001, CA-002, CA-003, CA-009, CA-011, CA-012, CA-013, CA-015, CA-019, CA-020. Net: 22 - 1 + 6 = 27 stories.",
+  "userStories": [
+    {
+      "id": "CA-001",
+      "title": "Convention Pack Schema and Registry",
+      "description": "Define the canonical pack.json schema (name, version, compatibility, dependencies, description, skills) and a local pack registry in .rorca/packs/. Create a PackRegistry class that can list installed packs, resolve pack paths, and validate pack.json against a Zod schema. Store pack metadata in a new `convention_packs` SQLite table (id, workspace_id, pack_name, pack_version, installed_at, pack_path). The pack.json schema includes a `skills` array field listing the skill files this pack bundles.",
+      "acceptanceCriteria": [
+        "pack.json Zod schema validates: name, version, description, compatibility (node, frameworks), dependencies (other packs), skills (string[] of skill filenames)",
+        "PackRegistry class: listInstalled(), getPackPath(name), validatePack(path) -> ValidationResult",
+        "convention_packs table created via pragma table_info pattern (not migration file)",
+        "Registry reads from .rorca/packs/ directory and cross-references DB for metadata",
+        "Invalid pack.json throws ValidationError with specific field-level errors",
+        "pack.json skills field lists all skill markdown files in the pack's skills/ directory"
+      ],
+      "dependsOn": [],
+      "passes": false,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "CA-005",
+      "title": "Convention Inference Agent — Brownfield Context Extraction",
+      "description": "Build a convention inference agent that analyzes an existing codebase and generates convention artifacts. Uses OpenCode (if available) or claude --print to: read package.json + config files to identify stack, scan file structure to infer architecture, read existing CLAUDE.md/README to extract conventions, analyze code patterns to generate observations. Produces: Direction Stack L3 content, CLAUDE.md (if missing), AGENTS.md with inferred file governance, and a skills/ directory with per-library guides in Agent Skills frontmatter format. Results are staged for human review (not auto-applied). Expose as POST /api/conventions/discover with { workspaceId }.",
+      "acceptanceCriteria": [
+        "POST /api/conventions/discover spawns an analysis agent against workspace.path",
+        "Agent reads: package.json, tsconfig.json, .eslintrc, Dockerfile, README.md, CLAUDE.md, up to 20 source files",
+        "Produces structured output: { stack, architecture, conventions, fileGovernance, directionL3 }",
+        "Convention files produced with Agent Skills frontmatter format (name, description, triggers)",
+        "Results stored in a new convention_proposals table (workspace_id, proposal_json, status: pending|approved|rejected, created_at)",
+        "Results are NOT auto-applied — stored as a proposal for human review",
+        "Frontend can display proposal via GET /api/conventions/proposals/:workspaceId",
+        "On approval (POST /api/conventions/proposals/:id/approve), applies: L3 direction layer, AGENTS.md, skill files to .rorca/skills/",
+        "WAL event emitted: convention_discovered with proposal summary"
+      ],
+      "dependsOn": [],
+      "passes": false,
+      "notes": "Completed by Rorca engine"
+    }
+  ]
+}
