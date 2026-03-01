@@ -53,6 +53,7 @@ import {
 } from './tool-capability-checker';
 import { route as routeContext, writeContextFile, type ContextStory } from './context-router';
 import { loadRorcaConfig } from './rorca-config';
+import { PersonaRegistry } from './agent-personas';
 import { loadMonorepoApps, type MonorepoPackage } from './workspace-echolocation';
 import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
 import {
@@ -91,6 +92,10 @@ interface UserStory {
   agent?: AgentType;
   /** Tags for context routing (CIE-004). Matched against routing.tags rules. */
   tags?: string[];
+  /** CA-009: Persona name from PersonaRegistry to inject into prompt. */
+  persona?: string;
+  /** CA-009: Reviewer persona names for post-implementation review passes. */
+  reviewers?: string[];
 }
 
 interface SpecJson {
@@ -361,6 +366,7 @@ function buildPrompt(
   agentType?: AgentType,
   contextFilePath?: string,
   roleSection?: string,
+  personaRegistry?: PersonaRegistry,
 ): string {
   const ac = getAcceptance(story);
   const acSection = ac ? `\nAcceptance Criteria:\n${ac}` : '';
@@ -387,6 +393,17 @@ function buildPrompt(
     ? 'AGENTS.md in the workspace root contains the Rorca direction stack with project standards and context. Follow its guidance for all implementation decisions.\n'
     : '';
 
+  // CA-009: Resolve persona prompt text if story has a persona field
+  let personaSection = '';
+  if (story.persona && personaRegistry) {
+    const persona = personaRegistry.getPersona(story.persona);
+    if (persona) {
+      personaSection = `\n## Agent Persona: ${persona.metadata.name}\n${persona.promptText}\n`;
+    } else {
+      console.warn(`  [persona] Persona "${story.persona}" not found in registry — proceeding without injection`);
+    }
+  }
+
   if (mode === 'journey') {
     const journeySkill = playbook ? readWorkspaceFile(cwd, playbook) : '';
     return [
@@ -395,7 +412,9 @@ function buildPrompt(
       openCodeSkillInstruction,
       codexAgentsInstruction,
       roleSection ?? '',
-      '', journeySkill, '', '---', '',
+      '', journeySkill,
+      personaSection,
+      '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
     ].filter(Boolean).join('\n');
@@ -423,6 +442,7 @@ function buildPrompt(
       '- Implement features or modify production code (only test files)',
       '- Skip running the tests — every test must actually execute and pass',
       '- Write placeholder/todo tests — all tests must have real assertions',
+      personaSection,
       '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
@@ -438,7 +458,9 @@ function buildPrompt(
     openCodeSkillInstruction,
     codexAgentsInstruction,
     roleSection ?? '',
-    '', skillContent, '', '---', '',
+    '', skillContent,
+    personaSection,
+    '', '---', '',
     `Your task (${story.id}):`,
     story.description, acSection,
   ].filter(Boolean).join('\n');
@@ -1303,6 +1325,7 @@ async function executeStory(
   allStories?: UserStory[],
   storyAgentOverride?: AgentType,
   storyAttachAddr?: string | null,
+  personaRegistry?: PersonaRegistry,
 ): Promise<'passed' | 'failed' | 'skipped'> {
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
@@ -1402,6 +1425,8 @@ async function executeStory(
 
   console.log(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
   if (worktreeInfo) console.log(`  Worktree: ${worktreeInfo.worktreePath}`);
+  if (story.persona) console.log(`  Persona: ${story.persona}`);
+  if (story.reviewers?.length) console.log(`  Reviewers: ${story.reviewers.join(', ')}`);
   console.log(`  Timeout: ${timeoutMin}m`);
 
   // CIE-004: Route context for this story
@@ -1455,7 +1480,7 @@ async function executeStory(
     console.warn(`  [agents] Role matching failed: ${err.message}`);
   }
 
-  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection);
+  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry);
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
   fs.writeFileSync(promptLogFile, prompt);
@@ -1548,6 +1573,7 @@ async function executeStory(
             story, config, mode, playbook, logDir, workspaceId, retryCounts,
             storyCwd, worktreeInfo, escalationStates, allStories,
             fallback, fallback === 'opencode' ? config.attachAddr : null,
+            personaRegistry,
           );
         }
 
@@ -2060,9 +2086,23 @@ async function main(): Promise<void> {
     process.exit(0);
   });
 
+  // CA-009: Discover personas from .rorca/personas/
+  const personaRegistry = new PersonaRegistry();
+  const rorcaDir = path.join(config.cwd, '.rorca');
+  if (fs.existsSync(path.join(rorcaDir, 'personas'))) {
+    personaRegistry.discover(rorcaDir);
+    const personaCount = personaRegistry.getAll().length;
+    if (personaCount > 0) {
+      console.log(`[persona] Discovered ${personaCount} persona(s)`);
+    }
+    for (const w of personaRegistry.getWarnings()) {
+      console.warn(`[persona] Warning: ${w.filePath}: ${w.reason}`);
+    }
+  }
+
   // ─── Parallel execution path (N > 1) ──────────────────────────────
   if (config.parallelism > 1 && !config.specificStory) {
-    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, escalationStates);
+    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, escalationStates, personaRegistry);
     return;
   }
 
@@ -2122,6 +2162,7 @@ async function main(): Promise<void> {
     const seqResult = await executeStory(
       story, config, mode, playbook, logDir, workspaceId, retryCounts,
       undefined, undefined, escalationStates, currentStories,
+      undefined, undefined, personaRegistry,
     );
 
     if (config.specificStory) {
@@ -2144,6 +2185,7 @@ async function runParallel(
   retryCounts: Map<string, number>,
   stories: UserStory[],
   escalationStates?: Map<string, EscalationState>,
+  personaRegistry?: PersonaRegistry,
 ): Promise<void> {
   const waveStories: WaveUserStory[] = stories.map(s => ({
     id: s.id,
@@ -2262,7 +2304,7 @@ async function runParallel(
     const tasks = storiesWithWorktrees.map(story => {
       const wt = worktreeMap.get(story.id)!;
       return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, escalationStates, stories)
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, escalationStates, stories, undefined, undefined, personaRegistry)
           .then(result => ({ storyId: story.id, result }));
     });
 
