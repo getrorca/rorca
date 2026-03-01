@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T03:02:02.086Z",
+  "lastUpdatedAt": "2026-03-01T03:14:56.879Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-01T03:02:02.085Z",
       "agentType": "claude",
       "elapsedMs": 419476
+    },
+    {
+      "storyId": "SK-001",
+      "title": "Skill Catalog and Registry",
+      "status": "passed",
+      "startedAt": "2026-03-01T03:07:17.353Z",
+      "finishedAt": "2026-03-01T03:14:56.879Z",
+      "agentType": "claude",
+      "elapsedMs": 459526
     }
   ],
   "failedStories": [],
