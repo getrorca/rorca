@@ -21,6 +21,7 @@ import { db } from '../db/index';
 import { PackLoader, type Pack, type ScaffoldEntry } from './convention-packs';
 import { PackRegistry, type InstalledPackRow } from './pack-registry';
 import { SkillRegistry } from './skill-registry';
+import { ValidationError, ConflictError } from './errors';
 import { broadcastAll, type WalEvent } from './sse-hub';
 
 // ─── AGENTS.md markers (same pattern as Codex AGENTS.md injection) ──────────
@@ -99,6 +100,137 @@ export function installPack(
     agentsMdAction,
     dbRow,
   };
+}
+
+// ─── Fork ───────────────────────────────────────────────────────────────────
+
+export interface PackForkResult {
+  newName: string;
+  newVersion: string;
+  forkedFrom: string;
+  forkedPackPath: string;
+  installResult: PackInstallResult;
+}
+
+/**
+ * Fork an installed pack: copies it to .rorca/packs/<newName>/,
+ * updates pack.json with new name + forkedFrom field, then
+ * re-installs from the forked location (replacing original L0 layers).
+ */
+export function forkPack(
+  workspaceId: string,
+  workspacePath: string,
+  sourcePack: string,
+  newName: string,
+): PackForkResult {
+  const registry = new PackRegistry(workspacePath, workspaceId);
+
+  // 1. Resolve the source pack path
+  const sourcePackPath = registry.getPackPath(sourcePack);
+
+  if (!fs.existsSync(sourcePackPath)) {
+    throw new ValidationError('Source pack directory does not exist on disk', {
+      sourcePack,
+      path: sourcePackPath,
+    });
+  }
+
+  // 2. Validate newName matches pack name rules
+  const nameRegex = /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/;
+  if (!nameRegex.test(newName)) {
+    throw new ValidationError(
+      'Pack name must be lowercase alphanumeric with optional dots, hyphens, or underscores',
+      { newName },
+    );
+  }
+
+  // 3. Ensure destination doesn't already exist
+  const destDir = path.join(workspacePath, '.rorca', 'packs', newName);
+  if (fs.existsSync(destDir)) {
+    throw new ConflictError(`Pack directory already exists: .rorca/packs/${newName}`);
+  }
+
+  // 4. Deep copy the entire source pack directory
+  copyDirRecursive(sourcePackPath, destDir);
+
+  // 5. Update pack.json with new name and forkedFrom field
+  const packJsonPath = path.join(destDir, 'pack.json');
+  const packJson = JSON.parse(fs.readFileSync(packJsonPath, 'utf-8'));
+  const originalName = packJson.name;
+  packJson.forkedFrom = originalName;
+  packJson.name = newName;
+  fs.writeFileSync(packJsonPath, JSON.stringify(packJson, null, 2) + '\n', 'utf-8');
+
+  // 6. Unregister original pack from DB (L0 layers will be replaced by fork)
+  try {
+    registry.unregister(sourcePack);
+  } catch {
+    // Source pack may not be registered (e.g., external pack path) — continue
+  }
+
+  // 7. Delete original pack's L0 direction layers
+  db.prepare(
+    `DELETE FROM direction_layers WHERE layer = 0 AND workspace_id = ?`,
+  ).run(workspaceId);
+
+  // 8. Install the forked pack (creates new L0 layers, registers in DB, etc.)
+  const installResult = installPack(workspaceId, workspacePath, destDir);
+
+  // 9. Update convention_packs row with forked_from reference
+  db.prepare(
+    `UPDATE convention_packs SET forked_from = ? WHERE workspace_id = ? AND pack_name = ?`,
+  ).run(originalName, workspaceId, newName);
+
+  // 10. Emit fork WAL event
+  emitPackForkedEvent(workspaceId, originalName, newName, destDir);
+
+  return {
+    newName,
+    newVersion: installResult.packVersion,
+    forkedFrom: originalName,
+    forkedPackPath: path.relative(workspacePath, destDir),
+    installResult,
+  };
+}
+
+/** Recursively copy a directory. */
+function copyDirRecursive(src: string, dest: string): void {
+  fs.mkdirSync(dest, { recursive: true });
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+function emitPackForkedEvent(
+  workspaceId: string,
+  originalName: string,
+  newName: string,
+  forkedPath: string,
+): void {
+  const result = db.prepare(
+    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, ?, ?)',
+  ).run('pack_forked', workspaceId, JSON.stringify({ originalName, newName, forkedPath }));
+
+  const walEvent: WalEvent = {
+    id: result.lastInsertRowid as number,
+    ts: new Date().toISOString(),
+    event_type: 'pack_forked',
+    workspace_id: workspaceId,
+    spec_id: null,
+    story_id: null,
+    actor: '',
+    payload: JSON.stringify({ originalName, newName, forkedPath }),
+  };
+  broadcastAll(walEvent);
 }
 
 // ─── Scaffold Copy ──────────────────────────────────────────────────────────

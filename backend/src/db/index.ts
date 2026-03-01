@@ -554,6 +554,12 @@ export function runMigrations() {
     db.pragma('foreign_keys = ON');
   }
 
+  // CA-004: Add forked_from column to convention_packs (for pack fork tracking)
+  const cpCols = db.prepare(`PRAGMA table_info(convention_packs)`).all() as Array<{ name: string }>;
+  if (cpCols.length > 0 && !cpCols.some(c => c.name === 'forked_from')) {
+    db.exec(`ALTER TABLE convention_packs ADD COLUMN forked_from TEXT`);
+  }
+
   // FR-005: Add 'completed' to spec_versions status CHECK constraint (idempotent)
   const specVersionsSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_versions'`

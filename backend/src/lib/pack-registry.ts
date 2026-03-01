@@ -62,6 +62,7 @@ export interface InstalledPackRow {
   pack_version: string;
   installed_at: string;
   pack_path: string;
+  forked_from: string | null;
 }
 
 // ─── PackRegistry ───────────────────────────────────────────────────────────
