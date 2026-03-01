@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T03:42:31.622Z",
+  "lastUpdatedAt": "2026-03-01T03:58:31.079Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -57,6 +57,15 @@
       "finishedAt": "2026-03-01T03:42:31.618Z",
       "agentType": "claude",
       "elapsedMs": 989865
+    },
+    {
+      "storyId": "SK-003",
+      "title": "Skill Injection in Execution Engine",
+      "status": "passed",
+      "startedAt": "2026-03-01T03:49:30.356Z",
+      "finishedAt": "2026-03-01T03:58:31.079Z",
+      "agentType": "claude",
+      "elapsedMs": 540723
     }
   ],
   "failedStories": [],
