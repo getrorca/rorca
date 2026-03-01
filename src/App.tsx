@@ -46,6 +46,7 @@ import HubPanel from './panels/HubPanel';
 import RunViewPanel from './panels/RunViewPanel';
 import SpecReviewPanel from './panels/SpecReviewPanel';
 import MemoryPanel from './panels/MemoryPanel';
+import ConventionsPanel from './panels/ConventionsPanel';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
 
@@ -174,6 +175,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
   settings: 'Settings',
   'spec-review': 'Spec Review',
   memory: 'Memory Ledger',
+  conventions: 'Convention Proposals',
 };
 
 /** Top-level route config — Shell layout wraps all panel routes */
@@ -208,6 +210,7 @@ function AppRoutes() {
         <Route path="direction" element={<PanelRoute panel="stack" />} />
         <Route path="team-direction" element={<PanelRoute panel="team-direction" />} />
         <Route path="memory" element={<PanelRoute panel="memory" />} />
+        <Route path="conventions" element={<PanelRoute panel="conventions" />} />
         {/* Analytics */}
         <Route path="usage" element={<PanelRoute panel="usage" />} />
         <Route path="costs" element={<PanelRoute panel="costs" />} />
@@ -272,6 +275,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'stack': return <SettingsPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'memory': return <MemoryPanel />;
+    case 'conventions': return <ConventionsPanel />;
     case 'queue': return <ReviewQueuePanel />;
     case 'pipeline': return <PipelineMonitorPanel />;
     case 'worktrees': return <WorktreesPanel />;

@@ -42,6 +42,8 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   settings: '/settings',
   // CIE-005: Memory Ledger
   memory: '/memory',
+  // CA-005: Convention Proposals
+  conventions: '/conventions',
   // Slide-over (also proper nested routes now)
   'spec-review': '/specs',
 };
