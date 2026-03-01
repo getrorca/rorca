@@ -22,6 +22,7 @@ import {
   Search,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { renderMarkdown } from '../lib/renderMarkdown';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 
 /* ─── Marketplace Tab Type ─────────────────────────────────────── */
@@ -1235,6 +1236,12 @@ function SkillsTab() {
 
 /* ─── Skill Registry Card ──────────────────────────────────────── */
 
+interface SkillContentCache {
+  content: string;
+  wordCount: number;
+  estimatedTokens: number;
+}
+
 function SkillRegistryCard({
   name, description, author, badge,
   installed, installing, installError,
@@ -1250,61 +1257,122 @@ function SkillRegistryCard({
   onInstall: () => void;
   onRemove: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const [contentCache, setContentCache] = useState<SkillContentCache | null>(null);
+  const [contentLoading, setContentLoading] = useState(false);
+  const [contentError, setContentError] = useState<string | null>(null);
+
+  const handleToggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && installed && !contentCache && !contentLoading) {
+      setContentLoading(true);
+      setContentError(null);
+      apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
+        `/api/skills/${encodeURIComponent(name)}/content`
+      )
+        .then(data => setContentCache({ content: data.content, wordCount: data.wordCount, estimatedTokens: data.estimatedTokens }))
+        .catch(err => setContentError(err instanceof Error ? err.message : 'Failed to load content'))
+        .finally(() => setContentLoading(false));
+    }
+  };
+
   return (
-    <div className={`flex items-start gap-3 p-3 rounded-lg border transition-colors ${
+    <div className={`rounded-lg border transition-colors ${
       installed ? 'border-green-500/25 bg-green-500/5' : 'border-border bg-panel hover:border-border/80'
     }`}>
-      <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-medium text-[var(--text)]">{name}</span>
-          {badge && (
-            <span className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
-              badge === 'suggested'
-                ? 'bg-accent/15 text-accent'
-                : badge === 'skills.sh' || badge === 'db'
-                  ? 'bg-green-500/15 text-green-400'
-                  : 'bg-border text-muted'
-            }`}>{badge}</span>
-          )}
-          {author && <span className="text-[11px] text-muted/50">{author}</span>}
-        </div>
-        {description && (
-          <p className="text-xs text-muted mt-0.5 line-clamp-2">{description}</p>
-        )}
-      </div>
-      <div className="shrink-0">
-        {installed ? (
-          <button
-            onClick={onRemove}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
-            title="Remove skill"
-          >
-            <Trash2 size={12} />
-          </button>
-        ) : installing ? (
-          <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
-            <Loader2 size={12} className="animate-spin" />
-            <span>Installing…</span>
+      <div className="flex items-start gap-3 p-3">
+        <button onClick={handleToggle} className="mt-0.5 shrink-0 text-muted hover:text-[var(--text)] transition-colors">
+          <ChevronRight size={14} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
+        </button>
+        <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-medium text-[var(--text)]">{name}</span>
+            {badge && (
+              <span className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
+                badge === 'suggested'
+                  ? 'bg-accent/15 text-accent'
+                  : badge === 'skills.sh' || badge === 'db'
+                    ? 'bg-green-500/15 text-green-400'
+                    : 'bg-border text-muted'
+              }`}>{badge}</span>
+            )}
+            {author && <span className="text-[11px] text-muted/50">{author}</span>}
           </div>
-        ) : installError ? (
-          <button
-            onClick={onInstall}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:bg-red-500/10 rounded transition-colors"
-          >
-            <AlertTriangle size={12} />
-            <span>Retry</span>
-          </button>
-        ) : (
-          <button
-            onClick={onInstall}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors"
-          >
-            <Download size={12} />
-            <span>Install</span>
-          </button>
-        )}
+          {description && (
+            <p className="text-xs text-muted mt-0.5 line-clamp-2">{description}</p>
+          )}
+        </div>
+        <div className="shrink-0">
+          {installed ? (
+            <button
+              onClick={onRemove}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
+              title="Remove skill"
+            >
+              <Trash2 size={12} />
+            </button>
+          ) : installing ? (
+            <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
+              <Loader2 size={12} className="animate-spin" />
+              <span>Installing…</span>
+            </div>
+          ) : installError ? (
+            <button
+              onClick={onInstall}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:bg-red-500/10 rounded transition-colors"
+            >
+              <AlertTriangle size={12} />
+              <span>Retry</span>
+            </button>
+          ) : (
+            <button
+              onClick={onInstall}
+              className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors"
+            >
+              <Download size={12} />
+              <span>Install</span>
+            </button>
+          )}
+        </div>
       </div>
+
+      {expanded && (
+        <div className="px-3 pb-3 pt-0">
+          {!installed ? (
+            <div className="flex items-center gap-3 p-3 rounded bg-bg text-xs text-muted">
+              <span className="flex-1">Install to preview content</span>
+              <button
+                onClick={onInstall}
+                disabled={installing}
+                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
+              >
+                {installing ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+                Install
+              </button>
+            </div>
+          ) : contentLoading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 size={16} className="animate-spin text-muted" />
+            </div>
+          ) : contentError ? (
+            <div className="p-3 rounded bg-red-500/5 border border-red-500/20 text-xs text-red-400">
+              {contentError}
+            </div>
+          ) : contentCache ? (
+            <div>
+              <p className="text-[11px] text-muted mb-1.5">
+                {contentCache.wordCount.toLocaleString()} words · ~{contentCache.estimatedTokens.toLocaleString()} tokens
+              </p>
+              <div
+                className="prose prose-invert prose-sm max-h-64 overflow-y-auto rounded bg-bg p-3"
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(contentCache.content) }}
+              />
+            </div>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
