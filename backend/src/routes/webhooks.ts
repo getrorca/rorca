@@ -50,11 +50,53 @@ async function dispatchEvent(
   }
 }
 
-// ─── POST /api/webhooks/github — Receive GitHub webhook events ───────────────
-// This route is PUBLIC (no auth) — GitHub sends webhooks without bearer tokens.
-// Signature verification via HMAC-SHA256 ensures authenticity.
-// Returns 200 immediately; processing happens asynchronously.
-
+/**
+ * @swagger
+ * /api/webhooks/github:
+ *   post:
+ *     tags: [Webhooks]
+ *     summary: Receive GitHub webhook events
+ *     operationId: receiveGithubWebhook
+ *     description: Public endpoint that receives GitHub webhook events. Verifies HMAC-SHA256 signature, responds immediately with 200, then processes the event asynchronously. Dispatches to registered event handlers.
+ *     parameters:
+ *       - in: header
+ *         name: x-hub-signature-256
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: x-github-event
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: x-github-delivery
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               repository:
+ *                 type: object
+ *                 properties:
+ *                   full_name: { type: string }
+ *     responses:
+ *       200:
+ *         description: Webhook received
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       400:
+ *         description: Missing webhook headers or raw body
+ *       401:
+ *         description: Invalid webhook signature
+ *       404:
+ *         description: No workspace connected to this repository
+ */
 router.post('/github', (req: Request, res: Response) => {
   const signature = req.headers['x-hub-signature-256'] as string | undefined;
   const event = req.headers['x-github-event'] as string | undefined;

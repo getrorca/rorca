@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Settings2, Layers, Github, Variable, Play, Webhook,
   Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route, FileText, Wrench,
+  Package,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -374,13 +375,17 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
   const [content, setContent] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [activePack, setActivePack] = useState<{ packName: string; packVersion: string } | null>(null);
 
   useEffect(() => {
-    apiFetch<{ layers: DirectionLayers }>(`/api/direction/all?workspaceId=${workspaceId}`)
-      .then(data => {
-        setLayers(data.layers);
-        setContent(data.layers.l3?.content ?? '');
-      })
+    Promise.all([
+      apiFetch<{ layers: DirectionLayers }>(`/api/direction/all?workspaceId=${workspaceId}`),
+      apiFetch<{ packs: Array<{ packName: string; packVersion: string }> }>(`/api/packs?workspaceId=${workspaceId}`),
+    ]).then(([dirData, packData]) => {
+      setLayers(dirData.layers);
+      setContent(dirData.layers.l3?.content ?? '');
+      setActivePack(packData.packs.length > 0 ? packData.packs[0] : null);
+    })
       .catch(() => showToast('Failed to load direction stack', 'error'))
       .finally(() => setLoading(false));
   }, [workspaceId, showToast]);
@@ -426,6 +431,29 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
 
   return (
     <div className="max-w-2xl space-y-4">
+      {/* Active Convention Pack */}
+      <div className="p-3 border border-border rounded bg-bg">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Package size={14} className={activePack ? 'text-green-400' : 'text-muted'} />
+            <span className="text-xs font-medium text-[var(--text)]">Convention Pack</span>
+          </div>
+          {activePack ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono text-accent">{activePack.packName}</span>
+              <span className="text-[10px] text-muted">v{activePack.packVersion}</span>
+            </div>
+          ) : (
+            <span className="text-xs text-muted">None installed</span>
+          )}
+        </div>
+        <p className="text-[11px] text-muted mt-1">
+          {activePack
+            ? 'Pack provides L0 direction layers (lowest priority, overridable by L1+).'
+            : 'Install a pack from Marketplace to add L0 conventions.'}
+        </p>
+      </div>
+
       <div>
         <h2 className="text-sm font-semibold text-[var(--text)] mb-2">Direction Stack</h2>
         <p className="text-xs text-muted">Edit the 5-layer context cascade. L1 is global, L2 is domain-scoped, L3 is project-scoped. L4/L5 are per-request.</p>

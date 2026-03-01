@@ -38,6 +38,7 @@ function getTeamLayers(workspaceId: string): { teamL1?: string; teamL2?: string 
  *   get:
  *     tags: [Direction Stack]
  *     summary: Fetch a single direction layer
+ *     operationId: getDirectionLayer
  *     parameters:
  *       - in: query
  *         name: layer
@@ -61,6 +62,7 @@ function getTeamLayers(workspaceId: string): { teamL1?: string; teamL2?: string 
  *   put:
  *     tags: [Direction Stack]
  *     summary: Upsert a direction layer
+ *     operationId: upsertDirectionLayer
  *     requestBody:
  *       required: true
  *       content:
@@ -178,6 +180,7 @@ router.put('/', (req: Request, res: Response) => {
  *   get:
  *     tags: [Direction Stack]
  *     summary: Fetch all direction layers for a workspace
+ *     operationId: getAllDirectionLayers
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -235,6 +238,7 @@ router.get('/all', (req: Request, res: Response) => {
  *   get:
  *     tags: [Direction Stack]
  *     summary: List supported LLM models
+ *     operationId: listDirectionModels
  *     responses:
  *       200:
  *         description: Model list
@@ -348,6 +352,7 @@ router.get('/models', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Direction Stack]
  *     summary: Test a specific model by sending a minimal prompt
+ *     operationId: testDirectionModel
  *     requestBody:
  *       required: true
  *       content:
@@ -445,6 +450,7 @@ router.post('/models/test', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Direction Stack]
  *     summary: Preview synthesized direction stack
+ *     operationId: previewDirectionStack
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -564,6 +570,7 @@ router.get('/preview', (req: Request, res: Response) => {
  *   post:
  *     tags: [Direction Stack]
  *     summary: Synthesize direction stack with L4/L5 content
+ *     operationId: synthesizeDirectionStack
  *     requestBody:
  *       content:
  *         application/json:
@@ -637,8 +644,42 @@ router.post('/synthesize', (req: Request, res: Response) => {
 });
 
 /**
- * POST /api/direction/wizard — AI Setup Wizard
- * Takes plain-English answers to 5-7 questions, returns L1/L2/L3 YAML via LLM.
+ * @swagger
+ * /api/direction/wizard:
+ *   post:
+ *     tags: [Direction Stack]
+ *     summary: AI Setup Wizard for direction stack
+ *     operationId: runDirectionWizard
+ *     description: Takes plain-English answers to 5-7 setup questions and uses an LLM to generate L1 (global), L2 (domain), and L3 (project) direction layer YAML content. L3 output is validated against the direction schema.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [answers]
+ *             properties:
+ *               answers:
+ *                 type: object
+ *                 additionalProperties: { type: string }
+ *                 description: "Key-value pairs of wizard question answers"
+ *     responses:
+ *       200:
+ *         description: Generated direction layer content
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 l1: { type: string, description: "Generated L1 YAML content" }
+ *                 l2: { type: string, description: "Generated L2 YAML content" }
+ *                 l3: { type: string, description: "Generated L3 YAML content" }
+ *                 l3Valid: { type: boolean, description: "Whether L3 passes schema validation" }
+ *                 l3Errors: { type: array, items: { type: string }, description: "Validation errors for L3" }
+ *                 usage: { type: object, description: "LLM token usage" }
+ *       400: { description: "Missing or empty answers object" }
+ *       502: { description: "LLM returned invalid JSON or missing l1/l2/l3 keys" }
+ *       500: { description: "Wizard generation failed" }
  */
 router.post('/wizard', async (req: Request, res: Response) => {
   try {

@@ -42,8 +42,26 @@ function getEffectiveUser(req: Request): AuthUser | null {
   return db.prepare('SELECT id, email FROM users LIMIT 1').get() as AuthUser | null;
 }
 
-// ─── GET /api/copilot/connect — Redirect to GitHub OAuth for Copilot ─────────
-
+/**
+ * @swagger
+ * /api/copilot/connect:
+ *   get:
+ *     tags: [Copilot]
+ *     summary: Get GitHub OAuth URL for Copilot connection
+ *     operationId: getCopilotConnectUrl
+ *     description: Returns a GitHub OAuth authorization URL with Copilot scope. The frontend redirects the user to this URL to initiate the OAuth flow.
+ *     responses:
+ *       200:
+ *         description: OAuth authorization URL
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 url: { type: string }
+ *       500:
+ *         description: GitHub OAuth not configured
+ */
 router.get('/connect', (_req: Request, res: Response) => {
   if (!GITHUB_CLIENT_ID) {
     res.status(500).json({ error: 'GitHub OAuth not configured. Set GITHUB_CLIENT_ID env var.' });
@@ -63,8 +81,35 @@ router.get('/connect', (_req: Request, res: Response) => {
   });
 });
 
-// ─── GET /api/copilot/callback — Exchange code for token + store ─────────────
-
+/**
+ * @swagger
+ * /api/copilot/callback:
+ *   get:
+ *     tags: [Copilot]
+ *     summary: GitHub OAuth callback for Copilot
+ *     operationId: copilotOAuthCallback
+ *     description: Handles the GitHub OAuth callback, exchanges the authorization code for an access token, stores it encrypted, and redirects back to the frontend.
+ *     parameters:
+ *       - in: query
+ *         name: code
+ *         required: true
+ *         schema: { type: string }
+ *         description: GitHub OAuth authorization code
+ *       - in: query
+ *         name: state
+ *         schema: { type: string }
+ *     responses:
+ *       302:
+ *         description: Redirects to frontend with success indicator
+ *       400:
+ *         description: Missing authorization code or token exchange failed
+ *       401:
+ *         description: No user found
+ *       500:
+ *         description: GitHub OAuth not configured
+ *       502:
+ *         description: GitHub API error
+ */
 router.get('/callback', async (req: Request, res: Response) => {
   const { code } = req.query;
 
@@ -167,8 +212,29 @@ router.get('/callback', async (req: Request, res: Response) => {
   }
 });
 
-// ─── GET /api/copilot/status — Check connection status ──────────────────────
-
+/**
+ * @swagger
+ * /api/copilot/status:
+ *   get:
+ *     tags: [Copilot]
+ *     summary: Check Copilot connection status
+ *     operationId: getCopilotStatus
+ *     description: Returns whether a GitHub Copilot connection exists for the current user, including GitHub username, scopes, and connection timestamps.
+ *     responses:
+ *       200:
+ *         description: Connection status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 connected: { type: boolean }
+ *                 githubUsername: { type: string }
+ *                 githubUserId: { type: string }
+ *                 scopes: { type: string }
+ *                 connectedAt: { type: string }
+ *                 updatedAt: { type: string }
+ */
 router.get('/status', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) {
@@ -195,8 +261,28 @@ router.get('/status', (req: Request, res: Response) => {
   });
 });
 
-// ─── DELETE /api/copilot/disconnect — Remove token ──────────────────────────
-
+/**
+ * @swagger
+ * /api/copilot/disconnect:
+ *   delete:
+ *     tags: [Copilot]
+ *     summary: Disconnect GitHub Copilot
+ *     operationId: disconnectCopilot
+ *     description: Removes the stored GitHub Copilot token and disconnects the integration. Emits a WAL event for the disconnection.
+ *     responses:
+ *       200:
+ *         description: Disconnected successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 disconnected: { type: boolean }
+ *       401:
+ *         description: No user found
+ *       404:
+ *         description: No GitHub Copilot connection found
+ */
 router.delete('/disconnect', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) {

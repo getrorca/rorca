@@ -147,7 +147,56 @@ const ACTIVITY_EVENT_TYPES = [
   'worktree_created', 'worktree_merged',
 ];
 
-// GET /api/activity
+/**
+ * @swagger
+ * /api/activity:
+ *   get:
+ *     tags: [Activity]
+ *     summary: Get paginated activity feed
+ *     operationId: getActivityFeed
+ *     description: Returns a paginated list of activity events derived from WAL events, enriched with user display names and human-readable descriptions.
+ *     parameters:
+ *       - in: query
+ *         name: type
+ *         schema: { type: string, enum: [spec_created, spec_approved, spec_rejected, spec_edited, run_triggered, run_completed, comment_added, member_joined] }
+ *         description: Filter by activity type
+ *       - in: query
+ *         name: workspaceId
+ *         schema: { type: string }
+ *         description: Filter by workspace ID
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 30, maximum: 100 }
+ *       - in: query
+ *         name: cursor
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated activity feed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       timestamp: { type: string }
+ *                       activityType: { type: string }
+ *                       rawEventType: { type: string }
+ *                       actor: { type: object, properties: { id: { type: string }, name: { type: string }, avatarUrl: { type: string, nullable: true } } }
+ *                       target: { type: object, nullable: true, properties: { type: { type: string }, id: { type: string } } }
+ *                       description: { type: string }
+ *                       workspaceId: { type: string, nullable: true }
+ *                       specId: { type: string, nullable: true }
+ *                       storyId: { type: string, nullable: true }
+ *                 total: { type: integer }
+ *                 hasMore: { type: boolean }
+ *                 cursor: { type: string, nullable: true }
+ */
 router.get('/', (req, res) => {
   const pagination = parsePaginationParams(req, { limit: 30, maxLimit: 100 });
   const typeFilter = req.query.type ? String(req.query.type) : null;

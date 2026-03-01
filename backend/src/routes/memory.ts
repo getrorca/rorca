@@ -47,6 +47,8 @@ function todayDate(): string {
  * /api/memory:
  *   get:
  *     summary: List memory entries
+ *     operationId: listMemoryEntries
+ *     description: Returns memory ledger entries for a workspace, optionally filtered by category or limited to the N most recent.
  *     parameters:
  *       - name: workspaceId
  *         in: query
@@ -88,6 +90,8 @@ router.get('/', (req: Request, res: Response) => {
  * /api/memory:
  *   post:
  *     summary: Append a new memory entry
+ *     operationId: createMemoryEntry
+ *     description: Appends a new structured entry to the workspace MEMORY.md ledger file.
  *     requestBody:
  *       required: true
  *       content:
@@ -134,6 +138,8 @@ router.post('/', (req: Request, res: Response) => {
  * /api/memory/entry:
  *   put:
  *     summary: Update an existing memory entry
+ *     operationId: updateMemoryEntry
+ *     description: Updates an existing memory entry identified by date and title with the provided field changes.
  */
 router.put('/entry', (req: Request, res: Response) => {
   const { workspaceId, date, title, updates } = req.body;
@@ -160,6 +166,8 @@ router.put('/entry', (req: Request, res: Response) => {
  * /api/memory/entry:
  *   delete:
  *     summary: Delete a memory entry by date + title
+ *     operationId: deleteMemoryEntry
+ *     description: Removes a specific memory entry from the MEMORY.md ledger, identified by its date and title.
  */
 router.delete('/entry', (req: Request, res: Response) => {
   const { workspaceId, date, title } = req.body;
@@ -182,6 +190,7 @@ router.delete('/entry', (req: Request, res: Response) => {
  * /api/memory/proposals:
  *   get:
  *     summary: Get cached memory proposals for a workspace
+ *     operationId: listMemoryProposals
  *     description: Returns persisted proposals from memory_proposals table. Supports filtering by status.
  *     parameters:
  *       - name: workspaceId
@@ -252,6 +261,8 @@ router.get('/proposals', (req: Request, res: Response) => {
  * /api/memory/proposals:
  *   post:
  *     summary: Approve, reject, or edit proposed memory entries from post-run synthesis
+ *     operationId: resolveMemoryProposals
+ *     description: Processes an array of proposal actions (approve, reject, or edit) and updates both the MEMORY.md ledger and the database accordingly.
  */
 router.post('/proposals', (req: Request, res: Response) => {
   const { workspaceId, proposals } = req.body as {
@@ -314,6 +325,8 @@ router.post('/proposals', (req: Request, res: Response) => {
  * /api/memory/proposals/dismiss:
  *   post:
  *     summary: Dismiss proposals (user can return to review later)
+ *     operationId: dismissMemoryProposals
+ *     description: Marks the specified proposals as dismissed so they no longer appear in the pending review queue.
  */
 router.post('/proposals/dismiss', (req: Request, res: Response) => {
   const { workspaceId, proposalIds } = req.body as {
@@ -343,6 +356,8 @@ router.post('/proposals/dismiss', (req: Request, res: Response) => {
  * /api/memory/proposals/undismiss:
  *   post:
  *     summary: Restore dismissed proposals back to pending for re-review
+ *     operationId: undismissMemoryProposals
+ *     description: Restores previously dismissed proposals back to pending status so they can be reviewed again.
  */
 router.post('/proposals/undismiss', (req: Request, res: Response) => {
   const { workspaceId, proposalIds } = req.body as {
@@ -379,6 +394,8 @@ router.post('/proposals/undismiss', (req: Request, res: Response) => {
  * /api/memory/rejected:
  *   get:
  *     summary: List rejected memory entries
+ *     operationId: listRejectedMemoryEntries
+ *     description: Returns all previously rejected memory entries for the given workspace from the rejected log.
  */
 router.get('/rejected', (req: Request, res: Response) => {
   const { workspaceId } = req.query;
@@ -396,6 +413,8 @@ router.get('/rejected', (req: Request, res: Response) => {
  * /api/memory/context:
  *   get:
  *     summary: Get memory context snippet for injection
+ *     operationId: getMemoryContextSnippet
+ *     description: Generates a formatted context snippet from recent memory entries suitable for injection into agent prompts.
  *     parameters:
  *       - name: workspaceId
  *         in: query
@@ -420,6 +439,8 @@ router.get('/context', (req: Request, res: Response) => {
  * /api/memory/categories:
  *   get:
  *     summary: List available memory categories
+ *     operationId: listMemoryCategories
+ *     description: Returns the list of valid memory entry categories that can be used when creating or filtering entries.
  */
 router.get('/categories', (_req: Request, res: Response) => {
   res.json({ categories: MEMORY_CATEGORIES });

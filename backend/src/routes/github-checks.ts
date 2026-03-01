@@ -11,9 +11,51 @@ interface GithubWebhookRow {
   repo_name: string;
 }
 
-// ─── POST /api/github/checks/:sha — Manual check status update ──────────────
-// Allows overriding the check status for edge cases (e.g. manual verification).
-
+/**
+ * @swagger
+ * /api/github/checks/{sha}:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Manually update a GitHub commit check status
+ *     operationId: updateGithubCheckStatus
+ *     description: Posts a commit status to GitHub for the given SHA. Used for manual verification overrides or edge cases outside the normal pipeline flow.
+ *     parameters:
+ *       - in: path
+ *         name: sha
+ *         required: true
+ *         schema: { type: string, minLength: 7 }
+ *         description: Git commit SHA
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [state, workspaceId]
+ *             properties:
+ *               state: { type: string, enum: [pending, success, failure, error] }
+ *               description: { type: string }
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Check status posted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 sha: { type: string }
+ *                 state: { type: string }
+ *                 context: { type: string }
+ *                 description: { type: string }
+ *       400:
+ *         description: Invalid SHA, state, or missing workspaceId
+ *       404:
+ *         description: No GitHub connection found for this workspace
+ *       502:
+ *         description: Failed to post status to GitHub
+ */
 router.post('/:sha', async (req: Request, res: Response) => {
   try {
     const sha = req.params.sha as string;

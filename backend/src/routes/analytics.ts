@@ -35,6 +35,8 @@ interface TimeSeriesRow {
  *   get:
  *     tags: [Analytics]
  *     summary: Get token usage analytics
+ *     operationId: getTokenUsage
+ *     description: Returns aggregated token usage data grouped by spec, story, model, or user, with a daily time series and summary totals. Supports date range and workspace filtering.
  *     parameters:
  *       - in: query
  *         name: from
@@ -210,6 +212,8 @@ interface PeriodCostRow {
  *   get:
  *     tags: [Analytics]
  *     summary: Get cost analytics
+ *     operationId: getCostAnalytics
+ *     description: Returns cost breakdowns grouped by spec, run, model, or time period. Uses model_pricing table for actual provider rates. Supports date range and workspace filtering.
  *     parameters:
  *       - in: query
  *         name: from
@@ -374,6 +378,36 @@ interface ModelPricingFullRow {
   updated_at: string;
 }
 
+/**
+ * @swagger
+ * /api/analytics/pricing:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: List all model pricing entries
+ *     operationId: listModelPricing
+ *     description: Returns all model pricing entries from the model_pricing table, normalized to per-1M token costs for display. Used by the FinOps dashboard and cost calculator.
+ *     responses:
+ *       200:
+ *         description: List of model pricing entries
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 pricing:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       model_id: { type: string }
+ *                       provider: { type: string }
+ *                       input_cost_per_1m_tokens: { type: number }
+ *                       output_cost_per_1m_tokens: { type: number }
+ *                       effective_date: { type: string }
+ *                       updated_at: { type: string }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/pricing', (_req: Request, res: Response) => {
   try {
     const rows = db.prepare(
@@ -399,6 +433,50 @@ router.get('/pricing', (_req: Request, res: Response) => {
 
 // ─── PUT /api/analytics/pricing/:modelId — Update or create model pricing ────
 
+/**
+ * @swagger
+ * /api/analytics/pricing/{modelId}:
+ *   put:
+ *     tags: [Analytics]
+ *     summary: Update or create model pricing
+ *     operationId: upsertModelPricing
+ *     description: Creates or updates pricing for a specific model. Accepts per-1M token costs and automatically converts to per-1K for backward compatibility with the cost estimator. If the model already exists, it is updated; otherwise a new entry is created.
+ *     parameters:
+ *       - in: path
+ *         name: modelId
+ *         required: true
+ *         schema: { type: string }
+ *         description: The model identifier (e.g. claude-sonnet-4-5-20250929)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [input_cost_per_1m_tokens, output_cost_per_1m_tokens]
+ *             properties:
+ *               provider: { type: string, description: "Provider name (default: anthropic)" }
+ *               input_cost_per_1m_tokens: { type: number, description: "Cost per 1M input tokens in USD" }
+ *               output_cost_per_1m_tokens: { type: number, description: "Cost per 1M output tokens in USD" }
+ *               effective_date: { type: string, format: date-time, description: "Effective date (default: now)" }
+ *     responses:
+ *       200:
+ *         description: Model pricing created or updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 model_id: { type: string }
+ *                 provider: { type: string }
+ *                 input_cost_per_1m_tokens: { type: number }
+ *                 output_cost_per_1m_tokens: { type: number }
+ *                 effective_date: { type: string }
+ *       400:
+ *         description: Missing required fields or negative cost values
+ *       500:
+ *         description: Internal server error
+ */
 router.put('/pricing/:modelId', (req: Request, res: Response) => {
   try {
     const modelId = req.params.modelId;
@@ -468,6 +546,34 @@ router.put('/pricing/:modelId', (req: Request, res: Response) => {
 
 // ─── DELETE /api/analytics/pricing/:modelId — Remove model pricing ───────────
 
+/**
+ * @swagger
+ * /api/analytics/pricing/{modelId}:
+ *   delete:
+ *     tags: [Analytics]
+ *     summary: Remove model pricing entry
+ *     operationId: deleteModelPricing
+ *     description: Deletes the pricing entry for the specified model. Returns 404 if the model pricing does not exist.
+ *     parameters:
+ *       - in: path
+ *         name: modelId
+ *         required: true
+ *         schema: { type: string }
+ *         description: The model identifier to delete pricing for
+ *     responses:
+ *       200:
+ *         description: Model pricing deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 deleted: { type: string }
+ *       404:
+ *         description: Model pricing not found
+ *       500:
+ *         description: Internal server error
+ */
 router.delete('/pricing/:modelId', (req: Request, res: Response) => {
   try {
     const modelId = req.params.modelId;
@@ -504,6 +610,55 @@ interface ModelComparisonRow {
   avg_output_tokens: number;
 }
 
+/**
+ * @swagger
+ * /api/analytics/models:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Model comparison metrics
+ *     operationId: getModelComparison
+ *     description: Aggregates cost, speed, quality, and usage metrics per model from historical token_usage and story_results data. Includes pass rate, average cost, average elapsed time, and an insufficient-data flag for models with fewer than 5 stories.
+ *     parameters:
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *         description: Optional workspace filter
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *         description: Start date (inclusive), default 30 days ago
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *         description: End date (inclusive), default now
+ *     responses:
+ *       200:
+ *         description: Model comparison data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 models:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       model: { type: string }
+ *                       totalStories: { type: integer }
+ *                       passedStories: { type: integer }
+ *                       failedStories: { type: integer }
+ *                       passRate: { type: number }
+ *                       avgCostUsd: { type: number }
+ *                       totalCostUsd: { type: number }
+ *                       avgElapsedSeconds: { type: number }
+ *                       avgInputTokens: { type: integer }
+ *                       avgOutputTokens: { type: integer }
+ *                       insufficientData: { type: boolean }
+ *                 dateRange: { type: object }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/models', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string | undefined;
@@ -579,6 +734,57 @@ interface VelocityWeek {
   specs: string[];     // spec slugs completed that week
 }
 
+/**
+ * @swagger
+ * /api/analytics/velocity:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Weekly story completion velocity
+ *     operationId: getVelocity
+ *     description: Returns weekly story completion counts grouped by status (passed, failed, skipped) with a rolling 4-week average. Includes notable spec slugs per week and a list of available specs for filter dropdowns. Default range is 12 weeks.
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *         description: Start date (inclusive), default 12 weeks ago
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *         description: End date (inclusive), default now
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *         description: Optional workspace filter
+ *       - in: query
+ *         name: spec_id
+ *         schema: { type: string }
+ *         description: Optional spec slug filter
+ *     responses:
+ *       200:
+ *         description: Velocity data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 velocity:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       week: { type: string }
+ *                       week_start: { type: string }
+ *                       passed: { type: integer }
+ *                       failed: { type: integer }
+ *                       skipped: { type: integer }
+ *                       total: { type: integer }
+ *                       specs: { type: array, items: { type: string } }
+ *                       rollingAvg: { type: number }
+ *                 availableSpecs: { type: array, items: { type: string } }
+ *                 dateRange: { type: object }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/velocity', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string | undefined;
@@ -705,6 +911,69 @@ interface CompletionGroup {
   passRate: number;
 }
 
+/**
+ * @swagger
+ * /api/analytics/completion-rates:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Pass/fail/skip rates by complexity and tag
+ *     operationId: getCompletionRates
+ *     description: Returns story completion rates grouped by complexity level (1-5 plus unrated) and by spec tags. Reads spec JSON files from the filesystem to extract per-story complexity values. Lowest pass-rate tags are sorted first to highlight improvement opportunities.
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *         description: Start date (inclusive), default 30 days ago
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *         description: End date (inclusive), default now
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *         description: Optional workspace filter
+ *     responses:
+ *       200:
+ *         description: Completion rate data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 byComplexity:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       label: { type: string }
+ *                       passed: { type: integer }
+ *                       failed: { type: integer }
+ *                       skipped: { type: integer }
+ *                       total: { type: integer }
+ *                       passRate: { type: number }
+ *                 byTag:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       label: { type: string }
+ *                       passed: { type: integer }
+ *                       failed: { type: integer }
+ *                       skipped: { type: integer }
+ *                       total: { type: integer }
+ *                       passRate: { type: number }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     passed: { type: integer }
+ *                     failed: { type: integer }
+ *                     skipped: { type: integer }
+ *                     overallPassRate: { type: number }
+ *                 dateRange: { type: object }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/completion-rates', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string | undefined;
@@ -1061,6 +1330,8 @@ function buildCompletionExport(from: string, to: string, workspaceId?: string, l
  *   get:
  *     tags: [Analytics]
  *     summary: Export analytics data (CSV or JSON)
+ *     operationId: exportAnalyticsData
+ *     description: Exports usage, costs, velocity, or completion data in CSV or JSON format. Supports pagination via page/limit params and returns X-Total-Count header and Link header for next page when results are truncated.
  *     parameters:
  *       - in: query
  *         name: format
@@ -1214,6 +1485,8 @@ interface ROITimeSeriesRow {
  *   get:
  *     tags: [Analytics]
  *     summary: ROI calculator — estimated developer hours saved
+ *     operationId: getRoiMetrics
+ *     description: Calculates estimated developer hours saved based on passed stories, configurable hourly rate and hours-per-story values. Deduplicates retried stories and includes a daily time series for trend charts. Requires workspace_id.
  *     parameters:
  *       - in: query
  *         name: workspace_id
@@ -1389,6 +1662,8 @@ router.get('/roi', (req: Request, res: Response) => {
  *   put:
  *     tags: [Analytics]
  *     summary: Update ROI calculator configuration
+ *     operationId: updateRoiConfig
+ *     description: Updates the ROI calculator configuration (hours_per_story and hourly_rate) for a specific workspace. These values are used by the ROI metrics endpoint to estimate developer hours saved and net savings.
  *     requestBody:
  *       required: true
  *       content:
@@ -1486,6 +1761,44 @@ function tierFromModel(model: string): string {
   return 'sonnet';
 }
 
+/**
+ * @swagger
+ * /api/analytics/finops/run/{runId}:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Per-run FinOps dashboard data
+ *     operationId: getFinOpsRun
+ *     description: Returns detailed FinOps data for a specific pipeline run, including per-story cost breakdown with model tier classification, run summary aggregated by model, savings vs all-Opus baseline, model distribution for pie charts, and escalation log from WAL events. For subscription-based agents (claude, codex), savings and cost fields are null.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *         description: The pipeline run ID
+ *     responses:
+ *       200:
+ *         description: FinOps run data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 runId: { type: integer }
+ *                 agentType: { type: string }
+ *                 isSubscription: { type: boolean }
+ *                 runSummary: { type: array, items: { type: object } }
+ *                 savings: { type: object, nullable: true }
+ *                 totals: { type: object }
+ *                 modelDistribution: { type: array, items: { type: object } }
+ *                 perStory: { type: array, items: { type: object } }
+ *                 escalationLog: { type: array, items: { type: object } }
+ *       400:
+ *         description: Invalid runId
+ *       404:
+ *         description: Run not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/finops/run/:runId', (req: Request, res: Response) => {
   try {
     const runId = parseInt(req.params.runId as string, 10);
@@ -1653,6 +1966,47 @@ router.get('/finops/run/:runId', (req: Request, res: Response) => {
 //   from         — ISO date (inclusive), default 90 days ago
 //   to           — ISO date (inclusive), default now
 
+/**
+ * @swagger
+ * /api/analytics/finops/historical:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Historical FinOps data
+ *     operationId: getFinOpsHistorical
+ *     description: Returns cumulative cost data broken down by workspace, spec, and month, along with a daily cost trend for charts, model distribution, projected monthly cost, and savings vs all-Opus baseline. Default range is 90 days. For subscription-only runs, the savings field is null.
+ *     parameters:
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *         description: Optional workspace filter
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *         description: Start date (inclusive), default 90 days ago
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *         description: End date (inclusive), default now
+ *     responses:
+ *       200:
+ *         description: Historical FinOps data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 dailyTrend: { type: array, items: { type: object } }
+ *                 byWorkspace: { type: array, items: { type: object } }
+ *                 bySpec: { type: array, items: { type: object } }
+ *                 byMonth: { type: array, items: { type: object } }
+ *                 modelDistribution: { type: array, items: { type: object } }
+ *                 projectedMonthlyCost: { type: number }
+ *                 savings: { type: object, nullable: true }
+ *                 allSubscription: { type: boolean }
+ *                 dateRange: { type: object }
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/finops/historical', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string | undefined;
@@ -1845,6 +2199,41 @@ router.get('/finops/historical', (req: Request, res: Response) => {
 
 // ─── GET /api/analytics/finops/export — CSV export of per-story cost data ────
 
+/**
+ * @swagger
+ * /api/analytics/finops/export:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: CSV export of per-story cost data
+ *     operationId: exportFinOpsCsv
+ *     description: Exports per-story token usage and cost data as a CSV file. Includes computed columns for model tier, Opus baseline cost, and savings vs Opus. Can be filtered by run_id, workspace_id, and date range. The CSV includes headers for run_id, story_id, spec_slug, model, tier, agent_type, input_tokens, output_tokens, cost_usd, opus_baseline_usd, savings_usd, recorded_at, and workspace_id.
+ *     parameters:
+ *       - in: query
+ *         name: run_id
+ *         schema: { type: integer }
+ *         description: Optional filter by specific pipeline run ID
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *         description: Optional workspace filter
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *         description: Start date (inclusive), default 30 days ago
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *         description: End date (inclusive), default now
+ *     responses:
+ *       200:
+ *         description: CSV file download
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/finops/export', (req: Request, res: Response) => {
   try {
     const runId = req.query.run_id ? parseInt(req.query.run_id as string, 10) : undefined;
