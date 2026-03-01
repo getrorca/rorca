@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T03:06:55.612Z",
+  "lastUpdatedAt": "2026-03-01T03:02:02.086Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -32,13 +32,13 @@
       "elapsedMs": 666098
     },
     {
-      "storyId": "CA-005",
-      "title": "Convention Inference Agent — Brownfield Context Extraction",
+      "storyId": "CA-007",
+      "title": "Agent Persona Schema and File Format",
       "status": "passed",
-      "startedAt": "2026-03-01T02:55:01.824Z",
-      "finishedAt": "2026-03-01T03:06:55.612Z",
+      "startedAt": "2026-03-01T02:55:02.609Z",
+      "finishedAt": "2026-03-01T03:02:02.085Z",
       "agentType": "claude",
-      "elapsedMs": 713788
+      "elapsedMs": 419476
     }
   ],
   "failedStories": [],
