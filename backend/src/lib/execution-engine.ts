@@ -2536,9 +2536,15 @@ async function main(): Promise<void> {
   const rorcaDir = path.join(config.cwd, '.rorca');
   if (fs.existsSync(path.join(rorcaDir, 'personas'))) {
     personaRegistry.discover(rorcaDir);
+    // CA-016: Respect disabled personas from .rorca/config.json
+    const rorcaConfig = loadRorcaConfig(config.cwd);
+    if (rorcaConfig.personas.disabled.length > 0) {
+      personaRegistry.setDisabled(rorcaConfig.personas.disabled);
+      console.log(`[persona] ${rorcaConfig.personas.disabled.length} persona(s) disabled`);
+    }
     const personaCount = personaRegistry.getAll().length;
     if (personaCount > 0) {
-      console.log(`[persona] Discovered ${personaCount} persona(s)`);
+      console.log(`[persona] Discovered ${personaCount} active persona(s)`);
     }
     for (const w of personaRegistry.getWarnings()) {
       console.warn(`[persona] Warning: ${w.filePath}: ${w.reason}`);

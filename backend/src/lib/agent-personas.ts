@@ -139,9 +139,27 @@ export class PersonaRegistry {
   private byName: Map<string, Persona> = new Map();
   private byCategory: Map<PersonaCategory, Persona[]> = new Map();
   private warnings: PersonaValidationWarning[] = [];
+  private disabledNames: Set<string> = new Set();
 
-  /** All discovered personas. */
+  /**
+   * Set the disabled persona names. Disabled personas are excluded from
+   * getPersona(), getReviewers(), getByCategory(), and getAll() results.
+   */
+  setDisabled(names: string[]): void {
+    this.disabledNames = new Set(names.map(n => n.toLowerCase()));
+  }
+
+  private isEnabled(name: string): boolean {
+    return !this.disabledNames.has(name.toLowerCase());
+  }
+
+  /** All discovered personas (excluding disabled). */
   getAll(): Persona[] {
+    return this.personas.filter(p => this.isEnabled(p.metadata.name));
+  }
+
+  /** All discovered personas including disabled ones. */
+  getAllIncludingDisabled(): Persona[] {
     return [...this.personas];
   }
 
@@ -152,10 +170,12 @@ export class PersonaRegistry {
 
   /**
    * Get a persona by name (case-insensitive).
-   * Returns undefined if not found.
+   * Returns undefined if not found or disabled.
    */
   getPersona(name: string): Persona | undefined {
-    return this.byName.get(name.toLowerCase());
+    const persona = this.byName.get(name.toLowerCase());
+    if (persona && !this.isEnabled(persona.metadata.name)) return undefined;
+    return persona;
   }
 
   /**
@@ -164,15 +184,16 @@ export class PersonaRegistry {
    */
   getPersonaCatalogForPrompt(): string {
     return this.personas
+      .filter(p => this.isEnabled(p.metadata.name))
       .map(p => `[${p.metadata.category}] ${p.metadata.name}: ${p.metadata.description}`)
       .join('\n');
   }
 
   /**
-   * Get all personas in a category.
+   * Get all enabled personas in a category.
    */
   getByCategory(category: PersonaCategory): Persona[] {
-    return [...(this.byCategory.get(category) ?? [])];
+    return (this.byCategory.get(category) ?? []).filter(p => this.isEnabled(p.metadata.name));
   }
 
   /**
@@ -187,6 +208,7 @@ export class PersonaRegistry {
     const matched: Persona[] = [];
 
     for (const persona of this.personas) {
+      if (!this.isEnabled(persona.metadata.name)) continue;
       if (persona.metadata.triggers.length === 0) continue;
       // Check if any of the story paths match any trigger glob
       const isMatch = storyPaths.some(sp =>
