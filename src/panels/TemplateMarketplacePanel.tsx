@@ -19,6 +19,7 @@ import {
   Layers,
   ChevronRight,
   AlertTriangle,
+  Search,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -910,10 +911,38 @@ function DetailSection({ title, icon, count, expanded, onToggle, children }: {
    SKILLS TAB
    ═══════════════════════════════════════════════════════════════════ */
 
+type SkillCategory = 'All' | 'Frontend' | 'Backend' | 'Testing' | 'DevOps' | 'Security' | 'Database';
+
+const SKILL_CATEGORY_KEYWORDS: Record<Exclude<SkillCategory, 'All'>, string[]> = {
+  Frontend: ['react', 'vue', 'angular', 'svelte', 'css', 'tailwind', 'frontend', 'ui', 'component', 'next', 'nuxt', 'astro'],
+  Backend: ['node', 'express', 'api', 'server', 'backend', 'rest', 'graphql', 'fastify', 'nest', 'hono'],
+  Testing: ['test', 'jest', 'vitest', 'playwright', 'cypress', 'testing', 'coverage', 'e2e', 'unit', 'qa'],
+  DevOps: ['docker', 'ci', 'cd', 'deploy', 'kubernetes', 'terraform', 'aws', 'gcp', 'azure', 'devops', 'pipeline', 'github-actions'],
+  Security: ['security', 'auth', 'oauth', 'jwt', 'encryption', 'vulnerability', 'cors', 'csrf', 'xss', 'sanitize'],
+  Database: ['database', 'sql', 'postgres', 'mysql', 'sqlite', 'prisma', 'drizzle', 'redis', 'mongo', 'migration', 'schema'],
+};
+
+const SKILL_CATEGORIES: SkillCategory[] = ['All', 'Frontend', 'Backend', 'Testing', 'DevOps', 'Security', 'Database'];
+
+function skillMatchesCategory(skill: SkillSummary, category: SkillCategory): boolean {
+  if (category === 'All') return true;
+  const keywords = SKILL_CATEGORY_KEYWORDS[category];
+  const haystack = `${skill.name} ${skill.description ?? ''}`.toLowerCase();
+  return keywords.some(kw => haystack.includes(kw));
+}
+
+function skillMatchesSearch(skill: SkillSummary, query: string): boolean {
+  if (!query) return true;
+  const haystack = `${skill.name} ${skill.description ?? ''}`.toLowerCase();
+  return haystack.includes(query.toLowerCase());
+}
+
 function SkillsTab() {
   const { workspaceId } = useWorkspace();
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeCategory, setActiveCategory] = useState<SkillCategory>('All');
 
   const fetchSkills = useCallback(async () => {
     setLoading(true);
@@ -930,64 +959,116 @@ function SkillsTab() {
 
   useEffect(() => { fetchSkills(); }, [fetchSkills]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-32">
-        <Loader2 size={24} className="animate-spin text-muted" />
-      </div>
-    );
-  }
+  const filtered = skills.filter(s =>
+    skillMatchesCategory(s, activeCategory) && skillMatchesSearch(s, searchQuery)
+  );
 
-  const installedSkills = skills.filter(s => s.source === 'db' || s.source.startsWith('pack:'));
-  const discoveredSkills = skills.filter(s => s.source !== 'db' && !s.source.startsWith('pack:'));
+  const installedSkills = filtered.filter(s => s.source === 'db' || s.source.startsWith('pack:'));
+  const discoveredSkills = filtered.filter(s => s.source !== 'db' && !s.source.startsWith('pack:'));
 
   return (
-    <div className="flex-1 overflow-y-auto p-5">
-      {/* Installed skills */}
-      {installedSkills.length > 0 && (
-        <div className="mb-6">
-          <div className="flex items-center gap-2 mb-3">
-            <Check size={14} className="text-green-400" />
-            <h2 className="text-sm font-medium text-green-400">Installed Skills</h2>
-            <span className="text-xs text-muted">({installedSkills.length})</span>
-          </div>
-          <div className="grid gap-2">
-            {installedSkills.map(skill => (
-              <SkillCard key={skill.name} skill={skill} />
-            ))}
-          </div>
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Search bar */}
+      <div className="px-5 pt-4 pb-2 shrink-0">
+        <div className="relative">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search skills..."
+            className="w-full pl-9 pr-8 py-2 text-sm bg-bg border border-border rounded-lg text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent transition-colors"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-[var(--text)]"
+            >
+              <X size={14} />
+            </button>
+          )}
         </div>
-      )}
-
-      {/* Discovered skills */}
-      {discoveredSkills.length > 0 && (
-        <div className="mb-6">
-          <div className="flex items-center gap-2 mb-3">
-            <Wrench size={14} className="text-accent" />
-            <h2 className="text-sm font-medium text-[var(--text)]">Discovered Skills</h2>
-            <span className="text-xs text-muted">({discoveredSkills.length})</span>
-          </div>
-          <div className="grid gap-2">
-            {discoveredSkills.map(skill => (
-              <SkillCard key={skill.name} skill={skill} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {skills.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-12 text-muted text-sm">
-          <Wrench size={32} className="mb-2 opacity-50" />
-          <p>No skills found</p>
-          <p className="text-xs mt-1">Install a convention pack or create skills in Workspace Settings &gt; Context</p>
-        </div>
-      )}
-
-      {/* Tip */}
-      <div className="mt-6 p-3 border border-border rounded bg-bg text-xs text-muted">
-        <p className="font-medium text-[var(--text)] mb-1">Manage skills in Workspace Settings</p>
-        <p>Go to Workspace Settings &gt; Context &gt; Skills to create, edit, import, and export skill files.</p>
       </div>
+
+      {/* Category chip bar */}
+      <div className="px-5 pb-3 shrink-0 overflow-x-auto">
+        <div className="flex items-center gap-1.5">
+          {SKILL_CATEGORIES.map(cat => (
+            <button
+              key={cat}
+              onClick={() => setActiveCategory(cat)}
+              className={`px-3 py-1 text-xs rounded-full whitespace-nowrap transition-colors ${
+                activeCategory === cat
+                  ? 'bg-accent text-white'
+                  : 'bg-bg text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Content */}
+      {loading ? (
+        <div className="flex items-center justify-center h-32">
+          <Loader2 size={24} className="animate-spin text-muted" />
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-5 pt-0">
+          {/* Installed skills */}
+          {installedSkills.length > 0 && (
+            <div className="mb-6">
+              <div className="flex items-center gap-2 mb-3">
+                <Check size={14} className="text-green-400" />
+                <h2 className="text-sm font-medium text-green-400">Installed Skills</h2>
+                <span className="text-xs text-muted">({installedSkills.length})</span>
+              </div>
+              <div className="grid gap-2">
+                {installedSkills.map(skill => (
+                  <SkillCard key={skill.name} skill={skill} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Discovered skills */}
+          {discoveredSkills.length > 0 && (
+            <div className="mb-6">
+              <div className="flex items-center gap-2 mb-3">
+                <Wrench size={14} className="text-accent" />
+                <h2 className="text-sm font-medium text-[var(--text)]">Discovered Skills</h2>
+                <span className="text-xs text-muted">({discoveredSkills.length})</span>
+              </div>
+              <div className="grid gap-2">
+                {discoveredSkills.map(skill => (
+                  <SkillCard key={skill.name} skill={skill} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {filtered.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-12 text-muted text-sm">
+              <Wrench size={32} className="mb-2 opacity-50" />
+              <p>{skills.length === 0 ? 'No skills found' : 'No skills match your filters'}</p>
+              <p className="text-xs mt-1">
+                {skills.length === 0
+                  ? 'Install a convention pack or create skills in Workspace Settings > Context'
+                  : 'Try a different category or search term'}
+              </p>
+            </div>
+          )}
+
+          {/* Tip */}
+          {filtered.length > 0 && (
+            <div className="mt-6 p-3 border border-border rounded bg-bg text-xs text-muted">
+              <p className="font-medium text-[var(--text)] mb-1">Manage skills in Workspace Settings</p>
+              <p>Go to Workspace Settings &gt; Context &gt; Skills to create, edit, import, and export skill files.</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
