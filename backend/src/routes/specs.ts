@@ -1186,10 +1186,296 @@ router.post('/generate', async (req: Request, res: Response) => {
         console.log(`[Specs] Pass 4 complete: ${parsed.stories.length} stories annotated with convention guidance`);
       }
 
+      // ── Pass 5: Adversarial Review — Assumption Buster + Devil's Advocate ──
+      emitPassEvent(slug, 5, 'started', workspaceId);
+
+      const assumptionBusterPrompt = loadDefaultPersonaPrompt('assumption-buster');
+      const devilsAdvocatePrompt = loadDefaultPersonaPrompt('devils-advocate');
+
+      let pass5Usage = { inputTokens: 0, outputTokens: 0 };
+
+      if (!assumptionBusterPrompt && !devilsAdvocatePrompt) {
+        console.warn('[Specs] Adversarial personas not found — skipping Pass 5');
+        emitPassEvent(slug, 5, 'completed', workspaceId);
+      } else {
+        const pass4StoriesJson = JSON.stringify(parsed.stories, null, 2);
+
+        // Sub-pass 5a: Assumption Buster reviews the spec
+        if (assumptionBusterPrompt) {
+          const pass5aPrompt = [
+            '=== INSTRUCTIONS: READ THIS FIRST ===',
+            'You are a spec reviewer. Your ONLY job is to output a single valid JSON object.',
+            'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+            'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+            'If you output anything other than raw JSON, the system will fail.',
+            '=== END INSTRUCTIONS ===',
+            '',
+            '=== PERSONA: ASSUMPTION BUSTER (Pass 5a — Adversarial Review) ===',
+            assumptionBusterPrompt,
+            '=== END PERSONA ===',
+            '',
+            synthesized,
+            '---',
+            'TASK: You are reviewing a spec that has gone through PM, Spec Writer, UX Designer, and Best Practices passes.',
+            'Your job is to find contradictions, missing edge cases, implicit assumptions, and missing error/loading/empty states.',
+            'You CAN and SHOULD:',
+            '- ADD new stories for missing edge cases or error handling the spec overlooked',
+            '- ADD acceptance criteria to existing stories that are missing edge case coverage',
+            '- ADD a "warnings" field (string[]) to stories with potential issues',
+            '- Modify story descriptions to call out implicit assumptions',
+            '',
+            `Spec title: ${effectiveTitle}`,
+            `Spec brief: ${brief}`,
+            '',
+            '=== PASS 4 OUTPUT (Convention-Annotated Stories) ===',
+            pass4StoriesJson,
+            '=== END PASS 4 OUTPUT ===',
+            '',
+            'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
+            '',
+            'JSON schema:',
+            `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3,"warnings":["string"]}]}`,
+            '',
+            'Rules:',
+            '- Return ALL existing stories (keep IDs, order) PLUS any new stories you add',
+            '- New stories should have IDs that continue the sequence (e.g. if last story is ' + storyPrefix + '-020, new stories start at ' + storyPrefix + '-021)',
+            '- ENRICH existing stories: add acceptance criteria for edge cases, add warnings for assumptions',
+            '- ADD new stories for: missing error handling, missing empty states, missing loading states, missing validation',
+            '- Each new story must have proper dependsOn references',
+            '- "warnings" field is an array of strings highlighting assumptions or risks',
+            '- Your entire response must be valid JSON parseable by JSON.parse()',
+            '- Do NOT remove any existing stories or acceptance criteria',
+          ].join('\n');
+
+          const llmResult5a = await chatComplete(
+            [{ role: 'user', content: pass5aPrompt }],
+            { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+          );
+          pass5Usage.inputTokens += llmResult5a.usage.inputTokens;
+          pass5Usage.outputTokens += llmResult5a.usage.outputTokens;
+
+          try {
+            const pass5aParsed = parseLLMJson(llmResult5a.text) as { stories: unknown[] };
+            if (Array.isArray(pass5aParsed.stories) && pass5aParsed.stories.length > 0) {
+              parsed = { ...parsed, stories: pass5aParsed.stories };
+            } else {
+              console.warn('[Specs] Pass 5a (Assumption Buster) returned invalid stories — keeping Pass 4 output');
+            }
+          } catch {
+            console.warn('[Specs] Pass 5a (Assumption Buster) returned non-JSON — keeping Pass 4 output');
+          }
+
+          console.log(`[Specs] Pass 5a (Assumption Buster) complete: ${parsed.stories.length} stories`);
+        }
+
+        // Sub-pass 5b: Devil's Advocate reviews the spec
+        if (devilsAdvocatePrompt) {
+          const pass5bStoriesJson = JSON.stringify(parsed.stories, null, 2);
+
+          const pass5bPrompt = [
+            '=== INSTRUCTIONS: READ THIS FIRST ===',
+            'You are a spec reviewer. Your ONLY job is to output a single valid JSON object.',
+            'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+            'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+            'If you output anything other than raw JSON, the system will fail.',
+            '=== END INSTRUCTIONS ===',
+            '',
+            '=== PERSONA: DEVIL\'S ADVOCATE (Pass 5b — Adversarial Review) ===',
+            devilsAdvocatePrompt,
+            '=== END PERSONA ===',
+            '',
+            synthesized,
+            '---',
+            'TASK: You are the second adversarial reviewer. The Assumption Buster has already reviewed this spec.',
+            'Your job is to argue against proposed approaches, surface alternative designs, and stress-test decisions.',
+            'You CAN and SHOULD:',
+            '- ADD new stories if the spec is missing simpler alternatives or critical fallbacks',
+            '- ADD acceptance criteria that enforce trade-off awareness (e.g. "Must handle the case where X is unavailable")',
+            '- ADD "warnings" to stories where the approach is over-engineered or under-considered',
+            '- Challenge unnecessary complexity — if a story can be simplified, annotate how',
+            '',
+            `Spec title: ${effectiveTitle}`,
+            `Spec brief: ${brief}`,
+            '',
+            '=== POST-ASSUMPTION-BUSTER STORIES ===',
+            pass5bStoriesJson,
+            '=== END STORIES ===',
+            '',
+            'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
+            '',
+            'JSON schema:',
+            `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3,"warnings":["string"]}]}`,
+            '',
+            'Rules:',
+            '- Return ALL existing stories (keep IDs, order) PLUS any new stories you add',
+            '- ENRICH existing stories: add acceptance criteria for robustness, add warnings for complexity',
+            '- ADD new stories only if genuinely missing (fallback mechanisms, degraded-mode handling)',
+            '- Keep new story IDs sequential after the highest existing ID',
+            '- "warnings" field: highlight over-engineering, unnecessary complexity, or missing fallbacks',
+            '- Your entire response must be valid JSON parseable by JSON.parse()',
+            '- Do NOT remove any existing stories or acceptance criteria',
+          ].join('\n');
+
+          const llmResult5b = await chatComplete(
+            [{ role: 'user', content: pass5bPrompt }],
+            { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+          );
+          pass5Usage.inputTokens += llmResult5b.usage.inputTokens;
+          pass5Usage.outputTokens += llmResult5b.usage.outputTokens;
+
+          try {
+            const pass5bParsed = parseLLMJson(llmResult5b.text) as { stories: unknown[] };
+            if (Array.isArray(pass5bParsed.stories) && pass5bParsed.stories.length > 0) {
+              parsed = { ...parsed, stories: pass5bParsed.stories };
+            } else {
+              console.warn('[Specs] Pass 5b (Devil\'s Advocate) returned invalid stories — keeping previous output');
+            }
+          } catch {
+            console.warn('[Specs] Pass 5b (Devil\'s Advocate) returned non-JSON — keeping previous output');
+          }
+
+          console.log(`[Specs] Pass 5b (Devil's Advocate) complete: ${parsed.stories.length} stories`);
+        }
+
+        // Snapshot Pass 5 result as spec version
+        const pass5Spec = {
+          title: effectiveTitle,
+          generatedAt: new Date().toISOString(),
+          model: resolvedModel,
+          multiPassStage: 'pass5-adversarial-review',
+          userStories: parsed.stories,
+        };
+        snapshotVersion(slug, JSON.stringify(pass5Spec), 'pending');
+        emitPassEvent(slug, 5, 'completed', workspaceId);
+
+        console.log(`[Specs] Pass 5 complete: ${parsed.stories.length} stories after adversarial review`);
+      }
+
+      // ── Pass 6: Spec Verifier — final consistency check + verification report ──
+      emitPassEvent(slug, 6, 'started', workspaceId);
+
+      const specVerifierPrompt = loadDefaultPersonaPrompt('spec-verifier');
+      let pass6Usage = { inputTokens: 0, outputTokens: 0 };
+
+      if (!specVerifierPrompt) {
+        console.warn('[Specs] Spec Verifier persona not found — skipping Pass 6');
+        emitPassEvent(slug, 6, 'completed', workspaceId);
+      } else {
+        const pass5StoriesJson = JSON.stringify(parsed.stories, null, 2);
+
+        const pass6Prompt = [
+          '=== INSTRUCTIONS: READ THIS FIRST ===',
+          'You are a spec verifier. Your ONLY job is to output a single valid JSON object.',
+          'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+          'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+          'If you output anything other than raw JSON, the system will fail.',
+          '=== END INSTRUCTIONS ===',
+          '',
+          '=== PERSONA: SPEC VERIFIER (Pass 6 — Final Consistency Check) ===',
+          specVerifierPrompt,
+          '=== END PERSONA ===',
+          '',
+          'TASK: You are performing the FINAL consistency check on a spec that has been through 5 passes.',
+          'You must validate structural integrity and produce a verification report.',
+          '',
+          'Validate ALL of the following:',
+          '1. All story IDs are unique',
+          '2. All dependsOn references point to existing story IDs in this spec',
+          '3. No circular dependencies in the dependsOn graph',
+          '4. Every story is reachable — either has no dependsOn (root) or is depended upon by another story',
+          '5. Acceptance criteria are testable — contain measurable/binary assertions, not vague language',
+          '6. Every story has at least 1 acceptance criterion',
+          '7. Story IDs follow consistent format',
+          '',
+          'For each issue found, classify as:',
+          '- "issue" (blocking): Must be fixed before spec can be approved (circular deps, missing refs, no AC)',
+          '- "warning" (non-blocking): Should be reviewed but doesn\'t block approval (vague AC, large stories)',
+          '',
+          `Spec title: ${effectiveTitle}`,
+          `Spec brief: ${brief}`,
+          '',
+          '=== PASS 5 OUTPUT (Adversarial-Reviewed Stories) ===',
+          pass5StoriesJson,
+          '=== END PASS 5 OUTPUT ===',
+          '',
+          'OUTPUT FORMAT: Respond with ONLY a raw JSON object containing both the final stories and the verification report.',
+          '',
+          'JSON schema:',
+          '{',
+          '  "stories": [same stories array — you may fix minor issues like typos in dependsOn refs],',
+          '  "verificationReport": {',
+          '    "valid": true/false,',
+          '    "issues": ["blocking issue descriptions"],',
+          '    "warnings": ["non-blocking warning descriptions"],',
+          '    "stats": {',
+          '      "totalStories": number,',
+          '      "totalAcceptanceCriteria": number,',
+          '      "rootStories": number,',
+          '      "maxDependencyDepth": number',
+          '    }',
+          '  }',
+          '}',
+          '',
+          'Rules:',
+          '- Return ALL stories — same as input, with only minor fixes (typo corrections in dependsOn, etc.)',
+          '- Do NOT add or remove stories — only fix references and structural issues',
+          '- verificationReport.valid = true if there are ZERO issues (warnings are OK)',
+          '- verificationReport.valid = false if there are ANY issues',
+          '- Be thorough — check EVERY dependsOn reference, EVERY acceptance criterion',
+          '- Your entire response must be valid JSON parseable by JSON.parse()',
+        ].join('\n');
+
+        const llmResult6 = await chatComplete(
+          [{ role: 'user', content: pass6Prompt }],
+          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        );
+        pass6Usage = llmResult6.usage;
+
+        let verificationReport: { valid: boolean; issues: string[]; warnings: string[]; stats?: Record<string, number> } | undefined;
+
+        try {
+          const pass6Parsed = parseLLMJson(llmResult6.text) as {
+            stories?: unknown[];
+            verificationReport?: { valid: boolean; issues: string[]; warnings: string[]; stats?: Record<string, number> };
+          };
+
+          if (pass6Parsed.verificationReport) {
+            verificationReport = pass6Parsed.verificationReport;
+          }
+
+          if (Array.isArray(pass6Parsed.stories) && pass6Parsed.stories.length > 0) {
+            parsed = { ...parsed, stories: pass6Parsed.stories };
+          } else {
+            console.warn('[Specs] Pass 6 returned invalid stories — keeping Pass 5 output');
+          }
+        } catch {
+          console.warn('[Specs] Pass 6 returned non-JSON — keeping Pass 5 output');
+        }
+
+        // Snapshot Pass 6 result as spec version (final)
+        const pass6Spec = {
+          title: effectiveTitle,
+          generatedAt: new Date().toISOString(),
+          model: resolvedModel,
+          multiPassStage: 'pass6-spec-verifier',
+          userStories: parsed.stories,
+          ...(verificationReport ? { verificationReport } : {}),
+        };
+        snapshotVersion(slug, JSON.stringify(pass6Spec), 'pending');
+        emitPassEvent(slug, 6, 'completed', workspaceId);
+
+        // Attach verification report to parsed output for the response
+        if (verificationReport) {
+          (parsed as Record<string, unknown>).verificationReport = verificationReport;
+        }
+
+        console.log(`[Specs] Pass 6 complete: ${parsed.stories.length} stories verified (valid: ${verificationReport?.valid ?? 'unknown'})`);
+      }
+
       // Aggregate token usage from all passes
       tokenUsage = {
-        inputTokens: pass1Usage.inputTokens + pass2Usage.inputTokens + pass3Usage.inputTokens + pass4Usage.inputTokens,
-        outputTokens: pass1Usage.outputTokens + pass2Usage.outputTokens + pass3Usage.outputTokens + pass4Usage.outputTokens,
+        inputTokens: pass1Usage.inputTokens + pass2Usage.inputTokens + pass3Usage.inputTokens + pass4Usage.inputTokens + pass5Usage.inputTokens + pass6Usage.inputTokens,
+        outputTokens: pass1Usage.outputTokens + pass2Usage.outputTokens + pass3Usage.outputTokens + pass4Usage.outputTokens + pass5Usage.outputTokens + pass6Usage.outputTokens,
       };
 
     } else if (configuredAgentType === 'opencode') {
@@ -1342,7 +1628,11 @@ router.post('/generate', async (req: Request, res: Response) => {
       usage: tokenUsage,
       specPath,
       diagramsPath,
-      ...(multiPass ? { multiPass: true, passCount: 4 } : {}),
+      ...(multiPass ? {
+        multiPass: true,
+        passCount: 6,
+        ...((parsed as Record<string, unknown>).verificationReport ? { verificationReport: (parsed as Record<string, unknown>).verificationReport } : {}),
+      } : {}),
     });
   } catch (error: any) {
     console.error('[Specs] Generate error:', error);
