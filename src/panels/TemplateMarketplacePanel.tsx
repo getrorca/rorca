@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Star,
   Loader2,
@@ -908,7 +908,7 @@ function DetailSection({ title, icon, count, expanded, onToggle, children }: {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   SKILLS TAB
+   SKILLS TAB — search-engine-style skills.sh browser
    ═══════════════════════════════════════════════════════════════════ */
 
 type SkillCategory = 'All' | 'Frontend' | 'Backend' | 'Testing' | 'DevOps' | 'Security' | 'Database';
@@ -924,183 +924,386 @@ const SKILL_CATEGORY_KEYWORDS: Record<Exclude<SkillCategory, 'All'>, string[]> =
 
 const SKILL_CATEGORIES: SkillCategory[] = ['All', 'Frontend', 'Backend', 'Testing', 'DevOps', 'Security', 'Database'];
 
-function skillMatchesCategory(skill: SkillSummary, category: SkillCategory): boolean {
+function skillMatchesCategory(skill: { name: string; description?: string | null }, category: SkillCategory): boolean {
   if (category === 'All') return true;
   const keywords = SKILL_CATEGORY_KEYWORDS[category];
   const haystack = `${skill.name} ${skill.description ?? ''}`.toLowerCase();
   return keywords.some(kw => haystack.includes(kw));
 }
 
-function skillMatchesSearch(skill: SkillSummary, query: string): boolean {
-  if (!query) return true;
-  const haystack = `${skill.name} ${skill.description ?? ''}`.toLowerCase();
-  return haystack.includes(query.toLowerCase());
+interface SkillSearchResult {
+  name: string;
+  description: string;
+  author: string;
+  url: string;
+}
+
+interface SkillSuggestion {
+  skill: string;         // e.g. "react.md"
+  triggeredBy: string[]; // stack items that triggered this
+  installed: boolean;
 }
 
 function SkillsTab() {
   const { workspaceId } = useWorkspace();
-  const [skills, setSkills] = useState<SkillSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<SkillCategory>('All');
 
-  const fetchSkills = useCallback(async () => {
-    setLoading(true);
+  // Installed / discovered skills (local)
+  const [installedSkills, setInstalledSkills] = useState<SkillSummary[]>([]);
+  const [loadingInstalled, setLoadingInstalled] = useState(true);
+
+  // Suggestions from echolocation
+  const [suggestions, setSuggestions] = useState<SkillSuggestion[]>([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(true);
+
+  // Search
+  const [query, setQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SkillSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+
+  // Per-skill install state: name → 'installing' | 'done' | 'error'
+  const [installState, setInstallState] = useState<Record<string, 'installing' | 'done' | 'error'>>({});
+
+  const searchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // ── Fetch installed skills ──────────────────────────────────────
+  const fetchInstalled = useCallback(async () => {
+    setLoadingInstalled(true);
     try {
       const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
       const data = await apiFetch<{ skills: SkillSummary[] }>(`/api/skills${params}`);
-      setSkills(data.skills);
-    } catch (err) {
-      console.error('Failed to fetch skills:', err);
-    } finally {
-      setLoading(false);
+      setInstalledSkills(data.skills);
+    } catch { /* silent */ } finally {
+      setLoadingInstalled(false);
     }
   }, [workspaceId]);
 
-  useEffect(() => { fetchSkills(); }, [fetchSkills]);
+  // ── Fetch stack-based suggestions ──────────────────────────────
+  const fetchSuggestions = useCallback(async () => {
+    setLoadingSuggestions(true);
+    try {
+      const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
+      const data = await apiFetch<{ suggestions: SkillSuggestion[] }>(`/api/skills/suggestions${params}`);
+      setSuggestions(data.suggestions ?? []);
+    } catch { /* silent */ } finally {
+      setLoadingSuggestions(false);
+    }
+  }, [workspaceId]);
 
-  const filtered = skills.filter(s =>
-    skillMatchesCategory(s, activeCategory) && skillMatchesSearch(s, searchQuery)
-  );
+  useEffect(() => {
+    fetchInstalled();
+    fetchSuggestions();
+  }, [fetchInstalled, fetchSuggestions]);
 
-  const installedSkills = filtered.filter(s => s.source === 'db' || s.source.startsWith('pack:'));
-  const discoveredSkills = filtered.filter(s => s.source !== 'db' && !s.source.startsWith('pack:'));
+  // ── Debounced search ────────────────────────────────────────────
+  useEffect(() => {
+    if (searchRef.current) clearTimeout(searchRef.current);
+    const q = query.trim();
+    if (!q) {
+      setSearchResults([]);
+      setHasSearched(false);
+      setSearchError(null);
+      return;
+    }
+    searchRef.current = setTimeout(async () => {
+      setSearching(true);
+      setSearchError(null);
+      try {
+        const data = await apiFetch<{ results: SkillSearchResult[]; total: number }>(
+          '/api/skills/search',
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q, limit: 30 }) },
+        );
+        setSearchResults(data.results ?? []);
+        setHasSearched(true);
+      } catch (err) {
+        setSearchError(err instanceof Error ? err.message : 'Search failed');
+        setSearchResults([]);
+        setHasSearched(true);
+      } finally {
+        setSearching(false);
+      }
+    }, 350);
+    return () => { if (searchRef.current) clearTimeout(searchRef.current); };
+  }, [query]);
 
+  // ── Install a skill from skills.sh ─────────────────────────────
+  const installSkill = useCallback(async (skillName: string) => {
+    setInstallState(s => ({ ...s, [skillName]: 'installing' }));
+    try {
+      await apiFetch('/api/skills/install-from-sh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: skillName, workspaceId }),
+      });
+      setInstallState(s => ({ ...s, [skillName]: 'done' }));
+      await fetchInstalled();
+    } catch {
+      setInstallState(s => ({ ...s, [skillName]: 'error' }));
+    }
+  }, [workspaceId, fetchInstalled]);
+
+  // ── Remove a skill ─────────────────────────────────────────────
+  const removeSkill = useCallback(async (skillName: string) => {
+    try {
+      await apiFetch(`/api/skills/${encodeURIComponent(skillName)}`, { method: 'DELETE' });
+      await fetchInstalled();
+    } catch { /* silent */ }
+  }, [fetchInstalled]);
+
+  const installedNames = new Set(installedSkills.map(s => s.name.toLowerCase()));
+
+  const isInstalled = (name: string) =>
+    installedNames.has(name.toLowerCase()) || installState[name] === 'done';
+
+  // ── Render ──────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      {/* Search bar */}
-      <div className="px-5 pt-4 pb-2 shrink-0">
+    <div className="flex flex-col h-full min-h-0">
+
+      {/* ── Search bar ── */}
+      <div className="px-5 pt-5 pb-4 border-b border-border shrink-0">
         <div className="relative">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+          <div className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none">
+            {searching
+              ? <Loader2 size={15} className="animate-spin text-muted" />
+              : <svg className="w-4 h-4 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+            }
+          </div>
           <input
+            ref={inputRef}
             type="text"
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search skills..."
-            className="w-full pl-9 pr-8 py-2 text-sm bg-bg border border-border rounded-lg text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent transition-colors"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search skills.sh — react, testing, stripe, sqlite…"
+            className="w-full pl-9 pr-9 py-2.5 text-sm bg-bg border border-border rounded-lg text-[var(--text)] placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors"
+            autoFocus
           />
-          {searchQuery && (
+          {query && (
             <button
-              onClick={() => setSearchQuery('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-[var(--text)]"
+              onClick={() => { setQuery(''); inputRef.current?.focus(); }}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-[var(--text)] transition-colors"
             >
               <X size={14} />
             </button>
           )}
         </div>
+        {query && !searching && (
+          <p className="mt-1.5 text-xs text-muted/60">
+            {hasSearched && searchResults.length > 0
+              ? `${searchResults.length} results from skills.sh`
+              : hasSearched && !searchError
+                ? 'No results found'
+                : ''}
+          </p>
+        )}
       </div>
 
-      {/* Category chip bar */}
-      <div className="px-5 pb-3 shrink-0 overflow-x-auto">
-        <div className="flex items-center gap-1.5">
-          {SKILL_CATEGORIES.map(cat => (
-            <button
-              key={cat}
-              onClick={() => setActiveCategory(cat)}
-              className={`px-3 py-1 text-xs rounded-full whitespace-nowrap transition-colors ${
-                activeCategory === cat
-                  ? 'bg-accent text-white'
-                  : 'bg-bg text-muted hover:text-[var(--text)]'
-              }`}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Content */}
-      {loading ? (
-        <div className="flex items-center justify-center h-32">
-          <Loader2 size={24} className="animate-spin text-muted" />
-        </div>
-      ) : (
-        <div className="flex-1 overflow-y-auto p-5 pt-0">
-          {/* Installed skills */}
-          {installedSkills.length > 0 && (
-            <div className="mb-6">
-              <div className="flex items-center gap-2 mb-3">
-                <Check size={14} className="text-green-400" />
-                <h2 className="text-sm font-medium text-green-400">Installed Skills</h2>
-                <span className="text-xs text-muted">({installedSkills.length})</span>
-              </div>
-              <div className="grid gap-2">
-                {installedSkills.map(skill => (
-                  <SkillCard key={skill.name} skill={skill} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Discovered skills */}
-          {discoveredSkills.length > 0 && (
-            <div className="mb-6">
-              <div className="flex items-center gap-2 mb-3">
-                <Wrench size={14} className="text-accent" />
-                <h2 className="text-sm font-medium text-[var(--text)]">Discovered Skills</h2>
-                <span className="text-xs text-muted">({discoveredSkills.length})</span>
-              </div>
-              <div className="grid gap-2">
-                {discoveredSkills.map(skill => (
-                  <SkillCard key={skill.name} skill={skill} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {filtered.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-12 text-muted text-sm">
-              <Wrench size={32} className="mb-2 opacity-50" />
-              <p>{skills.length === 0 ? 'No skills found' : 'No skills match your filters'}</p>
-              <p className="text-xs mt-1">
-                {skills.length === 0
-                  ? 'Install a convention pack or create skills in Workspace Settings > Context'
-                  : 'Try a different category or search term'}
-              </p>
-            </div>
-          )}
-
-          {/* Tip */}
-          {filtered.length > 0 && (
-            <div className="mt-6 p-3 border border-border rounded bg-bg text-xs text-muted">
-              <p className="font-medium text-[var(--text)] mb-1">Manage skills in Workspace Settings</p>
-              <p>Go to Workspace Settings &gt; Context &gt; Skills to create, edit, import, and export skill files.</p>
-            </div>
-          )}
+      {/* ── Category filter chips (shown when not searching) ── */}
+      {!query.trim() && (
+        <div className="px-5 py-2 shrink-0 overflow-x-auto border-b border-border/50">
+          <div className="flex items-center gap-1.5">
+            {SKILL_CATEGORIES.map(cat => (
+              <button
+                key={cat}
+                onClick={() => setActiveCategory(cat)}
+                className={`px-3 py-1 text-xs rounded-full whitespace-nowrap transition-colors ${
+                  activeCategory === cat
+                    ? 'bg-accent text-white'
+                    : 'bg-surface-100 text-muted hover:text-[var(--text)]'
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
         </div>
       )}
+
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6">
+
+        {/* ── Search results ── */}
+        {query.trim() ? (
+          <div>
+            {searchError && (
+              <div className="flex items-center gap-2 p-3 rounded-lg border border-red-500/20 bg-red-500/5 text-red-400 text-sm">
+                <AlertTriangle size={14} className="shrink-0" />
+                <span>{searchError}</span>
+              </div>
+            )}
+            {!searchError && hasSearched && searchResults.length === 0 && !searching && (
+              <div className="py-12 text-center text-muted text-sm">
+                <Wrench size={28} className="mx-auto mb-2 opacity-40" />
+                <p>No skills found for "{query}"</p>
+              </div>
+            )}
+            {searchResults.length > 0 && (
+              <div className="space-y-2">
+                {searchResults.map(result => (
+                  <SkillRegistryCard
+                    key={result.name}
+                    name={result.name}
+                    description={result.description}
+                    author={result.author}
+                    badge={null}
+                    installed={isInstalled(result.name)}
+                    installing={installState[result.name] === 'installing'}
+                    installError={installState[result.name] === 'error'}
+                    onInstall={() => installSkill(result.name)}
+                    onRemove={() => removeSkill(result.name)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            {/* ── Suggested for your stack ── */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <TrendingUp size={13} className="text-accent" />
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">Suggested for your stack</h2>
+                {loadingSuggestions && <Loader2 size={12} className="animate-spin text-muted" />}
+              </div>
+              {!loadingSuggestions && suggestions.length === 0 && (
+                <p className="text-xs text-muted/60 py-2">No stack detected — open a workspace with a package.json to get suggestions.</p>
+              )}
+              {suggestions.length > 0 && (
+                <div className="space-y-2">
+                  {suggestions.map(s => {
+                    const name = s.skill.replace(/\.md$/, '');
+                    return (
+                      <SkillRegistryCard
+                        key={name}
+                        name={name}
+                        description={`Detected via: ${s.triggeredBy.join(', ')}`}
+                        author=""
+                        badge="suggested"
+                        installed={s.installed || isInstalled(name)}
+                        installing={installState[name] === 'installing'}
+                        installError={installState[name] === 'error'}
+                        onInstall={() => installSkill(name)}
+                        onRemove={() => removeSkill(name)}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* ── Installed skills ── */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Check size={13} className="text-green-400" />
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">Installed</h2>
+                {loadingInstalled
+                  ? <Loader2 size={12} className="animate-spin text-muted" />
+                  : <span className="text-xs text-muted/60">({installedSkills.length})</span>
+                }
+              </div>
+              {!loadingInstalled && installedSkills.length === 0 && (
+                <p className="text-xs text-muted/60 py-2">No skills installed yet. Search above to install from skills.sh.</p>
+              )}
+              {installedSkills.filter(s => skillMatchesCategory(s, activeCategory)).length > 0 && (
+                <div className="space-y-2">
+                  {installedSkills.filter(s => skillMatchesCategory(s, activeCategory)).map(skill => (
+                    <SkillRegistryCard
+                      key={skill.name}
+                      name={skill.name}
+                      description={skill.description}
+                      author=""
+                      badge={skill.source.startsWith('pack:') ? skill.source.replace('pack:', '') : skill.source}
+                      installed={true}
+                      installing={false}
+                      installError={false}
+                      onInstall={() => {}}
+                      onRemove={() => removeSkill(skill.name)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
-/* ─── Skill Card ───────────────────────────────────────────────── */
+/* ─── Skill Registry Card ──────────────────────────────────────── */
 
-function SkillCard({ skill }: { skill: SkillSummary }) {
-  const sourceLabel = skill.source.startsWith('pack:')
-    ? skill.source.replace('pack:', '')
-    : skill.source;
-
+function SkillRegistryCard({
+  name, description, author, badge,
+  installed, installing, installError,
+  onInstall, onRemove,
+}: {
+  name: string;
+  description: string;
+  author: string;
+  badge: string | null;
+  installed: boolean;
+  installing: boolean;
+  installError: boolean;
+  onInstall: () => void;
+  onRemove: () => void;
+}) {
   return (
-    <div className="p-3 rounded-lg border border-border bg-panel">
-      <div className="flex items-start justify-between">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <Wrench size={13} className="text-accent shrink-0" />
-            <h3 className="text-sm font-medium text-[var(--text)] truncate">{skill.name}</h3>
-          </div>
-          {skill.description && (
-            <p className="text-xs text-muted mt-0.5 ml-5 line-clamp-2">{skill.description}</p>
+    <div className={`flex items-start gap-3 p-3 rounded-lg border transition-colors ${
+      installed ? 'border-green-500/25 bg-green-500/5' : 'border-border bg-panel hover:border-border/80'
+    }`}>
+      <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium text-[var(--text)]">{name}</span>
+          {badge && (
+            <span className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
+              badge === 'suggested'
+                ? 'bg-accent/15 text-accent'
+                : badge === 'skills.sh' || badge === 'db'
+                  ? 'bg-green-500/15 text-green-400'
+                  : 'bg-border text-muted'
+            }`}>{badge}</span>
           )}
+          {author && <span className="text-[11px] text-muted/50">{author}</span>}
         </div>
-        <span className={`shrink-0 ml-2 px-1.5 py-0.5 text-[10px] rounded ${
-          skill.source.startsWith('pack:')
-            ? 'bg-purple-500/20 text-purple-400'
-            : skill.source === 'db'
-              ? 'bg-green-500/20 text-green-400'
-              : 'bg-border text-muted'
-        }`}>
-          {sourceLabel}
-        </span>
+        {description && (
+          <p className="text-xs text-muted mt-0.5 line-clamp-2">{description}</p>
+        )}
+      </div>
+      <div className="shrink-0">
+        {installed ? (
+          <button
+            onClick={onRemove}
+            className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
+            title="Remove skill"
+          >
+            <Trash2 size={12} />
+          </button>
+        ) : installing ? (
+          <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
+            <Loader2 size={12} className="animate-spin" />
+            <span>Installing…</span>
+          </div>
+        ) : installError ? (
+          <button
+            onClick={onInstall}
+            className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:bg-red-500/10 rounded transition-colors"
+          >
+            <AlertTriangle size={12} />
+            <span>Retry</span>
+          </button>
+        ) : (
+          <button
+            onClick={onInstall}
+            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors"
+          >
+            <Download size={12} />
+            <span>Install</span>
+          </button>
+        )}
       </div>
     </div>
   );

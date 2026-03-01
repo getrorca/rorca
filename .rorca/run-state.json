@@ -1,98 +1,17 @@
 {
-  "specId": "rorca-convention-agents",
-  "runId": 885,
-  "startedAt": "2026-03-01T05:32:25.370Z",
-  "lastUpdatedAt": "2026-03-01T20:55:53.160Z",
+  "specId": "rorca-skills-marketplace",
+  "runId": 887,
+  "startedAt": "2026-03-01T21:18:21.645Z",
+  "lastUpdatedAt": "2026-03-01T21:20:05.888Z",
   "completedStories": [
     {
-      "storyId": "CA-004",
-      "title": "Pack Fork — Customize and Detach from Upstream",
+      "storyId": "SM-002",
+      "title": "Add GET /api/skills/:name/content Endpoint",
       "status": "passed",
-      "startedAt": "2026-03-01T05:32:30.710Z",
-      "finishedAt": "2026-03-01T05:39:57.085Z",
+      "startedAt": "2026-03-01T21:19:02.167Z",
+      "finishedAt": "2026-03-01T21:20:05.888Z",
       "agentType": "claude",
-      "elapsedMs": 446375
-    },
-    {
-      "storyId": "CA-006",
-      "title": "Convention Drift Detection",
-      "status": "passed",
-      "startedAt": "2026-03-01T05:40:05.946Z",
-      "finishedAt": "2026-03-01T05:48:41.655Z",
-      "agentType": "claude",
-      "elapsedMs": 515709
-    },
-    {
-      "storyId": "CA-011",
-      "title": "Adversarial Review Pipeline — Post-Story Review Passes",
-      "status": "passed",
-      "startedAt": "2026-03-01T05:48:50.485Z",
-      "finishedAt": "2026-03-01T05:56:42.836Z",
-      "agentType": "claude",
-      "elapsedMs": 472351
-    },
-    {
-      "storyId": "CA-015",
-      "title": "Convention Pack UI — Marketplace Panel Integration",
-      "status": "passed",
-      "startedAt": "2026-03-01T05:56:51.752Z",
-      "finishedAt": "2026-03-01T06:08:20.094Z",
-      "agentType": "claude",
-      "elapsedMs": 688342
-    },
-    {
-      "storyId": "CA-016",
-      "title": "Persona Management UI — Settings Panel Integration",
-      "status": "passed",
-      "startedAt": "2026-03-01T06:08:29.476Z",
-      "finishedAt": "2026-03-01T06:20:00.747Z",
-      "agentType": "claude",
-      "elapsedMs": 691271
-    },
-    {
-      "storyId": "CA-017",
-      "title": "Convention Drift UI — Workspace Health Integration",
-      "status": "passed",
-      "startedAt": "2026-03-01T06:20:10.005Z",
-      "finishedAt": "2026-03-01T06:26:51.863Z",
-      "agentType": "claude",
-      "elapsedMs": 401858
-    },
-    {
-      "storyId": "CA-020",
-      "title": "Integration Tests — Convention Packs, Personas, and Multi-Pass Pipeline",
-      "status": "passed",
-      "startedAt": "2026-03-01T06:27:00.976Z",
-      "finishedAt": "2026-03-01T06:39:41.924Z",
-      "agentType": "claude",
-      "elapsedMs": 760948
-    },
-    {
-      "storyId": "CA-022",
-      "title": "OpenAPI Annotation Audit — Ensure All Routes Have @swagger Coverage",
-      "status": "passed",
-      "startedAt": "2026-03-01T06:39:51.715Z",
-      "finishedAt": "2026-03-01T07:05:34.450Z",
-      "agentType": "claude",
-      "elapsedMs": 1542735
-    },
-    {
-      "storyId": "SK-004",
-      "title": "Skills.sh CLI Integration + Echolocation Bridge",
-      "status": "passed",
-      "startedAt": "2026-03-01T07:05:43.894Z",
-      "finishedAt": "2026-03-01T07:14:36.363Z",
-      "agentType": "claude",
-      "elapsedMs": 532469
-    },
-    {
-      "storyId": "SM-005",
-      "title": "Add Category Filter Chips",
-      "status": "passed",
-      "startedAt": "2026-03-01T20:53:21.844Z",
-      "finishedAt": "2026-03-01T20:55:53.160Z",
-      "agentType": "claude",
-      "elapsedMs": 151316
+      "elapsedMs": 63721
     }
   ],
   "failedStories": [],
