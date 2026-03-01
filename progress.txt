@@ -3,7 +3,7 @@
 Spec: rorca-convention-agents
 Run ID: 885
 Started: 2026-03-01T05:32:25.370Z
-Last Updated: 2026-03-01T20:55:26.709Z
+Last Updated: 2026-03-01T20:55:53.160Z
 
 ## Completed Stories (10)
 - CA-004: Pack Fork — Customize and Detach from Upstream — DONE (claude, 446s)
@@ -15,4 +15,4 @@ Last Updated: 2026-03-01T20:55:26.709Z
 - CA-020: Integration Tests — Convention Packs, Personas, and Multi-Pass Pipeline — DONE (claude, 761s)
 - CA-022: OpenAPI Annotation Audit — Ensure All Routes Have @swagger Coverage — DONE (claude, 1543s)
 - SK-004: Skills.sh CLI Integration + Echolocation Bridge — DONE (claude, 532s)
-- SM-003: Extract renderMarkdown to Shared Utility — DONE (claude, 124s)
+- SM-005: Add Category Filter Chips — DONE (claude, 151s)
