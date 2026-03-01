@@ -2,7 +2,7 @@
   "specId": "rorca-skills-marketplace",
   "runId": 887,
   "startedAt": "2026-03-01T21:18:21.645Z",
-  "lastUpdatedAt": "2026-03-01T21:22:34.111Z",
+  "lastUpdatedAt": "2026-03-01T21:24:55.515Z",
   "completedStories": [
     {
       "storyId": "SM-002",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-01T21:22:34.111Z",
       "agentType": "claude",
       "elapsedMs": 102268
+    },
+    {
+      "storyId": "SM-006",
+      "title": "Add Install All Recommended Banner",
+      "status": "passed",
+      "startedAt": "2026-03-01T21:23:19.623Z",
+      "finishedAt": "2026-03-01T21:24:55.514Z",
+      "agentType": "claude",
+      "elapsedMs": 95891
     }
   ],
   "failedStories": [],
