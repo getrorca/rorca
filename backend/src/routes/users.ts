@@ -22,8 +22,41 @@ interface AssignmentDbRow {
   workspace_path: string;
 }
 
-// ─── V2-042: GET /me/assigned — All specs and stories assigned to current user ──
-
+/**
+ * @swagger
+ * /api/users/me/assigned:
+ *   get:
+ *     tags: [Users]
+ *     summary: Get specs and stories assigned to the current user
+ *     operationId: getMyAssignments
+ *     description: Returns all specs and stories assigned to the authenticated user, grouped by spec and enriched with titles from the filesystem.
+ *     responses:
+ *       200:
+ *         description: List of assignments
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 assignments:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       specName: { type: string }
+ *                       workspaceId: { type: string }
+ *                       workspaceLabel: { type: string }
+ *                       assignedAt: { type: string }
+ *                       assignedStories:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             storyId: { type: string }
+ *                             storyTitle: { type: string }
+ *                             assignedAt: { type: string }
+ */
 router.get('/me/assigned', (req: Request, res: Response) => {
   try {
     const user = getEffectiveUser(req);
@@ -110,8 +143,39 @@ router.get('/me/assigned', (req: Request, res: Response) => {
   }
 });
 
-// ─── V2-042: GET /workspace-members — List users available for assignment ──────
-
+/**
+ * @swagger
+ * /api/users/workspace-members:
+ *   get:
+ *     tags: [Users]
+ *     summary: List users available for story assignment
+ *     operationId: listWorkspaceMembers
+ *     description: Returns all users in the system who can be assigned to stories in the specified workspace. In a team context this would filter by team membership.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of members
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 members:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       displayName: { type: string }
+ *                       email: { type: string }
+ *                       avatarUrl: { type: string, nullable: true }
+ *       400:
+ *         description: Missing workspaceId query parameter
+ */
 router.get('/workspace-members', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;

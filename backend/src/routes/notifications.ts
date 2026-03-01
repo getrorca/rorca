@@ -36,7 +36,52 @@ interface PreferenceRow {
   email: number;
 }
 
-// GET /api/notifications — list current user's notifications
+/**
+ * @swagger
+ * /api/notifications:
+ *   get:
+ *     tags: [Notifications]
+ *     summary: List notifications
+ *     operationId: listNotifications
+ *     description: Returns a paginated list of notifications for the authenticated user. Supports filtering to show only unread notifications.
+ *     parameters:
+ *       - in: query
+ *         name: unread
+ *         schema: { type: string, enum: ['true', 'false'] }
+ *         description: "Set to 'true' to return only unread notifications"
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer }
+ *         description: Page number
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, maximum: 100 }
+ *         description: Items per page (max 100, default 30)
+ *     responses:
+ *       200:
+ *         description: Paginated notification list with unread count
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       type: { type: string }
+ *                       title: { type: string }
+ *                       body: { type: string }
+ *                       link: { type: string, nullable: true }
+ *                       readAt: { type: string, format: date-time, nullable: true }
+ *                       createdAt: { type: string, format: date-time }
+ *                 total: { type: integer }
+ *                 hasMore: { type: boolean }
+ *                 cursor: { type: string, nullable: true }
+ *                 unreadCount: { type: integer }
+ */
 router.get('/', (req, res) => {
   const user = (req as any).user as AuthUser;
   const pagination = parsePaginationParams(req, { limit: 30, maxLimit: 100 });
@@ -77,7 +122,24 @@ router.get('/', (req, res) => {
   });
 });
 
-// GET /api/notifications/unread-count — lightweight poll for badge
+/**
+ * @swagger
+ * /api/notifications/unread-count:
+ *   get:
+ *     tags: [Notifications]
+ *     summary: Get unread notification count
+ *     operationId: getUnreadNotificationCount
+ *     description: Returns the count of unread notifications for the authenticated user. Designed as a lightweight endpoint for polling badge counts. Returns 0 when no user session is active.
+ *     responses:
+ *       200:
+ *         description: Unread count
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 count: { type: integer }
+ */
 router.get('/unread-count', (req, res) => {
   const user = (req as any).user as AuthUser | undefined;
   // Auth bypassed in local mode — return 0 when no user session
@@ -88,7 +150,31 @@ router.get('/unread-count', (req, res) => {
   res.json({ count: row.count });
 });
 
-// POST /api/notifications/:id/read — mark single notification as read
+/**
+ * @swagger
+ * /api/notifications/{id}/read:
+ *   post:
+ *     tags: [Notifications]
+ *     summary: Mark notification as read
+ *     operationId: markNotificationRead
+ *     description: Marks a single notification as read by setting its read_at timestamp. No-ops if the notification is already read.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Notification ID
+ *     responses:
+ *       200:
+ *         description: Notification marked as read
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       404: { description: "Notification not found or already read" }
+ */
 router.post('/:id/read', (req, res) => {
   const user = (req as any).user as AuthUser;
   const result = db.prepare(
@@ -100,7 +186,25 @@ router.post('/:id/read', (req, res) => {
   res.json({ ok: true });
 });
 
-// POST /api/notifications/read-all — mark all as read
+/**
+ * @swagger
+ * /api/notifications/read-all:
+ *   post:
+ *     tags: [Notifications]
+ *     summary: Mark all notifications as read
+ *     operationId: markAllNotificationsRead
+ *     description: Marks all unread notifications for the authenticated user as read. Returns the number of notifications that were marked.
+ *     responses:
+ *       200:
+ *         description: All notifications marked as read
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 marked: { type: integer, description: "Number of notifications marked as read" }
+ */
 router.post('/read-all', (req, res) => {
   const user = (req as any).user as AuthUser;
   const result = db.prepare(
@@ -109,7 +213,31 @@ router.post('/read-all', (req, res) => {
   res.json({ ok: true, marked: result.changes });
 });
 
-// DELETE /api/notifications/:id — delete a single notification
+/**
+ * @swagger
+ * /api/notifications/{id}:
+ *   delete:
+ *     tags: [Notifications]
+ *     summary: Delete a notification
+ *     operationId: deleteNotification
+ *     description: Permanently deletes a single notification. Only the notification owner can delete it.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Notification ID
+ *     responses:
+ *       200:
+ *         description: Notification deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       404: { description: "Notification not found" }
+ */
 router.delete('/:id', (req, res) => {
   const user = (req as any).user as AuthUser;
   const result = db.prepare(
@@ -123,7 +251,30 @@ router.delete('/:id', (req, res) => {
 
 // ─── Notification Preferences ───
 
-// GET /api/notifications/preferences — get user's preferences
+/**
+ * @swagger
+ * /api/notifications/preferences:
+ *   get:
+ *     tags: [Notifications]
+ *     summary: Get notification preferences
+ *     operationId: getNotificationPreferences
+ *     description: Returns the authenticated user's notification preferences for each event type. Missing event types default to both in-app and email enabled.
+ *     responses:
+ *       200:
+ *         description: Notification preferences map
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 preferences:
+ *                   type: object
+ *                   additionalProperties:
+ *                     type: object
+ *                     properties:
+ *                       inApp: { type: boolean }
+ *                       email: { type: boolean }
+ */
 router.get('/preferences', (req, res) => {
   const user = (req as any).user as AuthUser;
   const rows = db.prepare(
@@ -142,7 +293,41 @@ router.get('/preferences', (req, res) => {
   res.json({ preferences: prefsMap });
 });
 
-// PUT /api/notifications/preferences — upsert user's preferences
+/**
+ * @swagger
+ * /api/notifications/preferences:
+ *   put:
+ *     tags: [Notifications]
+ *     summary: Update notification preferences
+ *     operationId: updateNotificationPreferences
+ *     description: Creates or updates the authenticated user's notification preferences. Each event type can independently toggle in-app and email delivery. Unknown event types are silently ignored.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [preferences]
+ *             properties:
+ *               preferences:
+ *                 type: object
+ *                 description: "Map of event type to preference settings"
+ *                 additionalProperties:
+ *                   type: object
+ *                   properties:
+ *                     inApp: { type: boolean }
+ *                     email: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Preferences updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       400: { description: "preferences object required" }
+ */
 router.put('/preferences', (req, res) => {
   const user = (req as any).user as AuthUser;
   const { preferences } = req.body as {

@@ -2,7 +2,7 @@
   "specId": "rorca-convention-agents",
   "runId": 885,
   "startedAt": "2026-03-01T05:32:25.370Z",
-  "lastUpdatedAt": "2026-03-01T06:39:41.924Z",
+  "lastUpdatedAt": "2026-03-01T07:05:34.450Z",
   "completedStories": [
     {
       "storyId": "CA-004",
@@ -66,6 +66,15 @@
       "finishedAt": "2026-03-01T06:39:41.924Z",
       "agentType": "claude",
       "elapsedMs": 760948
+    },
+    {
+      "storyId": "CA-022",
+      "title": "OpenAPI Annotation Audit — Ensure All Routes Have @swagger Coverage",
+      "status": "passed",
+      "startedAt": "2026-03-01T06:39:51.715Z",
+      "finishedAt": "2026-03-01T07:05:34.450Z",
+      "agentType": "claude",
+      "elapsedMs": 1542735
     }
   ],
   "failedStories": [],

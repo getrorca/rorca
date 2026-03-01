@@ -33,8 +33,35 @@ function checkDbConnected(): boolean {
   }
 }
 
-// ─── GET /api/health — Basic health check ────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Basic health check
+ *     operationId: getHealth
+ *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, and MCP transport mode. When agent type is opencode or codex, includes installation status.
+ *     responses:
+ *       200:
+ *         description: Server is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status: { type: string, enum: [healthy, degraded] }
+ *                 version: { type: string }
+ *                 uptime: { type: integer, description: "Uptime in seconds" }
+ *                 db_connected: { type: boolean }
+ *                 active_runs: { type: integer }
+ *                 mcpTransport: { type: string }
+ *                 opencodeInstalled: { type: boolean }
+ *                 opencodeVersion: { type: string }
+ *                 codexInstalled: { type: boolean }
+ *                 codexVersion: { type: string }
+ *       503:
+ *         description: Server is degraded (database not connected)
+ */
 router.get('/', (_req: Request, res: Response) => {
   res.set(NO_CACHE_HEADERS);
 
@@ -77,8 +104,40 @@ router.get('/', (_req: Request, res: Response) => {
   });
 });
 
-// ─── GET /api/health/detailed — Extended metrics ─────────────────────────────
-
+/**
+ * @swagger
+ * /api/health/detailed:
+ *   get:
+ *     tags: [Health]
+ *     summary: Detailed health check with extended metrics
+ *     operationId: getHealthDetailed
+ *     description: Returns extended health metrics including database file size, pending spec count, memory usage, last backup timestamp, and execution engine status.
+ *     responses:
+ *       200:
+ *         description: Detailed health metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status: { type: string, enum: [healthy, degraded] }
+ *                 version: { type: string }
+ *                 uptime: { type: integer }
+ *                 db_connected: { type: boolean }
+ *                 active_runs: { type: integer }
+ *                 db_size: { type: integer, description: "Database file size in bytes" }
+ *                 pending_specs_count: { type: integer }
+ *                 memory_usage:
+ *                   type: object
+ *                   properties:
+ *                     rss: { type: integer }
+ *                     heapTotal: { type: integer }
+ *                     heapUsed: { type: integer }
+ *                     external: { type: integer }
+ *                 last_backup_at: { type: string, nullable: true }
+ *       503:
+ *         description: Server is degraded
+ */
 router.get('/detailed', (_req: Request, res: Response) => {
   res.set(NO_CACHE_HEADERS);
 

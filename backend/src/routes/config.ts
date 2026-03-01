@@ -84,6 +84,8 @@ const PROVIDER_KEY_MAP: Record<string, string[]> = {
  * /api/config:
  *   get:
  *     summary: Get agent configuration
+ *     operationId: getAgentConfig
+ *     description: Returns the current agent type, model, API key status, and detected CLI binaries.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -226,6 +228,8 @@ async function detectOllama(): Promise<OllamaStatus> {
  * /api/config/ollama:
  *   get:
  *     summary: Detect Ollama availability and list locally installed models
+ *     operationId: detectOllamaModels
+ *     description: Probes the local Ollama API and returns available models with their sizes.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -241,6 +245,8 @@ router.get('/ollama', async (_req: Request, res: Response) => {
  * /api/config/opencode-models:
  *   get:
  *     summary: Get available OpenCode models grouped by provider
+ *     operationId: listOpenCodeModels
+ *     description: Returns the full OpenCode model catalog with dynamic Ollama discovery, grouped by provider.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -345,6 +351,8 @@ function resolveOpenRouterKey(): string | null {
  * /api/config/openrouter-models:
  *   get:
  *     summary: Get OpenRouter model catalog (cached 1h)
+ *     operationId: listOpenRouterModels
+ *     description: Fetches the OpenRouter model catalog (cached for one hour) and returns models grouped by provider family.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -438,6 +446,8 @@ router.get('/openrouter-models', async (_req: Request, res: Response) => {
  * /api/config/openrouter-test:
  *   post:
  *     summary: Test OpenRouter API key connection
+ *     operationId: testOpenRouterConnection
+ *     description: Validates an OpenRouter API key by making a test request and returns latency and model count.
  *     tags: [Config]
  *     requestBody:
  *       content:
@@ -517,6 +527,8 @@ router.post('/openrouter-test', async (req: Request, res: Response) => {
  * /api/config/agent:
  *   put:
  *     summary: Update agent configuration (hot-reload, no restart required)
+ *     operationId: updateAgentConfig
+ *     description: Switches the active execution engine and model with validation, persisting the change to the database.
  *     tags: [Config]
  *     requestBody:
  *       content:
@@ -668,6 +680,8 @@ function resolveWorkspacePath(workspaceId: string | undefined): string | null {
  * /api/config/orchestration:
  *   get:
  *     summary: Get the full orchestration config for a workspace (merged with defaults)
+ *     operationId: getOrchestrationConfig
+ *     description: Returns the orchestration configuration for a workspace including routing, thresholds, cascades, and escalation settings.
  *     tags: [Config]
  *     parameters:
  *       - name: workspaceId
@@ -704,6 +718,8 @@ router.get('/orchestration', (req: Request, res: Response) => {
  * /api/config/orchestration:
  *   put:
  *     summary: Update orchestration config in .rorca/config.json
+ *     operationId: updateOrchestrationConfig
+ *     description: Writes the orchestration configuration to the workspace .rorca/config.json file after validation.
  *     tags: [Config]
  *     requestBody:
  *       content:
@@ -786,6 +802,8 @@ router.put('/orchestration', (req: Request, res: Response) => {
  * /api/config/claude-auth:
  *   get:
  *     summary: Get Claude subscription auth state (no raw token exposed)
+ *     operationId: getClaudeAuthState
+ *     description: Returns the current Claude CLI authentication status including connection state and account details.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -801,6 +819,8 @@ router.get('/claude-auth', (_req: Request, res: Response) => {
  * /api/config/claude-auth/login:
  *   post:
  *     summary: Trigger Claude CLI auth login (opens browser for PKCE OAuth)
+ *     operationId: triggerClaudeLogin
+ *     description: Spawns the Claude CLI login flow which opens the user's browser for PKCE OAuth authentication.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -822,6 +842,8 @@ router.post('/claude-auth/login', (_req: Request, res: Response) => {
  * /api/config/claude-auth/logout:
  *   post:
  *     summary: Trigger Claude CLI auth logout
+ *     operationId: triggerClaudeLogout
+ *     description: Removes the stored Claude CLI credentials and disconnects the account.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -845,6 +867,8 @@ router.post('/claude-auth/logout', async (_req: Request, res: Response) => {
  * /api/config/codex-auth:
  *   get:
  *     summary: Get Codex CLI (ChatGPT) auth state
+ *     operationId: getCodexAuthState
+ *     description: Returns the current Codex CLI authentication status including connection state and ChatGPT plan details.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -860,6 +884,8 @@ router.get('/codex-auth', (_req: Request, res: Response) => {
  * /api/config/codex-auth/login:
  *   post:
  *     summary: Trigger Codex CLI login (opens browser for ChatGPT OAuth)
+ *     operationId: triggerCodexLogin
+ *     description: Spawns the Codex CLI login flow which opens the user's browser for ChatGPT OAuth authentication.
  *     tags: [Config]
  *     responses:
  *       200:
@@ -881,6 +907,8 @@ router.post('/codex-auth/login', (_req: Request, res: Response) => {
  * /api/config/codex-auth/logout:
  *   post:
  *     summary: Trigger Codex CLI logout (remove stored credentials)
+ *     operationId: triggerCodexLogout
+ *     description: Removes the stored Codex CLI credentials and disconnects the ChatGPT account.
  *     tags: [Config]
  *     responses:
  *       200:

@@ -31,6 +31,29 @@ interface GitHubConnectionRow {
 
 // ─── GET /api/workspaces/:id/github — Connection status ──────────────────────
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Get GitHub connection status for a workspace
+ *     operationId: getWorkspaceGithubStatus
+ *     description: Returns the current GitHub webhook connection status for the specified workspace, including repository details and auto-PR configuration if connected.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Connection status returned successfully. Returns `{ connected: false }` if no GitHub connection exists, or full connection details if connected.
+ *       404:
+ *         description: Workspace not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/', (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
@@ -71,6 +94,52 @@ router.get('/', (req: Request, res: Response) => {
 
 // ─── POST /api/workspaces/:id/github/connect — Create webhook + store ────────
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/connect:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Connect a GitHub repository to a workspace
+ *     operationId: connectWorkspaceGithub
+ *     description: Creates a webhook on the specified GitHub repository and stores the connection details. Requires a valid GitHub personal access token with webhook permissions.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [repoOwner, repoName, githubToken]
+ *             properties:
+ *               repoOwner:
+ *                 type: string
+ *                 description: GitHub repository owner (user or organization)
+ *               repoName:
+ *                 type: string
+ *                 description: GitHub repository name
+ *               githubToken:
+ *                 type: string
+ *                 description: GitHub personal access token with repo and admin:repo_hook scopes
+ *     responses:
+ *       201:
+ *         description: GitHub connection created successfully
+ *       400:
+ *         description: Missing required fields (repoOwner, repoName, or githubToken)
+ *       404:
+ *         description: Workspace not found or GitHub repository not found
+ *       409:
+ *         description: GitHub already connected for this workspace
+ *       500:
+ *         description: Internal server error
+ *       502:
+ *         description: GitHub API error during webhook creation
+ */
 router.post('/connect', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
@@ -160,6 +229,44 @@ router.post('/connect', async (req: Request, res: Response) => {
 
 // ─── POST /api/workspaces/:id/github/disconnect — Remove webhook + clear ─────
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/disconnect:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Disconnect a GitHub repository from a workspace
+ *     operationId: disconnectWorkspaceGithub
+ *     description: Deletes the webhook from the GitHub repository and removes the connection record from the database. If the webhook was already deleted on GitHub's side, the local connection is still cleaned up.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [githubToken]
+ *             properties:
+ *               githubToken:
+ *                 type: string
+ *                 description: GitHub personal access token with permissions to delete the webhook
+ *     responses:
+ *       200:
+ *         description: GitHub connection removed successfully
+ *       400:
+ *         description: Missing required field (githubToken)
+ *       404:
+ *         description: No GitHub connection found for this workspace
+ *       500:
+ *         description: Internal server error
+ *       502:
+ *         description: GitHub API error during webhook deletion
+ */
 router.post('/disconnect', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
@@ -220,6 +327,27 @@ router.post('/disconnect', async (req: Request, res: Response) => {
 
 // ─── GET /api/workspaces/:id/github/account — OAuth account info ──────────────
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/account:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Get GitHub OAuth account info
+ *     operationId: getWorkspaceGithubAccount
+ *     description: Returns the GitHub OAuth account information for the current user, including username, avatar URL, connection timestamp, and granted scopes. In single-user mode, returns the first user's connection.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Account info returned successfully. Returns `{ connected: false }` if no user or GitHub connection exists, or full account details if connected.
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/account', (req: Request, res: Response) => {
   try {
     // Get first user's GitHub connection (auth is bypassed — single-user local tool)
@@ -255,6 +383,25 @@ router.get('/account', (req: Request, res: Response) => {
 
 // ─── POST /api/workspaces/:id/github/test-connection — Verify token validity ─
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/test-connection:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Test GitHub connection validity
+ *     operationId: testWorkspaceGithubConnection
+ *     description: Verifies that the stored GitHub OAuth token is still valid by making an authenticated request to the GitHub API. Returns the validity status and the associated GitHub username on success.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Test result returned. Returns `{ valid: true, username }` on success, or `{ valid: false, error }` if no connection exists or token is invalid.
+ */
 router.post('/test-connection', async (req: Request, res: Response) => {
   try {
     const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
@@ -296,6 +443,29 @@ router.post('/test-connection', async (req: Request, res: Response) => {
 
 // ─── POST /api/workspaces/:id/github/disconnect-oauth — Revoke OAuth token ───
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/disconnect-oauth:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Revoke GitHub OAuth token and remove connection
+ *     operationId: disconnectWorkspaceGithubOauth
+ *     description: Revokes the stored GitHub OAuth token via the GitHub API (best-effort), removes the GitHub connection record from the database, and clears the user's GitHub ID. If GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET are not configured, the token is not revoked on GitHub's side but the local connection is still removed.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: OAuth connection removed successfully
+ *       404:
+ *         description: No user configured or no GitHub connection found
+ *       500:
+ *         description: Internal server error
+ */
 router.post('/disconnect-oauth', async (req: Request, res: Response) => {
   try {
     const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
@@ -351,6 +521,47 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
 
 // ─── PUT /api/workspaces/:id/github/auto-pr — Update auto-PR settings ────────
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/auto-pr:
+ *   put:
+ *     tags: [GitHub]
+ *     summary: Update auto-PR settings for a workspace
+ *     operationId: updateWorkspaceGithubAutoPr
+ *     description: Updates the automatic pull request configuration for the workspace's GitHub connection, including whether auto-PR is enabled, the target branch, and the list of reviewers.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               enabled:
+ *                 type: boolean
+ *                 description: Whether automatic PR creation is enabled
+ *               targetBranch:
+ *                 type: string
+ *                 description: Target branch for auto-created PRs (defaults to "main")
+ *               reviewers:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: List of GitHub usernames to request as reviewers
+ *     responses:
+ *       200:
+ *         description: Auto-PR settings updated successfully
+ *       404:
+ *         description: No GitHub connection found for this workspace
+ *       500:
+ *         description: Internal server error
+ */
 router.put('/auto-pr', (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
@@ -395,6 +606,35 @@ router.put('/auto-pr', (req: Request, res: Response) => {
 
 // ─── GET /api/workspaces/:id/github/actions-yaml — Generate GitHub Actions workflow ──
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/actions-yaml:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Generate GitHub Actions workflow YAML
+ *     operationId: getWorkspaceGithubActionsYaml
+ *     description: Generates a GitHub Actions workflow YAML file configured for the specified workspace. The workflow triggers Rorca pipeline execution on push to main and polls for completion. Returns the YAML as a downloadable file attachment.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     produces:
+ *       - application/x-yaml
+ *     responses:
+ *       200:
+ *         description: GitHub Actions workflow YAML file returned as attachment
+ *         content:
+ *           application/x-yaml:
+ *             schema:
+ *               type: string
+ *       404:
+ *         description: Workspace not found
+ *       500:
+ *         description: Internal server error
+ */
 router.get('/actions-yaml', (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
