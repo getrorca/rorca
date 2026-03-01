@@ -64,6 +64,8 @@ function countWords(text: string): number {
  * /api/workspaces/{id}/context-files:
  *   get:
  *     summary: List all registered context/intent files for a workspace
+ *     operationId: listContextFiles
+ *     description: Returns all well-known, config-registered, skill, and global routing context/intent files for the specified workspace.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -189,6 +191,8 @@ router.get('/:id/context-files', (req: Request, res: Response) => {
  * /api/workspaces/{id}/context-files/read:
  *   get:
  *     summary: Read the content of a context/intent file
+ *     operationId: readContextFile
+ *     description: Reads and returns the content, word count, estimated token count, and metadata for a context/intent file within the workspace.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -250,6 +254,8 @@ router.get('/:id/context-files/read', (req: Request, res: Response) => {
  * /api/workspaces/{id}/context-files/write:
  *   put:
  *     summary: Write content to a context/intent file
+ *     operationId: writeContextFile
+ *     description: Writes the provided content to a context/intent file, creating parent directories if needed, and suppresses chokidar echo events.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -318,6 +324,8 @@ router.put('/:id/context-files/write', (req: Request, res: Response) => {
  * /api/workspaces/{id}/context-files/diff:
  *   get:
  *     summary: Get git diff of a context file vs last committed version
+ *     operationId: diffContextFile
+ *     description: Returns the unified git diff and committed content for a context file compared against the HEAD revision.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -401,6 +409,8 @@ router.get('/:id/context-files/diff', (req: Request, res: Response) => {
  * /api/workspaces/{id}/context-files/create-skill:
  *   post:
  *     summary: Create a new skill file in .rorca/skills/ with a default template
+ *     operationId: createSkillFile
+ *     description: Creates a new skill markdown file in the workspace .rorca/skills/ directory using the specified or blank template.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -816,6 +826,8 @@ router.post('/:id/context-files/create-skill', (req: Request, res: Response) => 
  * /api/workspaces/{id}/context-files/skill-templates:
  *   get:
  *     summary: List available skill templates
+ *     operationId: listSkillTemplates
+ *     description: Returns the list of available skill template identifiers and their display labels.
  *     tags: [Context Files]
  *     responses:
  *       200:
@@ -836,6 +848,8 @@ router.get('/:id/context-files/skill-templates', (_req: Request, res: Response) 
  * /api/workspaces/{id}/context-files/delete-skill:
  *   delete:
  *     summary: Delete a skill file from .rorca/skills/
+ *     operationId: deleteSkillFile
+ *     description: Deletes a skill file from the workspace .rorca/skills/ directory and returns warnings if the skill is referenced in active routing scopes or tags.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -924,6 +938,8 @@ router.delete('/:id/context-files/delete-skill', (req: Request, res: Response) =
  * /api/workspaces/{id}/context-files/skill-usage:
  *   get:
  *     summary: Get skill injection counts from recent WAL events
+ *     operationId: getSkillUsageStats
+ *     description: Queries WAL events to compute how many times each skill file was injected during recent pipeline runs.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -991,6 +1007,8 @@ router.get('/:id/context-files/skill-usage', (req: Request, res: Response) => {
  * /api/workspaces/{id}/context-files/import-skill:
  *   post:
  *     summary: Import a skill file from a URL
+ *     operationId: importSkillFromUrl
+ *     description: Fetches markdown content from a remote URL and saves it as a new skill file in .rorca/skills/.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -1102,6 +1120,8 @@ router.post('/:id/context-files/import-skill', async (req: Request, res: Respons
  * /api/workspaces/{id}/context-files/export-skill:
  *   get:
  *     summary: Export a skill file as downloadable .md
+ *     operationId: exportSkillFile
+ *     description: Returns a skill file as a downloadable markdown attachment with appropriate Content-Disposition headers.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id
@@ -1158,6 +1178,8 @@ router.get('/:id/context-files/export-skill', (req: Request, res: Response) => {
  * /api/workspaces/{id}/context-files/skill-assignments:
  *   get:
  *     summary: Get scope and tag assignments for all skill files
+ *     operationId: getSkillAssignments
+ *     description: Returns a map of each skill file path to its assigned routing scopes and tags from the workspace .rorca/config.json.
  *     tags: [Context Files]
  *     parameters:
  *       - name: id

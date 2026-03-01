@@ -1,0 +1,20 @@
+{
+  "name": "saas-nextjs",
+  "version": "1.0.0",
+  "description": "Next.js 14 + Tailwind + Prisma + Stripe + Supabase Auth — full-stack SaaS conventions",
+  "author": "rorca",
+  "license": "MIT",
+  "compatibility": {
+    "node": ">=18",
+    "frameworks": ["next", "react", "prisma", "tailwindcss", "stripe"]
+  },
+  "dependencies": [
+    { "name": "next", "version": "^14.0.0" },
+    { "name": "react", "version": "^18.0.0" },
+    { "name": "@prisma/client", "version": "^5.0.0" },
+    { "name": "tailwindcss", "version": "^3.4.0" },
+    { "name": "stripe", "version": "^14.0.0" },
+    { "name": "@supabase/supabase-js", "version": "^2.0.0" }
+  ],
+  "skills": ["tailwind", "prisma", "nextjs", "stripe", "auth"]
+}

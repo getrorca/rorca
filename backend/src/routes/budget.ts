@@ -108,8 +108,47 @@ export function checkBudgetThresholds(workspaceId: string): {
   return { alertTriggered, capExceeded, spending, config };
 }
 
-// ─── POST /api/workspaces/:id/budget — Create or update budget config ────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/budget:
+ *   post:
+ *     tags: [Budget]
+ *     summary: Create or update budget configuration
+ *     operationId: upsertBudgetConfig
+ *     description: Creates or updates the budget configuration for a workspace. Immediately checks spending against new thresholds and emits WAL events if thresholds are exceeded.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               alert_threshold_usd: { type: number, nullable: true }
+ *               hard_cap_usd: { type: number, nullable: true }
+ *               period: { type: string, enum: [daily, weekly, monthly], default: monthly }
+ *               notify_emails: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Budget config saved with current spending status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 config: { type: object }
+ *                 spending_usd: { type: number }
+ *                 alert_triggered: { type: boolean }
+ *                 cap_exceeded: { type: boolean }
+ *       400:
+ *         description: Invalid thresholds or period
+ *       404:
+ *         description: Workspace not found
+ */
 router.post('/', (req: Request, res: Response) => {
   try {
     const workspaceId = String(req.params.id);
@@ -199,8 +238,36 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── GET /api/workspaces/:id/budget — Get budget config + current spending ───
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/budget:
+ *   get:
+ *     tags: [Budget]
+ *     summary: Get budget configuration and current spending
+ *     operationId: getBudgetConfig
+ *     description: Returns the budget configuration for a workspace along with current spending, remaining budget, and threshold status.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Budget config and spending status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 config: { type: object, nullable: true }
+ *                 spending_usd: { type: number }
+ *                 remaining_usd: { type: number, nullable: true }
+ *                 period_start: { type: string, nullable: true }
+ *                 alert_triggered: { type: boolean }
+ *                 cap_exceeded: { type: boolean }
+ *       404:
+ *         description: Workspace not found
+ */
 router.get('/', (req: Request, res: Response) => {
   try {
     const workspaceId = String(req.params.id);
@@ -254,8 +321,31 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── DELETE /api/workspaces/:id/budget — Remove budget config ────────────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/budget:
+ *   delete:
+ *     tags: [Budget]
+ *     summary: Remove budget configuration
+ *     operationId: deleteBudgetConfig
+ *     description: Permanently removes the budget configuration for a workspace. Emits a WAL event for the deletion.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Budget config deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 deleted: { type: boolean }
+ *       404:
+ *         description: No budget config found for this workspace
+ */
 router.delete('/', (req: Request, res: Response) => {
   try {
     const workspaceId = String(req.params.id);

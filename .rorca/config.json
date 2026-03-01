@@ -37,6 +37,10 @@
     "waveParallelism": false,
     "storyTimeoutMin": 45,
     "maxRetries": 3,
-    "autoCommit": true
+    "autoCommit": true,
+    "adversarialReview": {
+      "enabled": false,
+      "reviewTimeoutMin": 5
+    }
   }
 }

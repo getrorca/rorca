@@ -16,6 +16,7 @@ const router = Router();
  *   get:
  *     tags: [Workspaces]
  *     summary: Get file watcher health and watched file list
+ *     operationId: getFileWatchStatus
  *     description: >
  *       Returns the current state of all file watchers: which workspaces
  *       are being watched, which files are tracked, and whether watchers
