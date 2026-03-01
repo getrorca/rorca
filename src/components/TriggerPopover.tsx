@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
@@ -55,6 +55,33 @@ interface ContextPreviewData {
   scopeCount: number;
   tagCount: number;
   stories: ContextStoryPreview[];
+}
+
+interface DriftViolation {
+  file: string;
+  line: number;
+  convention: string;
+  description: string;
+  severity: 'warning' | 'error';
+}
+
+interface DriftReportData {
+  id: number;
+  workspaceId: string;
+  triggerType: string;
+  report: {
+    violations: DriftViolation[];
+    score: number;
+    conventionsChecked: number;
+    filesSampled: number;
+    checkedAt: string;
+  };
+}
+
+interface WorkspaceConfig {
+  execution?: {
+    driftCheck?: boolean;
+  };
 }
 
 function formatTokenCount(n: number): string {
@@ -134,6 +161,8 @@ export default function TriggerPopover({
   const [contextPreview, setContextPreview] = useState<ContextPreviewData | null>(null);
   const [contextExpanded, setContextExpanded] = useState(false);
   const [expandedStory, setExpandedStory] = useState<string | null>(null);
+  const [driftData, setDriftData] = useState<DriftReportData | null>(null);
+  const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // Fetch workspace health badge on mount
@@ -177,6 +206,21 @@ export default function TriggerPopover({
       })
       .catch(() => {});
   }, [specPath, workspaceId]);
+
+  // Fetch drift report + config on mount
+  useEffect(() => {
+    if (!workspaceId) return;
+    // Fetch latest drift report
+    apiFetch<DriftReportData>(`/api/conventions/drift/${workspaceId}`)
+      .then(setDriftData)
+      .catch(() => {});
+    // Fetch workspace config to check if driftCheck is enabled
+    apiFetch<{ config: WorkspaceConfig }>(`/api/workspaces/${workspaceId}/rorca-config`)
+      .then((res) => {
+        setDriftCheckEnabled(res.config?.execution?.driftCheck === true);
+      })
+      .catch(() => {});
+  }, [workspaceId]);
 
   // Fetch context preview on mount
   useEffect(() => {
@@ -223,6 +267,10 @@ export default function TriggerPopover({
         : 'Claude (Pro/Max)'
     : null;
 
+  // Drift warning: show if driftCheck is enabled AND there are error-severity violations
+  const driftErrors = driftData?.report.violations.filter(v => v.severity === 'error') ?? [];
+  const showDriftWarning = driftCheckEnabled && driftErrors.length > 0;
+
   const isWaveParallel = orchestration?.mode === 'wave-parallel';
 
   // Build orchestration badge text
@@ -258,6 +306,21 @@ export default function TriggerPopover({
               Low context — add CLAUDE.md or run scaffolding
             </span>
           )}
+        </div>
+      )}
+
+      {/* CA-017: Convention drift warning banner */}
+      {showDriftWarning && (
+        <div className="flex items-start gap-2 p-2.5 rounded-md bg-amber-500/10 border border-amber-500/30">
+          <ShieldAlert size={14} className="text-amber-500 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs font-medium text-amber-500">
+              Convention drift detected — {driftErrors.length} error{driftErrors.length !== 1 ? 's' : ''}
+            </p>
+            <p className="text-[10px] text-amber-500/80 mt-0.5">
+              Drift check is enabled. {driftErrors.length} violation{driftErrors.length !== 1 ? 's' : ''} with error severity found. You can still run, but consider fixing violations first.
+            </p>
+          </div>
         </div>
       )}
 
