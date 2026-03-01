@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T03:42:31.622Z",
+  "lastUpdatedAt": "2026-03-01T03:21:54.048Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -48,19 +48,29 @@
       "finishedAt": "2026-03-01T03:14:56.879Z",
       "agentType": "claude",
       "elapsedMs": 459526
-    },
-    {
-      "storyId": "SK-002",
-      "title": "LLM-Driven Skill + Persona Matching in Spec Generation",
-      "status": "passed",
-      "startedAt": "2026-03-01T03:26:01.752Z",
-      "finishedAt": "2026-03-01T03:42:31.618Z",
-      "agentType": "claude",
-      "elapsedMs": 989865
     }
   ],
   "failedStories": [],
-  "skippedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "CA-017",
+      "title": "CA-017",
+      "status": "skipped",
+      "startedAt": "2026-03-01T03:21:54.043Z",
+      "finishedAt": "2026-03-01T03:21:54.043Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: CA-006"
+    },
+    {
+      "storyId": "CA-020",
+      "title": "CA-020",
+      "status": "skipped",
+      "startedAt": "2026-03-01T03:21:54.047Z",
+      "finishedAt": "2026-03-01T03:21:54.047Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: CA-017"
+    }
+  ],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
