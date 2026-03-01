@@ -93,6 +93,9 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [includeDiagram, setIncludeDiagram] = useState(true);
   const [diagramType, setDiagramType] = useState<DiagramType>('flowchart');
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('json');
+  const [multiPass, setMultiPass] = useState(() => {
+    try { return localStorage.getItem('rorca:forge:multiPass') === 'true'; } catch { return false; }
+  });
 
   // Section 4: Spec Brief (persisted in localStorage)
   const [specBrief, setSpecBrief] = useState(() => {
@@ -254,8 +257,9 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     const effectiveModelId = selectedModel || defaultModelId || 'claude-sonnet-4-5-20250929';
     const modelLabel = availableModels.find(m => m.id === effectiveModelId)?.label || effectiveModelId;
     const formatLabel = outputFormat === 'json' ? 'JSON output' : outputFormat === 'markdown' ? 'Markdown output' : 'Both formats';
-    return `${storyLabel}  ·  ${modelLabel}  ·  ${formatLabel}`;
-  }, [storyCount, selectedModel, defaultModelId, availableModels, outputFormat]);
+    const pipelineLabel = multiPass ? '6-pass' : 'Single-pass';
+    return `${storyLabel}  ·  ${modelLabel}  ·  ${formatLabel}  ·  ${pipelineLabel}`;
+  }, [storyCount, selectedModel, defaultModelId, availableModels, outputFormat, multiPass]);
 
   // Quick Run state
   const [isQuickRunning, setIsQuickRunning] = useState(false);
@@ -298,6 +302,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
           outputFormat,
           specBrief,
           model: selectedModel || undefined,
+          multiPass: multiPass || undefined,
         }),
       });
       setApiDone(true);
@@ -453,6 +458,8 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                       onCancel={handleCancel}
                       error={generateError}
                       apiDone={apiDone}
+                      multiPass={multiPass}
+                      specSlug={effectiveSlug}
                     />
                   ) : !generatedSpec ? (
                     <>
@@ -691,6 +698,26 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                                 label="ASCII block"
                               />
                             </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-3">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={multiPass}
+                              onChange={(e) => {
+                                setMultiPass(e.target.checked);
+                                try { localStorage.setItem('rorca:forge:multiPass', String(e.target.checked)); } catch { /* ignore */ }
+                              }}
+                              className="w-4 h-4 rounded border-border bg-panel accent-accent"
+                            />
+                            <span className="text-sm text-text">6-pass pipeline</span>
+                          </label>
+                          {multiPass && (
+                            <p className="ml-6 text-xs text-muted/60">
+                              PM &rarr; Spec Writer &rarr; UX Designer &rarr; Best Practices &rarr; Adversarial Review &rarr; Spec Verifier
+                            </p>
                           )}
                         </div>
 
