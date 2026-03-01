@@ -483,6 +483,25 @@ export function runMigrations() {
     `);
   }
 
+  // CA-001: convention_packs table for pack registry metadata (idempotent)
+  const conventionPacksExists = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='convention_packs'`
+  ).get();
+  if (!conventionPacksExists) {
+    db.exec(`
+      CREATE TABLE convention_packs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        pack_name TEXT NOT NULL,
+        pack_version TEXT NOT NULL,
+        installed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        pack_path TEXT NOT NULL,
+        UNIQUE(workspace_id, pack_name)
+      );
+      CREATE INDEX idx_convention_packs_workspace ON convention_packs(workspace_id);
+    `);
+  }
+
   // FR-005: Add 'completed' to spec_versions status CHECK constraint (idempotent)
   const specVersionsSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_versions'`
