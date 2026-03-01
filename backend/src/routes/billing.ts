@@ -81,7 +81,28 @@ function getSeatsUsed(userId: string): { used: number; limit: number | null } {
   return { used, limit: limits[plan] ?? 1 };
 }
 
-// ─── GET /api/billing/status ─────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/billing/status:
+ *   get:
+ *     tags: [Billing]
+ *     summary: Get current billing status
+ *     operationId: getBillingStatus
+ *     description: Returns the current user plan, subscription status, seat usage, available plans, and whether Stripe is configured.
+ *     responses:
+ *       200:
+ *         description: Billing status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 plan: { type: string, enum: [free, solo, pro, team] }
+ *                 subscription: { type: object, nullable: true }
+ *                 seats: { type: object, properties: { used: { type: integer }, limit: { type: integer, nullable: true } } }
+ *                 plans: { type: object }
+ *                 stripeConfigured: { type: boolean }
+ */
 router.get('/status', (req: Request, res: Response) => {
   const authReq = req as Request & { user: AuthUser };
   const plan = getUserPlan(authReq.user.id);
@@ -108,7 +129,39 @@ router.get('/status', (req: Request, res: Response) => {
   });
 });
 
-// ─── GET /api/billing/invoices ──────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/billing/invoices:
+ *   get:
+ *     tags: [Billing]
+ *     summary: List Stripe invoices
+ *     operationId: listBillingInvoices
+ *     description: Returns up to 24 most recent Stripe invoices for the authenticated user. Returns empty array if Stripe is not configured or no billing account exists.
+ *     responses:
+ *       200:
+ *         description: Invoice list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 invoices:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       number: { type: string }
+ *                       status: { type: string }
+ *                       amountDue: { type: integer }
+ *                       amountPaid: { type: integer }
+ *                       currency: { type: string }
+ *                       created: { type: string, nullable: true }
+ *                       hostedInvoiceUrl: { type: string, nullable: true }
+ *                       invoicePdf: { type: string, nullable: true }
+ *       500:
+ *         description: Failed to fetch invoices
+ */
 router.get('/invoices', async (req: Request, res: Response) => {
   if (!stripe) {
     res.json({ invoices: [], stripeConfigured: false });
@@ -150,7 +203,39 @@ router.get('/invoices', async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/billing/checkout ──────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/billing/checkout:
+ *   post:
+ *     tags: [Billing]
+ *     summary: Create a Stripe checkout session
+ *     operationId: createBillingCheckout
+ *     description: Creates a Stripe Checkout session for subscribing to a paid plan. Returns a redirect URL to the Stripe-hosted checkout page.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [plan]
+ *             properties:
+ *               plan: { type: string, enum: [solo, pro, team] }
+ *     responses:
+ *       200:
+ *         description: Checkout session URL
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 url: { type: string }
+ *       400:
+ *         description: Invalid plan
+ *       503:
+ *         description: Stripe not configured
+ *       500:
+ *         description: Failed to create checkout session
+ */
 router.post('/checkout', async (req: Request, res: Response) => {
   if (!stripe) {
     res.status(503).json({ error: 'Stripe is not configured. Set STRIPE_SECRET_KEY in backend/.env' });
@@ -208,7 +293,30 @@ router.post('/checkout', async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/billing/portal ────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/billing/portal:
+ *   post:
+ *     tags: [Billing]
+ *     summary: Create a Stripe billing portal session
+ *     operationId: createBillingPortal
+ *     description: Creates a Stripe Billing Portal session for managing subscriptions, payment methods, and invoices. Returns a redirect URL.
+ *     responses:
+ *       200:
+ *         description: Portal session URL
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 url: { type: string }
+ *       404:
+ *         description: No billing account found
+ *       503:
+ *         description: Stripe not configured
+ *       500:
+ *         description: Failed to create portal session
+ */
 router.post('/portal', async (req: Request, res: Response) => {
   if (!stripe) {
     res.status(503).json({ error: 'Stripe is not configured' });

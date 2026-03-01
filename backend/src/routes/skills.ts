@@ -32,6 +32,8 @@ function resolveWorkspacePath(req: Request): string | null {
  *   get:
  *     tags: [Skills]
  *     summary: List all discovered and installed skills
+ *     operationId: listSkills
+ *     description: Scans the workspace for skill files and merges with DB-persisted installed skills, returning metadata and a prompt-ready catalog.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -125,6 +127,8 @@ router.get('/', (req: Request, res: Response) => {
  *   post:
  *     tags: [Skills]
  *     summary: Install a skill from markdown content
+ *     operationId: installSkill
+ *     description: Persists a new skill from the provided markdown content with optional YAML frontmatter into the installed_skills table.
  *     requestBody:
  *       required: true
  *       content:
@@ -181,6 +185,8 @@ router.post('/install', (req: Request, res: Response) => {
  *   delete:
  *     tags: [Skills]
  *     summary: Remove an installed skill by name
+ *     operationId: removeSkill
+ *     description: Deletes the specified skill from the installed_skills table by name.
  *     parameters:
  *       - in: path
  *         name: name

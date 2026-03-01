@@ -23,8 +23,42 @@ function formatProfile(row: AgentProfileRow) {
   };
 }
 
-// ─── GET /api/workspaces/:id/agent-profiles ─────────────────────────────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/agent-profiles:
+ *   get:
+ *     tags: [Agent Profiles]
+ *     summary: List agent profiles for a workspace
+ *     operationId: listAgentProfiles
+ *     description: Returns all named agent configurations for the specified workspace, ordered by active status and name.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of agent profiles
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 profiles:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       workspace_id: { type: string }
+ *                       name: { type: string }
+ *                       system_prompt_override: { type: string, nullable: true }
+ *                       allowed_tools: { type: array, items: { type: string } }
+ *                       model_override: { type: string, nullable: true }
+ *                       is_active: { type: boolean }
+ *                       created_at: { type: string }
+ *                       updated_at: { type: string }
+ */
 router.get('/', (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   const profiles = db.prepare(
@@ -33,8 +67,29 @@ router.get('/', (req: Request, res: Response) => {
   res.json({ profiles: profiles.map(formatProfile) });
 });
 
-// ─── GET /api/workspaces/:id/agent-profiles/active ──────────────────────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/agent-profiles/active:
+ *   get:
+ *     tags: [Agent Profiles]
+ *     summary: Get the active agent profile for a workspace
+ *     operationId: getActiveAgentProfile
+ *     description: Returns the currently active agent profile for the specified workspace, or null if none is active.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Active agent profile or null
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 profile: { type: object, nullable: true }
+ */
 router.get('/active', (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   const profile = db.prepare(
@@ -43,8 +98,42 @@ router.get('/active', (req: Request, res: Response) => {
   res.json({ profile: profile ? formatProfile(profile) : null });
 });
 
-// ─── POST /api/workspaces/:id/agent-profiles ────────────────────────────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/agent-profiles:
+ *   post:
+ *     tags: [Agent Profiles]
+ *     summary: Create a new agent profile
+ *     operationId: createAgentProfile
+ *     description: Creates a new named agent configuration for the workspace. If is_active is true, all other profiles are deactivated first.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name: { type: string }
+ *               system_prompt_override: { type: string }
+ *               allowed_tools: { type: array, items: { type: string } }
+ *               model_override: { type: string }
+ *               is_active: { type: boolean, default: false }
+ *     responses:
+ *       201:
+ *         description: Profile created
+ *       400:
+ *         description: Missing required field name
+ *       404:
+ *         description: Workspace not found
+ *       409:
+ *         description: Profile name already exists for this workspace
+ */
 router.post('/', (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   const { name, system_prompt_override, allowed_tools, model_override, is_active } = req.body;
@@ -99,8 +188,43 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-// ─── PUT /api/workspaces/:id/agent-profiles/:profileId ──────────────────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/agent-profiles/{profileId}:
+ *   put:
+ *     tags: [Agent Profiles]
+ *     summary: Update an agent profile
+ *     operationId: updateAgentProfile
+ *     description: Updates an existing agent profile. If is_active is set to true, all other profiles in the workspace are deactivated.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: profileId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string }
+ *               system_prompt_override: { type: string }
+ *               allowed_tools: { type: array, items: { type: string } }
+ *               model_override: { type: string }
+ *               is_active: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Profile updated
+ *       400:
+ *         description: Invalid profile ID
+ *       404:
+ *         description: Profile not found
+ */
 router.put('/:profileId', (req: Request, res: Response) => {
   const profileId = parseInt(String(req.params.profileId), 10);
   if (isNaN(profileId)) {
@@ -142,8 +266,31 @@ router.put('/:profileId', (req: Request, res: Response) => {
   res.json({ profile: formatProfile(updated) });
 });
 
-// ─── DELETE /api/workspaces/:id/agent-profiles/:profileId ───────────────────
-
+/**
+ * @swagger
+ * /api/workspaces/{workspaceId}/agent-profiles/{profileId}:
+ *   delete:
+ *     tags: [Agent Profiles]
+ *     summary: Delete an agent profile
+ *     operationId: deleteAgentProfile
+ *     description: Permanently removes an agent profile from the workspace.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: profileId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       204:
+ *         description: Profile deleted
+ *       400:
+ *         description: Invalid profile ID
+ *       404:
+ *         description: Profile not found
+ */
 router.delete('/:profileId', (req: Request, res: Response) => {
   const profileId = parseInt(String(req.params.profileId), 10);
   if (isNaN(profileId)) {

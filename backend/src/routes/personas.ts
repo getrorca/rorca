@@ -56,6 +56,8 @@ Describe the role and expertise of this persona.
  * /api/personas:
  *   get:
  *     summary: List all discovered personas for a workspace, grouped by category
+ *     operationId: listPersonas
+ *     description: Scans the workspace .rorca/personas/ directory and returns all discovered personas grouped by category with enabled/disabled status.
  *     tags: [Personas]
  *     parameters:
  *       - name: workspaceId
@@ -136,6 +138,8 @@ router.get('/', (req: Request, res: Response) => {
  * /api/personas/read:
  *   get:
  *     summary: Read a persona file's content
+ *     operationId: readPersonaFile
+ *     description: Returns the raw markdown content of a specific persona file by its relative path within the workspace.
  *     tags: [Personas]
  *     parameters:
  *       - name: workspaceId
@@ -180,6 +184,8 @@ router.get('/read', (req: Request, res: Response) => {
  * /api/personas/write:
  *   put:
  *     summary: Write/update a persona file's content
+ *     operationId: writePersonaFile
+ *     description: Writes or overwrites the markdown content of a persona file at the specified relative path.
  *     tags: [Personas]
  */
 router.put('/write', (req: Request, res: Response) => {
@@ -222,6 +228,8 @@ router.put('/write', (req: Request, res: Response) => {
  * /api/personas/create:
  *   post:
  *     summary: Create a new persona from template
+ *     operationId: createPersona
+ *     description: Creates a new persona markdown file from the default template in the appropriate category directory.
  *     tags: [Personas]
  */
 router.post('/create', (req: Request, res: Response) => {
@@ -275,6 +283,8 @@ router.post('/create', (req: Request, res: Response) => {
  * /api/personas/toggle:
  *   post:
  *     summary: Enable or disable a persona
+ *     operationId: togglePersona
+ *     description: Toggles a persona's enabled/disabled state by updating the .rorca/config.json personas.disabled array.
  *     tags: [Personas]
  */
 router.post('/toggle', (req: Request, res: Response) => {

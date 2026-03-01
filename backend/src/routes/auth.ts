@@ -142,6 +142,8 @@ function generateAndStoreVerificationToken(userId: string, email: string): strin
  *   post:
  *     tags: [Auth]
  *     summary: Register a new user
+ *     operationId: registerUser
+ *     description: Creates a new user account with email, password, and display name, returning auth tokens and a verification link.
  *     security: []
  *     requestBody:
  *       required: true
@@ -251,6 +253,8 @@ router.post('/register', (req: Request, res: Response) => {
  *   post:
  *     tags: [Auth]
  *     summary: Authenticate and get tokens
+ *     operationId: loginUser
+ *     description: Authenticates a user with email and password, returning JWT access and refresh tokens.
  *     security: []
  *     requestBody:
  *       required: true
@@ -332,6 +336,8 @@ router.post('/login', (req: Request, res: Response) => {
  *   post:
  *     tags: [Auth]
  *     summary: Refresh access token (token rotation)
+ *     operationId: refreshAuthToken
+ *     description: Exchanges a valid refresh token for a new access/refresh token pair, revoking the old refresh token.
  *     security: []
  *     requestBody:
  *       required: true
@@ -405,6 +411,8 @@ router.post('/refresh', (req: Request, res: Response) => {
  *   post:
  *     tags: [Auth]
  *     summary: Revoke a refresh token
+ *     operationId: logoutUser
+ *     description: Revokes the provided refresh token to end the user session.
  *     security: []
  *     requestBody:
  *       required: true
@@ -447,6 +455,8 @@ router.post('/logout', (req: Request, res: Response) => {
  *   get:
  *     tags: [Auth]
  *     summary: Get current authenticated user
+ *     operationId: getCurrentUser
+ *     description: Returns the profile of the currently authenticated user, including GitHub connection status.
  *     responses:
  *       200:
  *         description: Current user info
@@ -504,6 +514,8 @@ router.get('/me', (req: Request, res: Response) => {
  *   patch:
  *     tags: [Auth]
  *     summary: Update current user profile (display name, password)
+ *     operationId: updateCurrentUser
+ *     description: Updates the authenticated user's display name and/or password, requiring current password for password changes.
  *     requestBody:
  *       required: true
  *       content:
@@ -607,6 +619,8 @@ router.patch('/me', (req: Request, res: Response) => {
  *   get:
  *     tags: [Auth]
  *     summary: Verify email address using a verification token
+ *     operationId: verifyEmail
+ *     description: Validates the email verification token and marks the user's email as verified, then redirects to the frontend.
  *     security: []
  *     parameters:
  *       - in: query
@@ -674,6 +688,8 @@ router.get('/verify-email', (req: Request, res: Response) => {
  *   post:
  *     tags: [Auth]
  *     summary: Resend email verification link
+ *     operationId: resendVerificationEmail
+ *     description: Generates and sends a new email verification link for an unverified account, subject to rate limiting.
  *     requestBody:
  *       required: true
  *       content:
@@ -751,6 +767,8 @@ interface PasswordResetTokenRow {
  *   post:
  *     tags: [Auth]
  *     summary: Request a password reset link
+ *     operationId: forgotPassword
+ *     description: Initiates the password reset flow by generating a reset token and logging the reset link for the given email.
  *     security: []
  *     requestBody:
  *       required: true
@@ -834,6 +852,8 @@ router.post('/forgot-password', (req: Request, res: Response) => {
  *   post:
  *     tags: [Auth]
  *     summary: Reset password using a reset token
+ *     operationId: resetPassword
+ *     description: Sets a new password using a valid reset token and revokes all existing refresh tokens for the user.
  *     security: []
  *     requestBody:
  *       required: true
@@ -920,6 +940,7 @@ router.post('/reset-password', (req: Request, res: Response) => {
  *   delete:
  *     tags: [Auth]
  *     summary: Permanently delete user account and all associated data
+ *     operationId: deleteUserAccount
  *     description: |
  *       Irreversible account deletion per GDPR Article 17 (Right to Erasure).
  *       Cancels active Stripe subscription, deletes all user data via CASCADE,
@@ -1049,6 +1070,8 @@ async function githubApiFetch<T>(url: string, token: string): Promise<T> {
  *   get:
  *     tags: [Auth]
  *     summary: Initiate GitHub OAuth flow
+ *     operationId: initiateGithubOAuth
+ *     description: Redirects the user to GitHub's authorization page to begin the OAuth login flow.
  *     security: []
  *     responses:
  *       302: { description: "Redirect to GitHub authorization URL" }
@@ -1077,6 +1100,8 @@ router.get('/github', (_req: Request, res: Response) => {
  *   get:
  *     tags: [Auth]
  *     summary: GitHub OAuth callback
+ *     operationId: handleGithubOAuthCallback
+ *     description: Processes the GitHub OAuth callback by exchanging the authorization code for tokens and creating or linking the user account.
  *     security: []
  *     parameters:
  *       - in: query
