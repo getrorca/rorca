@@ -159,14 +159,18 @@ function syncFallbackResults(cwd: string, workspaceId: string): number {
         ).get(runId, storyId);
 
         if (!existing) {
+          const activeSkillsVal = Array.isArray(p.activeSkills) && (p.activeSkills as string[]).length > 0
+            ? JSON.stringify(p.activeSkills)
+            : null;
           db.prepare(
-            `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd)
-             VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)`
+            `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, active_skills)
+             VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`
           ).run(
             runId, storyId, status,
             (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
             (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
             (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
+            activeSkillsVal,
           );
         }
         synced++;
@@ -3412,12 +3416,12 @@ router.post('/story-result', (req: Request, res: Response) => {
     const {
       runId, storyId, status, worktreePath, worktreeBranch,
       inputTokens, outputTokens, modelUsed, costUsd,
-      logPath, blockedBy,
+      logPath, blockedBy, activeSkills,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string;
       inputTokens?: number; outputTokens?: number; modelUsed?: string; costUsd?: number;
-      logPath?: string; blockedBy?: string[];
+      logPath?: string; blockedBy?: string[]; activeSkills?: string[];
     };
 
     if (!runId || !storyId || !status) {
@@ -3431,8 +3435,8 @@ router.post('/story-result', (req: Request, res: Response) => {
     }
 
     db.prepare(
-      `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by)
-       VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills)
+       VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
@@ -3440,6 +3444,7 @@ router.post('/story-result', (req: Request, res: Response) => {
       modelUsed ?? null, costUsd ?? null,
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
+      activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
     );
 
     // Also record into token_usage analytics table if tokens are present
