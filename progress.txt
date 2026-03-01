@@ -3,11 +3,12 @@
 Spec: rorca-convention-agents
 Run ID: 885
 Started: 2026-03-01T05:32:25.370Z
-Last Updated: 2026-03-01T06:20:00.747Z
+Last Updated: 2026-03-01T06:26:51.863Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - CA-004: Pack Fork — Customize and Detach from Upstream — DONE (claude, 446s)
 - CA-006: Convention Drift Detection — DONE (claude, 516s)
 - CA-011: Adversarial Review Pipeline — Post-Story Review Passes — DONE (claude, 472s)
 - CA-015: Convention Pack UI — Marketplace Panel Integration — DONE (claude, 688s)
 - CA-016: Persona Management UI — Settings Panel Integration — DONE (claude, 691s)
+- CA-017: Convention Drift UI — Workspace Health Integration — DONE (claude, 402s)
