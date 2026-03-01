@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T03:21:30.539Z",
+  "lastUpdatedAt": "2026-03-01T03:14:56.879Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -41,13 +41,13 @@
       "elapsedMs": 419476
     },
     {
-      "storyId": "CA-008",
-      "title": "Default Persona Library — 15 Built-In Personas",
+      "storyId": "SK-001",
+      "title": "Skill Catalog and Registry",
       "status": "passed",
-      "startedAt": "2026-03-01T03:07:21.623Z",
-      "finishedAt": "2026-03-01T03:21:30.539Z",
+      "startedAt": "2026-03-01T03:07:17.353Z",
+      "finishedAt": "2026-03-01T03:14:56.879Z",
       "agentType": "claude",
-      "elapsedMs": 848916
+      "elapsedMs": 459526
     }
   ],
   "failedStories": [],
