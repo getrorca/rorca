@@ -3,7 +3,8 @@
 Spec: rorca-skills-marketplace
 Run ID: 887
 Started: 2026-03-01T21:18:21.645Z
-Last Updated: 2026-03-01T21:20:05.888Z
+Last Updated: 2026-03-01T21:22:34.111Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - SM-002: Add GET /api/skills/:name/content Endpoint — DONE (claude, 64s)
+- SM-004: Add Expandable Markdown Preview to Skill Cards — DONE (claude, 102s)
