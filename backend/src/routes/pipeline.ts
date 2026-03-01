@@ -530,6 +530,8 @@ interface StoryResultRow {
  *   post:
  *     tags: [Pipeline]
  *     summary: Pre-flight capability check for spec stories vs engine
+ *     operationId: preflightPipelineCheck
+ *     description: Validates that the current execution engine supports all tools required by each story in the spec and returns a compatibility report.
  *     requestBody:
  *       required: true
  *       content:
@@ -595,6 +597,8 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Trigger a pipeline run (spawn run-loop.sh)
+ *     operationId: triggerPipelineRun
+ *     description: Spawns the execution engine as a subprocess to run all stories in the specified spec, optionally in a git worktree.
  *     requestBody:
  *       required: true
  *       content:
@@ -1508,6 +1512,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Preview context routing for each story in a spec
+ *     operationId: previewContextRouting
  *     description: >
  *       Returns the predicted context payload for each story, including
  *       global files, scope matches, tag matches, token estimates, and
@@ -1701,6 +1706,8 @@ router.post('/context-preview', (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Preview auto-orchestration mode for a spec
+ *     operationId: previewOrchestrationMode
+ *     description: Analyzes the spec's dependency graph and returns the recommended orchestration mode (sequential or wave-parallel) with wave groupings.
  *     requestBody:
  *       required: true
  *       content:
@@ -1764,6 +1771,8 @@ router.post('/orchestration-preview', (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Quick-run — generate a 1-story spec from a brief and execute immediately
+ *     operationId: quickRunPipeline
+ *     description: Generates a single-story spec from a plain-English brief, writes it directly to approved, and immediately triggers pipeline execution.
  *     requestBody:
  *       required: true
  *       content:
@@ -2140,6 +2149,36 @@ router.post('/quick-run', async (req: Request, res: Response) => {
 
 // ─── POST /api/pipeline/runs — Create a pipeline run ────────────────────────
 
+/**
+ * @swagger
+ * /api/pipeline/runs:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Create a pipeline run record
+ *     operationId: createPipelineRun
+ *     description: Creates a new pipeline_runs row with status 'running' and emits a run_started WAL event. Does not spawn an execution engine — use POST /api/pipeline/trigger for that.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [specPath, workspaceId]
+ *             properties:
+ *               specPath: { type: string, description: "Relative spec path within the workspace" }
+ *               workspaceId: { type: string, description: "Workspace ID" }
+ *     responses:
+ *       201:
+ *         description: Pipeline run created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 run: { $ref: '#/components/schemas/PipelineRun' }
+ *       400: { description: "Missing required fields (specPath, workspaceId)" }
+ *       500: { description: "Internal server error" }
+ */
 router.post('/runs', (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId } = req.body;
@@ -2186,6 +2225,8 @@ router.post('/runs', (req: Request, res: Response) => {
  *   get:
  *     tags: [Pipeline]
  *     summary: List pipeline runs
+ *     operationId: listPipelineRuns
+ *     description: Returns a paginated list of pipeline runs for the specified workspace, ordered by most recent first.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -2231,6 +2272,55 @@ router.get('/runs', (req: Request, res: Response) => {
 
 // ─── GET /api/pipeline/runs/compare — Compare two pipeline runs side-by-side ─
 
+/**
+ * @swagger
+ * /api/pipeline/runs/compare:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Compare two pipeline runs side-by-side
+ *     operationId: comparePipelineRuns
+ *     description: Fetches story results for two runs and produces a per-story diff showing improved, regressed, new, or removed stories along with summary statistics.
+ *     parameters:
+ *       - in: query
+ *         name: run1
+ *         required: true
+ *         schema: { type: integer }
+ *         description: First run ID
+ *       - in: query
+ *         name: run2
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Second run ID
+ *     responses:
+ *       200:
+ *         description: Side-by-side comparison with per-story diffs and summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 run1: { $ref: '#/components/schemas/PipelineRun' }
+ *                 run2: { $ref: '#/components/schemas/PipelineRun' }
+ *                 stories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       run1Status: { type: string, nullable: true }
+ *                       run2Status: { type: string, nullable: true }
+ *                       change: { type: string, enum: [unchanged, improved, regressed, new_in_run2, removed_in_run2] }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     run1PassRate: { type: integer }
+ *                     run2PassRate: { type: integer }
+ *                     improved: { type: integer }
+ *                     regressed: { type: integer }
+ *       400: { description: "Missing or invalid run1/run2 params, or comparing a run with itself" }
+ *       404: { description: "One or both runs not found" }
+ *       500: { description: "Internal server error" }
+ */
 router.get('/runs/compare', (req: Request, res: Response) => {
   try {
     const run1Id = parseInt(String(req.query.run1), 10);
@@ -2381,6 +2471,8 @@ router.get('/runs/compare', (req: Request, res: Response) => {
  *   get:
  *     tags: [Pipeline]
  *     summary: Get a pipeline run with story results
+ *     operationId: getPipelineRun
+ *     description: Retrieves a single pipeline run by ID along with all its story results and spec metadata.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -2567,6 +2659,8 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Retry failed stories in a pipeline run
+ *     operationId: retryPipelineRun
+ *     description: Re-executes failed stories from a completed or partially failed pipeline run, optionally filtering to specific story IDs.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -2915,6 +3009,8 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Pause a running pipeline
+ *     operationId: pausePipelineRun
+ *     description: Sends SIGTSTP to the pipeline process group, allowing the current story to finish before pausing execution.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3003,6 +3099,8 @@ router.post('/runs/:runId/pause', (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Resume a paused pipeline
+ *     operationId: resumePipelineRun
+ *     description: Sends SIGCONT to the paused pipeline process group to resume story execution from where it left off.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3080,6 +3178,8 @@ router.post('/runs/:runId/resume', (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Inject context into a blocked (HITL) pipeline run and resume
+ *     operationId: injectPipelineContext
+ *     description: Writes free-text context to a file for the run-loop to pick up and sends SIGCONT to resume a blocked or paused pipeline run.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3193,6 +3293,8 @@ router.post('/runs/:runId/context', (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Cancel a running or paused pipeline
+ *     operationId: cancelPipelineRun
+ *     description: Sends SIGTERM (escalating to SIGKILL after 5 seconds) to the pipeline process group and marks the run as cancelled.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3299,6 +3401,7 @@ router.post('/runs/:runId/cancel', (req: Request, res: Response) => {
  *   get:
  *     tags: [Pipeline]
  *     summary: Stream raw terminal output (SSE)
+ *     operationId: streamPipelineOutput
  *     description: Server-Sent Events stream of base64-encoded terminal output. Late joiners receive full buffer replay.
  *     parameters:
  *       - in: path
@@ -3470,6 +3573,39 @@ function recordTokenUsage(runId: number, storyId: string, inputTokens: number, o
 // ─── POST /api/pipeline/story-result — Record story outcome from run-loop.ts ──
 // Called by the TypeScript run-loop to insert story_results rows.
 
+/**
+ * @swagger
+ * /api/pipeline/story-result:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Record a story outcome from the execution engine
+ *     operationId: recordStoryResult
+ *     description: Called by run-loop.ts or execution-engine.ts to insert a story_results row after a story finishes. Also records token usage into the analytics table when tokens are present.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [runId, storyId, status]
+ *             properties:
+ *               runId: { type: integer, description: "Pipeline run ID" }
+ *               storyId: { type: string, description: "Story ID (e.g. US-001)" }
+ *               status: { type: string, enum: [pass, fail, skip, excluded] }
+ *               worktreePath: { type: string, nullable: true }
+ *               worktreeBranch: { type: string, nullable: true }
+ *               inputTokens: { type: integer, nullable: true }
+ *               outputTokens: { type: integer, nullable: true }
+ *               modelUsed: { type: string, nullable: true }
+ *               costUsd: { type: number, nullable: true }
+ *               logPath: { type: string, nullable: true }
+ *               blockedBy: { type: array, items: { type: string }, nullable: true }
+ *               activeSkills: { type: array, items: { type: string }, nullable: true }
+ *     responses:
+ *       201: { description: "Story result recorded" }
+ *       400: { description: "Missing required fields or invalid status" }
+ *       500: { description: "Internal server error" }
+ */
 router.post('/story-result', (req: Request, res: Response) => {
   try {
     const {
@@ -3521,6 +3657,39 @@ router.post('/story-result', (req: Request, res: Response) => {
 // ─── POST /api/pipeline/runs/:runId/stories/:storyId/tokens — Record token usage ─
 // Allows run-loop.ts or external callers to report token usage for a story.
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/stories/{storyId}/tokens:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Record token usage for a story
+ *     operationId: recordStoryTokenUsage
+ *     description: Updates the story_results row with token counts and records an entry in the token_usage analytics table. Called by run-loop.ts or external callers.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               inputTokens: { type: integer, description: "Number of input tokens consumed" }
+ *               outputTokens: { type: integer, description: "Number of output tokens consumed" }
+ *               model: { type: string, description: "Model name used for this story" }
+ *     responses:
+ *       200: { description: "Token usage recorded" }
+ *       400: { description: "Invalid runId or missing token counts" }
+ *       404: { description: "Story result not found for this run and story" }
+ *       500: { description: "Internal server error" }
+ */
 router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
@@ -3564,6 +3733,48 @@ router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response
 // ─── GET /api/pipeline/runs/:runId/stories/:storyId/output — Last N lines of story output ─
 // Extracts the story's log section from the run log file or returns WAL failure info.
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/stories/{storyId}/output:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Get last N lines of a story's output
+ *     operationId: getStoryOutput
+ *     description: Returns the tail of a story's log output extracted from the per-story log file, the run log file, or the in-memory buffer. Also includes failure reason and blocked-by info from WAL events.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: lines
+ *         schema: { type: integer, default: 20, maximum: 100 }
+ *         description: Number of lines to return (max 100)
+ *     responses:
+ *       200:
+ *         description: Story output lines with metadata
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 storyId: { type: string }
+ *                 runId: { type: integer }
+ *                 status: { type: string }
+ *                 retries: { type: integer }
+ *                 failureReason: { type: string, nullable: true }
+ *                 failureAttempts: { type: integer, nullable: true }
+ *                 blockedBy: { type: array, items: { type: string }, nullable: true }
+ *                 output: { type: array, items: { type: string } }
+ *                 lineCount: { type: integer }
+ *       400: { description: "Invalid runId" }
+ *       404: { description: "Story result not found" }
+ *       500: { description: "Internal server error" }
+ */
 router.get('/runs/:runId/stories/:storyId/output', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
@@ -3699,6 +3910,32 @@ router.get('/runs/:runId/stories/:storyId/output', (req: Request, res: Response)
 // Streams a per-story log file as SSE chunks (same protocol as /runs/:runId/output).
 // Used by the multi-pane terminal grid when parallelism > 1.
 
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/stories/{storyId}/log:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Stream per-story log output via SSE
+ *     operationId: streamStoryLog
+ *     description: Opens an SSE connection that streams a per-story log file in real time. Used by the multi-pane terminal grid for parallel story execution. Emits base64-encoded output chunks and semantic_step events.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: SSE stream of log chunks
+ *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
+ *       400: { description: "Invalid runId" }
+ */
 router.get('/runs/:runId/stories/:storyId/log', (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.runId), 10);
   const storyId = String(req.params.storyId);
@@ -3889,6 +4126,7 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  *   get:
  *     tags: [Pipeline]
  *     summary: Stream WAL events (SSE)
+ *     operationId: streamPipelineEvents
  *     description: Server-Sent Events stream of WAL events (story progress). Polls wal_events table every 3s.
  *     parameters:
  *       - in: query
@@ -3999,6 +4237,8 @@ router.get('/stream', (req: Request, res: Response) => {
  *   get:
  *     tags: [Pipeline]
  *     summary: Download raw pipeline log file
+ *     operationId: downloadPipelineLog
+ *     description: Returns the raw log file for a completed pipeline run as a downloadable text/plain attachment.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4091,6 +4331,8 @@ export function cleanupOldLogs(): number {
  *   get:
  *     tags: [Pipeline]
  *     summary: Get git commits for a pipeline run's branch
+ *     operationId: getPipelineRunCommits
+ *     description: Returns the list of git commits made on the pipeline run's feature branch since it diverged from main.
  *     parameters:
  *       - in: path
  *         name: runId

@@ -23,6 +23,7 @@ const router = Router();
  *   post:
  *     tags: [Packs]
  *     summary: Install a convention pack into a workspace
+ *     operationId: installPack
  *     description: >
  *       Copies scaffold files (skipping existing), injects L0 direction layers,
  *       copies personas/conventions/skills, generates AGENTS.md, and registers
@@ -162,6 +163,7 @@ router.post('/install', (req: Request, res: Response) => {
  *   post:
  *     tags: [Packs]
  *     summary: Fork an installed pack for workspace-local customization
+ *     operationId: forkPack
  *     description: >
  *       Copies an installed pack to .rorca/packs/<newName>/, updates pack.json
  *       with the new name and a forkedFrom field referencing the original,
@@ -278,6 +280,8 @@ router.post('/fork', (req: Request, res: Response) => {
  *   get:
  *     tags: [Packs]
  *     summary: List installed packs for a workspace
+ *     operationId: listInstalledPacks
+ *     description: Returns all convention packs currently installed in the specified workspace.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -350,6 +354,7 @@ router.get('/', (req: Request, res: Response) => {
  *   get:
  *     tags: [Packs]
  *     summary: List available convention packs from built-in catalog
+ *     operationId: listPackCatalog
  *     description: >
  *       Scans the Rorca built-in packs/ directory for valid pack.json files
  *       and returns their metadata. Optionally includes workspace install status.
@@ -441,6 +446,8 @@ router.get('/catalog', (req: Request, res: Response) => {
  *   get:
  *     tags: [Packs]
  *     summary: Get detailed contents of a pack
+ *     operationId: getPackDetail
+ *     description: Returns full pack details including direction layers, personas, conventions, scaffold tree, and AGENTS.md preview.
  *     parameters:
  *       - in: query
  *         name: packPath
@@ -562,6 +569,7 @@ router.get('/detail', (req: Request, res: Response) => {
  *   delete:
  *     tags: [Packs]
  *     summary: Uninstall a convention pack from a workspace
+ *     operationId: uninstallPack
  *     description: >
  *       Removes the pack registration from the DB, deletes L0 direction layers
  *       injected by the pack, and cleans up .rorca/ files if from a forked pack.

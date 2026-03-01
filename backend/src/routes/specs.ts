@@ -423,6 +423,8 @@ interface SpecDiffResult {
  *   post:
  *     tags: [Specs]
  *     summary: Generate a spec from a brief via LLM
+ *     operationId: generateSpec
+ *     description: Generates a software specification JSON from a brief using LLM. Supports single-pass and multi-pass (6-pass pipeline) generation. Routes through OpenCode or SDK path depending on configured agent type.
  *     requestBody:
  *       required: true
  *       content:
@@ -1919,6 +1921,48 @@ async function processBatch(batch: BatchState): Promise<void> {
   setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000);
 }
 
+/**
+ * @swagger
+ * /api/specs/generate/batch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue multiple briefs for sequential spec generation
+ *     operationId: generateSpecBatch
+ *     description: Accepts an array of briefs and processes them sequentially in the background. Returns a batchId for tracking progress via polling or SSE. Emits batch_started, batch_progress, and batch_finished WAL events.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [briefs]
+ *             properties:
+ *               briefs:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [brief, workspaceId, title]
+ *                   properties:
+ *                     brief: { type: string }
+ *                     workspaceId: { type: string }
+ *                     title: { type: string }
+ *                     templateId: { type: string }
+ *                     model: { type: string }
+ *                     storyCount: { type: integer }
+ *                     domain: { type: string }
+ *     responses:
+ *       201:
+ *         description: Batch queued successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 batchId: { type: string }
+ *                 briefCount: { type: integer }
+ *       400: { description: "Missing or empty briefs array, or brief missing required fields" }
+ *       500: { description: "Internal server error" }
+ */
 router.post('/generate/batch', (req: Request, res: Response) => {
   try {
     const { briefs } = req.body as { briefs?: BatchRequestItem[] };
@@ -1982,6 +2026,42 @@ router.post('/generate/batch', (req: Request, res: Response) => {
 
 // ─── US-008: GET /generate/batch/:batchId — Batch status ─────────────────────
 
+/**
+ * @swagger
+ * /api/specs/generate/batch/{batchId}:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get batch generation status
+ *     operationId: getBatchStatus
+ *     description: Returns the current status of a batch spec generation job including per-brief progress, completion summary, and any errors. Batches are stored in-memory and auto-clean after 1 hour.
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Batch job ID returned from POST /generate/batch
+ *     responses:
+ *       200:
+ *         description: Batch status with per-brief details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 batchId: { type: string }
+ *                 createdAt: { type: string, format: date-time }
+ *                 finishedAt: { type: string, format: date-time }
+ *                 totalBriefs: { type: integer }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     completed: { type: integer }
+ *                     failed: { type: integer }
+ *                     generating: { type: integer }
+ *                     queued: { type: integer }
+ *                 items: { type: array, items: { type: object } }
+ *       404: { description: "Batch not found or expired" }
+ */
 router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
   try {
     const batchId = req.params.batchId as string;
@@ -2022,6 +2102,25 @@ router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
 
 // ─── US-008: GET /generate/batch/:batchId/stream — SSE batch progress ─────────
 
+/**
+ * @swagger
+ * /api/specs/generate/batch/{batchId}/stream:
+ *   get:
+ *     tags: [Specs]
+ *     summary: SSE stream for batch generation progress
+ *     operationId: streamBatchProgress
+ *     description: Server-Sent Events endpoint that streams real-time batch generation progress. Sends an initial snapshot event, then progress events as each brief completes, and a done event when the batch finishes. Heartbeat every 15 seconds.
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Batch job ID
+ *     responses:
+ *       200:
+ *         description: SSE event stream (text/event-stream)
+ *       404: { description: "Batch not found or expired" }
+ */
 router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
   const batchId = req.params.batchId as string;
   const batch = batchQueue.get(batchId);
@@ -2106,6 +2205,8 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
  *   get:
  *     tags: [Specs]
  *     summary: List specs (pending/approved/all)
+ *     operationId: listSpecs
+ *     description: Lists specs for a workspace filtered by status, tags, review status, and assignee. Returns paginated results sorted by generatedAt descending.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -2433,6 +2534,8 @@ function computeRelevanceScore(snippets: MatchSnippet[]): number {
  *   get:
  *     tags: [Specs]
  *     summary: Search spec archive with pagination
+ *     operationId: searchSpecArchive
+ *     description: Full-text searchable spec archive with pagination, date range filtering, tag filtering, and agent type filtering. Rebuilds FTS index on each call. Returns relevance-ranked results with match snippets when a search query is provided.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -2697,6 +2800,46 @@ router.get('/archive', (req: Request, res: Response) => {
 
 // ─── V2-067: GET /search/stories — Cross-spec story search ────────────────────
 
+/**
+ * @swagger
+ * /api/specs/search/stories:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Cross-spec story search
+ *     operationId: searchStories
+ *     description: Searches across all specs in a workspace for stories matching the query text. Matches against story ID, title, description, and acceptance criteria. Returns paginated results with match field indicators.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: q
+ *         required: true
+ *         schema: { type: string }
+ *         description: Search query text
+ *     responses:
+ *       200:
+ *         description: Matching stories across specs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       specTitle: { type: string }
+ *                       status: { type: string }
+ *                       story: { type: object }
+ *                       matchFields: { type: array, items: { type: string } }
+ *                 total: { type: integer }
+ *       400: { description: "Missing workspaceId or q query params" }
+ *       404: { description: "Workspace not found" }
+ */
 router.get('/search/stories', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string | undefined;
@@ -2763,6 +2906,45 @@ router.get('/search/stories', (req: Request, res: Response) => {
 
 // ─── POST /:specId/add-stories — Generate more stories for an existing spec ───
 
+/**
+ * @swagger
+ * /api/specs/{specId}/add-stories:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Generate additional stories for an existing spec
+ *     operationId: addStories
+ *     description: Uses LLM to generate new user stories and append them to an existing spec. Automatically continues the story ID sequence and regenerates the mermaid dependency diagram.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               count: { type: integer, default: 3, description: "Number of stories to generate (1-20)" }
+ *               brief: { type: string, description: "Additional brief context for the new stories" }
+ *     responses:
+ *       200:
+ *         description: Stories added successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 addedCount: { type: integer }
+ *                 stories: { type: array, items: { type: object } }
+ *       400: { description: "Missing required field workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ *       500: { description: "LLM returned non-JSON or invalid structure" }
+ */
 router.post('/:specId/add-stories', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -2881,6 +3063,41 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
 // ─── US-001: GET /:specId/versions — List all versions for a spec slug ────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/versions:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List all versions for a spec
+ *     operationId: listSpecVersions
+ *     description: Returns all versioned snapshots of a spec, ordered by version ascending. Each version includes status, rejection reason (if rejected), creation timestamp, title, and story count.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug
+ *     responses:
+ *       200:
+ *         description: Paginated list of spec versions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       version: { type: integer }
+ *                       status: { type: string }
+ *                       rejectionReason: { type: string }
+ *                       createdAt: { type: string, format: date-time }
+ *                       title: { type: string }
+ *                       storyCount: { type: integer }
+ *                 total: { type: integer }
+ */
 router.get('/:specId/versions', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -2913,6 +3130,55 @@ router.get('/:specId/versions', (req: Request, res: Response) => {
 
 // ─── US-001: GET /:specId/diff — Structured diff between two versions ─────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/diff:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Structured diff between two spec versions
+ *     operationId: diffSpecVersions
+ *     description: Computes a structured diff between two historical versions of a spec. Shows added, removed, modified, and unchanged stories along with field-level deltas for modified stories.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: v1
+ *         required: true
+ *         schema: { type: integer }
+ *         description: First version number
+ *       - in: query
+ *         name: v2
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Second version number
+ *     responses:
+ *       200:
+ *         description: Structured diff result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specSlug: { type: string }
+ *                 v1: { type: object }
+ *                 v2: { type: object }
+ *                 diff:
+ *                   type: object
+ *                   properties:
+ *                     titleChanged: { type: boolean }
+ *                     stories: { type: array, items: { type: object } }
+ *                     summary:
+ *                       type: object
+ *                       properties:
+ *                         added: { type: integer }
+ *                         removed: { type: integer }
+ *                         modified: { type: integer }
+ *                         unchanged: { type: integer }
+ *       400: { description: "Missing or invalid v1/v2 params, or v1 equals v2" }
+ *       404: { description: "Version(s) not found" }
+ */
 router.get('/:specId/diff', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -2962,6 +3228,47 @@ router.get('/:specId/diff', (req: Request, res: Response) => {
 
 // ─── POST /:specId/versions/:version/restore — Restore a historical version ──
 
+/**
+ * @swagger
+ * /api/specs/{specId}/versions/{version}/restore:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Restore a historical spec version
+ *     operationId: restoreSpecVersion
+ *     description: Restores a spec to a previously saved version. Snapshots the current content before overwriting, writes the restored content to disk, and emits a version_restored WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: version
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Version number to restore
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Version restored successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 newVersion: { type: integer }
+ *                 restoredFromVersion: { type: integer }
+ *       400: { description: "Missing workspaceId or invalid version number" }
+ *       404: { description: "Workspace or version not found" }
+ */
 router.post('/:specId/versions/:version/restore', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -3043,6 +3350,51 @@ router.post('/:specId/versions/:version/restore', (req: Request, res: Response) 
 
 // ─── PATCH /:specId/stories/:storyId — Toggle excluded flag ──────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}:
+ *   patch:
+ *     tags: [Specs]
+ *     summary: Toggle story excluded flag or edit story fields
+ *     operationId: patchStory
+ *     description: Either toggles the excluded flag on a story (for approved or pending specs), or edits story fields (title, description, acceptanceCriteria) on pending specs only. Field edits create a version snapshot before applying changes.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               excluded: { type: boolean, description: "Set to true to exclude story from pipeline runs" }
+ *               title: { type: string, description: "Updated story title (pending specs only)" }
+ *               description: { type: string, description: "Updated story description (pending specs only)" }
+ *               acceptanceCriteria: { type: array, items: { type: string }, description: "Updated acceptance criteria (pending specs only)" }
+ *     responses:
+ *       200:
+ *         description: Story updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 story: { type: object }
+ *                 version: { type: integer }
+ *       400: { description: "Missing required field workspaceId" }
+ *       403: { description: "Cannot edit stories in an approved spec" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -3170,6 +3522,52 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
 // ─── V2-008: PUT /:specId/stories/:storyId — Update a single story ───────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}:
+ *   put:
+ *     tags: [Specs]
+ *     summary: Update a single story
+ *     operationId: updateStory
+ *     description: Updates fields on a single story within a spec (pending or approved). Creates a version snapshot before applying changes. Supports updating title, description, acceptanceCriteria, complexity (1-5), priority (1-4), and timeoutMinutes (5-120).
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               title: { type: string }
+ *               description: { type: string }
+ *               acceptanceCriteria: { type: array, items: { type: string } }
+ *               complexity: { type: integer, minimum: 1, maximum: 5 }
+ *               priority: { type: integer, minimum: 1, maximum: 4 }
+ *               timeoutMinutes: { type: integer, minimum: 5, maximum: 120 }
+ *     responses:
+ *       200:
+ *         description: Story updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 story: { type: object }
+ *                 version: { type: integer }
+ *       400: { description: "Missing workspaceId or invalid complexity/priority/timeoutMinutes values" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -3269,6 +3667,42 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
 // ─── V2-067: DELETE /:specId/stories/:storyId — Remove a single story ─────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}:
+ *   delete:
+ *     tags: [Specs]
+ *     summary: Remove a single story from a spec
+ *     operationId: deleteStory
+ *     description: Removes a story from a spec, creates a version snapshot before deletion, reindexes remaining story IDs sequentially, and updates dependsOn references. Emits a story_deleted WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Story deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 deletedStory: { type: object }
+ *                 version: { type: integer }
+ *                 remainingCount: { type: integer }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -3361,6 +3795,54 @@ router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
 // ─── V2-008: POST /:specId/stories/:storyId/rewrite — AI-assisted rewrite ────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/rewrite:
+ *   post:
+ *     tags: [Specs]
+ *     summary: AI-assisted story rewrite
+ *     operationId: rewriteStory
+ *     description: Uses LLM to rewrite a single story based on user instructions. Returns the rewritten story fields as a preview (does not save to disk). The caller can then apply the rewrite via PUT /:specId/stories/:storyId.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               instructions: { type: string, description: "User instructions for the rewrite" }
+ *               model: { type: string, description: "LLM model to use" }
+ *     responses:
+ *       200:
+ *         description: Rewritten story preview
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 rewritten:
+ *                   type: object
+ *                   properties:
+ *                     title: { type: string }
+ *                     description: { type: string }
+ *                     acceptanceCriteria: { type: array, items: { type: string } }
+ *                 usage: { type: object }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ *       422: { description: "LLM returned invalid story structure" }
+ */
 router.post('/:specId/stories/:storyId/rewrite', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -3461,6 +3943,40 @@ Rewrite the story following the user instructions. Keep the same scope unless to
 
 // ─── V2-012: GET /tags/autocomplete — must be before /:specId to avoid capture ─
 
+/**
+ * @swagger
+ * /api/specs/tags/autocomplete:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Autocomplete tag names
+ *     operationId: autocompleteSpecTags
+ *     description: Returns tag name suggestions for autocomplete, filtered by optional query prefix. Results are ordered by usage count descending, limited to 20 results.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: q
+ *         schema: { type: string }
+ *         description: Tag name prefix filter
+ *     responses:
+ *       200:
+ *         description: Tag suggestions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tags:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name: { type: string }
+ *                       count: { type: integer }
+ *       400: { description: "Missing workspaceId" }
+ */
 router.get('/tags/autocomplete', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -3499,6 +4015,8 @@ router.get('/tags/autocomplete', (req: Request, res: Response) => {
  *   get:
  *     tags: [Specs]
  *     summary: Get full spec detail
+ *     operationId: getSpec
+ *     description: Retrieves the full spec JSON including all user stories, metadata, and computed readiness percentage. Looks in both pending and approved directories.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -3553,6 +4071,45 @@ router.get('/:specId', (req: Request, res: Response) => {
 
 // ─── V2-013: POST /:specId/fork — Deep copy spec with new slug ────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/fork:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Fork (deep copy) a spec with a new slug
+ *     operationId: forkSpec
+ *     description: Creates a deep copy of an existing spec with a new slug (original-slug-fork-N). Resets all story pass states, copies tags, creates a version snapshot, and emits a spec_forked WAL event. The fork is always created in pending/.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               title: { type: string, description: "Override fork title" }
+ *               brief: { type: string, description: "Override fork brief" }
+ *     responses:
+ *       200:
+ *         description: Spec forked successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 forkId: { type: string }
+ *                 forkedFrom: { type: string }
+ *                 path: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or source spec not found" }
+ */
 router.post('/:specId/fork', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -3665,6 +4222,8 @@ router.post('/:specId/fork', (req: Request, res: Response) => {
  *   post:
  *     tags: [Specs]
  *     summary: Approve a spec (move to approved/)
+ *     operationId: approveSpec
+ *     description: Moves a spec from pending/ to approved/ directory, making it eligible for pipeline execution. Emits a spec_approved WAL event.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -3738,6 +4297,8 @@ router.post('/:specId/approve', (req: Request, res: Response) => {
  *   post:
  *     tags: [Specs]
  *     summary: Reject a spec (delete + preserve in WAL)
+ *     operationId: rejectSpec
+ *     description: Rejects a pending spec by deleting the file and preserving the content in spec_versions with rejection reason. Emits a spec_rejected WAL event.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -3803,6 +4364,42 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
 
 const VALID_REVIEW_STATUSES: ReviewStatus[] = ['draft', 'review_requested', 'approved', 'changes_requested'];
 
+/**
+ * @swagger
+ * /api/specs/{specId}/request-review:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Submit spec for review
+ *     operationId: requestSpecReview
+ *     description: Transitions a pending spec's reviewStatus from 'draft' or 'changes_requested' to 'review_requested'. Emits a review_requested WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Review requested
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 reviewStatus: { type: string, enum: [review_requested] }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found in pending" }
+ *       409: { description: "Spec is not in draft or changes_requested status" }
+ */
 router.post('/:specId/request-review', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -3861,6 +4458,45 @@ router.post('/:specId/request-review', (req: Request, res: Response) => {
 
 // ─── V2-037: POST /:specId/review — Approve or request changes ───────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/review:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Approve or request changes on a spec review
+ *     operationId: reviewSpec
+ *     description: Reviews a spec that is in 'review_requested' status. Action can be 'approve' (transitions to 'approved') or 'request_changes' (transitions to 'changes_requested'). Emits a review_approved or review_changes_requested WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, action]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               action: { type: string, enum: [approve, request_changes] }
+ *               comment: { type: string, description: "Review comment" }
+ *               reviewerId: { type: string, description: "ID of the reviewer" }
+ *     responses:
+ *       200:
+ *         description: Review submitted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 reviewStatus: { type: string, enum: [approved, changes_requested] }
+ *       400: { description: "Missing workspaceId or invalid action" }
+ *       404: { description: "Workspace or spec not found in pending" }
+ *       409: { description: "Spec is not in review_requested status" }
+ */
 router.post('/:specId/review', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -4030,6 +4666,47 @@ function computeParallelGroups(stories: UserStory[]): string[][] {
 
 // ─── V2-011: POST /:specId/stories/bulk — Bulk story actions ─────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/bulk:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Bulk story actions (exclude, include, delete, set_priority)
+ *     operationId: bulkStoryAction
+ *     description: Performs a bulk action on multiple stories within a spec. Supported actions are exclude, include, delete (with reindexing), and set_priority. Creates a version snapshot before applying changes and emits a WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, action, storyIds]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               action: { type: string, enum: [exclude, include, delete, set_priority] }
+ *               storyIds: { type: array, items: { type: string } }
+ *               priority: { type: integer, minimum: 1, maximum: 4, description: "Required for set_priority action" }
+ *     responses:
+ *       200:
+ *         description: Bulk action applied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 action: { type: string }
+ *                 affectedCount: { type: integer }
+ *                 version: { type: integer }
+ *                 stories: { type: array, items: { type: object } }
+ *       400: { description: "Missing workspaceId, invalid action, empty storyIds, or invalid priority" }
+ *       404: { description: "Workspace, spec, or stories not found" }
+ */
 router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -4182,6 +4859,56 @@ router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/graph:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get story dependency DAG
+ *     operationId: getSpecGraph
+ *     description: Returns a directed acyclic graph (DAG) representation of story dependencies including nodes with status, edges, and parallel execution groups (waves). If a runId is provided, node statuses are populated from story_results.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: runId
+ *         schema: { type: string }
+ *         description: Pipeline run ID to populate story statuses from
+ *     responses:
+ *       200:
+ *         description: Graph data with nodes, edges, and parallel groups
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 nodes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       title: { type: string }
+ *                       dependsOn: { type: array, items: { type: string } }
+ *                       status: { type: string, enum: [pending, running, passed, failed, skipped] }
+ *                 edges:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       from: { type: string }
+ *                       to: { type: string }
+ *                 parallelGroups: { type: array, items: { type: array, items: { type: string } } }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ *       422: { description: "Circular dependency detected" }
+ */
 router.get('/:specId/graph', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -4296,6 +5023,49 @@ interface DependencySuggestion {
   reason: string; // why this dependency is suggested
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/detect-dependencies:
+ *   post:
+ *     tags: [Specs]
+ *     summary: AI-powered dependency detection
+ *     operationId: detectDependencies
+ *     description: Uses LLM to analyze story content and suggest missing dependencies that are not yet declared in dependsOn. Validates suggestions by checking for cycles and filtering duplicates. Emits a dependencies_detected WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Dependency suggestions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 suggestions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       from: { type: string, description: "Prerequisite story ID" }
+ *                       to: { type: string, description: "Dependent story ID" }
+ *                       reason: { type: string }
+ *                 tokenUsage: { type: object }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ *       500: { description: "LLM returned non-JSON" }
+ */
 router.post('/:specId/detect-dependencies', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -4463,6 +5233,50 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
 
 // ─── V2-076: POST /:specId/apply-dependencies — Accept suggested dependencies ─
 
+/**
+ * @swagger
+ * /api/specs/{specId}/apply-dependencies:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Accept and apply suggested dependencies
+ *     operationId: applyDependencies
+ *     description: Applies accepted dependency suggestions to a spec by adding dependsOn entries. Validates that no circular dependencies are introduced. Regenerates the mermaid dependency diagram. Emits a dependencies_applied WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, dependencies]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               dependencies:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [from, to]
+ *                   properties:
+ *                     from: { type: string }
+ *                     to: { type: string }
+ *     responses:
+ *       200:
+ *         description: Dependencies applied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 appliedCount: { type: integer }
+ *       400: { description: "Missing workspaceId or empty dependencies array" }
+ *       404: { description: "Workspace or spec not found" }
+ *       422: { description: "Accepting dependencies would create a circular dependency" }
+ */
 router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -4557,6 +5371,41 @@ router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
 
 // ─── V2-012: Tag management ──────────────────────────────────────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/tags:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Add tags to a spec
+ *     operationId: addSpecTags
+ *     description: Adds one or more tags to a spec. Tag names are lowercased and trimmed. Duplicate tags are silently ignored. Emits a tags_updated WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, tags]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               tags: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Updated tag list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tags: { type: array, items: { type: string } }
+ *       400: { description: "Missing workspaceId or empty tags array" }
+ *       404: { description: "Workspace not found" }
+ */
 // POST /:specId/tags — Add one or more tags to a spec
 router.post('/:specId/tags', (req: Request, res: Response) => {
   try {
@@ -4606,6 +5455,39 @@ router.post('/:specId/tags', (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/tags/{tag}:
+ *   delete:
+ *     tags: [Specs]
+ *     summary: Remove a tag from a spec
+ *     operationId: removeSpecTag
+ *     description: Removes a specific tag from a spec. Tag name is lowercased for matching. Emits a tags_updated WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: tag
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated tag list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tags: { type: array, items: { type: string } }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Tag not found on this spec" }
+ */
 // DELETE /:specId/tags/:tag — Remove a tag from a spec
 router.delete('/:specId/tags/:tag', (req: Request, res: Response) => {
   try {
@@ -4658,6 +5540,49 @@ interface StoryCommitRow {
   pushed_at: string;
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/commits:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List git commits for a story
+ *     operationId: listStoryCommits
+ *     description: Returns all git commits associated with a specific story, ordered by pushed_at descending. Includes commit SHA, message, and author.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of commits
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 commits:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       story_id: { type: string }
+ *                       spec_id: { type: string }
+ *                       commit_sha: { type: string }
+ *                       commit_message: { type: string }
+ *                       author: { type: string }
+ *                       pushed_at: { type: string, format: date-time }
+ *       400: { description: "Missing workspaceId" }
+ */
 router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;
@@ -4683,6 +5608,47 @@ router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) =>
 
 // ─── POST /api/specs/:specId/stories/:storyId/branch ────────────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/branch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Create a git branch for a story
+ *     operationId: createStoryBranch
+ *     description: Creates a new git branch named feat/STORY-ID from the default branch (main or master). Returns the branch name and checkout command.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       201:
+ *         description: Branch created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 branchName: { type: string }
+ *                 baseBranch: { type: string }
+ *                 checkoutCommand: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found" }
+ *       409: { description: "Branch already exists" }
+ */
 router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -4790,6 +5756,44 @@ function renderPrTemplate(template: string, vars: Record<string, string>): strin
   return result.trim();
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/pr-body:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Generate PR body for a story
+ *     operationId: generateStoryPrBody
+ *     description: Generates a pull request body from a story's metadata using a template. Includes summary, acceptance criteria checklist, dependencies, and spec reference. Uses workspace PR template if configured, otherwise falls back to default.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Generated PR body markdown
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 body: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.post('/:specId/stories/:storyId/pr-body', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -4984,6 +5988,47 @@ function githubIssueToStory(
   };
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/import/github-issues:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Import GitHub issues as stories
+ *     operationId: importGithubIssues
+ *     description: Fetches GitHub issues (by number or all open) and converts them to user stories appended to the spec. Supports preview mode to review before committing. Requires a GitHub connection for the workspace. Emits a github_issues_imported WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               issueNumbers: { type: array, items: { type: integer }, description: "Specific issue numbers to import (omit for all open)" }
+ *               preview: { type: boolean, default: false, description: "Preview mode - return stories without saving" }
+ *     responses:
+ *       200:
+ *         description: Issues imported or previewed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 preview: { type: boolean }
+ *                 importedCount: { type: integer }
+ *                 stories: { type: array, items: { type: object } }
+ *                 errors: { type: array, items: { type: object } }
+ *       400: { description: "Missing workspaceId or no GitHub connection" }
+ *       404: { description: "Workspace or spec not found" }
+ *       502: { description: "Failed to fetch GitHub issues" }
+ */
 router.post('/:specId/import/github-issues', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -5291,6 +6336,56 @@ interface ImportRequestBody {
   githubMilestone?: string;
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/import:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Unified issue import from Linear or GitHub
+ *     operationId: importIssues
+ *     description: Imports issues from Linear or GitHub as user stories appended to a spec. Supports preview mode. For Linear, requires an API key and optional team/project/label filters. For GitHub, requires a token, owner, and repo name. Emits an issues_imported WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, source]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               source: { type: string, enum: [linear, github] }
+ *               preview: { type: boolean, default: false }
+ *               linearApiKey: { type: string }
+ *               linearTeamId: { type: string }
+ *               linearProjectId: { type: string }
+ *               linearLabelIds: { type: array, items: { type: string } }
+ *               githubToken: { type: string }
+ *               githubOwner: { type: string }
+ *               githubRepo: { type: string }
+ *               githubMilestone: { type: string }
+ *     responses:
+ *       200:
+ *         description: Issues imported or previewed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 preview: { type: boolean }
+ *                 source: { type: string }
+ *                 importedCount: { type: integer }
+ *                 stories: { type: array, items: { type: object } }
+ *                 errors: { type: array, items: { type: string } }
+ *       400: { description: "Missing workspaceId, invalid source, or missing source-specific fields" }
+ *       404: { description: "Workspace or spec not found" }
+ *       502: { description: "Failed to fetch issues from external service" }
+ */
 router.post('/:specId/import', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -5449,6 +6544,46 @@ interface StoryCommentRow {
   avatar_url: string | null;
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/comments:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List comments for a story
+ *     operationId: listStoryComments
+ *     description: Returns all comments for a specific story, ordered by creation time ascending. Includes author display name and avatar.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of comments
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 comments:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       spec_id: { type: string }
+ *                       story_id: { type: string }
+ *                       user_id: { type: string }
+ *                       body: { type: string }
+ *                       created_at: { type: string, format: date-time }
+ *                       resolved_at: { type: string, format: date-time }
+ *                       display_name: { type: string }
+ *                       avatar_url: { type: string }
+ */
 // GET /api/specs/:specId/stories/:storyId/comments — list all comments for a story
 router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) => {
   try {
@@ -5472,6 +6607,49 @@ router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) =
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/comments:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Create a comment on a story
+ *     operationId: createStoryComment
+ *     description: Creates a new comment on a story. Parses @mentions in the body and creates notifications for mentioned users. Emits a comment_added WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [body]
+ *             properties:
+ *               body: { type: string, description: "Comment body (supports @mentions)" }
+ *     responses:
+ *       201:
+ *         description: Comment created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 spec_id: { type: string }
+ *                 story_id: { type: string }
+ *                 body: { type: string }
+ *                 created_at: { type: string, format: date-time }
+ *                 display_name: { type: string }
+ *       400: { description: "Body is required" }
+ *       500: { description: "No user configured" }
+ */
 // POST /api/specs/:specId/stories/:storyId/comments — create a comment
 router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) => {
   try {
@@ -5548,6 +6726,41 @@ router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) 
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/comments/{commentId}/resolve:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Resolve a story comment
+ *     operationId: resolveStoryComment
+ *     description: Marks a comment as resolved by setting its resolved_at timestamp. Cannot resolve an already-resolved comment. Emits a comment_resolved WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: commentId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Comment resolved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 resolved_at: { type: string, format: date-time }
+ *       400: { description: "Comment is already resolved" }
+ *       404: { description: "Comment not found" }
+ *       500: { description: "No user configured" }
+ */
 // POST /api/specs/:specId/stories/:storyId/comments/:commentId/resolve — resolve a comment
 router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Request, res: Response) => {
   try {
@@ -5600,6 +6813,31 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Reque
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/comments/counts:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get unresolved comment counts per story
+ *     operationId: getCommentCounts
+ *     description: Returns a map of story IDs to their unresolved (non-resolved) comment counts for a given spec.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Comment counts keyed by story ID
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 counts:
+ *                   type: object
+ *                   additionalProperties: { type: integer }
+ */
 // GET /api/specs/:specId/comments/counts — unresolved comment counts per story
 router.get('/:specId/comments/counts', (req: Request, res: Response) => {
   try {
@@ -5636,6 +6874,48 @@ interface AssignmentRow {
   assigned_by: string | null;
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/assign:
+ *   put:
+ *     tags: [Specs]
+ *     summary: Assign or unassign a spec to a user
+ *     operationId: assignSpec
+ *     description: Assigns a spec to a user or removes the assignment (when assigneeId is null/empty). Emits spec_assigned or spec_unassigned WAL events.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               assigneeId: { type: string, description: "User ID to assign, or null/empty to unassign" }
+ *     responses:
+ *       200:
+ *         description: Assignment updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 assignee:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     displayName: { type: string }
+ *                     email: { type: string }
+ *                     avatarUrl: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or assignee user not found" }
+ */
 router.put('/:specId/assign', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -5734,6 +7014,52 @@ router.put('/:specId/assign', (req: Request, res: Response) => {
 
 // ─── V2-042: PUT /:specId/stories/:storyId/assign — Assign story to a user ───
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/assign:
+ *   put:
+ *     tags: [Specs]
+ *     summary: Assign or unassign a story to a user
+ *     operationId: assignStory
+ *     description: Assigns a specific story within a spec to a user, or removes the assignment when assigneeId is null/empty. Validates the story exists within the spec. Emits story_assigned or story_unassigned WAL events.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               assigneeId: { type: string, description: "User ID to assign, or null/empty to unassign" }
+ *     responses:
+ *       200:
+ *         description: Assignment updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 assignee:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     displayName: { type: string }
+ *                     email: { type: string }
+ *                     avatarUrl: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, story, or assignee user not found" }
+ */
 router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -5846,6 +7172,48 @@ router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => 
 
 // ─── V2-042: GET /:specId/assignments — Get all assignments for a spec ────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/assignments:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get all assignments for a spec
+ *     operationId: getSpecAssignments
+ *     description: Returns all spec-level and story-level assignments for a given spec within a workspace. Includes assignee display name, email, and avatar.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of assignments
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 assignments:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       storyId: { type: string }
+ *                       assignee:
+ *                         type: object
+ *                         properties:
+ *                           id: { type: string }
+ *                           displayName: { type: string }
+ *                           email: { type: string }
+ *                           avatarUrl: { type: string }
+ *                       assignedAt: { type: string, format: date-time }
+ *       400: { description: "Missing workspaceId" }
+ */
 router.get('/:specId/assignments', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -5893,6 +7261,54 @@ router.get('/:specId/assignments', (req: Request, res: Response) => {
 
 // ─── V2-077: POST /:specId/stories/:storyId/enhance-criteria — AI-suggest acceptance criteria ───
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/enhance-criteria:
+ *   post:
+ *     tags: [Specs]
+ *     summary: AI-suggest additional acceptance criteria
+ *     operationId: enhanceStoryCriteria
+ *     description: Uses LLM to suggest 3-5 additional acceptance criteria for a story, covering edge cases, error handling, and performance. Considers related stories (dependencies and dependents) for consistency. Returns suggestions as a preview without saving.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Suggested criteria
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 storyId: { type: string }
+ *                 existingCount: { type: integer }
+ *                 suggestions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       criterion: { type: string }
+ *                       rationale: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ *       500: { description: "LLM returned non-JSON or invalid structure" }
+ */
 router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;
@@ -6017,6 +7433,48 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
 
 // ─── V2-077: POST /:specId/stories/:storyId/accept-criteria — Accept suggested criteria ───
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/accept-criteria:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Accept and apply suggested acceptance criteria
+ *     operationId: acceptStoryCriteria
+ *     description: Appends accepted acceptance criteria to a story. Deduplicates against existing criteria. Saves the updated spec to disk immediately.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, criteria]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               criteria: { type: array, items: { type: string }, description: "Acceptance criteria strings to add" }
+ *     responses:
+ *       200:
+ *         description: Criteria accepted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 storyId: { type: string }
+ *                 addedCount: { type: integer }
+ *                 totalCriteria: { type: integer }
+ *       400: { description: "Missing workspaceId or empty criteria array" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;

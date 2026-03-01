@@ -24,7 +24,27 @@ function ensureRow(): OnboardingRow {
   return row;
 }
 
-// GET /api/onboarding — get current onboarding state
+/**
+ * @swagger
+ * /api/onboarding:
+ *   get:
+ *     tags: [Onboarding]
+ *     summary: Get current onboarding state
+ *     operationId: getOnboardingState
+ *     description: Returns the current onboarding wizard progress including step number, workspace association, direction completion, and overall completion status.
+ *     responses:
+ *       200:
+ *         description: Onboarding state
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 currentStep: { type: integer }
+ *                 workspaceId: { type: string, nullable: true }
+ *                 directionDone: { type: boolean }
+ *                 completed: { type: boolean }
+ */
 router.get('/', (_req: Request, res: Response) => {
   const row = ensureRow();
   res.json({
@@ -35,7 +55,40 @@ router.get('/', (_req: Request, res: Response) => {
   });
 });
 
-// PUT /api/onboarding — update onboarding state
+/**
+ * @swagger
+ * /api/onboarding:
+ *   put:
+ *     tags: [Onboarding]
+ *     summary: Update onboarding state
+ *     operationId: updateOnboardingState
+ *     description: Updates one or more fields of the onboarding wizard state. Only provided fields are updated.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               currentStep: { type: integer }
+ *               workspaceId: { type: string, nullable: true }
+ *               directionDone: { type: boolean }
+ *               completed: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Updated onboarding state
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 currentStep: { type: integer }
+ *                 workspaceId: { type: string, nullable: true }
+ *                 directionDone: { type: boolean }
+ *                 completed: { type: boolean }
+ *       400:
+ *         description: No fields to update
+ */
 router.put('/', (req: Request, res: Response) => {
   const { currentStep, workspaceId, directionDone, completed } = req.body;
   ensureRow();
