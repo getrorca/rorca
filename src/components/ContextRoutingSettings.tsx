@@ -1017,7 +1017,11 @@ function MonorepoDiscoveryPanel({
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Discovery failed';
-      showToast(msg, 'error');
+      if (msg.toLowerCase().includes('no monorepo') || msg.toLowerCase().includes('not a monorepo')) {
+        showToast('No monorepo structure detected in this workspace.', 'success');
+      } else {
+        showToast(msg, 'error');
+      }
     } finally {
       setDiscovering(false);
     }

@@ -211,7 +211,7 @@ MODE_LABEL="Implementation"
 [ "$MODE" = "journey" ] && MODE_LABEL="User Journey"
 
 echo "╔══════════════════════════════════════════╗"
-echo "║         Ralph Loop — $MODE_LABEL"
+echo "║         Rorca Engine — $MODE_LABEL"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 echo "Progress: $(get_progress)"

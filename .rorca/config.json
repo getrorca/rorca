@@ -2,7 +2,10 @@
   "$schema": "./config.schema.json",
   "version": 1,
   "routing": {
-    "global": ["CLAUDE.md", "AGENTS.md"],
+    "global": [
+      "CLAUDE.md",
+      "AGENTS.md"
+    ],
     "scopes": [],
     "tags": [],
     "tokenBudget": 32000
@@ -17,21 +20,42 @@
   },
   "teleology": {
     "specDir": "forge/specs",
-    "directionStackLayers": ["L1", "L2", "L3", "L4", "L5"]
+    "directionStackLayers": [
+      "L1",
+      "L2",
+      "L3",
+      "L4",
+      "L5"
+    ]
   },
   "orchestration": {
     "router": "auto",
     "thresholds": {
-      "haiku": [0, 30],
-      "sonnet": [31, 65],
-      "opus": [66, 100]
+      "haiku": [
+        0,
+        30
+      ],
+      "sonnet": [
+        31,
+        65
+      ],
+      "opus": [
+        66,
+        100
+      ]
     },
     "escalation": {
       "enabled": true,
       "maxRetriesOnTier": 2,
-      "chain": ["haiku", "sonnet", "opus"]
+      "chain": [
+        "haiku",
+        "sonnet",
+        "opus"
+      ]
     },
-    "tokenBudgetPerStory": 50000
+    "tokenBudgetPerStory": 50000,
+    "fallbackEngine": null,
+    "capabilityMismatch": "warn"
   },
   "execution": {
     "waveParallelism": false,
@@ -42,5 +66,8 @@
       "enabled": false,
       "reviewTimeoutMin": 5
     }
+  },
+  "personas": {
+    "disabled": []
   }
 }

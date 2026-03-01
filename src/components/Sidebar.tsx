@@ -5,7 +5,7 @@ import {
   Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight,
   Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
   BarChart3, HeartPulse, ScrollText, Calculator, Settings, Settings2,
-  Plus, X, Search, ChevronDown, BookOpen,
+  Plus, X, Search, ChevronDown, BookOpen, LayoutDashboard,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -229,6 +229,15 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
           <span className="flex-1 text-left truncate">Search...</span>
           <span className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</span>
         </button>
+
+        <NavLink
+          to={PANEL_ROUTES.hub}
+          onClick={(e) => { e.preventDefault(); onNavigate('hub'); onMobileClose?.(); }}
+          className={({ isActive }) => `flex items-center gap-2 px-2 py-1 rounded text-[13px] transition-colors ${isActive ? 'text-[var(--text)] bg-surface-200 font-medium' : 'text-muted hover:text-[var(--text)] hover:bg-surface-100'}`}
+        >
+          <LayoutDashboard size={14} className="shrink-0 text-muted/70" />
+          <span className="truncate">Overview</span>
+        </NavLink>
 
         <NavLink
           to={PANEL_ROUTES.forge}

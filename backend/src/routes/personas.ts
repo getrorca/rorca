@@ -21,6 +21,9 @@ const router = Router();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+// Built-in default personas shipped with Rorca — used when workspace has no custom personas yet
+const DEFAULT_PERSONAS_DIR = path.resolve(__dirname, '..', '..', '..', 'default-personas');
+
 function resolveWorkspacePath(workspaceId: string): string | null {
   try {
     const row = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as
@@ -89,6 +92,11 @@ router.get('/', (req: Request, res: Response) => {
   const rorcaDir = path.join(wsPath, '.rorca');
   const registry = new PersonaRegistry();
   registry.discover(rorcaDir);
+
+  // If no workspace personas found, seed from built-in defaults
+  if (registry.getAll().length === 0 && fs.existsSync(DEFAULT_PERSONAS_DIR)) {
+    registry.discover(DEFAULT_PERSONAS_DIR);
+  }
 
   const config = loadRorcaConfig(wsPath);
   const disabledSet = new Set(config.personas.disabled);

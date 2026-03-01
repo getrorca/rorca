@@ -42,7 +42,8 @@ interface NotificationContextValue {
 
 const NotificationCtx = createContext<NotificationContextValue | null>(null);
 
-const POLL_INTERVAL = 10_000; // 10s fallback poll
+const POLL_INTERVAL = 30_000; // 30s fallback poll — SSE handles real-time
+const SSE_THROTTLE_MS = 5_000; // SSE events throttled to at most 1 refresh per 5s
 
 export function NotificationProvider({ children }: { children: ReactNode }) {
   const [unreadCount, setUnreadCount] = useState(0);
@@ -50,15 +51,24 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sseRef = useRef<EventSource | null>(null);
+  const lastSseRefreshRef = useRef<number>(0); // timestamp of last SSE-triggered refresh
 
   const refreshUnreadCount = useCallback(async () => {
     try {
       const res = await apiFetch<UnreadCountResponse>('/api/notifications/unread-count');
       setUnreadCount(res.count);
     } catch {
-      // Silently ignore — auth might not be active
+      // Silently ignore — auth might not be active or rate limited
     }
   }, []);
+
+  // Throttled version for SSE triggers — prevents rapid-fire 429s on event replay
+  const refreshUnreadCountThrottled = useCallback(() => {
+    const now = Date.now();
+    if (now - lastSseRefreshRef.current < SSE_THROTTLE_MS) return;
+    lastSseRefreshRef.current = now;
+    void refreshUnreadCount();
+  }, [refreshUnreadCount]);
 
   const fetchNotifications = useCallback(async () => {
     setLoading(true);
@@ -111,7 +121,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
           'run_failed', 'run_cancelled', 'review_requested', 'budget_alert',
         ]);
         if (triggerTypes.has(data.event_type)) {
-          refreshUnreadCount();
+          refreshUnreadCountThrottled();
         }
       } catch {
         // ignore parse errors
@@ -126,7 +136,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       es.close();
       sseRef.current = null;
     };
-  }, [refreshUnreadCount]);
+  }, [refreshUnreadCountThrottled]);
 
   // Fallback polling for unread count
   useEffect(() => {

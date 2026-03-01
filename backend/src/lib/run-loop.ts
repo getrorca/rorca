@@ -1150,7 +1150,7 @@ async function main(): Promise<void> {
   const progress = getProgress(stories);
 
   console.log('========================================');
-  console.log(`  Ralph Loop — ${modeLabel} (TypeScript)`);
+  console.log(`  Rorca Engine — ${modeLabel}`);
   console.log('========================================');
   console.log('');
   console.log(`Progress: ${progress.passed}/${progress.total}`);

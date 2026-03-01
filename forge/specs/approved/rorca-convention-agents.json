@@ -4,9 +4,9 @@
   "title": "rorca-convention-agents",
   "model": "claude-opus-4-6",
   "generatedAt": "2026-02-27T00:00:00.000Z",
-  "_notes": "Convention packs (greenfield scaffolding), convention inference (brownfield extraction), convention drift detection, agent persona system (15+ personas in 4 categories), adversarial review pipeline, multi-pass spec generation (6-pass), and MCP HTTP transport migration (API-first, auto-generated MCP from OpenAPI). Depends on rorca-context-intent-engine for .rorca/ directory, AGENTS.md, MEMORY.md, and virtual context routing infrastructure.",
+  "_notes": "Convention packs (greenfield scaffolding), convention inference (brownfield extraction), convention drift detection, agent persona system (15+ personas in 4 categories), adversarial review pipeline, multi-pass spec generation (6-pass), MCP HTTP transport migration (API-first, auto-generated MCP from OpenAPI), and skills integration (LLM-driven skill matching, SkillRegistry, skills.sh CLI bridge, skill injection in execution engine). Depends on rorca-context-intent-engine for .rorca/ directory, AGENTS.md, MEMORY.md, and virtual context routing infrastructure.",
   "_relatesTo": "rorca-context-intent-engine (direct dependency — CIE provides .rorca/ infrastructure this spec builds on), rorca-opencode-integration (extends OC-019 complexity scorer with persona assignment), rorca-execution-quality (extends EQ-001 objective gates with adversarial review), rorca-v2-platform V2-102-V2-105 (extends direction stack wizard with convention inference)",
-  "_executionOrder": "After rorca-context-intent-engine (spec #3), before rorca-e2e-testing (spec #4). CIE creates .rorca/ directory, AGENTS.md, MEMORY.md, routing engine. This spec layers convention packs + personas on top. E2E testing should run last to test the complete system including conventions and personas.",
+  "_executionOrder": "After rorca-context-intent-engine (spec #3), before rorca-e2e-testing (spec #4). CIE creates .rorca/ directory, AGENTS.md, MEMORY.md, routing engine. This spec layers convention packs + personas + skills on top. E2E testing should run last to test the complete system including conventions, personas, and skills.",
   "userStories": [
     {
       "id": "CA-001",
@@ -17,10 +17,12 @@
         "PackRegistry class: listInstalled(), getPackPath(name), validatePack(path) -> ValidationResult",
         "convention_packs table created via pragma table_info pattern (not migration file)",
         "Registry reads from .rorca/packs/ directory and cross-references DB for metadata",
-        "Invalid pack.json throws ValidationError with specific field-level errors"
+        "Invalid pack.json throws ValidationError with specific field-level errors",
+        "pack.json schema includes optional `skills` field (array of skill names bundled with the pack)"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-002",
@@ -33,10 +35,14 @@
         "conventions/ files are plain markdown (library-specific guides)",
         "scaffold/ is a directory tree that gets copied verbatim to the project root",
         "Missing optional directories return empty arrays, missing required directories throw ValidationError",
-        "TypeScript types exported from backend/src/lib/convention-packs.ts"
+        "TypeScript types exported from backend/src/lib/convention-packs.ts",
+        "conventions/ directory files treated as Agent Skills with YAML frontmatter (name, description, globs, alwaysApply fields)"
       ],
-      "dependsOn": ["CA-001"],
-      "passes": false
+      "dependsOn": [
+        "CA-001"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-003",
@@ -50,10 +56,15 @@
         "AGENTS.md generated at workspace root from pack AGENTS.md template (preserves existing if present, using marker-based append like Codex AGENTS.md pattern)",
         "convention_packs row created with pack metadata",
         "Idempotent — re-installing same pack updates files but doesn't duplicate direction layers",
-        "WAL event emitted: pack_installed with pack name and workspace ID"
+        "WAL event emitted: pack_installed with pack name and workspace ID",
+        "Pack install copies skills to .rorca/skills/ directory and registers in installed_skills table",
+        "Skills also copied to .claude/skills/ for Claude auto-discovery"
       ],
-      "dependsOn": ["CA-002"],
-      "passes": false
+      "dependsOn": [
+        "CA-002"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-004",
@@ -66,7 +77,9 @@
         "Forked pack is fully editable (not read-only like upstream packs)",
         "Direction layers from forked pack replace original pack's L0 layers"
       ],
-      "dependsOn": ["CA-003"],
+      "dependsOn": [
+        "CA-003"
+      ],
       "passes": false
     },
     {
@@ -84,7 +97,8 @@
         "WAL event emitted: convention_discovered with proposal summary"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-006",
@@ -99,7 +113,9 @@
         "Optional pre-execution hook: .rorca/config.json driftCheck: true blocks pipeline trigger if error-severity violations exist",
         "GET /api/conventions/drift/:workspaceId returns latest drift report"
       ],
-      "dependsOn": ["CA-005"],
+      "dependsOn": [
+        "CA-005"
+      ],
       "passes": false
     },
     {
@@ -116,7 +132,8 @@
         "TypeScript types exported from backend/src/lib/agent-personas.ts"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-008",
@@ -132,8 +149,11 @@
         "PersonaRegistry successfully discovers and indexes all 15 personas",
         "Personas are opinionated but overridable (users can edit the markdown files)"
       ],
-      "dependsOn": ["CA-007"],
-      "passes": false
+      "dependsOn": [
+        "CA-007"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-009",
@@ -146,26 +166,14 @@
         "Spec JSON schema updated: userStories[].persona is optional string, userStories[].reviewers is optional string[]",
         "Existing specs without persona field work identically (backward compatible)",
         "Persona injection works for all three execution paths (claude, opencode, codex)",
-        "For OpenCode: persona text added to SKILL.md content. For Codex: persona text added to AGENTS.md content"
+        "For OpenCode: persona text added to SKILL.md content. For Codex: persona text added to AGENTS.md content",
+        "buildPrompt() injection order updated: matched skills injected BEFORE persona text"
       ],
-      "dependsOn": ["CA-008"],
-      "passes": false
-    },
-    {
-      "id": "CA-010",
-      "title": "Auto-Persona Assignment via Complexity Scorer Extension",
-      "description": "Extend the existing Story Complexity Scorer (OC-019) to also assign a default persona when story.persona is not explicitly set. The scorer analyzes story title, description, acceptanceCriteria, and dependsOn depth to determine the best-fit specialist persona. Uses trigger glob patterns from persona frontmatter for file-touch prediction. Assignment follows: if story mentions 'UI', 'component', 'layout' → frontend persona. If 'API', 'endpoint', 'route' → backend. If 'schema', 'migration', 'query' → database. If 'auth', 'token', 'CORS' → security. Falls back to lead-dev for ambiguous stories.",
-      "acceptanceCriteria": [
-        "ComplexityScorer extended with assignPersona(story, registry) method",
-        "Keyword-based matching against story title + description for persona assignment",
-        "Persona trigger globs from frontmatter used as secondary signal (if story dependsOn files matching triggers)",
-        "Default fallback to 'lead-dev' persona when no strong signal detected",
-        "Auto-assignment logged in WAL event (persona_assigned) with reasoning",
-        "Explicit story.persona field always overrides auto-assignment",
-        "Works with all three execution paths (claude, opencode, codex)"
+      "dependsOn": [
+        "CA-008"
       ],
-      "dependsOn": ["CA-009"],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-011",
@@ -183,7 +191,9 @@
         "Opt-in only: disabled by default, enabled via .rorca/config.json adversarialReview: true",
         "Works with all three execution paths for the review agent spawn"
       ],
-      "dependsOn": ["CA-010"],
+      "dependsOn": [
+        "CA-009"
+      ],
       "passes": false
     },
     {
@@ -199,10 +209,15 @@
         "SSE events emitted for each pass: spec_generation_pass with { pass: 1|2, status: started|completed }",
         "When multiPass: false (default), existing single-pass behavior is unchanged",
         "Both passes use the persona prompt text from the default persona library (pm.md, spec-writer.md)",
-        "Final output is the Pass 2 result (the decomposed spec)"
+        "Final output is the Pass 2 result (the decomposed spec)",
+        "Pass 2 includes installed skill catalog in prompt context",
+        "Pass 2 outputs suggestedSkills array and suggestedPersona per story"
       ],
-      "dependsOn": ["CA-008"],
-      "passes": false
+      "dependsOn": [
+        "CA-008"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-013",
@@ -217,10 +232,14 @@
         "Pass 4 output stored as spec version 4",
         "SSE events for passes 3 and 4 follow same pattern as passes 1-2",
         "Stories that have no UI component (pure backend) are lightly touched by Pass 3 (not forced)",
-        "Passes 3-4 run only when multiPass: true"
+        "Passes 3-4 run only when multiPass: true",
+        "Pass 4 reads story's assigned skills from suggestedSkills (not all conventions)"
       ],
-      "dependsOn": ["CA-012"],
-      "passes": false
+      "dependsOn": [
+        "CA-012"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-014",
@@ -238,8 +257,11 @@
         "Each pass version stored in spec_versions table with pass number in metadata",
         "Forge panel shows progress through all 6 passes with pass names"
       ],
-      "dependsOn": ["CA-013"],
-      "passes": false
+      "dependsOn": [
+        "CA-013"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-015",
@@ -253,10 +275,15 @@
         "Install button calls POST /api/packs/install and shows progress/result",
         "Fork button calls POST /api/packs/fork and navigates to forked pack for editing",
         "Workspace Settings > Direction tab shows active pack name and 'Change Pack' action",
-        "Uninstall removes pack files from .rorca/ and direction layers from DB (with confirmation)"
+        "Uninstall removes pack files from .rorca/ and direction layers from DB (with confirmation)",
+        "Marketplace panel includes 'Skills' tab showing installed skills, suggested skills, and skills.sh browse"
       ],
-      "dependsOn": ["CA-004"],
-      "passes": false
+      "dependsOn": [
+        "CA-004"
+      ],
+      "passes": false,
+      "skipped": true,
+      "notes": "Skipped after max retries — fix manually and re-run with --story CA-015"
     },
     {
       "id": "CA-016",
@@ -272,8 +299,13 @@
         "PersonaRegistry.discover() respects the disabled list",
         "Category filter dropdown to show only primary/adversarial/specialist/review"
       ],
-      "dependsOn": ["CA-009", "CA-015"],
-      "passes": false
+      "dependsOn": [
+        "CA-009",
+        "CA-015"
+      ],
+      "passes": false,
+      "skipped": true,
+      "notes": "Skipped after max retries — fix manually and re-run with --story CA-016"
     },
     {
       "id": "CA-017",
@@ -288,8 +320,13 @@
         "Trigger modal warning is non-blocking (user can still trigger) but clearly visible",
         "Drift report refreshes automatically when workspace is opened"
       ],
-      "dependsOn": ["CA-006", "CA-016"],
-      "passes": false
+      "dependsOn": [
+        "CA-006",
+        "CA-016"
+      ],
+      "passes": false,
+      "skipped": true,
+      "notes": "Skipped after max retries — fix manually and re-run with --story CA-017"
     },
     {
       "id": "CA-018",
@@ -305,8 +342,11 @@
         "If a pass fails, shows error message and option to retry from that pass",
         "Single-pass mode (multiPass: false) shows existing single progress bar (backward compatible)"
       ],
-      "dependsOn": ["CA-014"],
-      "passes": false
+      "dependsOn": [
+        "CA-014"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-019",
@@ -319,10 +359,14 @@
         "api-express includes: L1 (engineering principles), L2 (API domain conventions), 4+ convention guides (express.md, sqlite.md, jwt.md, typescript.md), scaffold, AGENTS.md",
         "Both packs include persona customizations (saas-nextjs adds billing-specialist, api-express adds api-designer)",
         "Both packs pass PackLoader validation",
-        "Both packs successfully install via POST /api/packs/install on a fresh workspace"
+        "Both packs successfully install via POST /api/packs/install on a fresh workspace",
+        "Convention files use Agent Skills frontmatter format (name, description, globs, alwaysApply YAML header)"
       ],
-      "dependsOn": ["CA-003"],
-      "passes": false
+      "dependsOn": [
+        "CA-003"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-020",
@@ -338,10 +382,17 @@
         "Test: adversarial review pipeline with mock diff produces structured ReviewResult",
         "Test: multi-pass generation produces 6 spec versions with increasing detail",
         "Test: auto-persona assignment matches expected personas for test stories",
-        "All tests pass with npx jest --testPathPattern=convention"
+        "All tests pass with npx jest --testPathPattern=convention",
+        "Test suite includes skill-specific test cases: SkillRegistry CRUD, skill injection in buildPrompt(), LLM-driven skill matching"
       ],
-      "dependsOn": ["CA-011", "CA-014", "CA-017"],
-      "passes": false
+      "dependsOn": [
+        "CA-011",
+        "CA-014",
+        "CA-017"
+      ],
+      "passes": false,
+      "skipped": true,
+      "notes": "Skipped after max retries — fix manually and re-run with --story CA-020"
     },
     {
       "id": "CA-021",
@@ -360,8 +411,12 @@
         "Tool descriptions derived from OpenAPI summary/description fields",
         "Tool parameters derived from OpenAPI request body and path/query parameter schemas"
       ],
-      "dependsOn": ["CA-003", "CA-007"],
-      "passes": false
+      "dependsOn": [
+        "CA-003",
+        "CA-007"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CA-022",
@@ -378,7 +433,86 @@
         "No routes missing from the generated spec (compare route count in server.ts vs spec)",
         "Convention pack, persona, and drift detection routes included in spec"
       ],
-      "dependsOn": ["CA-021"],
+      "dependsOn": [
+        "CA-021"
+      ],
+      "passes": false
+    },
+    {
+      "id": "SK-001",
+      "title": "Skill Catalog and Registry",
+      "description": "Build a SkillRegistry class in `backend/src/lib/skill-registry.ts` that manages installed skills (Agent Skills format markdown files with YAML frontmatter). Methods: discover() — scan .rorca/skills/ + .claude/skills/, parse frontmatter; getSkill(name) — lookup by name; getCatalogForPrompt() — compact 'name: description' list (~750 tokens for 30 skills); install(name, content, source); remove(name). Create `installed_skills` table via pragma table_info check in `backend/src/db/index.ts`. Create API routes in `backend/src/routes/skills.ts`: GET /api/skills, POST /api/skills/install, DELETE /api/skills/:name. Mount routes in `backend/src/server.ts`.",
+      "acceptanceCriteria": [
+        "SkillRegistry class in backend/src/lib/skill-registry.ts with discover(), getSkill(), getCatalogForPrompt(), install(), remove() methods",
+        "discover() scans .rorca/skills/ and .claude/skills/ directories, parses YAML frontmatter from markdown files",
+        "getCatalogForPrompt() returns compact 'name: description' list suitable for LLM prompt injection (~750 tokens for 30 skills)",
+        "installed_skills table created via pragma table_info pattern in backend/src/db/index.ts (not migration file)",
+        "API routes: GET /api/skills (list), POST /api/skills/install (install), DELETE /api/skills/:name (remove)",
+        "Routes mounted in backend/src/server.ts under /api/skills",
+        "@swagger JSDoc annotations on all new routes"
+      ],
+      "dependsOn": [
+        "CA-001"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "SK-002",
+      "title": "LLM-Driven Skill + Persona Matching in Spec Generation",
+      "description": "Modify spec generation in `backend/src/routes/specs.ts` to include skill and persona catalogs in the LLM prompt. After the synthesized direction stack, inject: '=== INSTALLED SKILLS ===' (from SkillRegistry.getCatalogForPrompt()) and '=== AVAILABLE PERSONAS ===' (from PersonaRegistry.getPersonaCatalogForPrompt()). Extend the JSON output schema so each story gets `suggestedSkills: [{name, relevance, reason}]`, `suggestedPersona`, and `suggestedReviewers`. Validate suggestedSkills names against installed catalog (strip unknown). This replaces the removed CA-010 keyword matching with superior LLM-driven assignment.",
+      "acceptanceCriteria": [
+        "Spec generation prompt includes installed skill catalog and available persona catalog sections",
+        "Each generated story includes suggestedSkills array with {name, relevance (1-10), reason} objects",
+        "Each generated story includes suggestedPersona and suggestedReviewers fields",
+        "suggestedSkills names validated against installed catalog — unknown names stripped with warning log",
+        "LLM receives MEMORY.md, AGENTS.md, story text, domain L2, and stack detection as signals for matching",
+        "Zero extra LLM cost — piggybacks on existing spec generation call",
+        "Replaces CA-010 keyword matching entirely — LLM-driven is the only assignment path"
+      ],
+      "dependsOn": [
+        "SK-001",
+        "CA-007"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "SK-003",
+      "title": "Skill Injection in Execution Engine",
+      "description": "Modify buildPrompt() in `backend/src/lib/execution-engine.ts` to inject matched skill content into the story prompt. New injection order: contextPreamble → mode → agent instructions → roleSection → matched skills (sorted by relevance, token-budgeted) → persona text → story task. Read story.suggestedSkills from spec JSON, load skill file content from .rorca/skills/. For Claude agent: skip skills already in .claude/skills/ (auto-discovered natively). Token budget enforcement via existing enforceBudget() pattern. Log active_skills in WAL story_started event and story_results table.",
+      "acceptanceCriteria": [
+        "buildPrompt() injects matched skill content BEFORE persona, AFTER roleSection",
+        "Skills sorted by LLM-assigned relevance score (highest first)",
+        "Token budget enforced via enforceBudget() — skills truncated if over budget",
+        "Claude agent path skips skills already in .claude/skills/ (natively auto-discovered)",
+        "OpenCode and Codex agent paths inject all matched skills into prompt",
+        "active_skills logged in WAL story_started event payload",
+        "story_results table includes active_skills metadata",
+        "Existing rorca.md workflow skill treated as meta-skill with relevance 10 (always included)"
+      ],
+      "dependsOn": [
+        "SK-001",
+        "CA-009"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "SK-004",
+      "title": "Skills.sh CLI Integration + Echolocation Bridge",
+      "description": "Add skills.sh integration to the skills API routes. POST /api/skills/install-from-sh — runs `npx skills add <name>`, copies result to .rorca/skills/. GET /api/skills/suggestions — runs workspace echolocation, maps detected stack to skill names via existing STACK_TO_SKILLS mapping and inferredSkills field in workspace-echolocation.ts. POST /api/skills/search — proxy to skills.sh search API for marketplace browse. Wire up echolocation's inferredSkills output to SkillRegistry suggestions.",
+      "acceptanceCriteria": [
+        "POST /api/skills/install-from-sh runs npx skills add <name> and copies result to .rorca/skills/",
+        "GET /api/skills/suggestions uses workspace echolocation to suggest skills based on detected stack",
+        "POST /api/skills/search proxies to skills.sh search API for marketplace browsing",
+        "Echolocation inferredSkills field mapped to SkillRegistry via STACK_TO_SKILLS",
+        "Error handling for npx skills failures (not installed, network error, skill not found)",
+        "@swagger JSDoc annotations on all new routes"
+      ],
+      "dependsOn": [
+        "SK-001"
+      ],
       "passes": false
     }
   ]
