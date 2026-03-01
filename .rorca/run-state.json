@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T04:04:59.950Z",
+  "lastUpdatedAt": "2026-03-01T04:00:53.167Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -59,13 +59,13 @@
       "elapsedMs": 989865
     },
     {
-      "storyId": "CA-013",
-      "title": "Multi-Pass Spec Generation — UX Designer and Best Practices Passes (Passes 3-4)",
+      "storyId": "CA-019",
+      "title": "Built-In Convention Packs — SaaS-NextJS and API-Express",
       "status": "passed",
-      "startedAt": "2026-03-01T03:49:10.481Z",
-      "finishedAt": "2026-03-01T04:04:59.950Z",
+      "startedAt": "2026-03-01T03:49:10.360Z",
+      "finishedAt": "2026-03-01T04:00:53.167Z",
       "agentType": "claude",
-      "elapsedMs": 949469
+      "elapsedMs": 702807
     }
   ],
   "failedStories": [],
