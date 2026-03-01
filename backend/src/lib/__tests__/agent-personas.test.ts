@@ -408,3 +408,82 @@ describe('PersonaRegistry', () => {
     expect(registry.getAll()).toHaveLength(0);
   });
 });
+
+// ─── Default Personas Integration ─────────────────────────────────────────────
+
+describe('Default personas (default-personas/ directory)', () => {
+  const defaultPersonasDir = path.resolve(__dirname, '../../../../default-personas');
+  let rorcaDir: string;
+
+  beforeEach(() => {
+    rorcaDir = fs.mkdtempSync(path.join(os.tmpdir(), 'default-personas-test-'));
+    // Copy default-personas/ into temp .rorca/personas/ to simulate install
+    const destPersonas = path.join(rorcaDir, 'personas');
+    copyDirSync(defaultPersonasDir, destPersonas);
+  });
+
+  afterEach(() => {
+    try { fs.rmSync(rorcaDir, { recursive: true, force: true }); } catch { /* ok */ }
+  });
+
+  it('discovers all 15 default personas with zero warnings', () => {
+    const registry = new PersonaRegistry().discover(rorcaDir);
+    const warnings = registry.getWarnings();
+    expect(warnings).toHaveLength(0);
+    expect(registry.getAll()).toHaveLength(16);
+  });
+
+  it('has correct category distribution: 3 primary, 3 adversarial, 7 specialist, 3 review', () => {
+    const registry = new PersonaRegistry().discover(rorcaDir);
+    expect(registry.getByCategory('primary')).toHaveLength(3);
+    expect(registry.getByCategory('adversarial')).toHaveLength(3);
+    expect(registry.getByCategory('specialist')).toHaveLength(7);
+    expect(registry.getByCategory('review')).toHaveLength(3);
+  });
+
+  it('can look up every expected persona by name', () => {
+    const registry = new PersonaRegistry().discover(rorcaDir);
+    const expected = [
+      'architect', 'pm', 'lead-dev',
+      'red-team', 'assumption-buster', 'devils-advocate',
+      'frontend', 'backend', 'database', 'security', 'sre', 'ux-designer', 'qa',
+      'spec-writer', 'spec-verifier', 'best-practices',
+    ];
+    for (const name of expected) {
+      const persona = registry.getPersona(name);
+      expect(persona).toBeDefined();
+      expect(persona!.promptText.length).toBeGreaterThan(200);
+    }
+  });
+
+  it('every persona has non-empty triggers', () => {
+    const registry = new PersonaRegistry().discover(rorcaDir);
+    for (const persona of registry.getAll()) {
+      expect(persona.metadata.triggers.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('reviewer matching works with default trigger globs', () => {
+    const registry = new PersonaRegistry().discover(rorcaDir);
+    // A story touching auth routes should match red-team and security
+    const authReviewers = registry.getReviewers(['backend/src/routes/auth.ts']);
+    const names = authReviewers.map(p => p.metadata.name);
+    expect(names).toContain('red-team');
+    expect(names).toContain('security');
+  });
+});
+
+// ─── Helper: recursive dir copy ───────────────────────────────────────────────
+
+function copyDirSync(src: string, dest: string): void {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirSync(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
