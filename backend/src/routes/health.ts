@@ -64,6 +64,8 @@ router.get('/', (_req: Request, res: Response) => {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     db_connected: dbConnected,
     active_runs: activeRuns,
+    // CA-021: Report MCP transport mode
+    mcpTransport: 'http',
     ...(agentType === 'opencode' && opencode ? {
       opencodeInstalled: opencode.opencodeInstalled,
       opencodeVersion: opencode.opencodeVersion,

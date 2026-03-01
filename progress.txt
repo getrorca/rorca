@@ -3,7 +3,7 @@
 Spec: rorca-frontend-routing
 Run ID: 833
 Started: 2026-02-28T22:04:07.575Z
-Last Updated: 2026-03-01T04:00:53.167Z
+Last Updated: 2026-03-01T04:02:18.454Z
 
 ## Completed Stories (7)
 - FR-002: Migrate Sidebar and Programmatic Navigation — DONE (claude, 378s)
@@ -12,4 +12,4 @@ Last Updated: 2026-03-01T04:00:53.167Z
 - CA-007: Agent Persona Schema and File Format — DONE (claude, 419s)
 - SK-001: Skill Catalog and Registry — DONE (claude, 460s)
 - SK-002: LLM-Driven Skill + Persona Matching in Spec Generation — DONE (claude, 990s)
-- CA-019: Built-In Convention Packs — SaaS-NextJS and API-Express — DONE (claude, 703s)
+- CA-021: MCP Streamable HTTP Transport — API-First Auto-Generated MCP — DONE (claude, 787s)
