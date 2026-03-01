@@ -3,9 +3,9 @@
 Spec: rorca-frontend-routing
 Run ID: 833
 Started: 2026-02-28T22:04:07.575Z
-Last Updated: 2026-03-01T03:58:31.079Z
+Last Updated: 2026-03-01T04:17:08.328Z
 
-## Completed Stories (7)
+## Completed Stories (8)
 - FR-002: Migrate Sidebar and Programmatic Navigation — DONE (claude, 378s)
 - FR-003: SlideOver Deep Linking via Nested Routes — DONE (claude, 311s)
 - FR-004: Settings Sub-Routes and SPA Fallback — DONE (claude, 666s)
@@ -13,3 +13,4 @@ Last Updated: 2026-03-01T03:58:31.079Z
 - SK-001: Skill Catalog and Registry — DONE (claude, 460s)
 - SK-002: LLM-Driven Skill + Persona Matching in Spec Generation — DONE (claude, 990s)
 - SK-003: Skill Injection in Execution Engine — DONE (claude, 541s)
+- CA-014: Multi-Pass Spec Generation — Adversarial Review and Verification Passes (Passes 5-6) — DONE (claude, 704s)
