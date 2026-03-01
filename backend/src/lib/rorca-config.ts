@@ -238,6 +238,7 @@ export function ensureRorcaDirStructure(workspacePath: string): void {
     path.join(workspacePath, '.rorca', 'skills'),
     path.join(workspacePath, '.rorca', 'memory'),
     path.join(workspacePath, '.rorca', 'templates'),
+    path.join(workspacePath, '.rorca', 'packs'),
   ];
   for (const dir of dirs) {
     if (!fs.existsSync(dir)) {
