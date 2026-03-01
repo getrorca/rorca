@@ -1,3 +1,16 @@
+/**
+ * LEGACY STDIO MCP SERVER — kept as offline fallback.
+ *
+ * CA-021: The primary MCP transport is now Streamable HTTP at /mcp,
+ * auto-generated from the OpenAPI spec. This stdio server is maintained
+ * for offline/standalone usage when the backend isn't running.
+ *
+ * Preferred connection method:
+ *   claude mcp add rorca --transport http http://localhost:3030/mcp
+ *
+ * Legacy connection method (this file):
+ *   claude mcp add rorca -- npx tsx /path/to/rorca/backend/src/mcp/server.ts
+ */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';

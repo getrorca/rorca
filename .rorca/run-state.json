@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T04:00:53.167Z",
+  "lastUpdatedAt": "2026-03-01T04:02:18.454Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -59,13 +59,13 @@
       "elapsedMs": 989865
     },
     {
-      "storyId": "CA-019",
-      "title": "Built-In Convention Packs — SaaS-NextJS and API-Express",
+      "storyId": "CA-021",
+      "title": "MCP Streamable HTTP Transport — API-First Auto-Generated MCP",
       "status": "passed",
-      "startedAt": "2026-03-01T03:49:10.360Z",
-      "finishedAt": "2026-03-01T04:00:53.167Z",
+      "startedAt": "2026-03-01T03:49:11.594Z",
+      "finishedAt": "2026-03-01T04:02:18.454Z",
       "agentType": "claude",
-      "elapsedMs": 702807
+      "elapsedMs": 786860
     }
   ],
   "failedStories": [],
