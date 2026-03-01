@@ -61,6 +61,7 @@ import packsRouter from './routes/packs';
 import skillsRouter from './routes/skills';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
+import { createMcpRequestHandler } from './lib/mcp-http';
 
 dotenv.config();
 
@@ -111,6 +112,12 @@ app.use('/api/invites', rateLimiter, invitesRouter);
 // EQ-007: Public review routes (no auth required — accessed via shareable token)
 app.use('/api/review', rateLimiter, publicReviewRouter);
 registerWebhookHandlers();
+
+// CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
+const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
+app.post('/mcp', mcpHandlers.handlePost);
+app.get('/mcp', mcpHandlers.handleGet);
+app.delete('/mcp', mcpHandlers.handleDelete);
 
 // ─── Auth middleware (all routes below require authentication) ───
 // Auth gate bypassed — Rorca is a local single-user tool (see CLAUDE.md)
