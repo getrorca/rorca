@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T04:17:08.328Z",
+  "lastUpdatedAt": "2026-03-01T04:28:15.467Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -66,19 +66,47 @@
       "finishedAt": "2026-03-01T03:58:31.079Z",
       "agentType": "claude",
       "elapsedMs": 540723
-    },
-    {
-      "storyId": "CA-014",
-      "title": "Multi-Pass Spec Generation — Adversarial Review and Verification Passes (Passes 5-6)",
-      "status": "passed",
-      "startedAt": "2026-03-01T04:05:23.863Z",
-      "finishedAt": "2026-03-01T04:17:08.327Z",
-      "agentType": "claude",
-      "elapsedMs": 704464
     }
   ],
   "failedStories": [],
-  "skippedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "CA-015",
+      "title": "CA-015",
+      "status": "skipped",
+      "startedAt": "2026-03-01T04:05:16.695Z",
+      "finishedAt": "2026-03-01T04:05:16.695Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: CA-004"
+    },
+    {
+      "storyId": "CA-016",
+      "title": "CA-016",
+      "status": "skipped",
+      "startedAt": "2026-03-01T04:05:16.696Z",
+      "finishedAt": "2026-03-01T04:05:16.696Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: CA-015"
+    },
+    {
+      "storyId": "CA-015",
+      "title": "Convention Pack UI — Marketplace Panel Integration",
+      "status": "skipped",
+      "startedAt": "2026-03-01T04:05:18.700Z",
+      "finishedAt": "2026-03-01T04:05:18.700Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: CA-004"
+    },
+    {
+      "storyId": "CA-016",
+      "title": "Persona Management UI — Settings Panel Integration",
+      "status": "skipped",
+      "startedAt": "2026-03-01T04:28:15.467Z",
+      "finishedAt": "2026-03-01T04:28:15.467Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: CA-015"
+    }
+  ],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
