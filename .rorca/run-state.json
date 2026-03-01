@@ -2,7 +2,7 @@
   "specId": "rorca-frontend-routing",
   "runId": 833,
   "startedAt": "2026-02-28T22:04:07.575Z",
-  "lastUpdatedAt": "2026-03-01T03:32:00.251Z",
+  "lastUpdatedAt": "2026-03-01T03:46:09.315Z",
   "completedStories": [
     {
       "storyId": "FR-002",
@@ -50,13 +50,13 @@
       "elapsedMs": 459526
     },
     {
-      "storyId": "CA-009",
-      "title": "Persona Injection in buildPrompt() — Story-Level Persona Assignment",
+      "storyId": "CA-012",
+      "title": "Multi-Pass Spec Generation — PM and Spec Writer Passes (Passes 1-2)",
       "status": "passed",
-      "startedAt": "2026-03-01T03:23:01.380Z",
-      "finishedAt": "2026-03-01T03:32:00.250Z",
+      "startedAt": "2026-03-01T03:22:01.894Z",
+      "finishedAt": "2026-03-01T03:46:09.315Z",
       "agentType": "claude",
-      "elapsedMs": 538870
+      "elapsedMs": 1447421
     }
   ],
   "failedStories": [],
