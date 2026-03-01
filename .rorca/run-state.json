@@ -2,7 +2,7 @@
   "specId": "rorca-convention-agents",
   "runId": 885,
   "startedAt": "2026-03-01T05:32:25.370Z",
-  "lastUpdatedAt": "2026-03-01T07:14:36.363Z",
+  "lastUpdatedAt": "2026-03-01T20:55:53.160Z",
   "completedStories": [
     {
       "storyId": "CA-004",
@@ -84,6 +84,15 @@
       "finishedAt": "2026-03-01T07:14:36.363Z",
       "agentType": "claude",
       "elapsedMs": 532469
+    },
+    {
+      "storyId": "SM-005",
+      "title": "Add Category Filter Chips",
+      "status": "passed",
+      "startedAt": "2026-03-01T20:53:21.844Z",
+      "finishedAt": "2026-03-01T20:55:53.160Z",
+      "agentType": "claude",
+      "elapsedMs": 151316
     }
   ],
   "failedStories": [],
