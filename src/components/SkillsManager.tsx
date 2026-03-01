@@ -21,6 +21,7 @@ import {
   FilePlus,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { renderMarkdown } from '../lib/renderMarkdown';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -45,41 +46,6 @@ interface SkillTemplate {
 interface Props {
   workspaceId: string;
   showToast: (message: string, type?: 'success' | 'error') => void;
-}
-
-// ─── Simple Markdown Renderer ───────────────────────────────────────────────
-
-function renderMarkdown(md: string): string {
-  return md
-    // Code blocks (fenced)
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) =>
-      `<pre class="md-code-block"><code class="language-${lang}">${escapeHtml(code.trim())}</code></pre>`)
-    // Headings
-    .replace(/^#### (.+)$/gm, '<h4 class="md-h4">$1</h4>')
-    .replace(/^### (.+)$/gm, '<h3 class="md-h3">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 class="md-h2">$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1 class="md-h1">$1</h1>')
-    // Horizontal rules
-    .replace(/^---$/gm, '<hr class="md-hr" />')
-    // Bold + italic
-    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    // Inline code
-    .replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>')
-    // Unordered lists
-    .replace(/^- (.+)$/gm, '<li class="md-li">$1</li>')
-    // Ordered lists
-    .replace(/^\d+\. (.+)$/gm, '<li class="md-li-ordered">$1</li>')
-    // Paragraphs (wrap lines that aren't already HTML)
-    .replace(/^(?!<[a-z])((?!^\s*$).+)$/gm, '<p class="md-p">$1</p>')
-    // Clean up consecutive <li> items into <ul>
-    .replace(/((?:<li class="md-li">.*<\/li>\n?)+)/g, '<ul class="md-ul">$1</ul>')
-    .replace(/((?:<li class="md-li-ordered">.*<\/li>\n?)+)/g, '<ol class="md-ol">$1</ol>');
-}
-
-function escapeHtml(str: string): string {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // ─── Main Component ─────────────────────────────────────────────────────────
@@ -756,21 +722,6 @@ export default function SkillsManager({ workspaceId, showToast }: Props) {
         </div>
       )}
 
-      {/* ─── Preview Styles ──────────────────────────────────────── */}
-      <style>{`
-        .skill-preview .md-h1 { font-size: 1.25rem; font-weight: 700; margin: 1rem 0 0.5rem; color: var(--text); }
-        .skill-preview .md-h2 { font-size: 1.1rem; font-weight: 600; margin: 0.75rem 0 0.375rem; color: var(--text); }
-        .skill-preview .md-h3 { font-size: 1rem; font-weight: 600; margin: 0.5rem 0 0.25rem; color: var(--text); }
-        .skill-preview .md-h4 { font-size: 0.875rem; font-weight: 600; margin: 0.5rem 0 0.25rem; color: var(--text); }
-        .skill-preview .md-p { margin: 0.25rem 0; font-size: 0.8125rem; color: var(--text-muted, #999); line-height: 1.5; }
-        .skill-preview .md-ul, .skill-preview .md-ol { padding-left: 1.25rem; margin: 0.25rem 0; }
-        .skill-preview .md-li { font-size: 0.8125rem; color: var(--text-muted, #999); line-height: 1.6; list-style: disc; }
-        .skill-preview .md-li-ordered { font-size: 0.8125rem; color: var(--text-muted, #999); line-height: 1.6; list-style: decimal; }
-        .skill-preview .md-inline-code { background: rgba(255,255,255,0.06); padding: 0.125rem 0.375rem; border-radius: 3px; font-family: monospace; font-size: 0.75rem; }
-        .skill-preview .md-code-block { background: rgba(0,0,0,0.3); padding: 0.75rem 1rem; border-radius: 6px; margin: 0.5rem 0; overflow-x: auto; }
-        .skill-preview .md-code-block code { font-family: monospace; font-size: 0.75rem; white-space: pre; color: #e0e0e0; }
-        .skill-preview .md-hr { border: none; border-top: 1px solid var(--border, #333); margin: 0.75rem 0; }
-      `}</style>
     </div>
   );
 }
