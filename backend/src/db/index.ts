@@ -521,6 +521,33 @@ export function runMigrations() {
     `);
   }
 
+  // CA-003: Expand direction_layers CHECK constraint to allow layer 0 (L0 = pack conventions)
+  const dirLayersSql = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='direction_layers'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (dirLayersSql && !dirLayersSql.includes('0,1,2,3')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE direction_layers_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT,
+        domain TEXT,
+        team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
+        layer INTEGER NOT NULL CHECK(layer IN (0,1,2,3)),
+        content_yaml TEXT NOT NULL DEFAULT '',
+        preferred_model TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX idx_direction_layers_new_unique
+        ON direction_layers_new(layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''));
+      INSERT INTO direction_layers_new (id, workspace_id, domain, team_id, layer, content_yaml, preferred_model, updated_at)
+        SELECT id, workspace_id, domain, team_id, layer, content_yaml, preferred_model, updated_at FROM direction_layers;
+      DROP TABLE direction_layers;
+      ALTER TABLE direction_layers_new RENAME TO direction_layers;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
+
   // FR-005: Add 'completed' to spec_versions status CHECK constraint (idempotent)
   const specVersionsSql = (db.prepare(
     `SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_versions'`
