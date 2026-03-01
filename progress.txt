@@ -3,8 +3,9 @@
 Spec: rorca-convention-agents
 Run ID: 885
 Started: 2026-03-01T05:32:25.370Z
-Last Updated: 2026-03-01T05:48:41.655Z
+Last Updated: 2026-03-01T05:56:42.837Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - CA-004: Pack Fork — Customize and Detach from Upstream — DONE (claude, 446s)
 - CA-006: Convention Drift Detection — DONE (claude, 516s)
+- CA-011: Adversarial Review Pipeline — Post-Story Review Passes — DONE (claude, 472s)
