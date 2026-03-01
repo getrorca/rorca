@@ -2,7 +2,7 @@
   "specId": "rorca-convention-agents",
   "runId": 885,
   "startedAt": "2026-03-01T05:32:25.370Z",
-  "lastUpdatedAt": "2026-03-01T05:39:57.085Z",
+  "lastUpdatedAt": "2026-03-01T05:48:41.655Z",
   "completedStories": [
     {
       "storyId": "CA-004",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-01T05:39:57.085Z",
       "agentType": "claude",
       "elapsedMs": 446375
+    },
+    {
+      "storyId": "CA-006",
+      "title": "Convention Drift Detection",
+      "status": "passed",
+      "startedAt": "2026-03-01T05:40:05.946Z",
+      "finishedAt": "2026-03-01T05:48:41.655Z",
+      "agentType": "claude",
+      "elapsedMs": 515709
     }
   ],
   "failedStories": [],

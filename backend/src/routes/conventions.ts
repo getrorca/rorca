@@ -13,6 +13,8 @@ import * as path from 'path';
 import { db } from '../db/index';
 import { discoverConventions } from '../lib/convention-discovery';
 import type { ConventionProposal } from '../lib/convention-discovery';
+import { detectDrift } from '../lib/drift-detector';
+import type { DriftReport, DriftViolation } from '../lib/drift-detector';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 
 const router = Router();
@@ -302,6 +304,140 @@ router.post('/proposals/:id/reject', (req: Request, res: Response) => {
   emitWalEvent('convention_rejected', row.workspace_id, { proposalId });
 
   res.json({ ok: true });
+});
+
+/**
+ * @swagger
+ * /api/conventions/check:
+ *   post:
+ *     tags: [Conventions]
+ *     summary: Run convention drift detection on a workspace
+ *     description: Spawns a drift analysis agent that reads .rorca/conventions/*.md and direction stack L0-L3, samples up to 50 source files, and checks for violations.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Drift report generated
+ *       400:
+ *         description: Missing workspaceId
+ *       404:
+ *         description: Workspace not found
+ */
+router.post('/check', async (req: Request, res: Response) => {
+  const { workspaceId } = req.body;
+
+  if (!workspaceId) {
+    res.status(400).json({ error: 'Missing required field: workspaceId' });
+    return;
+  }
+
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+    { id: string; path: string; label: string } | undefined;
+
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  if (!fs.existsSync(workspace.path)) {
+    res.status(404).json({ error: 'Workspace path does not exist on disk' });
+    return;
+  }
+
+  try {
+    const report = await detectDrift(workspace.path, workspaceId);
+
+    // Store in drift_reports table
+    db.prepare(
+      `INSERT INTO drift_reports (workspace_id, violations_json, score, conventions_checked, files_sampled, trigger_type)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      workspaceId,
+      JSON.stringify(report.violations),
+      report.score,
+      report.conventionsChecked,
+      report.filesSampled,
+      'manual',
+    );
+
+    // Emit WAL event
+    emitWalEvent('convention_drift_detected', workspaceId, {
+      score: report.score,
+      violationCount: report.violations.length,
+      errorCount: report.violations.filter((v: DriftViolation) => v.severity === 'error').length,
+      warningCount: report.violations.filter((v: DriftViolation) => v.severity === 'warning').length,
+      conventionsChecked: report.conventionsChecked,
+      filesSampled: report.filesSampled,
+    });
+
+    res.json({ ok: true, report });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Drift detection failed', details: err.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/conventions/drift/{workspaceId}:
+ *   get:
+ *     tags: [Conventions]
+ *     summary: Get the latest drift report for a workspace
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Latest drift report
+ *       404:
+ *         description: No drift report found
+ */
+router.get('/drift/:workspaceId', (req: Request, res: Response) => {
+  const { workspaceId } = req.params;
+
+  const row = db.prepare(
+    `SELECT id, workspace_id, violations_json, score, conventions_checked, files_sampled, trigger_type, created_at
+     FROM drift_reports WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 1`
+  ).get(workspaceId) as {
+    id: number;
+    workspace_id: string;
+    violations_json: string;
+    score: number;
+    conventions_checked: number;
+    files_sampled: number;
+    trigger_type: string;
+    created_at: string;
+  } | undefined;
+
+  if (!row) {
+    res.status(404).json({ error: 'No drift report found for this workspace' });
+    return;
+  }
+
+  const report: DriftReport = {
+    violations: JSON.parse(row.violations_json) as DriftViolation[],
+    score: row.score,
+    conventionsChecked: row.conventions_checked,
+    filesSampled: row.files_sampled,
+    checkedAt: row.created_at,
+  };
+
+  res.json({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    triggerType: row.trigger_type,
+    report,
+  });
 });
 
 export default router;
