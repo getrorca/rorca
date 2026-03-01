@@ -2,7 +2,7 @@
   "specId": "rorca-skills-marketplace",
   "runId": 887,
   "startedAt": "2026-03-01T21:18:21.645Z",
-  "lastUpdatedAt": "2026-03-01T21:20:05.888Z",
+  "lastUpdatedAt": "2026-03-01T21:22:34.111Z",
   "completedStories": [
     {
       "storyId": "SM-002",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-01T21:20:05.888Z",
       "agentType": "claude",
       "elapsedMs": 63721
+    },
+    {
+      "storyId": "SM-004",
+      "title": "Add Expandable Markdown Preview to Skill Cards",
+      "status": "passed",
+      "startedAt": "2026-03-01T21:20:51.843Z",
+      "finishedAt": "2026-03-01T21:22:34.111Z",
+      "agentType": "claude",
+      "elapsedMs": 102268
     }
   ],
   "failedStories": [],

@@ -82,7 +82,8 @@
         "SM-002",
         "SM-003"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SM-005",
