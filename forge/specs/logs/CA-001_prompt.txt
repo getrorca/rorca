@@ -621,7 +621,7 @@ Escalation cascade on failure:
 
 ## Spec Pipeline — Run Order
 
-**Completed (249 stories passed):**
+**Completed (259 stories passed):**
 - `prd-rorca-phase1b` through `prd-rorca-phase5` (30 stories, archived, 100%)
 - `rorca-feature-enhancements` (17 stories, 7 passed — early spec, superseded by v2-platform)
 - `rorca-v2-platform` (117 stories, 113 passed — V2-082 failed, V2-089–092 excluded)
@@ -629,20 +629,28 @@ Escalation cascade on failure:
 - `rorca-opencode-integration` (35 stories, 100% — includes Run Queue RQ-001–004 + Nav Drawer NAV-001–004)
 - `rorca-execution-quality` (14 stories, 100% — wave execution, semantic logging, objective gates)
 - `rorca-ui-redesign-p2` (22 stories, 100% — polish, animations, accessibility, performance)
+- `rorca-forge-brief-first` (6 stories, 100% — brief-first Forge flow, FG-001–006)
+- `rorca-wave-execution-fix` (4 stories, 100% — WE-001–004: sub-worktree persistence, auto-mode, failure root cause, stdout streaming)
+
+**In Progress:**
+- `rorca-context-intent-engine` (18 stories, 15 passed — CIE-001–014, CIE-016; CIE-015 excluded; CIE-017–018 pending)
 
 **Stale / Duplicate (can be deleted):**
 - `rorca-nav-drawer` (4 stories) — already completed as NAV-001–004 in rorca-opencode-integration
 - `rorca-run-queue` (4 stories) — already completed as RQ-001–004 in rorca-opencode-integration
 
+**Approved (not yet run):**
+- `rorca-frontend-routing` (5 stories) — frontend routing fixes
+
 **Pending (not yet executed):**
-1. `rorca-context-intent-engine` (18 stories) — .rorca/ directory, virtual context routing, episodic memory, file watchers, scaffold gen, Opus 4-6
-2. `rorca-convention-agents` (22 stories) — Convention packs + agent personas + multi-pass spec gen (6-pass pipeline), adversarial review, convention drift detection, MCP HTTP transport, OpenAPI audit, Opus 4-6
-3. `rorca-integrations` (52 stories) — GitHub first (launch blocker), Linear/Vercel/Slack post-launch, Opus 4-6
-4. `rorca-e2e-testing` (58 stories) — Playwright E2E, finds AND fixes bugs, Sonnet 4-6
+1. `rorca-convention-agents` (22 stories) — Convention packs + agent personas + multi-pass spec gen (6-pass pipeline), adversarial review, convention drift detection, MCP HTTP transport, OpenAPI audit, Opus 4-6
+2. `rorca-integrations` (52 stories) — GitHub first (launch blocker), Linear/Vercel/Slack post-launch, Opus 4-6
+3. `rorca-e2e-testing` (58 stories) — Playwright E2E, finds AND fixes bugs, Sonnet 4-6
 
 **Why this order**: CIE creates `.rorca/` directory infrastructure that convention-agents builds on top of. Convention-agents before integrations so personas can review integration code (security, red-team). Integrations before E2E because E2E tests integration flows (GitHub, Linear, Vercel, Slack). E2E testing runs last to test the complete system.
 
 **Why V2-089–092 excluded**: Superseded by `rorca-ui-redesign` which covers all panel redesigns plus the navigation shell.
+**Why CIE-015 excluded**: Superseded by `rorca-convention-agents` CA-001–004, CA-019 which cover the same template/scaffold ground more completely (adds L0 direction layers, personas, per-library conventions, actual project boilerplate).
 
 ## UI Redesign Architecture (rorca-ui-redesign)
 The redesign replaces the 10-icon sidebar with a 4-screen architecture:
@@ -1317,3 +1325,4 @@ Acceptance Criteria:
 - convention_packs table created via pragma table_info pattern (not migration file)
 - Registry reads from .rorca/packs/ directory and cross-references DB for metadata
 - Invalid pack.json throws ValidationError with specific field-level errors
+- pack.json schema includes optional `skills` field (array of skill names bundled with the pack)
