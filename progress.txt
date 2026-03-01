@@ -3,10 +3,10 @@
 Spec: rorca-frontend-routing
 Run ID: 833
 Started: 2026-02-28T22:04:07.575Z
-Last Updated: 2026-03-01T03:06:55.612Z
+Last Updated: 2026-03-01T03:02:02.086Z
 
 ## Completed Stories (4)
 - FR-002: Migrate Sidebar and Programmatic Navigation — DONE (claude, 378s)
 - FR-003: SlideOver Deep Linking via Nested Routes — DONE (claude, 311s)
 - FR-004: Settings Sub-Routes and SPA Fallback — DONE (claude, 666s)
-- CA-005: Convention Inference Agent — Brownfield Context Extraction — DONE (claude, 714s)
+- CA-007: Agent Persona Schema and File Format — DONE (claude, 419s)
