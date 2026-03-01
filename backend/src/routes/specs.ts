@@ -16,6 +16,8 @@ import { getEffectiveUser } from '../lib/get-user';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
+import { SkillRegistry } from '../lib/skill-registry';
+import { PersonaRegistry } from '../lib/agent-personas';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -135,6 +137,12 @@ interface SpecVersionRow {
   created_at: string;
 }
 
+interface SuggestedSkillRaw {
+  name: string;
+  relevance: number;
+  reason: string;
+}
+
 interface UserStory {
   id: string;
   title: string;
@@ -144,8 +152,67 @@ interface UserStory {
   complexity?: number;
   priority?: number;  // 1=urgent, 2=high, 3=normal (default), 4=low
   timeoutMinutes?: number;  // 5-120, default 45
+  suggestedSkills?: SuggestedSkillRaw[];
+  suggestedPersona?: string;
+  suggestedReviewers?: string[];
   passes?: boolean;
   excluded?: boolean;
+}
+
+/** Read a file safely, returning empty string on failure. */
+function safeReadFile(filePath: string): string {
+  try { return fs.readFileSync(filePath, 'utf-8'); } catch { return ''; }
+}
+
+/**
+ * Build skill + persona catalog context for spec generation prompts.
+ * Discovers installed skills and personas from the workspace, reads MEMORY.md and AGENTS.md.
+ */
+function buildCatalogContext(workspacePath: string): {
+  skillCatalog: string;
+  personaCatalog: string;
+  memoryMd: string;
+  agentsMd: string;
+  skillNames: Set<string>;
+} {
+  const skillRegistry = new SkillRegistry().discover(workspacePath);
+  const rorcaDir = path.join(workspacePath, '.rorca');
+  const personaRegistry = new PersonaRegistry().discover(rorcaDir);
+
+  const skillCatalog = skillRegistry.getCatalogForPrompt();
+  const personaCatalog = personaRegistry.getPersonaCatalogForPrompt();
+
+  const memoryMd = safeReadFile(path.join(rorcaDir, 'MEMORY.md'));
+  const agentsMd = safeReadFile(path.join(workspacePath, 'AGENTS.md'))
+    || safeReadFile(path.join(rorcaDir, 'AGENTS.md'));
+
+  const skillNames = new Set(skillRegistry.getAll().map(s => s.metadata.name.toLowerCase()));
+
+  return { skillCatalog, personaCatalog, memoryMd, agentsMd, skillNames };
+}
+
+/**
+ * Validate suggestedSkills against installed catalog.
+ * Strips unknown skill names and logs warnings.
+ */
+function validateSuggestedSkills(
+  stories: unknown[],
+  validSkillNames: Set<string>,
+): void {
+  for (const story of stories) {
+    const s = story as Record<string, unknown>;
+    if (!Array.isArray(s.suggestedSkills)) continue;
+    const original = s.suggestedSkills as SuggestedSkillRaw[];
+    const filtered = original.filter(sk => {
+      if (typeof sk.name !== 'string') return false;
+      const valid = validSkillNames.has(sk.name.toLowerCase());
+      if (!valid) {
+        console.warn(`[Specs] Stripped unknown suggestedSkill "${sk.name}" from story ${s.id}`);
+      }
+      return valid;
+    });
+    s.suggestedSkills = filtered.length > 0 ? filtered : undefined;
+  }
 }
 
 function getWorkspace(workspaceId: string): WorkspaceRow | undefined {
@@ -489,6 +556,9 @@ router.post('/generate', async (req: Request, res: Response) => {
       }
     }
 
+    // 6c. Discover skill + persona catalogs and read context files
+    const catalogs = buildCatalogContext(workspace.path as string);
+
     // 7. Build LLM prompt
     const storyPrefix = req.body.storyPrefix || 'US';
     const wantDiagrams = Array.isArray(diagramTypes) && diagramTypes.some(
@@ -514,6 +584,23 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Do not use special chars like quotes inside node labels',
     ].join('\n') : '';
 
+    // Build catalog sections (only include if non-empty)
+    const catalogSections: string[] = [];
+    if (catalogs.memoryMd) {
+      catalogSections.push('=== PROJECT MEMORY ===', catalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
+    }
+    if (catalogs.agentsMd) {
+      catalogSections.push('=== AGENTS GOVERNANCE ===', catalogs.agentsMd, '=== END AGENTS GOVERNANCE ===', '');
+    }
+    if (catalogs.skillCatalog) {
+      catalogSections.push('=== INSTALLED SKILLS ===', catalogs.skillCatalog, '=== END INSTALLED SKILLS ===', '');
+    }
+    if (catalogs.personaCatalog) {
+      catalogSections.push('=== AVAILABLE PERSONAS ===', catalogs.personaCatalog, '=== END AVAILABLE PERSONAS ===', '');
+    }
+
+    const hasSkillsOrPersonas = !!(catalogs.skillCatalog || catalogs.personaCatalog);
+
     const fullPrompt = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
@@ -523,6 +610,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       '=== END INSTRUCTIONS ===',
       '',
       synthesized,
+      ...catalogSections,
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
       storyCount === 0
@@ -534,7 +622,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
       '',
       'JSON schema:',
-      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3${hasSkillsOrPersonas ? ',"suggestedSkills":[{"name":"skill-name","relevance":8,"reason":"why this skill applies"}],"suggestedPersona":"persona-name","suggestedReviewers":["reviewer-name"]' : ''}}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
       wantDiagrams ? diagramSchema : '',
       '',
       `Rules:`,
@@ -546,6 +634,11 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
       '- Stories should be concrete and implementable, not vague',
       '- Each story must have a "complexity" field: integer 1-5 (1=trivial one-liner, 2=simple, 3=moderate, 4=complex multi-file, 5=epic cross-cutting). Base on acceptance criteria count, description scope, and dependency depth',
+      ...(hasSkillsOrPersonas ? [
+        '- Each story MUST include "suggestedSkills": array of {name, relevance (1-10), reason} — pick from INSTALLED SKILLS catalog ONLY. Use the exact skill name from the catalog. relevance: 1=tangentially related, 10=core skill for this story. Omit if no skills apply.',
+        '- Each story MUST include "suggestedPersona": string — pick the single best-fit persona name from AVAILABLE PERSONAS for implementation. Use the exact persona name from the catalog.',
+        '- Each story MUST include "suggestedReviewers": string[] — pick 1-3 reviewer persona names from AVAILABLE PERSONAS that should review this story\'s output (e.g. security for auth stories, red-team for critical paths). Use exact persona names from the catalog.',
+      ] : []),
       '- Your entire response must be valid JSON parseable by JSON.parse()',
       '- Include a "mermaidDiagram" field: a valid Mermaid flowchart (graph TD) showing story dependency relationships',
       '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
@@ -638,6 +731,11 @@ router.post('/generate', async (req: Request, res: Response) => {
         res.status(500).json({ error: 'Invalid spec structure from LLM' });
         return;
       }
+    }
+
+    // 8b. Validate suggestedSkills against installed catalog
+    if (catalogs.skillNames.size > 0) {
+      validateSuggestedSkills(parsed.stories, catalogs.skillNames);
     }
 
     // 9. Generate algorithmic diagrams
@@ -805,6 +903,24 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   }
 
   const storyPrefix = 'US';
+
+  // Discover skill + persona catalogs for batch brief
+  const batchCatalogs = buildCatalogContext(workspace.path);
+  const batchCatalogSections: string[] = [];
+  if (batchCatalogs.memoryMd) {
+    batchCatalogSections.push('=== PROJECT MEMORY ===', batchCatalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
+  }
+  if (batchCatalogs.agentsMd) {
+    batchCatalogSections.push('=== AGENTS GOVERNANCE ===', batchCatalogs.agentsMd, '=== END AGENTS GOVERNANCE ===', '');
+  }
+  if (batchCatalogs.skillCatalog) {
+    batchCatalogSections.push('=== INSTALLED SKILLS ===', batchCatalogs.skillCatalog, '=== END INSTALLED SKILLS ===', '');
+  }
+  if (batchCatalogs.personaCatalog) {
+    batchCatalogSections.push('=== AVAILABLE PERSONAS ===', batchCatalogs.personaCatalog, '=== END AVAILABLE PERSONAS ===', '');
+  }
+  const batchHasSkillsOrPersonas = !!(batchCatalogs.skillCatalog || batchCatalogs.personaCatalog);
+
   const fullPrompt = [
     '=== INSTRUCTIONS: READ THIS FIRST ===',
     'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
@@ -814,6 +930,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     '=== END INSTRUCTIONS ===',
     '',
     synthesized,
+    ...batchCatalogSections,
     ...(templateContext ? [templateContext, '---'] : []),
     '---',
     storyCount === 0
@@ -825,7 +942,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
     '',
     'JSON schema:',
-    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}]}`,
+    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3${batchHasSkillsOrPersonas ? ',"suggestedSkills":[{"name":"skill-name","relevance":8,"reason":"why"}],"suggestedPersona":"persona-name","suggestedReviewers":["reviewer-name"]' : ''}}]}`,
     '',
     `Rules:`,
     storyCount === 0
@@ -835,6 +952,11 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
     '- Stories should be concrete and implementable, not vague',
     '- Each story must have a "complexity" field: integer 1-5 (1=trivial, 2=simple, 3=moderate, 4=complex, 5=epic)',
+    ...(batchHasSkillsOrPersonas ? [
+      '- Each story MUST include "suggestedSkills": array of {name, relevance (1-10), reason} — pick from INSTALLED SKILLS catalog ONLY',
+      '- Each story MUST include "suggestedPersona": string — best-fit persona name from AVAILABLE PERSONAS',
+      '- Each story MUST include "suggestedReviewers": string[] — 1-3 reviewer persona names from AVAILABLE PERSONAS',
+    ] : []),
     '- Your entire response must be valid JSON parseable by JSON.parse()',
   ].join('\n');
 
@@ -855,6 +977,11 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
 
   if (!Array.isArray(parsed.stories)) {
     throw new Error('Invalid spec structure from LLM');
+  }
+
+  // Validate suggestedSkills against installed catalog
+  if (batchCatalogs.skillNames.size > 0) {
+    validateSuggestedSkills(parsed.stories, batchCatalogs.skillNames);
   }
 
   // Generate diagrams
