@@ -3,10 +3,11 @@
 Spec: rorca-frontend-routing
 Run ID: 833
 Started: 2026-02-28T22:04:07.575Z
-Last Updated: 2026-03-01T03:02:02.086Z
+Last Updated: 2026-03-01T03:21:30.539Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - FR-002: Migrate Sidebar and Programmatic Navigation — DONE (claude, 378s)
 - FR-003: SlideOver Deep Linking via Nested Routes — DONE (claude, 311s)
 - FR-004: Settings Sub-Routes and SPA Fallback — DONE (claude, 666s)
 - CA-007: Agent Persona Schema and File Format — DONE (claude, 419s)
+- CA-008: Default Persona Library — 15 Built-In Personas — DONE (claude, 849s)
