@@ -2,7 +2,7 @@
   "specId": "rorca-convention-agents",
   "runId": 885,
   "startedAt": "2026-03-01T05:32:25.370Z",
-  "lastUpdatedAt": "2026-03-01T06:08:20.094Z",
+  "lastUpdatedAt": "2026-03-01T06:20:00.747Z",
   "completedStories": [
     {
       "storyId": "CA-004",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-01T06:08:20.094Z",
       "agentType": "claude",
       "elapsedMs": 688342
+    },
+    {
+      "storyId": "CA-016",
+      "title": "Persona Management UI — Settings Panel Integration",
+      "status": "passed",
+      "startedAt": "2026-03-01T06:08:29.476Z",
+      "finishedAt": "2026-03-01T06:20:00.747Z",
+      "agentType": "claude",
+      "elapsedMs": 691271
     }
   ],
   "failedStories": [],

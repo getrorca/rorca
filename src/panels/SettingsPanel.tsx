@@ -9,10 +9,11 @@ import GitHubSettingsPanel from './GitHubSettingsPanel';
 import { modLabel } from '../hooks/useHotkeys';
 import OpenCodeSetupGuide from '../components/OpenCodeSetupGuide';
 import { useActiveSettingsTab } from '../routes';
+import PersonasSection from '../components/PersonasSection';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account' | 'billing';
+export type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account' | 'billing' | 'personas';
 
 interface ProfileData {
   id: string;
@@ -119,6 +120,7 @@ export default function SettingsPanel() {
         {activeTab === 'shortcuts' && <ShortcutsSection />}
         {activeTab === 'account' && <AccountSection />}
         {activeTab === 'billing' && <BillingSection />}
+        {activeTab === 'personas' && <PersonasSection />}
       </div>
     </div>
   );

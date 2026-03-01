@@ -119,6 +119,11 @@ const ExecutionSchema = z.object({
   adversarialReview: AdversarialReviewSchema.default(() => AdversarialReviewSchema.parse({})),
 });
 
+const PersonasConfigSchema = z.object({
+  /** Persona names that are disabled (not injected by buildPrompt / PersonaRegistry). */
+  disabled: z.array(z.string()).default([]),
+});
+
 export const RorcaConfigSchema = z.object({
   $schema: z.string().optional(),
   version: z.number().int().min(1).default(1),
@@ -127,6 +132,7 @@ export const RorcaConfigSchema = z.object({
   teleology: TeleologySchema.default(() => TeleologySchema.parse({})),
   orchestration: OrchestrationSchema.default(() => OrchestrationSchema.parse({})),
   execution: ExecutionSchema.default(() => ExecutionSchema.parse({})),
+  personas: PersonasConfigSchema.default(() => PersonasConfigSchema.parse({})),
 });
 
 // ─── Exported Types ──────────────────────────────────────────────────────────
@@ -142,6 +148,7 @@ export type TeleologyConfig = z.infer<typeof TeleologySchema>;
 export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
 export type ExecutionConfig = z.infer<typeof ExecutionSchema>;
 export type AdversarialReviewConfig = z.infer<typeof AdversarialReviewSchema>;
+export type PersonasConfig = z.infer<typeof PersonasConfigSchema>;
 
 // ─── Config Loading ──────────────────────────────────────────────────────────
 
