@@ -56,8 +56,13 @@ import memoryRouter from './routes/memory';
 import agentsRouter from './routes/agents';
 import contextRoutingRouter from './routes/context-routing';
 import contextFilesRouter from './routes/context-files';
+import conventionsRouter from './routes/conventions';
+import packsRouter from './routes/packs';
+import skillsRouter from './routes/skills';
+import personasRouter from './routes/personas';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
+import { createMcpRequestHandler } from './lib/mcp-http';
 
 dotenv.config();
 
@@ -109,6 +114,12 @@ app.use('/api/invites', rateLimiter, invitesRouter);
 app.use('/api/review', rateLimiter, publicReviewRouter);
 registerWebhookHandlers();
 
+// CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
+const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
+app.post('/mcp', mcpHandlers.handlePost);
+app.get('/mcp', mcpHandlers.handleGet);
+app.delete('/mcp', mcpHandlers.handleDelete);
+
 // ─── Auth middleware (all routes below require authentication) ───
 // Auth gate bypassed — Rorca is a local single-user tool (see CLAUDE.md)
 // app.use(authRequired);
@@ -154,6 +165,10 @@ app.use('/api/memory', memoryRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/workspaces', contextRoutingRouter);
 app.use('/api/workspaces', contextFilesRouter);
+app.use('/api/conventions', conventionsRouter);
+app.use('/api/packs', packsRouter);
+app.use('/api/skills', skillsRouter);
+app.use('/api/personas', personasRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {

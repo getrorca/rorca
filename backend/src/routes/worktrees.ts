@@ -94,6 +94,8 @@ function parsePorcelain(output: string): GitWorktree[] {
  *   get:
  *     tags: [Worktrees]
  *     summary: List git worktrees for a workspace
+ *     operationId: listWorktrees
+ *     description: Returns all git worktrees for the specified workspace by parsing porcelain output.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -114,6 +116,8 @@ function parsePorcelain(output: string): GitWorktree[] {
  *   post:
  *     tags: [Worktrees]
  *     summary: Create a new git worktree
+ *     operationId: createWorktree
+ *     description: Creates a new git worktree with a new branch in the workspace repository.
  *     requestBody:
  *       required: true
  *       content:
@@ -216,6 +220,8 @@ router.post('/', async (req: Request, res: Response) => {
  *   delete:
  *     tags: [Worktrees]
  *     summary: Remove a git worktree
+ *     operationId: removeWorktree
+ *     description: Removes a git worktree by its URL-encoded path, optionally forcing removal of dirty worktrees.
  *     parameters:
  *       - in: path
  *         name: encodedPath
@@ -326,6 +332,8 @@ async function extractConflictMarkers(git: ReturnType<typeof simpleGit>, repoPat
  *   post:
  *     tags: [Worktrees]
  *     summary: Dry-run merge to detect conflicts
+ *     operationId: previewWorktreeMerge
+ *     description: Performs a dry-run merge attempt to detect conflicts before actually merging a worktree branch.
  *     requestBody:
  *       required: true
  *       content:
@@ -436,6 +444,8 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Worktrees]
  *     summary: Merge a worktree branch to main
+ *     operationId: mergeWorktree
+ *     description: Merges a worktree branch into the current branch using --no-ff, with optional force resolution using --theirs strategy.
  *     requestBody:
  *       required: true
  *       content:
@@ -559,6 +569,8 @@ router.post('/merge', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Worktrees]
  *     summary: Get worktree branch status
+ *     operationId: getWorktreeStatus
+ *     description: Returns the git status of a specific worktree including branch name, ahead/behind counts, and modified files.
  *     parameters:
  *       - in: query
  *         name: workspaceId

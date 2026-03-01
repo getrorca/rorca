@@ -98,6 +98,8 @@ function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
  *   post:
  *     tags: [Templates]
  *     summary: Create a template from an approved spec
+ *     operationId: createTemplate
+ *     description: Creates a reusable spec template from an approved spec's story structure and direction layers.
  *     requestBody:
  *       required: true
  *       content:
@@ -123,6 +125,8 @@ function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
  *   get:
  *     tags: [Templates]
  *     summary: List templates
+ *     operationId: listTemplates
+ *     description: Returns paginated templates filtered by scope (all, personal, or team) with ratings and author info.
  *     parameters:
  *       - in: query
  *         name: scope
@@ -260,6 +264,8 @@ router.get('/', (req: Request, res: Response) => {
  *   post:
  *     tags: [Templates]
  *     summary: Rate a template (1-5)
+ *     operationId: rateTemplate
+ *     description: Submits or updates a 1-5 star rating for the specified template.
  *     parameters:
  *       - in: path
  *         name: id
@@ -332,8 +338,31 @@ router.post('/:id/rate', (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /:id/use — Increment usage count + update last_used_at ──────────────
-
+/**
+ * @swagger
+ * /api/templates/{id}/use:
+ *   post:
+ *     tags: [Templates]
+ *     summary: Record template usage
+ *     operationId: recordTemplateUsage
+ *     description: Increments the usage count and updates the last_used_at timestamp for the specified template.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Usage recorded
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       404:
+ *         description: Template not found
+ */
 router.post('/:id/use', (req: Request, res: Response) => {
   try {
     const result = db.prepare(
@@ -358,6 +387,8 @@ router.post('/:id/use', (req: Request, res: Response) => {
  *   get:
  *     tags: [Templates]
  *     summary: Get a single template
+ *     operationId: getTemplate
+ *     description: Returns the full template including story structure, direction layers, and the requesting user's rating.
  *     parameters:
  *       - in: path
  *         name: id
@@ -373,6 +404,8 @@ router.post('/:id/use', (req: Request, res: Response) => {
  *   delete:
  *     tags: [Templates]
  *     summary: Delete a template
+ *     operationId: deleteTemplate
+ *     description: Permanently deletes the specified template and its associated ratings.
  *     parameters:
  *       - in: path
  *         name: id

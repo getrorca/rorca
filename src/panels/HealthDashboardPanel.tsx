@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { HeartPulse, Database, Clock, Cpu, HardDrive, FileText, RefreshCw, AlertTriangle, CheckCircle } from 'lucide-react';
+import { HeartPulse, Database, Clock, Cpu, HardDrive, FileText, RefreshCw, AlertTriangle, CheckCircle, ShieldCheck, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { BASE_URL } from '../lib/apiFetch';
+import { BASE_URL, apiFetch } from '../lib/apiFetch';
+import { useWorkspace } from '../contexts/WorkspaceContext';
 
 interface HealthBasic {
   status: string;
@@ -31,6 +32,29 @@ interface HistoryPoint {
   heapUsed: number;
   activeRuns: number;
   dbConnected: boolean;
+}
+
+interface DriftViolation {
+  file: string;
+  line: number;
+  convention: string;
+  description: string;
+  severity: 'warning' | 'error';
+}
+
+interface DriftReport {
+  violations: DriftViolation[];
+  score: number;
+  conventionsChecked: number;
+  filesSampled: number;
+  checkedAt: string;
+}
+
+interface DriftReportResponse {
+  id: number;
+  workspaceId: string;
+  triggerType: string;
+  report: DriftReport;
 }
 
 function formatBytes(bytes: number): string {
@@ -65,12 +89,18 @@ function formatRelativeTime(iso: string): string {
 }
 
 export default function HealthDashboardPanel() {
+  const { workspaceId } = useWorkspace();
   const [health, setHealth] = useState<HealthDetailed | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [pollInterval, setPollInterval] = useState(30);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Drift report state
+  const [driftReport, setDriftReport] = useState<DriftReport | null>(null);
+  const [driftLoading, setDriftLoading] = useState(false);
+  const [driftExpanded, setDriftExpanded] = useState(false);
 
   const fetchHealth = useCallback(async () => {
     try {
@@ -119,6 +149,41 @@ export default function HealthDashboardPanel() {
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [fetchHealth, pollInterval]);
+
+  // Fetch latest drift report on mount and when workspace changes
+  const fetchDriftReport = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const data = await apiFetch<DriftReportResponse>(`/api/conventions/drift/${workspaceId}`);
+      setDriftReport(data.report);
+    } catch {
+      // No report yet — not an error
+      setDriftReport(null);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    fetchDriftReport();
+  }, [fetchDriftReport]);
+
+  // Run drift check manually
+  const runDriftCheck = useCallback(async () => {
+    if (!workspaceId) return;
+    setDriftLoading(true);
+    try {
+      const data = await apiFetch<{ ok: boolean; report: DriftReport }>('/api/conventions/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      setDriftReport(data.report);
+      setDriftExpanded(true);
+    } catch {
+      // Error handled silently — user sees no report update
+    } finally {
+      setDriftLoading(false);
+    }
+  }, [workspaceId]);
 
   const statusColor = health?.status === 'healthy' ? 'text-green-400' : health?.status === 'degraded' ? 'text-yellow-400' : 'text-red-400';
   const statusBg = health?.status === 'healthy' ? 'bg-green-500/10 border-green-500/30' : health?.status === 'degraded' ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-red-500/10 border-red-500/30';
@@ -264,6 +329,136 @@ export default function HealthDashboardPanel() {
               )}
             </p>
           </div>
+
+          {/* Convention Compliance */}
+          {workspaceId && (
+            <div className="bg-panel border border-border rounded-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck size={16} className={
+                    driftReport
+                      ? driftReport.score >= 80 ? 'text-green-400' : driftReport.score >= 50 ? 'text-yellow-400' : 'text-red-400'
+                      : 'text-muted'
+                  } />
+                  <h2 className="text-sm font-semibold">Convention Compliance</h2>
+                  {driftReport && (
+                    <span className={`text-xs font-medium tabular-nums px-1.5 py-0.5 rounded ${
+                      driftReport.score >= 80 ? 'bg-green-500/15 text-green-400' :
+                      driftReport.score >= 50 ? 'bg-yellow-500/15 text-yellow-400' :
+                      'bg-red-500/15 text-red-400'
+                    }`}>
+                      {driftReport.score}%
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={runDriftCheck}
+                  disabled={driftLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-accent/10 text-accent rounded text-sm hover:bg-accent/20 transition-colors disabled:opacity-60"
+                >
+                  {driftLoading ? (
+                    <><Loader2 size={14} className="animate-spin" /> Checking...</>
+                  ) : (
+                    <><RefreshCw size={14} /> Run Check</>
+                  )}
+                </button>
+              </div>
+
+              {driftReport ? (
+                <>
+                  {/* Summary row */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mb-3">
+                    <div>
+                      <span className="text-muted">Total Violations:</span>{' '}
+                      <span className="font-medium">{driftReport.violations.length}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted">Errors:</span>{' '}
+                      <span className="font-medium text-red-400">
+                        {driftReport.violations.filter(v => v.severity === 'error').length}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-muted">Warnings:</span>{' '}
+                      <span className="font-medium text-yellow-400">
+                        {driftReport.violations.filter(v => v.severity === 'warning').length}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-muted">Last checked:</span>{' '}
+                      <span>{formatRelativeTime(driftReport.checkedAt)}</span>
+                    </div>
+                  </div>
+
+                  {/* Compliance bar */}
+                  <div className="mb-3">
+                    <div className="flex justify-between text-xs text-muted mb-1">
+                      <span>Compliance Score</span>
+                      <span>{driftReport.score}% ({driftReport.conventionsChecked} conventions, {driftReport.filesSampled} files sampled)</span>
+                    </div>
+                    <div className="h-2 bg-bg rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${
+                          driftReport.score >= 80 ? 'bg-green-500' : driftReport.score >= 50 ? 'bg-yellow-500' : 'bg-red-500'
+                        }`}
+                        style={{ width: `${driftReport.score}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Expandable violation list */}
+                  {driftReport.violations.length > 0 && (
+                    <div>
+                      <button
+                        onClick={() => setDriftExpanded(!driftExpanded)}
+                        className="flex items-center gap-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors"
+                      >
+                        {driftExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        {driftReport.violations.length} violation{driftReport.violations.length !== 1 ? 's' : ''} found
+                      </button>
+
+                      {driftExpanded && (
+                        <div className="mt-2 space-y-1 max-h-64 overflow-y-auto">
+                          {driftReport.violations.map((v, i) => (
+                            <div
+                              key={i}
+                              className="flex items-start gap-2 p-2 rounded bg-bg/50 text-sm"
+                            >
+                              <span className={`shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                v.severity === 'error'
+                                  ? 'bg-red-500/20 text-red-400'
+                                  : 'bg-yellow-500/20 text-yellow-400'
+                              }`}>
+                                {v.severity}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 text-xs">
+                                  <span className="font-mono text-muted truncate">{v.file}:{v.line}</span>
+                                  <span className="text-accent shrink-0">{v.convention}</span>
+                                </div>
+                                <p className="text-xs text-muted mt-0.5">{v.description}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {driftReport.violations.length === 0 && (
+                    <div className="flex items-center gap-2 text-sm text-green-400">
+                      <CheckCircle size={14} />
+                      No violations found — code matches declared conventions.
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-muted">
+                  No drift report yet. Click &quot;Run Check&quot; to scan for convention violations.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Uptime history chart */}
           {history.length > 1 && (

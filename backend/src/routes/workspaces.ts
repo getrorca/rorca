@@ -52,6 +52,11 @@ function parseWorkspace(row: WorkspaceRow) {
  *   post:
  *     tags: [Workspaces]
  *     summary: Register a new workspace
+ *     operationId: createWorkspace
+ *     description: >
+ *       Registers a new workspace by path. Validates the filesystem path exists,
+ *       creates the workspace record, auto-creates a default agent profile from
+ *       L3 direction content, and runs echolocation on the workspace root.
  *     requestBody:
  *       required: true
  *       content:
@@ -78,6 +83,8 @@ function parseWorkspace(row: WorkspaceRow) {
  *   get:
  *     tags: [Workspaces]
  *     summary: List all registered workspaces
+ *     operationId: listWorkspaces
+ *     description: Returns a paginated list of all registered workspaces ordered by creation date descending.
  *     responses:
  *       200:
  *         description: List of workspaces
@@ -163,6 +170,10 @@ router.get('/', (req, res) => {
  *   get:
  *     tags: [Workspaces]
  *     summary: Get workspace hydrated context (schema + git)
+ *     operationId: getWorkspaceContext
+ *     description: >
+ *       Returns the hydrated context for a workspace, including schema snapshot,
+ *       table count, git memory, last ingested commit hash, and git commit count.
  *     parameters:
  *       - in: path
  *         name: id
@@ -202,6 +213,11 @@ router.get('/:id/context', (req, res) => {
  *   post:
  *     tags: [Workspaces]
  *     summary: Hydrate workspace context (schema and/or git)
+ *     operationId: hydrateWorkspaceContext
+ *     description: >
+ *       Ingests schema and/or git history for a workspace. Schema hydration scans
+ *       for database tables; git hydration uses LLM map-reduce over recent commits
+ *       to build a memory summary. Supports delta ingestion from last known commit hash.
  *     parameters:
  *       - in: path
  *         name: id
@@ -357,6 +373,10 @@ router.post('/:id/hydrate', async (req, res) => {
  *   get:
  *     tags: [Workspaces]
  *     summary: Check which files exist in a workspace
+ *     operationId: checkWorkspaceFiles
+ *     description: >
+ *       Checks the existence of specific files or glob patterns within a workspace's
+ *       filesystem path. Returns the list of matching files that exist.
  *     parameters:
  *       - in: path
  *         name: id
@@ -435,6 +455,8 @@ router.get('/:id/files', (req, res) => {
  *   get:
  *     tags: [Workspaces]
  *     summary: Get a single workspace
+ *     operationId: getWorkspace
+ *     description: Returns the full details of a single workspace by its ID.
  *     parameters:
  *       - in: path
  *         name: id
@@ -453,6 +475,10 @@ router.get('/:id/files', (req, res) => {
  *   patch:
  *     tags: [Workspaces]
  *     summary: Update workspace settings
+ *     operationId: updateWorkspace
+ *     description: >
+ *       Updates one or more workspace fields (label, path, domains, pr_template).
+ *       Only provided fields are updated; omitted fields remain unchanged.
  *     parameters:
  *       - in: path
  *         name: id
@@ -478,6 +504,8 @@ router.get('/:id/files', (req, res) => {
  *   delete:
  *     tags: [Workspaces]
  *     summary: Delete a workspace
+ *     operationId: deleteWorkspace
+ *     description: Deletes a workspace record by ID and emits a workspace_delete WAL event.
  *     parameters:
  *       - in: path
  *         name: id
@@ -530,7 +558,38 @@ router.patch('/:id', (req, res) => {
   res.json({ workspace: parseWorkspace(updated) });
 });
 
-// GET /api/workspaces/:id/pipeline-config — Get pipeline configuration
+/**
+ * @swagger
+ * /api/workspaces/{id}/pipeline-config:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get pipeline configuration for a workspace
+ *     operationId: getWorkspacePipelineConfig
+ *     description: >
+ *       Returns the pipeline configuration for a workspace, including auto-worktree,
+ *       story timeout, max retries, and default parallelism settings.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Pipeline configuration
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 config:
+ *                   type: object
+ *                   properties:
+ *                     autoWorktree: { type: boolean }
+ *                     storyTimeoutMin: { type: integer }
+ *                     maxRetries: { type: integer }
+ *                     defaultParallelism: { type: integer }
+ *       404: { description: "Workspace not found" }
+ */
 router.get('/:id/pipeline-config', (req, res) => {
   const row = db.prepare('SELECT pipeline_config, default_parallelism FROM workspaces WHERE id = ?').get(req.params.id) as { pipeline_config: string; default_parallelism: number } | undefined;
   if (!row) {
@@ -548,7 +607,44 @@ router.get('/:id/pipeline-config', (req, res) => {
   });
 });
 
-// PUT /api/workspaces/:id/pipeline-config — Update pipeline configuration
+/**
+ * @swagger
+ * /api/workspaces/{id}/pipeline-config:
+ *   put:
+ *     tags: [Workspaces]
+ *     summary: Update pipeline configuration for a workspace
+ *     operationId: updateWorkspacePipelineConfig
+ *     description: >
+ *       Updates the pipeline configuration for a workspace. Supports setting
+ *       auto-worktree, story timeout in minutes, max retries, and default
+ *       parallelism (clamped between 1 and 10).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               autoWorktree: { type: boolean }
+ *               storyTimeoutMin: { type: integer }
+ *               maxRetries: { type: integer }
+ *               defaultParallelism: { type: integer, minimum: 1, maximum: 10 }
+ *     responses:
+ *       200:
+ *         description: Configuration updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       404: { description: "Workspace not found" }
+ */
 router.put('/:id/pipeline-config', (req, res) => {
   const row = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(req.params.id) as { id: string } | undefined;
   if (!row) {
@@ -566,7 +662,55 @@ router.put('/:id/pipeline-config', (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /api/workspaces/:id/stats — Summary stats for a workspace
+/**
+ * @swagger
+ * /api/workspaces/{id}/stats:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get summary stats for a workspace
+ *     operationId: getWorkspaceStats
+ *     description: >
+ *       Returns aggregated statistics for a workspace including spec counts
+ *       (pending/approved), pipeline run counts (total/active/completed/failed),
+ *       story pass/fail rates, and last activity timestamp.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Workspace summary statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workspaceId: { type: string }
+ *                 specs:
+ *                   type: object
+ *                   properties:
+ *                     pending: { type: integer }
+ *                     approved: { type: integer }
+ *                     total: { type: integer }
+ *                 runs:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     active: { type: integer }
+ *                     completed: { type: integer }
+ *                     failed: { type: integer }
+ *                     lastRunAt: { type: string, format: date-time, nullable: true }
+ *                 stories:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     passed: { type: integer }
+ *                     failed: { type: integer }
+ *                     passRate: { type: integer, minimum: 0, maximum: 100 }
+ *                 lastActivity: { type: string, format: date-time, nullable: true }
+ *       404: { description: "Workspace not found" }
+ */
 router.get('/:id/stats', (req, res) => {
   const workspaceId = req.params.id;
   const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
@@ -648,7 +792,53 @@ router.get('/:id/stats', (req, res) => {
   });
 });
 
-// GET /api/workspaces/:id/team-members — Team members for a workspace (via workspace_access)
+/**
+ * @swagger
+ * /api/workspaces/{id}/team-members:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get team members for a workspace
+ *     operationId: getWorkspaceTeamMembers
+ *     description: >
+ *       Returns the team linked to this workspace via workspace_access, along with
+ *       all team members and their roles. If no team is linked, returns an empty
+ *       members array with teamScoped set to false.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Team members for the workspace
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 teamScoped: { type: boolean }
+ *                 team:
+ *                   type: object
+ *                   nullable: true
+ *                   properties:
+ *                     id: { type: string }
+ *                     name: { type: string }
+ *                     slug: { type: string }
+ *                     permission: { type: string }
+ *                 members:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       userId: { type: string }
+ *                       email: { type: string }
+ *                       displayName: { type: string }
+ *                       role: { type: string }
+ *                       joinedAt: { type: string, format: date-time }
+ *                       acceptedAt: { type: string, format: date-time, nullable: true }
+ *                       lastActiveAt: { type: string, format: date-time, nullable: true }
+ *       404: { description: "Workspace not found" }
+ */
 router.get('/:id/team-members', (req, res) => {
   const workspaceId = req.params.id;
   const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
@@ -698,9 +888,43 @@ router.get('/:id/team-members', (req, res) => {
 });
 
 /**
- * POST /api/workspaces/:id/scan-direction
- * Scans repo structure (package.json, CLAUDE.md, README.md, top-level dirs)
- * and uses Claude to generate draft L1/L2/L3 direction layer content.
+ * @swagger
+ * /api/workspaces/{id}/scan-direction:
+ *   post:
+ *     tags: [Workspaces]
+ *     summary: Scan repo and generate draft direction layers
+ *     operationId: scanWorkspaceDirection
+ *     description: >
+ *       Scans the workspace repository structure (package.json, CLAUDE.md, README.md,
+ *       pyproject.toml, Cargo.toml, go.mod, tsconfig.json, and top-level directories)
+ *       and uses an LLM to generate draft L1/L2/L3 direction layer content. Returns
+ *       drafted YAML for each layer along with confidence level and L3 validation results.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Draft direction layers generated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 l1Draft: { type: string }
+ *                 l2Draft: { type: string }
+ *                 l3Draft: { type: string }
+ *                 confidence: { type: string, enum: [low, medium, high] }
+ *                 filesScanned: { type: array, items: { type: string } }
+ *                 dirCount: { type: integer }
+ *                 l3Valid: { type: boolean }
+ *                 l3Errors: { type: array, items: { type: string } }
+ *                 usage: { type: object }
+ *       400: { description: "Workspace path does not exist" }
+ *       404: { description: "Workspace not found" }
+ *       500: { description: "Repo scan failed" }
+ *       502: { description: "LLM returned invalid or incomplete response" }
  */
 router.post('/:id/scan-direction', async (req, res) => {
   const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
@@ -844,6 +1068,7 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
  *   get:
  *     tags: [Workspaces]
  *     summary: Get workspace health report with component breakdown
+ *     operationId: getWorkspaceHealth
  *     description: >
  *       CIE-012: Returns context/intent completeness score (0-100%) with per-component
  *       breakdown showing CLAUDE.md depth, AGENTS.md roles, config scopes, MEMORY.md
@@ -918,6 +1143,7 @@ router.get('/:id/health', (req, res) => {
  *   post:
  *     tags: [Workspaces]
  *     summary: Scan workspace to detect tech stack, context files, and compute health score
+ *     operationId: echolocateWorkspace
  *     description: >
  *       Non-destructive scan of workspace root and subdirectories.
  *       Detects tech stack from manifest files, checks for context/intent files
@@ -1009,6 +1235,7 @@ router.post('/:id/echolocate', (req, res) => {
  *   post:
  *     tags: [Workspaces]
  *     summary: Discover monorepo structure and generate per-app scopes + AGENTS.md
+ *     operationId: discoverMonorepo
  *     description: >
  *       CIE-017: Detects monorepo tool (Turborepo, Nx, Lerna, pnpm/npm/yarn workspaces),
  *       scans each app/package for tech stack, infers skill files, generates routing
@@ -1134,6 +1361,7 @@ router.post('/:id/monorepo/discover', (req, res) => {
  *   post:
  *     tags: [Workspaces]
  *     summary: Generate or write context/intent scaffolding for a workspace
+ *     operationId: scaffoldWorkspace
  *     description: >
  *       CIE-002: After echolocation detects the stack, this endpoint generates
  *       bespoke CLAUDE.md, AGENTS.md, .rorca/config.json, and skill files.

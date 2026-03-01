@@ -23,8 +23,31 @@ interface UserSettingsRow {
   updated_at: string;
 }
 
-// ─── GET /api/settings/profile ─────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/settings/profile:
+ *   get:
+ *     tags: [Settings]
+ *     summary: Get user profile
+ *     operationId: getUserProfile
+ *     description: Returns the current user's profile information including display name, email, and avatar URL.
+ *     responses:
+ *       200:
+ *         description: User profile
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 email: { type: string }
+ *                 displayName: { type: string }
+ *                 avatarUrl: { type: string, nullable: true }
+ *       404:
+ *         description: User not found
+ *       500:
+ *         description: No user configured
+ */
 router.get('/profile', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
@@ -46,8 +69,37 @@ router.get('/profile', (req: Request, res: Response) => {
   });
 });
 
-// ─── PUT /api/settings/profile ─────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/settings/profile:
+ *   put:
+ *     tags: [Settings]
+ *     summary: Update user profile
+ *     operationId: updateUserProfile
+ *     description: Updates the current user's display name and/or avatar URL.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               displayName: { type: string, minLength: 1 }
+ *               avatarUrl: { type: string, nullable: true }
+ *     responses:
+ *       200:
+ *         description: Profile updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       400:
+ *         description: Invalid field values or no fields to update
+ *       500:
+ *         description: No user configured
+ */
 router.put('/profile', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
@@ -88,8 +140,42 @@ router.put('/profile', (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// ─── PUT /api/settings/password ────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/settings/password:
+ *   put:
+ *     tags: [Settings]
+ *     summary: Change user password
+ *     operationId: changeUserPassword
+ *     description: Changes the current user's password. Requires the current password for verification.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [currentPassword, newPassword]
+ *             properties:
+ *               currentPassword: { type: string }
+ *               newPassword: { type: string, minLength: 6 }
+ *     responses:
+ *       200:
+ *         description: Password changed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       400:
+ *         description: Missing or invalid password fields
+ *       403:
+ *         description: Current password is incorrect
+ *       404:
+ *         description: User not found
+ *       500:
+ *         description: No user configured
+ */
 router.put('/password', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
@@ -121,8 +207,27 @@ router.put('/password', (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-// ─── GET /api/settings/display ─────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/settings/display:
+ *   get:
+ *     tags: [Settings]
+ *     summary: Get display preferences
+ *     operationId: getDisplaySettings
+ *     description: Returns the current user's display preferences including default model and items per page.
+ *     responses:
+ *       200:
+ *         description: Display settings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 defaultModel: { type: string }
+ *                 itemsPerPage: { type: integer }
+ *       500:
+ *         description: No user configured
+ */
 router.get('/display', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
@@ -137,8 +242,37 @@ router.get('/display', (req: Request, res: Response) => {
   });
 });
 
-// ─── PUT /api/settings/display ─────────────────────────────────────────────
-
+/**
+ * @swagger
+ * /api/settings/display:
+ *   put:
+ *     tags: [Settings]
+ *     summary: Update display preferences
+ *     operationId: updateDisplaySettings
+ *     description: Updates the current user's display preferences. Upserts into user_settings table.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               defaultModel: { type: string }
+ *               itemsPerPage: { type: integer, minimum: 5, maximum: 100 }
+ *     responses:
+ *       200:
+ *         description: Display settings updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 defaultModel: { type: string }
+ *                 itemsPerPage: { type: integer }
+ *       500:
+ *         description: No user configured
+ */
 router.put('/display', (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }

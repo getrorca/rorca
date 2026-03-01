@@ -1,0 +1,18 @@
+{
+  "name": "api-express",
+  "version": "1.0.0",
+  "description": "Express.js + TypeScript + SQLite/PostgreSQL + JWT Auth — REST API conventions",
+  "author": "rorca",
+  "license": "MIT",
+  "compatibility": {
+    "node": ">=18",
+    "frameworks": ["express", "better-sqlite3", "jsonwebtoken"]
+  },
+  "dependencies": [
+    { "name": "express", "version": "^4.18.0" },
+    { "name": "better-sqlite3", "version": "^11.0.0" },
+    { "name": "jsonwebtoken", "version": "^9.0.0" },
+    { "name": "zod", "version": "^3.23.0" }
+  ],
+  "skills": ["express", "sqlite", "jwt", "typescript"]
+}

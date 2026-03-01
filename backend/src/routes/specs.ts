@@ -16,6 +16,8 @@ import { getEffectiveUser } from '../lib/get-user';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
+import { PersonaRegistry } from '../lib/agent-personas';
+import { SkillRegistry } from '../lib/skill-registry';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -135,6 +137,12 @@ interface SpecVersionRow {
   created_at: string;
 }
 
+interface SuggestedSkillRaw {
+  name: string;
+  relevance: number;
+  reason: string;
+}
+
 interface UserStory {
   id: string;
   title: string;
@@ -144,8 +152,67 @@ interface UserStory {
   complexity?: number;
   priority?: number;  // 1=urgent, 2=high, 3=normal (default), 4=low
   timeoutMinutes?: number;  // 5-120, default 45
+  suggestedSkills?: SuggestedSkillRaw[];
+  suggestedPersona?: string;
+  suggestedReviewers?: string[];
   passes?: boolean;
   excluded?: boolean;
+}
+
+/** Read a file safely, returning empty string on failure. */
+function safeReadFile(filePath: string): string {
+  try { return fs.readFileSync(filePath, 'utf-8'); } catch { return ''; }
+}
+
+/**
+ * Build skill + persona catalog context for spec generation prompts.
+ * Discovers installed skills and personas from the workspace, reads MEMORY.md and AGENTS.md.
+ */
+function buildCatalogContext(workspacePath: string): {
+  skillCatalog: string;
+  personaCatalog: string;
+  memoryMd: string;
+  agentsMd: string;
+  skillNames: Set<string>;
+} {
+  const skillRegistry = new SkillRegistry().discover(workspacePath);
+  const rorcaDir = path.join(workspacePath, '.rorca');
+  const personaRegistry = new PersonaRegistry().discover(rorcaDir);
+
+  const skillCatalog = skillRegistry.getCatalogForPrompt();
+  const personaCatalog = personaRegistry.getPersonaCatalogForPrompt();
+
+  const memoryMd = safeReadFile(path.join(rorcaDir, 'MEMORY.md'));
+  const agentsMd = safeReadFile(path.join(workspacePath, 'AGENTS.md'))
+    || safeReadFile(path.join(rorcaDir, 'AGENTS.md'));
+
+  const skillNames = new Set(skillRegistry.getAll().map(s => s.metadata.name.toLowerCase()));
+
+  return { skillCatalog, personaCatalog, memoryMd, agentsMd, skillNames };
+}
+
+/**
+ * Validate suggestedSkills against installed catalog.
+ * Strips unknown skill names and logs warnings.
+ */
+function validateSuggestedSkills(
+  stories: unknown[],
+  validSkillNames: Set<string>,
+): void {
+  for (const story of stories) {
+    const s = story as Record<string, unknown>;
+    if (!Array.isArray(s.suggestedSkills)) continue;
+    const original = s.suggestedSkills as SuggestedSkillRaw[];
+    const filtered = original.filter(sk => {
+      if (typeof sk.name !== 'string') return false;
+      const valid = validSkillNames.has(sk.name.toLowerCase());
+      if (!valid) {
+        console.warn(`[Specs] Stripped unknown suggestedSkill "${sk.name}" from story ${s.id}`);
+      }
+      return valid;
+    });
+    s.suggestedSkills = filtered.length > 0 ? filtered : undefined;
+  }
 }
 
 function getWorkspace(workspaceId: string): WorkspaceRow | undefined {
@@ -356,6 +423,8 @@ interface SpecDiffResult {
  *   post:
  *     tags: [Specs]
  *     summary: Generate a spec from a brief via LLM
+ *     operationId: generateSpec
+ *     description: Generates a software specification JSON from a brief using LLM. Supports single-pass and multi-pass (6-pass pipeline) generation. Routes through OpenCode or SDK path depending on configured agent type.
  *     requestBody:
  *       required: true
  *       content:
@@ -373,6 +442,7 @@ interface SpecDiffResult {
  *               diagramTypes: { type: array, items: { type: string } }
  *               storyAnnotations: { type: string }
  *               templateId: { type: string }
+ *               multiPass: { type: boolean, default: false, description: "Enable multi-pass spec generation (Pass 1: PM coarse stories, Pass 2: Spec Writer micro-stories)" }
  *     responses:
  *       200:
  *         description: Generated spec
@@ -391,6 +461,90 @@ interface SpecDiffResult {
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace not found" }
  */
+// ─── Multi-pass helpers ─────────────────────────────────────────────────────
+
+/** Load a default persona's prompt text from the default-personas/ directory. */
+function loadDefaultPersonaPrompt(personaName: string): string | null {
+  const baseDir = path.resolve(__dirname, '../../../default-personas');
+  // Search all category subdirs for <personaName>.md
+  const categories = ['_primary', '_adversarial', '_specialist', '_review'];
+  for (const cat of categories) {
+    const filePath = path.join(baseDir, cat, `${personaName}.md`);
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      // Extract body after frontmatter
+      const fmMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/);
+      return fmMatch ? fmMatch[1].trim() : content.trim();
+    }
+  }
+  return null;
+}
+
+/** Parse raw LLM response text into JSON, stripping markdown fences if present. */
+function parseLLMJson(raw: string): unknown {
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const jsonStr = fenceMatch ? fenceMatch[1].trim() : raw.trim();
+  const jsonStart = jsonStr.indexOf('{');
+  return JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+}
+
+/** Emit a spec_generation_pass WAL event and broadcast via SSE. */
+function emitPassEvent(
+  specId: string,
+  pass: number,
+  status: 'started' | 'completed',
+  workspaceId?: string,
+): void {
+  const payload = JSON.stringify({ pass, status });
+  const result = db.prepare(
+    `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_generation_pass', ?, ?, ?)`
+  ).run(specId, workspaceId ?? null, payload);
+  broadcastAll({
+    id: Number(result.lastInsertRowid),
+    ts: new Date().toISOString(),
+    event_type: 'spec_generation_pass',
+    workspace_id: workspaceId ?? null,
+    spec_id: specId,
+    story_id: null,
+    actor: 'system',
+    payload,
+  });
+}
+
+/**
+ * Load convention files from .rorca/conventions/ directory.
+ * Returns a map of convention name → content for prompt injection.
+ */
+function loadWorkspaceConventions(workspacePath: string): Map<string, string> {
+  const conventions = new Map<string, string>();
+  const convDir = path.join(workspacePath, '.rorca', 'conventions');
+  if (!fs.existsSync(convDir)) return conventions;
+
+  for (const entry of fs.readdirSync(convDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+    const name = path.basename(entry.name, '.md').toLowerCase();
+    const content = fs.readFileSync(path.join(convDir, entry.name), 'utf-8').trim();
+    if (content) conventions.set(name, content);
+  }
+  return conventions;
+}
+
+/**
+ * Extract suggestedSkills names from a story object.
+ * Handles both array-of-strings and array-of-objects formats.
+ */
+function extractSkillNames(story: Record<string, unknown>): string[] {
+  const raw = story.suggestedSkills;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((s: unknown) => {
+    if (typeof s === 'string') return s.toLowerCase();
+    if (s && typeof s === 'object' && 'name' in (s as Record<string, unknown>)) {
+      return String((s as Record<string, unknown>).name).toLowerCase();
+    }
+    return '';
+  }).filter(Boolean);
+}
+
 router.post('/generate', async (req: Request, res: Response) => {
   try {
     const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
@@ -399,6 +553,7 @@ router.post('/generate', async (req: Request, res: Response) => {
     const rawCount = parseInt(req.body.storyCount);
     const storyCount: number = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
     const requestedModel: string | undefined = req.body.model;
+    const multiPass: boolean = req.body.multiPass === true;
 
     // 1. Validate required fields (title is optional — auto-generated from brief)
     if (!workspaceId || !brief) {
@@ -489,6 +644,9 @@ router.post('/generate', async (req: Request, res: Response) => {
       }
     }
 
+    // 6c. Discover skill + persona catalogs and read context files
+    const catalogs = buildCatalogContext(workspace.path as string);
+
     // 7. Build LLM prompt
     const storyPrefix = req.body.storyPrefix || 'US';
     const wantDiagrams = Array.isArray(diagramTypes) && diagramTypes.some(
@@ -514,30 +672,10 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Do not use special chars like quotes inside node labels',
     ].join('\n') : '';
 
-    const fullPrompt = [
-      '=== INSTRUCTIONS: READ THIS FIRST ===',
-      'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
-      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
-      'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
-      'If you output anything other than raw JSON, the system will fail.',
-      '=== END INSTRUCTIONS ===',
-      '',
-      synthesized,
-      ...(templateContext ? [templateContext, '---'] : []),
-      '---',
-      storyCount === 0
-        ? 'TASK: Generate a software specification JSON. Generate an appropriate number of user stories (typically 3-20) based on the scope and complexity of the brief. Use fewer stories for focused features and more for large system changes.'
-        : `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
-      `Spec title: ${effectiveTitle}`,
-      `Spec brief: ${brief}`,
-      '',
-      'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
-      '',
-      'JSON schema:',
-      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
-      wantDiagrams ? diagramSchema : '',
-      '',
-      `Rules:`,
+    // Base JSON schema and rules used by multi-pass Pass 1 (simpler format without skill/persona fields)
+    const baseJsonSchema = `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`;
+
+    const baseRules = [
       storyCount === 0
         ? `- Number stories sequentially starting from ${storyPrefix}-001`
         : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
@@ -550,6 +688,67 @@ router.post('/generate', async (req: Request, res: Response) => {
       '- Include a "mermaidDiagram" field: a valid Mermaid flowchart (graph TD) showing story dependency relationships',
       '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
+    ];
+
+    // Build catalog sections (only include if non-empty)
+    const catalogSections: string[] = [];
+    if (catalogs.memoryMd) {
+      catalogSections.push('=== PROJECT MEMORY ===', catalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
+    }
+    if (catalogs.agentsMd) {
+      catalogSections.push('=== AGENTS GOVERNANCE ===', catalogs.agentsMd, '=== END AGENTS GOVERNANCE ===', '');
+    }
+    if (catalogs.skillCatalog) {
+      catalogSections.push('=== INSTALLED SKILLS ===', catalogs.skillCatalog, '=== END INSTALLED SKILLS ===', '');
+    }
+    if (catalogs.personaCatalog) {
+      catalogSections.push('=== AVAILABLE PERSONAS ===', catalogs.personaCatalog, '=== END AVAILABLE PERSONAS ===', '');
+    }
+
+    const hasSkillsOrPersonas = !!(catalogs.skillCatalog || catalogs.personaCatalog);
+
+    const fullPrompt = [
+      '=== INSTRUCTIONS: READ THIS FIRST ===',
+      'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+      'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+      'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+      'If you output anything other than raw JSON, the system will fail.',
+      '=== END INSTRUCTIONS ===',
+      '',
+      synthesized,
+      ...catalogSections,
+      ...(templateContext ? [templateContext, '---'] : []),
+      '---',
+      storyCount === 0
+        ? 'TASK: Generate a software specification JSON. Generate an appropriate number of user stories (typically 3-20) based on the scope and complexity of the brief. Use fewer stories for focused features and more for large system changes.'
+        : `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
+      `Spec title: ${effectiveTitle}`,
+      `Spec brief: ${brief}`,
+      '',
+      'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
+      '',
+      'JSON schema:',
+      `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3${hasSkillsOrPersonas ? ',"suggestedSkills":[{"name":"skill-name","relevance":8,"reason":"why this skill applies"}],"suggestedPersona":"persona-name","suggestedReviewers":["reviewer-name"]' : ''}}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+      wantDiagrams ? diagramSchema : '',
+      '',
+      `Rules:`,
+      storyCount === 0
+        ? `- Number stories sequentially starting from ${storyPrefix}-001`
+        : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
+      '- Each story needs 3-5 specific testable acceptanceCriteria',
+      '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
+      '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
+      '- Stories should be concrete and implementable, not vague',
+      '- Each story must have a "complexity" field: integer 1-5 (1=trivial one-liner, 2=simple, 3=moderate, 4=complex multi-file, 5=epic cross-cutting). Base on acceptance criteria count, description scope, and dependency depth',
+      ...(hasSkillsOrPersonas ? [
+        '- Each story MUST include "suggestedSkills": array of {name, relevance (1-10), reason} — pick from INSTALLED SKILLS catalog ONLY. Use the exact skill name from the catalog. relevance: 1=tangentially related, 10=core skill for this story. Omit if no skills apply.',
+        '- Each story MUST include "suggestedPersona": string — pick the single best-fit persona name from AVAILABLE PERSONAS for implementation. Use the exact persona name from the catalog.',
+        '- Each story MUST include "suggestedReviewers": string[] — pick 1-3 reviewer persona names from AVAILABLE PERSONAS that should review this story\'s output (e.g. security for auth stories, red-team for critical paths). Use exact persona names from the catalog.',
+      ] : []),
+      '- Your entire response must be valid JSON parseable by JSON.parse()',
+      '- Include a "mermaidDiagram" field: a valid Mermaid flowchart (graph TD) showing story dependency relationships',
+      '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
+      '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ].join('\n');
 
     // 8. Route by agent type: OpenCode path vs SDK (llm-client) path
@@ -557,7 +756,731 @@ router.post('/generate', async (req: Request, res: Response) => {
     let tokenUsage = { inputTokens: 0, outputTokens: 0 };
     let usedProvider: string;
 
-    if (configuredAgentType === 'opencode') {
+    // Pre-compute slug early — needed for multi-pass version snapshots
+    const slug = title
+      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      : briefToSlug(brief);
+
+    if (multiPass) {
+      // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
+      console.log(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
+
+      const pmPromptText = loadDefaultPersonaPrompt('pm');
+      const specWriterPromptText = loadDefaultPersonaPrompt('spec-writer');
+
+      if (!pmPromptText || !specWriterPromptText) {
+        res.status(500).json({ error: 'Default persona files not found (pm.md, spec-writer.md). Ensure default-personas/ directory exists.' });
+        return;
+      }
+
+      const user = getEffectiveUser(req);
+      if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
+      const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+
+      // ── Pass 1: PM Agent — coarse high-level stories ──
+      emitPassEvent(slug, 1, 'started', workspaceId);
+
+      const pass1Prompt = [
+        '=== INSTRUCTIONS: READ THIS FIRST ===',
+        'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+        'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+        'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+        'If you output anything other than raw JSON, the system will fail.',
+        '=== END INSTRUCTIONS ===',
+        '',
+        '=== PERSONA: PM AGENT (Pass 1 — High-Level Spec) ===',
+        pmPromptText,
+        '=== END PERSONA ===',
+        '',
+        synthesized,
+        ...(templateContext ? [templateContext, '---'] : []),
+        '---',
+        'TASK: Generate a HIGH-LEVEL software specification JSON with coarse user stories (10-20 stories).',
+        'Each story should represent a meaningful feature area — NOT micro-tasks.',
+        'These will be decomposed into finer-grained stories in a subsequent pass.',
+        `Spec title: ${effectiveTitle}`,
+        `Spec brief: ${brief}`,
+        '',
+        'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
+        '',
+        'JSON schema:',
+        baseJsonSchema,
+        wantDiagrams ? diagramSchema : '',
+        '',
+        'Rules:',
+        `- Number stories sequentially starting from ${storyPrefix}-001`,
+        '- Generate 10-20 coarse stories covering the full scope of the brief',
+        '- Each story needs 3-5 specific testable acceptanceCriteria',
+        '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
+        '- IMPORTANT: Analyze story CONTENT to determine dependencies',
+        '- Stories should represent feature areas, not micro-tasks',
+        '- Each story must have a "complexity" field: integer 1-5',
+        '- Your entire response must be valid JSON parseable by JSON.parse()',
+        '- Include a "mermaidDiagram" field showing story dependency relationships',
+      ].join('\n');
+
+      let pass1Result: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
+      let pass1Usage = { inputTokens: 0, outputTokens: 0 };
+
+      const llmResult1 = await chatComplete(
+        [{ role: 'user', content: pass1Prompt }],
+        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+      );
+      pass1Usage = llmResult1.usage;
+      usedProvider = getActiveProvider();
+
+      try {
+        pass1Result = parseLLMJson(llmResult1.text) as typeof pass1Result;
+      } catch {
+        res.status(500).json({ error: 'Pass 1 (PM Agent) returned non-JSON', raw: llmResult1.text });
+        return;
+      }
+
+      if (!Array.isArray(pass1Result.stories)) {
+        res.status(500).json({ error: 'Pass 1 (PM Agent) returned invalid spec structure' });
+        return;
+      }
+
+      // Snapshot Pass 1 result as spec version
+      const pass1Spec = {
+        title: effectiveTitle,
+        generatedAt: new Date().toISOString(),
+        model: resolvedModel,
+        multiPassStage: 'pass1-pm',
+        userStories: pass1Result.stories,
+      };
+      snapshotVersion(slug, JSON.stringify(pass1Spec), 'pending');
+      emitPassEvent(slug, 1, 'completed', workspaceId);
+
+      console.log(`[Specs] Pass 1 complete: ${pass1Result.stories.length} coarse stories`);
+
+      // ── Pass 2: Spec Writer Agent — decompose into micro-stories ──
+      emitPassEvent(slug, 2, 'started', workspaceId);
+
+      // Discover installed skills for prompt context
+      let skillCatalog = '';
+      try {
+        const skillRegistry = new SkillRegistry();
+        skillRegistry.discover(workspace.path as string);
+        skillCatalog = skillRegistry.getCatalogForPrompt();
+      } catch {
+        // Skills not available — proceed without
+      }
+
+      const pass1StoriesJson = JSON.stringify(pass1Result.stories, null, 2);
+
+      const pass2Prompt = [
+        '=== INSTRUCTIONS: READ THIS FIRST ===',
+        'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
+        'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+        'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+        'If you output anything other than raw JSON, the system will fail.',
+        '=== END INSTRUCTIONS ===',
+        '',
+        '=== PERSONA: SPEC WRITER AGENT (Pass 2 — Micro-Story Decomposition) ===',
+        specWriterPromptText,
+        '=== END PERSONA ===',
+        '',
+        synthesized,
+        '---',
+        'TASK: You are given a high-level spec with coarse user stories from Pass 1 (PM Agent).',
+        'Your job is to DECOMPOSE each coarse story into 2-5 atomic micro-stories with exhaustive acceptance criteria.',
+        'The output replaces the Pass 1 stories entirely — produce a flat array of all micro-stories.',
+        '',
+        `Spec title: ${effectiveTitle}`,
+        `Spec brief: ${brief}`,
+        '',
+        '=== PASS 1 OUTPUT (Coarse Stories) ===',
+        pass1StoriesJson,
+        '=== END PASS 1 OUTPUT ===',
+        '',
+        ...(skillCatalog ? [
+          '=== INSTALLED SKILL CATALOG ===',
+          'The following skills are available in this workspace. For each micro-story, suggest which skills would be useful.',
+          skillCatalog,
+          '=== END SKILL CATALOG ===',
+          '',
+        ] : []),
+        'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
+        '',
+        'JSON schema:',
+        `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3,"suggestedSkills":["react","tailwind"],"suggestedPersona":"frontend"}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+        wantDiagrams ? diagramSchema : '',
+        '',
+        'Rules:',
+        `- Re-number ALL stories sequentially starting from ${storyPrefix}-001`,
+        '- Each coarse story from Pass 1 should become 2-5 atomic micro-stories',
+        '- Each micro-story needs 3-8 specific, binary, testable acceptanceCriteria',
+        '- For UI stories: describe ALL visual states (loading, success, error, empty) with exact copy',
+        '- For API stories: specify HTTP method, path, request/response shapes, status codes',
+        '- dependsOn must reference IDs from YOUR output (the new micro-story IDs), not Pass 1 IDs',
+        '- Each story must have a "complexity" field: integer 1-5',
+        '- Each story must have a "suggestedPersona" field: the persona best suited to implement it (e.g. "frontend", "backend", "database", "security", "architect")',
+        ...(skillCatalog ? [
+          '- Each story must have a "suggestedSkills" field: array of skill names from the catalog that would help implement it (empty array if none apply)',
+        ] : [
+          '- Each story must have a "suggestedSkills" field: empty array [] (no skill catalog available)',
+        ]),
+        '- Your entire response must be valid JSON parseable by JSON.parse()',
+        '- Include a "mermaidDiagram" field showing the decomposed story dependency relationships',
+        '- Stories with no dependencies are root nodes. Use \\n for newlines in the mermaid string',
+      ].join('\n');
+
+      const llmResult2 = await chatComplete(
+        [{ role: 'user', content: pass2Prompt }],
+        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+      );
+      const pass2Usage = llmResult2.usage;
+
+      try {
+        parsed = parseLLMJson(llmResult2.text) as typeof parsed;
+      } catch {
+        res.status(500).json({ error: 'Pass 2 (Spec Writer Agent) returned non-JSON', raw: llmResult2.text });
+        return;
+      }
+
+      if (!Array.isArray(parsed.stories)) {
+        res.status(500).json({ error: 'Pass 2 (Spec Writer Agent) returned invalid spec structure' });
+        return;
+      }
+
+      // Snapshot Pass 2 result as spec version
+      const pass2Spec = {
+        title: effectiveTitle,
+        generatedAt: new Date().toISOString(),
+        model: resolvedModel,
+        multiPassStage: 'pass2-spec-writer',
+        userStories: parsed.stories,
+      };
+      snapshotVersion(slug, JSON.stringify(pass2Spec), 'pending');
+      emitPassEvent(slug, 2, 'completed', workspaceId);
+
+      console.log(`[Specs] Pass 2 complete: ${parsed.stories.length} micro-stories (decomposed from ${pass1Result.stories.length} coarse stories)`);
+
+      // ── Pass 3: UX Designer Agent — add visual descriptions ──
+      emitPassEvent(slug, 3, 'started', workspaceId);
+
+      const uxDesignerPromptText = loadDefaultPersonaPrompt('ux-designer');
+      if (!uxDesignerPromptText) {
+        console.warn('[Specs] UX Designer persona not found — skipping Pass 3');
+        emitPassEvent(slug, 3, 'completed', workspaceId);
+      }
+
+      let pass3Usage = { inputTokens: 0, outputTokens: 0 };
+
+      if (uxDesignerPromptText) {
+        const pass2StoriesJson = JSON.stringify(parsed.stories, null, 2);
+
+        const pass3Prompt = [
+          '=== INSTRUCTIONS: READ THIS FIRST ===',
+          'You are a spec reviewer. Your ONLY job is to output a single valid JSON object.',
+          'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+          'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+          'If you output anything other than raw JSON, the system will fail.',
+          '=== END INSTRUCTIONS ===',
+          '',
+          '=== PERSONA: UX DESIGNER AGENT (Pass 3 — Visual Description Enrichment) ===',
+          uxDesignerPromptText,
+          '=== END PERSONA ===',
+          '',
+          synthesized,
+          '---',
+          'TASK: You are given a spec with micro-stories from Pass 2 (Spec Writer Agent).',
+          'Your job is to ENRICH each story with explicit visual descriptions.',
+          'You modify stories IN-PLACE — keep all existing fields and ADD visual detail.',
+          '',
+          'For stories with a UI component, add to the description and acceptanceCriteria:',
+          '- Exact button labels, field names, placeholder text',
+          '- Layout positions (e.g. "top-right corner", "below the title")',
+          '- Loading state descriptions (what the user sees while waiting)',
+          '- Empty state descriptions (what appears when there is no data)',
+          '- Error state descriptions (exact error message copy)',
+          '- Success state descriptions (toast text, confirmation UI)',
+          '- Icon usage and size descriptions',
+          '- Form field types, validation messages, character limits',
+          '',
+          'For pure backend stories (no UI at all), make only minimal changes:',
+          '- Add API response format descriptions if they produce user-facing data',
+          '- Leave the story mostly as-is — do NOT force UI descriptions onto backend logic',
+          '',
+          `Spec title: ${effectiveTitle}`,
+          `Spec brief: ${brief}`,
+          '',
+          '=== PASS 2 OUTPUT (Micro-Stories) ===',
+          pass2StoriesJson,
+          '=== END PASS 2 OUTPUT ===',
+          '',
+          'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
+          '',
+          'JSON schema:',
+          `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3,"suggestedSkills":["skill"],"suggestedPersona":"persona"}]}`,
+          '',
+          'Rules:',
+          '- Return ALL stories from Pass 2 — same IDs, same order, same count',
+          '- Keep all existing fields (id, title, dependsOn, complexity, suggestedSkills, suggestedPersona, suggestedReviewers)',
+          '- ENRICH descriptions by appending visual detail (do not replace existing content)',
+          '- ADD new acceptanceCriteria for visual states (loading, empty, error, success) to UI stories',
+          '- For each UI element: specify exact labels, placeholder text, and copy',
+          '- Pure backend stories: leave mostly unchanged (add API response descriptions if relevant)',
+          '- Your entire response must be valid JSON parseable by JSON.parse()',
+          '- Do NOT add a mermaidDiagram field — it will be preserved from Pass 2',
+        ].join('\n');
+
+        const llmResult3 = await chatComplete(
+          [{ role: 'user', content: pass3Prompt }],
+          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        );
+        pass3Usage = llmResult3.usage;
+
+        try {
+          const pass3Parsed = parseLLMJson(llmResult3.text) as { stories: unknown[] };
+          if (Array.isArray(pass3Parsed.stories) && pass3Parsed.stories.length > 0) {
+            // Preserve mermaidDiagram and diagrams from Pass 2
+            parsed = { ...parsed, stories: pass3Parsed.stories };
+          } else {
+            console.warn('[Specs] Pass 3 returned invalid stories array — keeping Pass 2 output');
+          }
+        } catch {
+          console.warn('[Specs] Pass 3 returned non-JSON — keeping Pass 2 output');
+        }
+
+        // Snapshot Pass 3 result as spec version
+        const pass3Spec = {
+          title: effectiveTitle,
+          generatedAt: new Date().toISOString(),
+          model: resolvedModel,
+          multiPassStage: 'pass3-ux-designer',
+          userStories: parsed.stories,
+        };
+        snapshotVersion(slug, JSON.stringify(pass3Spec), 'pending');
+        emitPassEvent(slug, 3, 'completed', workspaceId);
+
+        console.log(`[Specs] Pass 3 complete: ${parsed.stories.length} stories enriched with visual descriptions`);
+      }
+
+      // ── Pass 4: Best Practices Agent — library convention annotations ──
+      emitPassEvent(slug, 4, 'started', workspaceId);
+
+      const bestPracticesPromptText = loadDefaultPersonaPrompt('best-practices');
+      if (!bestPracticesPromptText) {
+        console.warn('[Specs] Best Practices persona not found — skipping Pass 4');
+        emitPassEvent(slug, 4, 'completed', workspaceId);
+      }
+
+      let pass4Usage = { inputTokens: 0, outputTokens: 0 };
+
+      if (bestPracticesPromptText) {
+        // Load convention files from .rorca/conventions/
+        const allConventions = loadWorkspaceConventions(workspace.path as string);
+
+        // Build convention context: only include conventions matching story suggestedSkills
+        const relevantConventionNames = new Set<string>();
+        for (const story of parsed.stories as Record<string, unknown>[]) {
+          for (const skillName of extractSkillNames(story)) {
+            if (allConventions.has(skillName)) {
+              relevantConventionNames.add(skillName);
+            }
+          }
+        }
+
+        // If no skill-matched conventions, include all (fallback for workspaces without skill tagging)
+        const conventionsToInclude = relevantConventionNames.size > 0
+          ? relevantConventionNames
+          : new Set(allConventions.keys());
+
+        const conventionSections: string[] = [];
+        for (const name of conventionsToInclude) {
+          const content = allConventions.get(name);
+          if (content) {
+            conventionSections.push(`=== CONVENTION: ${name} ===`, content, `=== END CONVENTION: ${name} ===`, '');
+          }
+        }
+
+        const pass3StoriesJson = JSON.stringify(parsed.stories, null, 2);
+
+        const pass4Prompt = [
+          '=== INSTRUCTIONS: READ THIS FIRST ===',
+          'You are a spec reviewer. Your ONLY job is to output a single valid JSON object.',
+          'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+          'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+          'If you output anything other than raw JSON, the system will fail.',
+          '=== END INSTRUCTIONS ===',
+          '',
+          '=== PERSONA: BEST PRACTICES AGENT (Pass 4 — Convention Annotations) ===',
+          bestPracticesPromptText,
+          '=== END PERSONA ===',
+          '',
+          synthesized,
+          '---',
+          'TASK: You are given a spec with enriched user stories from Pass 3 (UX Designer Agent).',
+          'Your job is to ANNOTATE each story with library-specific convention guidance.',
+          'You modify stories IN-PLACE — keep all existing fields and ADD convention annotations.',
+          '',
+          ...(conventionSections.length > 0 ? [
+            '=== INSTALLED CONVENTIONS ===',
+            'The following convention guides are installed in this workspace.',
+            'Reference these SPECIFIC conventions when annotating stories.',
+            '',
+            ...conventionSections,
+          ] : [
+            'No convention files are installed. Apply general best practices for the project stack.',
+            '',
+          ]),
+          'For each story:',
+          '- Review its suggestedSkills to determine which conventions apply',
+          '- Add convention-specific acceptanceCriteria (e.g. "Use Tailwind space-y-4 not manual margin")',
+          '- Add implementation notes to the description referencing specific convention rules',
+          '- If a convention file exists for a suggested skill, cite specific rules from it',
+          '- Stories without matching conventions: add general best-practice guidance',
+          '',
+          `Spec title: ${effectiveTitle}`,
+          `Spec brief: ${brief}`,
+          '',
+          '=== PASS 3 OUTPUT (UX-Enriched Stories) ===',
+          pass3StoriesJson,
+          '=== END PASS 3 OUTPUT ===',
+          '',
+          'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
+          '',
+          'JSON schema:',
+          `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3,"suggestedSkills":["skill"],"suggestedPersona":"persona"}]}`,
+          '',
+          'Rules:',
+          '- Return ALL stories — same IDs, same order, same count as input',
+          '- Keep all existing fields (id, title, dependsOn, complexity, suggestedSkills, suggestedPersona, suggestedReviewers)',
+          '- ENRICH descriptions by appending convention guidance (do not replace existing content)',
+          '- ADD new acceptanceCriteria for convention compliance',
+          '- Reference SPECIFIC convention rules from the installed conventions above',
+          '- For stories with suggestedSkills matching installed conventions: cite those conventions',
+          '- For stories without matching conventions: add general best-practice annotations',
+          '- Your entire response must be valid JSON parseable by JSON.parse()',
+          '- Do NOT add a mermaidDiagram field — it will be preserved from earlier passes',
+        ].join('\n');
+
+        const llmResult4 = await chatComplete(
+          [{ role: 'user', content: pass4Prompt }],
+          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        );
+        pass4Usage = llmResult4.usage;
+
+        try {
+          const pass4Parsed = parseLLMJson(llmResult4.text) as { stories: unknown[] };
+          if (Array.isArray(pass4Parsed.stories) && pass4Parsed.stories.length > 0) {
+            parsed = { ...parsed, stories: pass4Parsed.stories };
+          } else {
+            console.warn('[Specs] Pass 4 returned invalid stories array — keeping Pass 3 output');
+          }
+        } catch {
+          console.warn('[Specs] Pass 4 returned non-JSON — keeping Pass 3 output');
+        }
+
+        // Snapshot Pass 4 result as spec version
+        const pass4Spec = {
+          title: effectiveTitle,
+          generatedAt: new Date().toISOString(),
+          model: resolvedModel,
+          multiPassStage: 'pass4-best-practices',
+          userStories: parsed.stories,
+        };
+        snapshotVersion(slug, JSON.stringify(pass4Spec), 'pending');
+        emitPassEvent(slug, 4, 'completed', workspaceId);
+
+        console.log(`[Specs] Pass 4 complete: ${parsed.stories.length} stories annotated with convention guidance`);
+      }
+
+      // ── Pass 5: Adversarial Review — Assumption Buster + Devil's Advocate ──
+      emitPassEvent(slug, 5, 'started', workspaceId);
+
+      const assumptionBusterPrompt = loadDefaultPersonaPrompt('assumption-buster');
+      const devilsAdvocatePrompt = loadDefaultPersonaPrompt('devils-advocate');
+
+      let pass5Usage = { inputTokens: 0, outputTokens: 0 };
+
+      if (!assumptionBusterPrompt && !devilsAdvocatePrompt) {
+        console.warn('[Specs] Adversarial personas not found — skipping Pass 5');
+        emitPassEvent(slug, 5, 'completed', workspaceId);
+      } else {
+        const pass4StoriesJson = JSON.stringify(parsed.stories, null, 2);
+
+        // Sub-pass 5a: Assumption Buster reviews the spec
+        if (assumptionBusterPrompt) {
+          const pass5aPrompt = [
+            '=== INSTRUCTIONS: READ THIS FIRST ===',
+            'You are a spec reviewer. Your ONLY job is to output a single valid JSON object.',
+            'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+            'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+            'If you output anything other than raw JSON, the system will fail.',
+            '=== END INSTRUCTIONS ===',
+            '',
+            '=== PERSONA: ASSUMPTION BUSTER (Pass 5a — Adversarial Review) ===',
+            assumptionBusterPrompt,
+            '=== END PERSONA ===',
+            '',
+            synthesized,
+            '---',
+            'TASK: You are reviewing a spec that has gone through PM, Spec Writer, UX Designer, and Best Practices passes.',
+            'Your job is to find contradictions, missing edge cases, implicit assumptions, and missing error/loading/empty states.',
+            'You CAN and SHOULD:',
+            '- ADD new stories for missing edge cases or error handling the spec overlooked',
+            '- ADD acceptance criteria to existing stories that are missing edge case coverage',
+            '- ADD a "warnings" field (string[]) to stories with potential issues',
+            '- Modify story descriptions to call out implicit assumptions',
+            '',
+            `Spec title: ${effectiveTitle}`,
+            `Spec brief: ${brief}`,
+            '',
+            '=== PASS 4 OUTPUT (Convention-Annotated Stories) ===',
+            pass4StoriesJson,
+            '=== END PASS 4 OUTPUT ===',
+            '',
+            'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
+            '',
+            'JSON schema:',
+            `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3,"warnings":["string"]}]}`,
+            '',
+            'Rules:',
+            '- Return ALL existing stories (keep IDs, order) PLUS any new stories you add',
+            '- New stories should have IDs that continue the sequence (e.g. if last story is ' + storyPrefix + '-020, new stories start at ' + storyPrefix + '-021)',
+            '- ENRICH existing stories: add acceptance criteria for edge cases, add warnings for assumptions',
+            '- ADD new stories for: missing error handling, missing empty states, missing loading states, missing validation',
+            '- Each new story must have proper dependsOn references',
+            '- "warnings" field is an array of strings highlighting assumptions or risks',
+            '- Your entire response must be valid JSON parseable by JSON.parse()',
+            '- Do NOT remove any existing stories or acceptance criteria',
+          ].join('\n');
+
+          const llmResult5a = await chatComplete(
+            [{ role: 'user', content: pass5aPrompt }],
+            { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+          );
+          pass5Usage.inputTokens += llmResult5a.usage.inputTokens;
+          pass5Usage.outputTokens += llmResult5a.usage.outputTokens;
+
+          try {
+            const pass5aParsed = parseLLMJson(llmResult5a.text) as { stories: unknown[] };
+            if (Array.isArray(pass5aParsed.stories) && pass5aParsed.stories.length > 0) {
+              parsed = { ...parsed, stories: pass5aParsed.stories };
+            } else {
+              console.warn('[Specs] Pass 5a (Assumption Buster) returned invalid stories — keeping Pass 4 output');
+            }
+          } catch {
+            console.warn('[Specs] Pass 5a (Assumption Buster) returned non-JSON — keeping Pass 4 output');
+          }
+
+          console.log(`[Specs] Pass 5a (Assumption Buster) complete: ${parsed.stories.length} stories`);
+        }
+
+        // Sub-pass 5b: Devil's Advocate reviews the spec
+        if (devilsAdvocatePrompt) {
+          const pass5bStoriesJson = JSON.stringify(parsed.stories, null, 2);
+
+          const pass5bPrompt = [
+            '=== INSTRUCTIONS: READ THIS FIRST ===',
+            'You are a spec reviewer. Your ONLY job is to output a single valid JSON object.',
+            'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+            'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+            'If you output anything other than raw JSON, the system will fail.',
+            '=== END INSTRUCTIONS ===',
+            '',
+            '=== PERSONA: DEVIL\'S ADVOCATE (Pass 5b — Adversarial Review) ===',
+            devilsAdvocatePrompt,
+            '=== END PERSONA ===',
+            '',
+            synthesized,
+            '---',
+            'TASK: You are the second adversarial reviewer. The Assumption Buster has already reviewed this spec.',
+            'Your job is to argue against proposed approaches, surface alternative designs, and stress-test decisions.',
+            'You CAN and SHOULD:',
+            '- ADD new stories if the spec is missing simpler alternatives or critical fallbacks',
+            '- ADD acceptance criteria that enforce trade-off awareness (e.g. "Must handle the case where X is unavailable")',
+            '- ADD "warnings" to stories where the approach is over-engineered or under-considered',
+            '- Challenge unnecessary complexity — if a story can be simplified, annotate how',
+            '',
+            `Spec title: ${effectiveTitle}`,
+            `Spec brief: ${brief}`,
+            '',
+            '=== POST-ASSUMPTION-BUSTER STORIES ===',
+            pass5bStoriesJson,
+            '=== END STORIES ===',
+            '',
+            'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation.',
+            '',
+            'JSON schema:',
+            `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3,"warnings":["string"]}]}`,
+            '',
+            'Rules:',
+            '- Return ALL existing stories (keep IDs, order) PLUS any new stories you add',
+            '- ENRICH existing stories: add acceptance criteria for robustness, add warnings for complexity',
+            '- ADD new stories only if genuinely missing (fallback mechanisms, degraded-mode handling)',
+            '- Keep new story IDs sequential after the highest existing ID',
+            '- "warnings" field: highlight over-engineering, unnecessary complexity, or missing fallbacks',
+            '- Your entire response must be valid JSON parseable by JSON.parse()',
+            '- Do NOT remove any existing stories or acceptance criteria',
+          ].join('\n');
+
+          const llmResult5b = await chatComplete(
+            [{ role: 'user', content: pass5bPrompt }],
+            { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+          );
+          pass5Usage.inputTokens += llmResult5b.usage.inputTokens;
+          pass5Usage.outputTokens += llmResult5b.usage.outputTokens;
+
+          try {
+            const pass5bParsed = parseLLMJson(llmResult5b.text) as { stories: unknown[] };
+            if (Array.isArray(pass5bParsed.stories) && pass5bParsed.stories.length > 0) {
+              parsed = { ...parsed, stories: pass5bParsed.stories };
+            } else {
+              console.warn('[Specs] Pass 5b (Devil\'s Advocate) returned invalid stories — keeping previous output');
+            }
+          } catch {
+            console.warn('[Specs] Pass 5b (Devil\'s Advocate) returned non-JSON — keeping previous output');
+          }
+
+          console.log(`[Specs] Pass 5b (Devil's Advocate) complete: ${parsed.stories.length} stories`);
+        }
+
+        // Snapshot Pass 5 result as spec version
+        const pass5Spec = {
+          title: effectiveTitle,
+          generatedAt: new Date().toISOString(),
+          model: resolvedModel,
+          multiPassStage: 'pass5-adversarial-review',
+          userStories: parsed.stories,
+        };
+        snapshotVersion(slug, JSON.stringify(pass5Spec), 'pending');
+        emitPassEvent(slug, 5, 'completed', workspaceId);
+
+        console.log(`[Specs] Pass 5 complete: ${parsed.stories.length} stories after adversarial review`);
+      }
+
+      // ── Pass 6: Spec Verifier — final consistency check + verification report ──
+      emitPassEvent(slug, 6, 'started', workspaceId);
+
+      const specVerifierPrompt = loadDefaultPersonaPrompt('spec-verifier');
+      let pass6Usage = { inputTokens: 0, outputTokens: 0 };
+
+      if (!specVerifierPrompt) {
+        console.warn('[Specs] Spec Verifier persona not found — skipping Pass 6');
+        emitPassEvent(slug, 6, 'completed', workspaceId);
+      } else {
+        const pass5StoriesJson = JSON.stringify(parsed.stories, null, 2);
+
+        const pass6Prompt = [
+          '=== INSTRUCTIONS: READ THIS FIRST ===',
+          'You are a spec verifier. Your ONLY job is to output a single valid JSON object.',
+          'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
+          'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
+          'If you output anything other than raw JSON, the system will fail.',
+          '=== END INSTRUCTIONS ===',
+          '',
+          '=== PERSONA: SPEC VERIFIER (Pass 6 — Final Consistency Check) ===',
+          specVerifierPrompt,
+          '=== END PERSONA ===',
+          '',
+          'TASK: You are performing the FINAL consistency check on a spec that has been through 5 passes.',
+          'You must validate structural integrity and produce a verification report.',
+          '',
+          'Validate ALL of the following:',
+          '1. All story IDs are unique',
+          '2. All dependsOn references point to existing story IDs in this spec',
+          '3. No circular dependencies in the dependsOn graph',
+          '4. Every story is reachable — either has no dependsOn (root) or is depended upon by another story',
+          '5. Acceptance criteria are testable — contain measurable/binary assertions, not vague language',
+          '6. Every story has at least 1 acceptance criterion',
+          '7. Story IDs follow consistent format',
+          '',
+          'For each issue found, classify as:',
+          '- "issue" (blocking): Must be fixed before spec can be approved (circular deps, missing refs, no AC)',
+          '- "warning" (non-blocking): Should be reviewed but doesn\'t block approval (vague AC, large stories)',
+          '',
+          `Spec title: ${effectiveTitle}`,
+          `Spec brief: ${brief}`,
+          '',
+          '=== PASS 5 OUTPUT (Adversarial-Reviewed Stories) ===',
+          pass5StoriesJson,
+          '=== END PASS 5 OUTPUT ===',
+          '',
+          'OUTPUT FORMAT: Respond with ONLY a raw JSON object containing both the final stories and the verification report.',
+          '',
+          'JSON schema:',
+          '{',
+          '  "stories": [same stories array — you may fix minor issues like typos in dependsOn refs],',
+          '  "verificationReport": {',
+          '    "valid": true/false,',
+          '    "issues": ["blocking issue descriptions"],',
+          '    "warnings": ["non-blocking warning descriptions"],',
+          '    "stats": {',
+          '      "totalStories": number,',
+          '      "totalAcceptanceCriteria": number,',
+          '      "rootStories": number,',
+          '      "maxDependencyDepth": number',
+          '    }',
+          '  }',
+          '}',
+          '',
+          'Rules:',
+          '- Return ALL stories — same as input, with only minor fixes (typo corrections in dependsOn, etc.)',
+          '- Do NOT add or remove stories — only fix references and structural issues',
+          '- verificationReport.valid = true if there are ZERO issues (warnings are OK)',
+          '- verificationReport.valid = false if there are ANY issues',
+          '- Be thorough — check EVERY dependsOn reference, EVERY acceptance criterion',
+          '- Your entire response must be valid JSON parseable by JSON.parse()',
+        ].join('\n');
+
+        const llmResult6 = await chatComplete(
+          [{ role: 'user', content: pass6Prompt }],
+          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        );
+        pass6Usage = llmResult6.usage;
+
+        let verificationReport: { valid: boolean; issues: string[]; warnings: string[]; stats?: Record<string, number> } | undefined;
+
+        try {
+          const pass6Parsed = parseLLMJson(llmResult6.text) as {
+            stories?: unknown[];
+            verificationReport?: { valid: boolean; issues: string[]; warnings: string[]; stats?: Record<string, number> };
+          };
+
+          if (pass6Parsed.verificationReport) {
+            verificationReport = pass6Parsed.verificationReport;
+          }
+
+          if (Array.isArray(pass6Parsed.stories) && pass6Parsed.stories.length > 0) {
+            parsed = { ...parsed, stories: pass6Parsed.stories };
+          } else {
+            console.warn('[Specs] Pass 6 returned invalid stories — keeping Pass 5 output');
+          }
+        } catch {
+          console.warn('[Specs] Pass 6 returned non-JSON — keeping Pass 5 output');
+        }
+
+        // Snapshot Pass 6 result as spec version (final)
+        const pass6Spec = {
+          title: effectiveTitle,
+          generatedAt: new Date().toISOString(),
+          model: resolvedModel,
+          multiPassStage: 'pass6-spec-verifier',
+          userStories: parsed.stories,
+          ...(verificationReport ? { verificationReport } : {}),
+        };
+        snapshotVersion(slug, JSON.stringify(pass6Spec), 'pending');
+        emitPassEvent(slug, 6, 'completed', workspaceId);
+
+        // Attach verification report to parsed output for the response
+        if (verificationReport) {
+          (parsed as Record<string, unknown>).verificationReport = verificationReport;
+        }
+
+        console.log(`[Specs] Pass 6 complete: ${parsed.stories.length} stories verified (valid: ${verificationReport?.valid ?? 'unknown'})`);
+      }
+
+      // Aggregate token usage from all passes
+      tokenUsage = {
+        inputTokens: pass1Usage.inputTokens + pass2Usage.inputTokens + pass3Usage.inputTokens + pass4Usage.inputTokens + pass5Usage.inputTokens + pass6Usage.inputTokens,
+        outputTokens: pass1Usage.outputTokens + pass2Usage.outputTokens + pass3Usage.outputTokens + pass4Usage.outputTokens + pass5Usage.outputTokens + pass6Usage.outputTokens,
+      };
+
+    } else if (configuredAgentType === 'opencode') {
       // ── OpenCode path: spawn `opencode run` with codebase exploration ──
       console.log(`[Specs] Generating via OpenCode (model: ${resolvedModel})`);
       usedProvider = 'opencode';
@@ -590,10 +1513,7 @@ router.post('/generate', async (req: Request, res: Response) => {
         usedProvider = getActiveProvider();
 
         try {
-          const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-          const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-          const jsonStart = jsonStr.indexOf('{');
-          parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+          parsed = parseLLMJson(rawResponse) as typeof parsed;
         } catch {
           res.status(500).json({ error: 'LLM returned non-JSON (fallback after OpenCode failure)', raw: rawResponse });
           return;
@@ -625,10 +1545,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       usedProvider = getActiveProvider();
 
       try {
-        const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-        const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-        const jsonStart = jsonStr.indexOf('{');
-        parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
+        parsed = parseLLMJson(rawResponse) as typeof parsed;
       } catch {
         res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
         return;
@@ -638,6 +1555,11 @@ router.post('/generate', async (req: Request, res: Response) => {
         res.status(500).json({ error: 'Invalid spec structure from LLM' });
         return;
       }
+    }
+
+    // 8b. Validate suggestedSkills against installed catalog
+    if (catalogs.skillNames.size > 0) {
+      validateSuggestedSkills(parsed.stories, catalogs.skillNames);
     }
 
     // 9. Generate algorithmic diagrams
@@ -651,11 +1573,6 @@ router.post('/generate', async (req: Request, res: Response) => {
     // 10. Merge diagrams (algorithmic overwrites LLM for storyDeps)
     const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
 
-    // 11. Build slug — use title if provided, otherwise auto-generate from brief
-    const slug = title
-      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-      : briefToSlug(brief);
-
     // 12. WAL event
     const model = resolvedModel;
     db.prepare(
@@ -664,6 +1581,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       title: effectiveTitle, domain, storyCount: parsed.stories.length, provider: usedProvider, model,
       hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
       inputTokens: tokenUsage.inputTokens, outputTokens: tokenUsage.outputTokens,
+      multiPass,
     }));
 
     // 13. Snapshot existing spec as a version if regenerating same slug
@@ -712,6 +1630,11 @@ router.post('/generate', async (req: Request, res: Response) => {
       usage: tokenUsage,
       specPath,
       diagramsPath,
+      ...(multiPass ? {
+        multiPass: true,
+        passCount: 6,
+        ...((parsed as Record<string, unknown>).verificationReport ? { verificationReport: (parsed as Record<string, unknown>).verificationReport } : {}),
+      } : {}),
     });
   } catch (error: any) {
     console.error('[Specs] Generate error:', error);
@@ -805,6 +1728,24 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   }
 
   const storyPrefix = 'US';
+
+  // Discover skill + persona catalogs for batch brief
+  const batchCatalogs = buildCatalogContext(workspace.path);
+  const batchCatalogSections: string[] = [];
+  if (batchCatalogs.memoryMd) {
+    batchCatalogSections.push('=== PROJECT MEMORY ===', batchCatalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
+  }
+  if (batchCatalogs.agentsMd) {
+    batchCatalogSections.push('=== AGENTS GOVERNANCE ===', batchCatalogs.agentsMd, '=== END AGENTS GOVERNANCE ===', '');
+  }
+  if (batchCatalogs.skillCatalog) {
+    batchCatalogSections.push('=== INSTALLED SKILLS ===', batchCatalogs.skillCatalog, '=== END INSTALLED SKILLS ===', '');
+  }
+  if (batchCatalogs.personaCatalog) {
+    batchCatalogSections.push('=== AVAILABLE PERSONAS ===', batchCatalogs.personaCatalog, '=== END AVAILABLE PERSONAS ===', '');
+  }
+  const batchHasSkillsOrPersonas = !!(batchCatalogs.skillCatalog || batchCatalogs.personaCatalog);
+
   const fullPrompt = [
     '=== INSTRUCTIONS: READ THIS FIRST ===',
     'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
@@ -814,6 +1755,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     '=== END INSTRUCTIONS ===',
     '',
     synthesized,
+    ...batchCatalogSections,
     ...(templateContext ? [templateContext, '---'] : []),
     '---',
     storyCount === 0
@@ -825,7 +1767,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
     '',
     'JSON schema:',
-    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}]}`,
+    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3${batchHasSkillsOrPersonas ? ',"suggestedSkills":[{"name":"skill-name","relevance":8,"reason":"why"}],"suggestedPersona":"persona-name","suggestedReviewers":["reviewer-name"]' : ''}}]}`,
     '',
     `Rules:`,
     storyCount === 0
@@ -835,6 +1777,11 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
     '- Stories should be concrete and implementable, not vague',
     '- Each story must have a "complexity" field: integer 1-5 (1=trivial, 2=simple, 3=moderate, 4=complex, 5=epic)',
+    ...(batchHasSkillsOrPersonas ? [
+      '- Each story MUST include "suggestedSkills": array of {name, relevance (1-10), reason} — pick from INSTALLED SKILLS catalog ONLY',
+      '- Each story MUST include "suggestedPersona": string — best-fit persona name from AVAILABLE PERSONAS',
+      '- Each story MUST include "suggestedReviewers": string[] — 1-3 reviewer persona names from AVAILABLE PERSONAS',
+    ] : []),
     '- Your entire response must be valid JSON parseable by JSON.parse()',
   ].join('\n');
 
@@ -855,6 +1802,11 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
 
   if (!Array.isArray(parsed.stories)) {
     throw new Error('Invalid spec structure from LLM');
+  }
+
+  // Validate suggestedSkills against installed catalog
+  if (batchCatalogs.skillNames.size > 0) {
+    validateSuggestedSkills(parsed.stories, batchCatalogs.skillNames);
   }
 
   // Generate diagrams
@@ -969,6 +1921,48 @@ async function processBatch(batch: BatchState): Promise<void> {
   setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000);
 }
 
+/**
+ * @swagger
+ * /api/specs/generate/batch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue multiple briefs for sequential spec generation
+ *     operationId: generateSpecBatch
+ *     description: Accepts an array of briefs and processes them sequentially in the background. Returns a batchId for tracking progress via polling or SSE. Emits batch_started, batch_progress, and batch_finished WAL events.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [briefs]
+ *             properties:
+ *               briefs:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [brief, workspaceId, title]
+ *                   properties:
+ *                     brief: { type: string }
+ *                     workspaceId: { type: string }
+ *                     title: { type: string }
+ *                     templateId: { type: string }
+ *                     model: { type: string }
+ *                     storyCount: { type: integer }
+ *                     domain: { type: string }
+ *     responses:
+ *       201:
+ *         description: Batch queued successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 batchId: { type: string }
+ *                 briefCount: { type: integer }
+ *       400: { description: "Missing or empty briefs array, or brief missing required fields" }
+ *       500: { description: "Internal server error" }
+ */
 router.post('/generate/batch', (req: Request, res: Response) => {
   try {
     const { briefs } = req.body as { briefs?: BatchRequestItem[] };
@@ -1032,6 +2026,42 @@ router.post('/generate/batch', (req: Request, res: Response) => {
 
 // ─── US-008: GET /generate/batch/:batchId — Batch status ─────────────────────
 
+/**
+ * @swagger
+ * /api/specs/generate/batch/{batchId}:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get batch generation status
+ *     operationId: getBatchStatus
+ *     description: Returns the current status of a batch spec generation job including per-brief progress, completion summary, and any errors. Batches are stored in-memory and auto-clean after 1 hour.
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Batch job ID returned from POST /generate/batch
+ *     responses:
+ *       200:
+ *         description: Batch status with per-brief details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 batchId: { type: string }
+ *                 createdAt: { type: string, format: date-time }
+ *                 finishedAt: { type: string, format: date-time }
+ *                 totalBriefs: { type: integer }
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     completed: { type: integer }
+ *                     failed: { type: integer }
+ *                     generating: { type: integer }
+ *                     queued: { type: integer }
+ *                 items: { type: array, items: { type: object } }
+ *       404: { description: "Batch not found or expired" }
+ */
 router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
   try {
     const batchId = req.params.batchId as string;
@@ -1072,6 +2102,25 @@ router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
 
 // ─── US-008: GET /generate/batch/:batchId/stream — SSE batch progress ─────────
 
+/**
+ * @swagger
+ * /api/specs/generate/batch/{batchId}/stream:
+ *   get:
+ *     tags: [Specs]
+ *     summary: SSE stream for batch generation progress
+ *     operationId: streamBatchProgress
+ *     description: Server-Sent Events endpoint that streams real-time batch generation progress. Sends an initial snapshot event, then progress events as each brief completes, and a done event when the batch finishes. Heartbeat every 15 seconds.
+ *     parameters:
+ *       - in: path
+ *         name: batchId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Batch job ID
+ *     responses:
+ *       200:
+ *         description: SSE event stream (text/event-stream)
+ *       404: { description: "Batch not found or expired" }
+ */
 router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
   const batchId = req.params.batchId as string;
   const batch = batchQueue.get(batchId);
@@ -1156,6 +2205,8 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
  *   get:
  *     tags: [Specs]
  *     summary: List specs (pending/approved/all)
+ *     operationId: listSpecs
+ *     description: Lists specs for a workspace filtered by status, tags, review status, and assignee. Returns paginated results sorted by generatedAt descending.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -1483,6 +2534,8 @@ function computeRelevanceScore(snippets: MatchSnippet[]): number {
  *   get:
  *     tags: [Specs]
  *     summary: Search spec archive with pagination
+ *     operationId: searchSpecArchive
+ *     description: Full-text searchable spec archive with pagination, date range filtering, tag filtering, and agent type filtering. Rebuilds FTS index on each call. Returns relevance-ranked results with match snippets when a search query is provided.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -1747,6 +2800,46 @@ router.get('/archive', (req: Request, res: Response) => {
 
 // ─── V2-067: GET /search/stories — Cross-spec story search ────────────────────
 
+/**
+ * @swagger
+ * /api/specs/search/stories:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Cross-spec story search
+ *     operationId: searchStories
+ *     description: Searches across all specs in a workspace for stories matching the query text. Matches against story ID, title, description, and acceptance criteria. Returns paginated results with match field indicators.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: q
+ *         required: true
+ *         schema: { type: string }
+ *         description: Search query text
+ *     responses:
+ *       200:
+ *         description: Matching stories across specs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       specTitle: { type: string }
+ *                       status: { type: string }
+ *                       story: { type: object }
+ *                       matchFields: { type: array, items: { type: string } }
+ *                 total: { type: integer }
+ *       400: { description: "Missing workspaceId or q query params" }
+ *       404: { description: "Workspace not found" }
+ */
 router.get('/search/stories', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string | undefined;
@@ -1813,6 +2906,45 @@ router.get('/search/stories', (req: Request, res: Response) => {
 
 // ─── POST /:specId/add-stories — Generate more stories for an existing spec ───
 
+/**
+ * @swagger
+ * /api/specs/{specId}/add-stories:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Generate additional stories for an existing spec
+ *     operationId: addStories
+ *     description: Uses LLM to generate new user stories and append them to an existing spec. Automatically continues the story ID sequence and regenerates the mermaid dependency diagram.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               count: { type: integer, default: 3, description: "Number of stories to generate (1-20)" }
+ *               brief: { type: string, description: "Additional brief context for the new stories" }
+ *     responses:
+ *       200:
+ *         description: Stories added successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 addedCount: { type: integer }
+ *                 stories: { type: array, items: { type: object } }
+ *       400: { description: "Missing required field workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ *       500: { description: "LLM returned non-JSON or invalid structure" }
+ */
 router.post('/:specId/add-stories', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -1931,6 +3063,41 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
 // ─── US-001: GET /:specId/versions — List all versions for a spec slug ────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/versions:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List all versions for a spec
+ *     operationId: listSpecVersions
+ *     description: Returns all versioned snapshots of a spec, ordered by version ascending. Each version includes status, rejection reason (if rejected), creation timestamp, title, and story count.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug
+ *     responses:
+ *       200:
+ *         description: Paginated list of spec versions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       version: { type: integer }
+ *                       status: { type: string }
+ *                       rejectionReason: { type: string }
+ *                       createdAt: { type: string, format: date-time }
+ *                       title: { type: string }
+ *                       storyCount: { type: integer }
+ *                 total: { type: integer }
+ */
 router.get('/:specId/versions', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -1963,6 +3130,55 @@ router.get('/:specId/versions', (req: Request, res: Response) => {
 
 // ─── US-001: GET /:specId/diff — Structured diff between two versions ─────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/diff:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Structured diff between two spec versions
+ *     operationId: diffSpecVersions
+ *     description: Computes a structured diff between two historical versions of a spec. Shows added, removed, modified, and unchanged stories along with field-level deltas for modified stories.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: v1
+ *         required: true
+ *         schema: { type: integer }
+ *         description: First version number
+ *       - in: query
+ *         name: v2
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Second version number
+ *     responses:
+ *       200:
+ *         description: Structured diff result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specSlug: { type: string }
+ *                 v1: { type: object }
+ *                 v2: { type: object }
+ *                 diff:
+ *                   type: object
+ *                   properties:
+ *                     titleChanged: { type: boolean }
+ *                     stories: { type: array, items: { type: object } }
+ *                     summary:
+ *                       type: object
+ *                       properties:
+ *                         added: { type: integer }
+ *                         removed: { type: integer }
+ *                         modified: { type: integer }
+ *                         unchanged: { type: integer }
+ *       400: { description: "Missing or invalid v1/v2 params, or v1 equals v2" }
+ *       404: { description: "Version(s) not found" }
+ */
 router.get('/:specId/diff', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -2012,6 +3228,47 @@ router.get('/:specId/diff', (req: Request, res: Response) => {
 
 // ─── POST /:specId/versions/:version/restore — Restore a historical version ──
 
+/**
+ * @swagger
+ * /api/specs/{specId}/versions/{version}/restore:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Restore a historical spec version
+ *     operationId: restoreSpecVersion
+ *     description: Restores a spec to a previously saved version. Snapshots the current content before overwriting, writes the restored content to disk, and emits a version_restored WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: version
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Version number to restore
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Version restored successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 newVersion: { type: integer }
+ *                 restoredFromVersion: { type: integer }
+ *       400: { description: "Missing workspaceId or invalid version number" }
+ *       404: { description: "Workspace or version not found" }
+ */
 router.post('/:specId/versions/:version/restore', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -2093,6 +3350,51 @@ router.post('/:specId/versions/:version/restore', (req: Request, res: Response) 
 
 // ─── PATCH /:specId/stories/:storyId — Toggle excluded flag ──────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}:
+ *   patch:
+ *     tags: [Specs]
+ *     summary: Toggle story excluded flag or edit story fields
+ *     operationId: patchStory
+ *     description: Either toggles the excluded flag on a story (for approved or pending specs), or edits story fields (title, description, acceptanceCriteria) on pending specs only. Field edits create a version snapshot before applying changes.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               excluded: { type: boolean, description: "Set to true to exclude story from pipeline runs" }
+ *               title: { type: string, description: "Updated story title (pending specs only)" }
+ *               description: { type: string, description: "Updated story description (pending specs only)" }
+ *               acceptanceCriteria: { type: array, items: { type: string }, description: "Updated acceptance criteria (pending specs only)" }
+ *     responses:
+ *       200:
+ *         description: Story updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 story: { type: object }
+ *                 version: { type: integer }
+ *       400: { description: "Missing required field workspaceId" }
+ *       403: { description: "Cannot edit stories in an approved spec" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -2220,6 +3522,52 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
 // ─── V2-008: PUT /:specId/stories/:storyId — Update a single story ───────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}:
+ *   put:
+ *     tags: [Specs]
+ *     summary: Update a single story
+ *     operationId: updateStory
+ *     description: Updates fields on a single story within a spec (pending or approved). Creates a version snapshot before applying changes. Supports updating title, description, acceptanceCriteria, complexity (1-5), priority (1-4), and timeoutMinutes (5-120).
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               title: { type: string }
+ *               description: { type: string }
+ *               acceptanceCriteria: { type: array, items: { type: string } }
+ *               complexity: { type: integer, minimum: 1, maximum: 5 }
+ *               priority: { type: integer, minimum: 1, maximum: 4 }
+ *               timeoutMinutes: { type: integer, minimum: 5, maximum: 120 }
+ *     responses:
+ *       200:
+ *         description: Story updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 story: { type: object }
+ *                 version: { type: integer }
+ *       400: { description: "Missing workspaceId or invalid complexity/priority/timeoutMinutes values" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -2319,6 +3667,42 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
 // ─── V2-067: DELETE /:specId/stories/:storyId — Remove a single story ─────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}:
+ *   delete:
+ *     tags: [Specs]
+ *     summary: Remove a single story from a spec
+ *     operationId: deleteStory
+ *     description: Removes a story from a spec, creates a version snapshot before deletion, reindexes remaining story IDs sequentially, and updates dependsOn references. Emits a story_deleted WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Story deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 deletedStory: { type: object }
+ *                 version: { type: integer }
+ *                 remainingCount: { type: integer }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -2411,6 +3795,54 @@ router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
 // ─── V2-008: POST /:specId/stories/:storyId/rewrite — AI-assisted rewrite ────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/rewrite:
+ *   post:
+ *     tags: [Specs]
+ *     summary: AI-assisted story rewrite
+ *     operationId: rewriteStory
+ *     description: Uses LLM to rewrite a single story based on user instructions. Returns the rewritten story fields as a preview (does not save to disk). The caller can then apply the rewrite via PUT /:specId/stories/:storyId.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               instructions: { type: string, description: "User instructions for the rewrite" }
+ *               model: { type: string, description: "LLM model to use" }
+ *     responses:
+ *       200:
+ *         description: Rewritten story preview
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 rewritten:
+ *                   type: object
+ *                   properties:
+ *                     title: { type: string }
+ *                     description: { type: string }
+ *                     acceptanceCriteria: { type: array, items: { type: string } }
+ *                 usage: { type: object }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ *       422: { description: "LLM returned invalid story structure" }
+ */
 router.post('/:specId/stories/:storyId/rewrite', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -2511,6 +3943,40 @@ Rewrite the story following the user instructions. Keep the same scope unless to
 
 // ─── V2-012: GET /tags/autocomplete — must be before /:specId to avoid capture ─
 
+/**
+ * @swagger
+ * /api/specs/tags/autocomplete:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Autocomplete tag names
+ *     operationId: autocompleteSpecTags
+ *     description: Returns tag name suggestions for autocomplete, filtered by optional query prefix. Results are ordered by usage count descending, limited to 20 results.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: q
+ *         schema: { type: string }
+ *         description: Tag name prefix filter
+ *     responses:
+ *       200:
+ *         description: Tag suggestions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tags:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name: { type: string }
+ *                       count: { type: integer }
+ *       400: { description: "Missing workspaceId" }
+ */
 router.get('/tags/autocomplete', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -2549,6 +4015,8 @@ router.get('/tags/autocomplete', (req: Request, res: Response) => {
  *   get:
  *     tags: [Specs]
  *     summary: Get full spec detail
+ *     operationId: getSpec
+ *     description: Retrieves the full spec JSON including all user stories, metadata, and computed readiness percentage. Looks in both pending and approved directories.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -2603,6 +4071,45 @@ router.get('/:specId', (req: Request, res: Response) => {
 
 // ─── V2-013: POST /:specId/fork — Deep copy spec with new slug ────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/fork:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Fork (deep copy) a spec with a new slug
+ *     operationId: forkSpec
+ *     description: Creates a deep copy of an existing spec with a new slug (original-slug-fork-N). Resets all story pass states, copies tags, creates a version snapshot, and emits a spec_forked WAL event. The fork is always created in pending/.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               title: { type: string, description: "Override fork title" }
+ *               brief: { type: string, description: "Override fork brief" }
+ *     responses:
+ *       200:
+ *         description: Spec forked successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 forkId: { type: string }
+ *                 forkedFrom: { type: string }
+ *                 path: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or source spec not found" }
+ */
 router.post('/:specId/fork', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -2715,6 +4222,8 @@ router.post('/:specId/fork', (req: Request, res: Response) => {
  *   post:
  *     tags: [Specs]
  *     summary: Approve a spec (move to approved/)
+ *     operationId: approveSpec
+ *     description: Moves a spec from pending/ to approved/ directory, making it eligible for pipeline execution. Emits a spec_approved WAL event.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -2788,6 +4297,8 @@ router.post('/:specId/approve', (req: Request, res: Response) => {
  *   post:
  *     tags: [Specs]
  *     summary: Reject a spec (delete + preserve in WAL)
+ *     operationId: rejectSpec
+ *     description: Rejects a pending spec by deleting the file and preserving the content in spec_versions with rejection reason. Emits a spec_rejected WAL event.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -2853,6 +4364,42 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
 
 const VALID_REVIEW_STATUSES: ReviewStatus[] = ['draft', 'review_requested', 'approved', 'changes_requested'];
 
+/**
+ * @swagger
+ * /api/specs/{specId}/request-review:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Submit spec for review
+ *     operationId: requestSpecReview
+ *     description: Transitions a pending spec's reviewStatus from 'draft' or 'changes_requested' to 'review_requested'. Emits a review_requested WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Review requested
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 reviewStatus: { type: string, enum: [review_requested] }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found in pending" }
+ *       409: { description: "Spec is not in draft or changes_requested status" }
+ */
 router.post('/:specId/request-review', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -2911,6 +4458,45 @@ router.post('/:specId/request-review', (req: Request, res: Response) => {
 
 // ─── V2-037: POST /:specId/review — Approve or request changes ───────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/review:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Approve or request changes on a spec review
+ *     operationId: reviewSpec
+ *     description: Reviews a spec that is in 'review_requested' status. Action can be 'approve' (transitions to 'approved') or 'request_changes' (transitions to 'changes_requested'). Emits a review_approved or review_changes_requested WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, action]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               action: { type: string, enum: [approve, request_changes] }
+ *               comment: { type: string, description: "Review comment" }
+ *               reviewerId: { type: string, description: "ID of the reviewer" }
+ *     responses:
+ *       200:
+ *         description: Review submitted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 reviewStatus: { type: string, enum: [approved, changes_requested] }
+ *       400: { description: "Missing workspaceId or invalid action" }
+ *       404: { description: "Workspace or spec not found in pending" }
+ *       409: { description: "Spec is not in review_requested status" }
+ */
 router.post('/:specId/review', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -3080,6 +4666,47 @@ function computeParallelGroups(stories: UserStory[]): string[][] {
 
 // ─── V2-011: POST /:specId/stories/bulk — Bulk story actions ─────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/bulk:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Bulk story actions (exclude, include, delete, set_priority)
+ *     operationId: bulkStoryAction
+ *     description: Performs a bulk action on multiple stories within a spec. Supported actions are exclude, include, delete (with reindexing), and set_priority. Creates a version snapshot before applying changes and emits a WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, action, storyIds]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               action: { type: string, enum: [exclude, include, delete, set_priority] }
+ *               storyIds: { type: array, items: { type: string } }
+ *               priority: { type: integer, minimum: 1, maximum: 4, description: "Required for set_priority action" }
+ *     responses:
+ *       200:
+ *         description: Bulk action applied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 action: { type: string }
+ *                 affectedCount: { type: integer }
+ *                 version: { type: integer }
+ *                 stories: { type: array, items: { type: object } }
+ *       400: { description: "Missing workspaceId, invalid action, empty storyIds, or invalid priority" }
+ *       404: { description: "Workspace, spec, or stories not found" }
+ */
 router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -3232,6 +4859,56 @@ router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/graph:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get story dependency DAG
+ *     operationId: getSpecGraph
+ *     description: Returns a directed acyclic graph (DAG) representation of story dependencies including nodes with status, edges, and parallel execution groups (waves). If a runId is provided, node statuses are populated from story_results.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: runId
+ *         schema: { type: string }
+ *         description: Pipeline run ID to populate story statuses from
+ *     responses:
+ *       200:
+ *         description: Graph data with nodes, edges, and parallel groups
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 nodes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       title: { type: string }
+ *                       dependsOn: { type: array, items: { type: string } }
+ *                       status: { type: string, enum: [pending, running, passed, failed, skipped] }
+ *                 edges:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       from: { type: string }
+ *                       to: { type: string }
+ *                 parallelGroups: { type: array, items: { type: array, items: { type: string } } }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ *       422: { description: "Circular dependency detected" }
+ */
 router.get('/:specId/graph', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -3346,6 +5023,49 @@ interface DependencySuggestion {
   reason: string; // why this dependency is suggested
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/detect-dependencies:
+ *   post:
+ *     tags: [Specs]
+ *     summary: AI-powered dependency detection
+ *     operationId: detectDependencies
+ *     description: Uses LLM to analyze story content and suggest missing dependencies that are not yet declared in dependsOn. Validates suggestions by checking for cycles and filtering duplicates. Emits a dependencies_detected WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Dependency suggestions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 suggestions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       from: { type: string, description: "Prerequisite story ID" }
+ *                       to: { type: string, description: "Dependent story ID" }
+ *                       reason: { type: string }
+ *                 tokenUsage: { type: object }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ *       500: { description: "LLM returned non-JSON" }
+ */
 router.post('/:specId/detect-dependencies', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -3513,6 +5233,50 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
 
 // ─── V2-076: POST /:specId/apply-dependencies — Accept suggested dependencies ─
 
+/**
+ * @swagger
+ * /api/specs/{specId}/apply-dependencies:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Accept and apply suggested dependencies
+ *     operationId: applyDependencies
+ *     description: Applies accepted dependency suggestions to a spec by adding dependsOn entries. Validates that no circular dependencies are introduced. Regenerates the mermaid dependency diagram. Emits a dependencies_applied WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, dependencies]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               dependencies:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [from, to]
+ *                   properties:
+ *                     from: { type: string }
+ *                     to: { type: string }
+ *     responses:
+ *       200:
+ *         description: Dependencies applied
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 appliedCount: { type: integer }
+ *       400: { description: "Missing workspaceId or empty dependencies array" }
+ *       404: { description: "Workspace or spec not found" }
+ *       422: { description: "Accepting dependencies would create a circular dependency" }
+ */
 router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -3607,6 +5371,41 @@ router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
 
 // ─── V2-012: Tag management ──────────────────────────────────────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/tags:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Add tags to a spec
+ *     operationId: addSpecTags
+ *     description: Adds one or more tags to a spec. Tag names are lowercased and trimmed. Duplicate tags are silently ignored. Emits a tags_updated WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, tags]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               tags: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Updated tag list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tags: { type: array, items: { type: string } }
+ *       400: { description: "Missing workspaceId or empty tags array" }
+ *       404: { description: "Workspace not found" }
+ */
 // POST /:specId/tags — Add one or more tags to a spec
 router.post('/:specId/tags', (req: Request, res: Response) => {
   try {
@@ -3656,6 +5455,39 @@ router.post('/:specId/tags', (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/tags/{tag}:
+ *   delete:
+ *     tags: [Specs]
+ *     summary: Remove a tag from a spec
+ *     operationId: removeSpecTag
+ *     description: Removes a specific tag from a spec. Tag name is lowercased for matching. Emits a tags_updated WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: tag
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Updated tag list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tags: { type: array, items: { type: string } }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Tag not found on this spec" }
+ */
 // DELETE /:specId/tags/:tag — Remove a tag from a spec
 router.delete('/:specId/tags/:tag', (req: Request, res: Response) => {
   try {
@@ -3708,6 +5540,49 @@ interface StoryCommitRow {
   pushed_at: string;
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/commits:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List git commits for a story
+ *     operationId: listStoryCommits
+ *     description: Returns all git commits associated with a specific story, ordered by pushed_at descending. Includes commit SHA, message, and author.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of commits
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 commits:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       story_id: { type: string }
+ *                       spec_id: { type: string }
+ *                       commit_sha: { type: string }
+ *                       commit_message: { type: string }
+ *                       author: { type: string }
+ *                       pushed_at: { type: string, format: date-time }
+ *       400: { description: "Missing workspaceId" }
+ */
 router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;
@@ -3733,6 +5608,47 @@ router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) =>
 
 // ─── POST /api/specs/:specId/stories/:storyId/branch ────────────────────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/branch:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Create a git branch for a story
+ *     operationId: createStoryBranch
+ *     description: Creates a new git branch named feat/STORY-ID from the default branch (main or master). Returns the branch name and checkout command.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       201:
+ *         description: Branch created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 branchName: { type: string }
+ *                 baseBranch: { type: string }
+ *                 checkoutCommand: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found" }
+ *       409: { description: "Branch already exists" }
+ */
 router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -3840,6 +5756,44 @@ function renderPrTemplate(template: string, vars: Record<string, string>): strin
   return result.trim();
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/pr-body:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Generate PR body for a story
+ *     operationId: generateStoryPrBody
+ *     description: Generates a pull request body from a story's metadata using a template. Includes summary, acceptance criteria checklist, dependencies, and spec reference. Uses workspace PR template if configured, otherwise falls back to default.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Generated PR body markdown
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 body: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.post('/:specId/stories/:storyId/pr-body', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -4034,6 +5988,47 @@ function githubIssueToStory(
   };
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/import/github-issues:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Import GitHub issues as stories
+ *     operationId: importGithubIssues
+ *     description: Fetches GitHub issues (by number or all open) and converts them to user stories appended to the spec. Supports preview mode to review before committing. Requires a GitHub connection for the workspace. Emits a github_issues_imported WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               issueNumbers: { type: array, items: { type: integer }, description: "Specific issue numbers to import (omit for all open)" }
+ *               preview: { type: boolean, default: false, description: "Preview mode - return stories without saving" }
+ *     responses:
+ *       200:
+ *         description: Issues imported or previewed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 preview: { type: boolean }
+ *                 importedCount: { type: integer }
+ *                 stories: { type: array, items: { type: object } }
+ *                 errors: { type: array, items: { type: object } }
+ *       400: { description: "Missing workspaceId or no GitHub connection" }
+ *       404: { description: "Workspace or spec not found" }
+ *       502: { description: "Failed to fetch GitHub issues" }
+ */
 router.post('/:specId/import/github-issues', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -4341,6 +6336,56 @@ interface ImportRequestBody {
   githubMilestone?: string;
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/import:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Unified issue import from Linear or GitHub
+ *     operationId: importIssues
+ *     description: Imports issues from Linear or GitHub as user stories appended to a spec. Supports preview mode. For Linear, requires an API key and optional team/project/label filters. For GitHub, requires a token, owner, and repo name. Emits an issues_imported WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, source]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               source: { type: string, enum: [linear, github] }
+ *               preview: { type: boolean, default: false }
+ *               linearApiKey: { type: string }
+ *               linearTeamId: { type: string }
+ *               linearProjectId: { type: string }
+ *               linearLabelIds: { type: array, items: { type: string } }
+ *               githubToken: { type: string }
+ *               githubOwner: { type: string }
+ *               githubRepo: { type: string }
+ *               githubMilestone: { type: string }
+ *     responses:
+ *       200:
+ *         description: Issues imported or previewed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 preview: { type: boolean }
+ *                 source: { type: string }
+ *                 importedCount: { type: integer }
+ *                 stories: { type: array, items: { type: object } }
+ *                 errors: { type: array, items: { type: string } }
+ *       400: { description: "Missing workspaceId, invalid source, or missing source-specific fields" }
+ *       404: { description: "Workspace or spec not found" }
+ *       502: { description: "Failed to fetch issues from external service" }
+ */
 router.post('/:specId/import', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
@@ -4499,6 +6544,46 @@ interface StoryCommentRow {
   avatar_url: string | null;
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/comments:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List comments for a story
+ *     operationId: listStoryComments
+ *     description: Returns all comments for a specific story, ordered by creation time ascending. Includes author display name and avatar.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of comments
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 comments:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       spec_id: { type: string }
+ *                       story_id: { type: string }
+ *                       user_id: { type: string }
+ *                       body: { type: string }
+ *                       created_at: { type: string, format: date-time }
+ *                       resolved_at: { type: string, format: date-time }
+ *                       display_name: { type: string }
+ *                       avatar_url: { type: string }
+ */
 // GET /api/specs/:specId/stories/:storyId/comments — list all comments for a story
 router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) => {
   try {
@@ -4522,6 +6607,49 @@ router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) =
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/comments:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Create a comment on a story
+ *     operationId: createStoryComment
+ *     description: Creates a new comment on a story. Parses @mentions in the body and creates notifications for mentioned users. Emits a comment_added WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [body]
+ *             properties:
+ *               body: { type: string, description: "Comment body (supports @mentions)" }
+ *     responses:
+ *       201:
+ *         description: Comment created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 spec_id: { type: string }
+ *                 story_id: { type: string }
+ *                 body: { type: string }
+ *                 created_at: { type: string, format: date-time }
+ *                 display_name: { type: string }
+ *       400: { description: "Body is required" }
+ *       500: { description: "No user configured" }
+ */
 // POST /api/specs/:specId/stories/:storyId/comments — create a comment
 router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) => {
   try {
@@ -4598,6 +6726,41 @@ router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) 
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/comments/{commentId}/resolve:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Resolve a story comment
+ *     operationId: resolveStoryComment
+ *     description: Marks a comment as resolved by setting its resolved_at timestamp. Cannot resolve an already-resolved comment. Emits a comment_resolved WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: commentId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Comment resolved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 resolved_at: { type: string, format: date-time }
+ *       400: { description: "Comment is already resolved" }
+ *       404: { description: "Comment not found" }
+ *       500: { description: "No user configured" }
+ */
 // POST /api/specs/:specId/stories/:storyId/comments/:commentId/resolve — resolve a comment
 router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Request, res: Response) => {
   try {
@@ -4650,6 +6813,31 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Reque
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/comments/counts:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get unresolved comment counts per story
+ *     operationId: getCommentCounts
+ *     description: Returns a map of story IDs to their unresolved (non-resolved) comment counts for a given spec.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Comment counts keyed by story ID
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 counts:
+ *                   type: object
+ *                   additionalProperties: { type: integer }
+ */
 // GET /api/specs/:specId/comments/counts — unresolved comment counts per story
 router.get('/:specId/comments/counts', (req: Request, res: Response) => {
   try {
@@ -4686,6 +6874,48 @@ interface AssignmentRow {
   assigned_by: string | null;
 }
 
+/**
+ * @swagger
+ * /api/specs/{specId}/assign:
+ *   put:
+ *     tags: [Specs]
+ *     summary: Assign or unassign a spec to a user
+ *     operationId: assignSpec
+ *     description: Assigns a spec to a user or removes the assignment (when assigneeId is null/empty). Emits spec_assigned or spec_unassigned WAL events.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               assigneeId: { type: string, description: "User ID to assign, or null/empty to unassign" }
+ *     responses:
+ *       200:
+ *         description: Assignment updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 assignee:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     displayName: { type: string }
+ *                     email: { type: string }
+ *                     avatarUrl: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or assignee user not found" }
+ */
 router.put('/:specId/assign', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -4784,6 +7014,52 @@ router.put('/:specId/assign', (req: Request, res: Response) => {
 
 // ─── V2-042: PUT /:specId/stories/:storyId/assign — Assign story to a user ───
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/assign:
+ *   put:
+ *     tags: [Specs]
+ *     summary: Assign or unassign a story to a user
+ *     operationId: assignStory
+ *     description: Assigns a specific story within a spec to a user, or removes the assignment when assigneeId is null/empty. Validates the story exists within the spec. Emits story_assigned or story_unassigned WAL events.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               assigneeId: { type: string, description: "User ID to assign, or null/empty to unassign" }
+ *     responses:
+ *       200:
+ *         description: Assignment updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 assignee:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     displayName: { type: string }
+ *                     email: { type: string }
+ *                     avatarUrl: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, story, or assignee user not found" }
+ */
 router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -4896,6 +7172,48 @@ router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => 
 
 // ─── V2-042: GET /:specId/assignments — Get all assignments for a spec ────────
 
+/**
+ * @swagger
+ * /api/specs/{specId}/assignments:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get all assignments for a spec
+ *     operationId: getSpecAssignments
+ *     description: Returns all spec-level and story-level assignments for a given spec within a workspace. Includes assignee display name, email, and avatar.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of assignments
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 assignments:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       specId: { type: string }
+ *                       storyId: { type: string }
+ *                       assignee:
+ *                         type: object
+ *                         properties:
+ *                           id: { type: string }
+ *                           displayName: { type: string }
+ *                           email: { type: string }
+ *                           avatarUrl: { type: string }
+ *                       assignedAt: { type: string, format: date-time }
+ *       400: { description: "Missing workspaceId" }
+ */
 router.get('/:specId/assignments', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -4943,6 +7261,54 @@ router.get('/:specId/assignments', (req: Request, res: Response) => {
 
 // ─── V2-077: POST /:specId/stories/:storyId/enhance-criteria — AI-suggest acceptance criteria ───
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/enhance-criteria:
+ *   post:
+ *     tags: [Specs]
+ *     summary: AI-suggest additional acceptance criteria
+ *     operationId: enhanceStoryCriteria
+ *     description: Uses LLM to suggest 3-5 additional acceptance criteria for a story, covering edge cases, error handling, and performance. Considers related stories (dependencies and dependents) for consistency. Returns suggestions as a preview without saving.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Suggested criteria
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 storyId: { type: string }
+ *                 existingCount: { type: integer }
+ *                 suggestions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       criterion: { type: string }
+ *                       rationale: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ *       500: { description: "LLM returned non-JSON or invalid structure" }
+ */
 router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;
@@ -5067,6 +7433,48 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
 
 // ─── V2-077: POST /:specId/stories/:storyId/accept-criteria — Accept suggested criteria ───
 
+/**
+ * @swagger
+ * /api/specs/{specId}/stories/{storyId}/accept-criteria:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Accept and apply suggested acceptance criteria
+ *     operationId: acceptStoryCriteria
+ *     description: Appends accepted acceptance criteria to a story. Deduplicates against existing criteria. Saves the updated spec to disk immediately.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, criteria]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               criteria: { type: array, items: { type: string }, description: "Acceptance criteria strings to add" }
+ *     responses:
+ *       200:
+ *         description: Criteria accepted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 storyId: { type: string }
+ *                 addedCount: { type: integer }
+ *                 totalCriteria: { type: integer }
+ *       400: { description: "Missing workspaceId or empty criteria array" }
+ *       404: { description: "Workspace, spec, or story not found" }
+ */
 router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;
