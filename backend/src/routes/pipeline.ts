@@ -27,6 +27,7 @@ import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
+import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -826,6 +827,64 @@ router.post('/trigger', async (req: Request, res: Response) => {
         }
       } catch {
         // Non-fatal — let the trigger proceed
+      }
+    }
+
+    // CA-006: Pre-execution convention drift check
+    // If .rorca/config.json has execution.driftCheck: true, run drift detection
+    // and block the pipeline if error-severity violations exist.
+    if (isDriftCheckEnabled(workspace.path)) {
+      try {
+        const driftReport: DriftReport = await detectDrift(workspace.path, workspaceId);
+
+        // Store the report
+        db.prepare(
+          `INSERT INTO drift_reports (workspace_id, violations_json, score, conventions_checked, files_sampled, trigger_type)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(
+          workspaceId,
+          JSON.stringify(driftReport.violations),
+          driftReport.score,
+          driftReport.conventionsChecked,
+          driftReport.filesSampled,
+          'pre-execution',
+        );
+
+        // Emit WAL event
+        const walPayload: Record<string, unknown> = {
+          score: driftReport.score,
+          violationCount: driftReport.violations.length,
+          errorCount: driftReport.violations.filter(v => v.severity === 'error').length,
+          warningCount: driftReport.violations.filter(v => v.severity === 'warning').length,
+          conventionsChecked: driftReport.conventionsChecked,
+          filesSampled: driftReport.filesSampled,
+          triggerType: 'pre-execution',
+        };
+        const walResult = db.prepare(
+          'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, ?, ?)'
+        ).run('convention_drift_detected', workspaceId, JSON.stringify(walPayload));
+        broadcastAll({
+          id: walResult.lastInsertRowid as number,
+          ts: new Date().toISOString(),
+          event_type: 'convention_drift_detected',
+          workspace_id: workspaceId,
+          spec_id: null,
+          story_id: null,
+          actor: '',
+          payload: JSON.stringify(walPayload),
+        });
+
+        if (hasBlockingViolations(driftReport)) {
+          res.status(409).json({
+            error: 'convention_drift_detected',
+            message: 'Convention drift check found error-severity violations. Fix violations or disable driftCheck in .rorca/config.json.',
+            report: driftReport,
+          });
+          return;
+        }
+      } catch (driftErr: any) {
+        // Drift check failure is non-fatal — log and continue
+        console.warn('[drift-check] Pre-execution drift check failed:', driftErr.message);
       }
     }
 

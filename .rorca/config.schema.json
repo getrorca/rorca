@@ -313,6 +313,11 @@
           "type": "boolean",
           "default": true,
           "description": "Auto-commit after each passing story."
+        },
+        "driftCheck": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run convention drift detection before pipeline execution. Blocks trigger if error-severity violations found."
         }
       },
       "additionalProperties": false
