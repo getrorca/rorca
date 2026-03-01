@@ -106,11 +106,17 @@ const OrchestrationSchema = z.object({
   capabilityMismatch: z.enum(['warn', 'reroute', 'block']).default('warn'),
 });
 
+const AdversarialReviewSchema = z.object({
+  enabled: z.boolean().default(false),
+  reviewTimeoutMin: z.number().int().min(1).max(30).default(5),
+});
+
 const ExecutionSchema = z.object({
   waveParallelism: z.boolean().default(false),
   storyTimeoutMin: z.number().int().min(1).default(45),
   maxRetries: z.number().int().min(0).default(3),
   autoCommit: z.boolean().default(true),
+  adversarialReview: AdversarialReviewSchema.default(() => AdversarialReviewSchema.parse({})),
 });
 
 export const RorcaConfigSchema = z.object({
@@ -135,6 +141,7 @@ export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
 export type TeleologyConfig = z.infer<typeof TeleologySchema>;
 export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
 export type ExecutionConfig = z.infer<typeof ExecutionSchema>;
+export type AdversarialReviewConfig = z.infer<typeof AdversarialReviewSchema>;
 
 // ─── Config Loading ──────────────────────────────────────────────────────────
 

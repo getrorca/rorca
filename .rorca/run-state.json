@@ -2,7 +2,7 @@
   "specId": "rorca-convention-agents",
   "runId": 885,
   "startedAt": "2026-03-01T05:32:25.370Z",
-  "lastUpdatedAt": "2026-03-01T05:48:41.655Z",
+  "lastUpdatedAt": "2026-03-01T05:56:42.837Z",
   "completedStories": [
     {
       "storyId": "CA-004",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-01T05:48:41.655Z",
       "agentType": "claude",
       "elapsedMs": 515709
+    },
+    {
+      "storyId": "CA-011",
+      "title": "Adversarial Review Pipeline — Post-Story Review Passes",
+      "status": "passed",
+      "startedAt": "2026-03-01T05:48:50.485Z",
+      "finishedAt": "2026-03-01T05:56:42.836Z",
+      "agentType": "claude",
+      "elapsedMs": 472351
     }
   ],
   "failedStories": [],
