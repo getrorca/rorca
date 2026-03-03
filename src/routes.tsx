@@ -4,7 +4,7 @@ import type { PanelId } from './components/Sidebar';
 import type { SettingsTab } from './panels/SettingsPanel';
 
 /** Valid settings sub-tabs for URL validation */
-const VALID_SETTINGS_TABS: readonly SettingsTab[] = ['direction', 'providers', 'github', 'personas', 'shortcuts', 'account', 'billing'] as const;
+const VALID_SETTINGS_TABS: readonly SettingsTab[] = ['direction', 'providers', 'github', 'personas', 'shortcuts', 'account', 'billing', 'analytics'] as const;
 
 /**
  * Maps every PanelId to its URL path segment.
@@ -97,5 +97,5 @@ export function useActiveSettingsTab(): SettingsTab {
   if (tab && (VALID_SETTINGS_TABS as readonly string[]).includes(tab)) {
     return tab as SettingsTab;
   }
-  return 'direction';
+  return 'account';
 }
