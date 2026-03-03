@@ -1,9 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal, Crown, Users, ChevronUp, Download, ExternalLink, FileText, CreditCard, BarChart3, Drama } from 'lucide-react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal, Crown, Users, ChevronUp, Download, ExternalLink, FileText, CreditCard, BarChart3, ScrollText, Rss } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
-import { useDirectionLayer } from '../hooks/useDirectionLayer';
 import { apiFetch, clearTokens, BASE_URL } from '../lib/apiFetch';
 import { useNavigate } from 'react-router-dom';
 import GitHubSettingsPanel from './GitHubSettingsPanel';
@@ -15,14 +14,15 @@ import CompletionRatePanel from './CompletionRatePanel';
 import RoiCalculatorPanel from './RoiCalculatorPanel';
 import FinOpsDashboardPanel from './FinOpsDashboardPanel';
 import HealthDashboardPanel from './HealthDashboardPanel';
+import AuditLogPanel from './AuditLogPanel';
+import ActivityFeedPanel from './ActivityFeedPanel';
 import { modLabel } from '../hooks/useHotkeys';
 import OpenCodeSetupGuide from '../components/OpenCodeSetupGuide';
 import { useActiveSettingsTab } from '../routes';
-import PersonasSection from '../components/PersonasSection';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account' | 'billing' | 'personas' | 'analytics';
+export type SettingsTab = 'account' | 'providers' | 'github' | 'analytics' | 'system' | 'billing' | 'shortcuts';
 
 interface ProfileData {
   id: string;
@@ -89,48 +89,20 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   mention: 'Mentions',
 };
 
-// ─── Direction Layer Config ──────────────────────────────────────────────────
-
-const LAYER_INFO: Record<1 | 2 | 3, { title: string; description: string; placeholder: string; tooltip: string }> = {
-  1: {
-    title: 'Standards',
-    description: 'Engineering principles, coding style, and preferences that apply to all projects.',
-    placeholder: 'e.g. "Always use TypeScript strict mode. Prefer functional components. Use Tailwind for styling."',
-    tooltip: 'How you build software — engineering principles that apply to all projects',
-  },
-  2: {
-    title: 'Conventions',
-    description: 'Industry concepts, business rules, and domain-specific patterns.',
-    placeholder: 'e.g. "This is a fintech product. Follow PCI-DSS compliance. Use cents for monetary values."',
-    tooltip: 'Patterns for this type of project — framework and domain conventions',
-  },
-  3: {
-    title: 'Project',
-    description: 'Tech stack, architecture, and key constraints for this specific project.',
-    placeholder: 'e.g. "React + Express app. PostgreSQL database. Deployed on Vercel."',
-    tooltip: 'What makes this project unique — its stack, architecture, and constraints',
-  },
-};
-
 // ─── Component ───────────────────────────────────────────────────────────────
 
-const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof Layers }[] = [
+const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof User }[] = [
   { id: 'account', label: 'Account', icon: User },
   { id: 'providers', label: 'Providers', icon: Zap },
   { id: 'github', label: 'GitHub', icon: Github },
   { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+  { id: 'system', label: 'System', icon: ScrollText },
   { id: 'billing', label: 'Billing', icon: CreditCard },
 ];
 
 export default function SettingsPanel() {
-  const { workspaceId } = useWorkspace();
   const activeTab = useActiveSettingsTab();
   const routerNavigate = useNavigate();
-
-  // Direction layer hooks — always call (hooks can't be conditional)
-  const l1 = useDirectionLayer(workspaceId, 1, { skipValidation: true });
-  const l2 = useDirectionLayer(workspaceId, 2, { skipValidation: true });
-  const l3 = useDirectionLayer(workspaceId, 3, { skipValidation: true });
 
   return (
     <div className="h-full flex flex-col">
@@ -159,14 +131,13 @@ export default function SettingsPanel() {
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto">
         <div className="p-4 sm:p-6 mx-auto w-full max-w-4xl">
-          {activeTab === 'direction' && <DirectionStackSection l1={l1} l2={l2} l3={l3} />}
+          {activeTab === 'account' && <AccountSection />}
           {activeTab === 'providers' && <ProvidersAndDisplaySection />}
           {activeTab === 'github' && <GitHubSettingsPanel />}
-          {activeTab === 'shortcuts' && <ShortcutsSection />}
-          {activeTab === 'account' && <AccountSection />}
-          {activeTab === 'billing' && <BillingSection />}
-          {activeTab === 'personas' && <PersonasSection />}
           {activeTab === 'analytics' && <AnalyticsSection />}
+          {activeTab === 'system' && <SystemSection />}
+          {activeTab === 'billing' && <BillingSection />}
+          {activeTab === 'shortcuts' && <ShortcutsSection />}
         </div>
       </div>
     </div>
@@ -223,65 +194,44 @@ function AnalyticsSection() {
   );
 }
 
-// ─── Direction Section ──────────────────────────────────────────────────────
+// ─── System Section (Audit Log + Activity Feed) ─────────────────────────────
 
-interface DirectionLayerHook {
-  content: string;
-  setContent: (v: string) => void;
-  isSaving: boolean;
-  isDirty: boolean;
-}
+type SystemSubTab = 'audit-log' | 'activity';
 
-function DirectionStackSection({ l1, l2, l3 }: { l1: DirectionLayerHook; l2: DirectionLayerHook; l3: DirectionLayerHook }) {
-  const layers = [
-    { n: 1 as const, hook: l1 },
-    { n: 2 as const, hook: l2 },
-    { n: 3 as const, hook: l3 },
-  ];
+const SYSTEM_SUBTABS: { id: SystemSubTab; label: string; icon: typeof ScrollText }[] = [
+  { id: 'audit-log', label: 'Audit Log', icon: ScrollText },
+  { id: 'activity', label: 'Activity Feed', icon: Rss },
+];
+
+function SystemSection() {
+  const [activeSubTab, setActiveSubTab] = useState<SystemSubTab>('audit-log');
 
   return (
-    <div className="max-w-2xl space-y-6">
-      {/* Cascade explanation */}
-      <div className="border border-border rounded p-3 bg-panel">
-        <p className="text-xs text-muted">
-          <span className="font-medium text-[var(--text)]">Direction</span> — Context flows from Standards (global) through Project (specific). Project beats Conventions beats Standards.
-        </p>
+    <div>
+      {/* Sub-tab pills */}
+      <div className="flex flex-wrap gap-1 mb-4">
+        {SYSTEM_SUBTABS.map((tab) => {
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveSubTab(tab.id)}
+              className={`flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-full transition-colors ${
+                activeSubTab === tab.id
+                  ? 'bg-accent text-white'
+                  : 'bg-surface-100 text-muted hover:text-text hover:bg-surface-200'
+              }`}
+            >
+              <Icon size={11} />
+              {tab.label}
+            </button>
+          );
+        })}
       </div>
 
-      {/* Layer editors */}
-      {layers.map(({ n, hook }) => {
-        const info = LAYER_INFO[n];
-        return (
-          <div key={n} className="border border-border rounded bg-bg">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-              <div>
-                <h3 className="text-sm font-medium text-[var(--text)]">{info.title}</h3>
-                <p className="text-xs text-muted mt-0.5">{info.description}</p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0 ml-3">
-                {hook.isDirty && (
-                  <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
-                    Unsaved
-                  </span>
-                )}
-                {hook.isSaving && (
-                  <Loader2 size={14} className="animate-spin text-accent" />
-                )}
-                {!hook.isDirty && !hook.isSaving && hook.content.trim() && (
-                  <Check size={14} className="text-green-500" />
-                )}
-              </div>
-            </div>
-            <textarea
-              value={hook.content}
-              onChange={(e) => hook.setContent(e.target.value)}
-              className="w-full p-4 text-sm bg-bg text-[var(--text)] border-none outline-none resize-none min-h-[120px]"
-              placeholder={info.placeholder}
-              rows={6}
-            />
-          </div>
-        );
-      })}
+      {/* Sub-tab content */}
+      {activeSubTab === 'audit-log' && <AuditLogPanel />}
+      {activeSubTab === 'activity' && <ActivityFeedPanel />}
     </div>
   );
 }

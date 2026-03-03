@@ -28,18 +28,8 @@ import WorktreesPanel from './panels/WorktreesPanel';
 import ArchivePanel from './panels/ArchivePanel';
 import CompareRunsPanel from './panels/CompareRunsPanel';
 import GitHubSettingsPanel from './panels/GitHubSettingsPanel';
-import ActivityFeedPanel from './panels/ActivityFeedPanel';
 import TeamDirectionPanel from './panels/TeamDirectionPanel';
 import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
-import UsageDashboardPanel from './panels/UsageDashboardPanel';
-import CostBreakdownPanel from './panels/CostBreakdownPanel';
-import ModelComparisonPanel from './panels/ModelComparisonPanel';
-import VelocityChartPanel from './panels/VelocityChartPanel';
-import CompletionRatePanel from './panels/CompletionRatePanel';
-import HealthDashboardPanel from './panels/HealthDashboardPanel';
-import AuditLogPanel from './panels/AuditLogPanel';
-import RoiCalculatorPanel from './panels/RoiCalculatorPanel';
-import FinOpsDashboardPanel from './panels/FinOpsDashboardPanel';
 import SettingsPanel, { type SettingsTab } from './panels/SettingsPanel';
 import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
 import HubPanel from './panels/HubPanel';
@@ -210,19 +200,19 @@ function AppRoutes() {
         <Route path="direction" element={<PanelRoute panel="stack" />} />
         <Route path="team-direction" element={<PanelRoute panel="team-direction" />} />
         <Route path="memory" element={<PanelRoute panel="memory" />} />
-        {/* Analytics */}
-        <Route path="usage" element={<PanelRoute panel="usage" />} />
-        <Route path="costs" element={<PanelRoute panel="costs" />} />
-        <Route path="models" element={<PanelRoute panel="models" />} />
-        <Route path="velocity" element={<PanelRoute panel="velocity" />} />
-        <Route path="completion" element={<PanelRoute panel="completion" />} />
-        <Route path="roi" element={<PanelRoute panel="roi" />} />
-        <Route path="finops" element={<PanelRoute panel="finops" />} />
-        <Route path="health" element={<PanelRoute panel="health" />} />
-        {/* System */}
-        <Route path="audit-log" element={<PanelRoute panel="audit-log" />} />
-        <Route path="activity" element={<PanelRoute panel="activity" />} />
-        <Route path="github" element={<PanelRoute panel="github" />} />
+        {/* Analytics — redirect to Settings > Analytics */}
+        <Route path="usage" element={<Navigate to="/settings/analytics" replace />} />
+        <Route path="costs" element={<Navigate to="/settings/analytics" replace />} />
+        <Route path="models" element={<Navigate to="/settings/analytics" replace />} />
+        <Route path="velocity" element={<Navigate to="/settings/analytics" replace />} />
+        <Route path="completion" element={<Navigate to="/settings/analytics" replace />} />
+        <Route path="roi" element={<Navigate to="/settings/analytics" replace />} />
+        <Route path="finops" element={<Navigate to="/settings/analytics" replace />} />
+        <Route path="health" element={<Navigate to="/settings/analytics" replace />} />
+        {/* System — redirect to Settings > System */}
+        <Route path="audit-log" element={<Navigate to="/settings/system" replace />} />
+        <Route path="activity" element={<Navigate to="/settings/system" replace />} />
+        <Route path="github" element={<Navigate to="/settings/github" replace />} />
         <Route path="workspace-settings" element={<PanelRoute panel="workspace-settings" />} />
         {/* FR-004: Settings with nested sub-tab routes */}
         <Route path="settings" element={<Navigate to="/settings/account" replace />} />
@@ -282,16 +272,13 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'compare': return <CompareRunsPanel onBack={() => onNavigate('pipeline')} />;
     case 'archive': return <ArchivePanel onNavigate={onNavigate} />;
     case 'marketplace': return <TemplateMarketplacePanel />;
-    case 'usage': return <UsageDashboardPanel />;
-    case 'costs': return <CostBreakdownPanel />;
-    case 'models': return <ModelComparisonPanel />;
-    case 'velocity': return <VelocityChartPanel />;
-    case 'completion': return <CompletionRatePanel />;
-    case 'roi': return <RoiCalculatorPanel />;
-    case 'finops': return <FinOpsDashboardPanel />;
-    case 'health': return <HealthDashboardPanel />;
-    case 'audit-log': return <AuditLogPanel />;
-    case 'activity': return <ActivityFeedPanel />;
+    // Analytics and System panels are now inside Settings tabs — these cases
+    // are kept for CommandPalette navigation compatibility but redirect via router
+    case 'usage': case 'costs': case 'models': case 'velocity':
+    case 'completion': case 'roi': case 'finops': case 'health':
+      return <SettingsPanel />;
+    case 'audit-log': case 'activity':
+      return <SettingsPanel />;
     case 'github': return <GitHubSettingsPanel />;
     case 'workspace-settings': return <WorkspaceSettingsPanel />;
     case 'settings': return <SettingsPanel />;

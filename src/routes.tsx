@@ -4,7 +4,7 @@ import type { PanelId } from './components/Sidebar';
 import type { SettingsTab } from './panels/SettingsPanel';
 
 /** Valid settings sub-tabs for URL validation */
-const VALID_SETTINGS_TABS: readonly SettingsTab[] = ['direction', 'providers', 'github', 'personas', 'shortcuts', 'account', 'billing', 'analytics'] as const;
+const VALID_SETTINGS_TABS: readonly SettingsTab[] = ['account', 'providers', 'github', 'analytics', 'system', 'billing', 'shortcuts'] as const;
 
 /**
  * Maps every PanelId to its URL path segment.
@@ -25,19 +25,19 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   // Direction
   stack: '/direction',
   'team-direction': '/team-direction',
-  // Analytics
-  usage: '/usage',
-  costs: '/costs',
-  models: '/models',
-  velocity: '/velocity',
-  completion: '/completion',
-  roi: '/roi',
-  finops: '/finops',
-  health: '/health',
-  // System
-  'audit-log': '/audit-log',
-  activity: '/activity',
-  github: '/github',
+  // Analytics — now inside Settings > Analytics tab
+  usage: '/settings/analytics',
+  costs: '/settings/analytics',
+  models: '/settings/analytics',
+  velocity: '/settings/analytics',
+  completion: '/settings/analytics',
+  roi: '/settings/analytics',
+  finops: '/settings/analytics',
+  health: '/settings/analytics',
+  // System — now inside Settings > System tab
+  'audit-log': '/settings/system',
+  activity: '/settings/system',
+  github: '/settings/github',
   'workspace-settings': '/workspace-settings',
   settings: '/settings',
   // CIE-005: Memory Ledger
