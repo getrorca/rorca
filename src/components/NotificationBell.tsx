@@ -7,7 +7,7 @@ import NotificationPreferences from './NotificationPreferences';
 /** Map notification link paths to panel IDs */
 function linkToPanelId(link: string | null): PanelId | null {
   if (!link) return null;
-  if (link.startsWith('/specs/')) return 'queue';
+  if (link.startsWith('/specs/')) return 'forge';
   if (link.startsWith('/pipeline/')) return 'pipeline';
   if (link.includes('/budget')) return 'costs';
   return null;

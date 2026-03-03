@@ -15,7 +15,7 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   hub: '/',
   // Specs
   forge: '/forge',
-  queue: '/queue',
+  queue: '/forge',
   archive: '/archive',
   marketplace: '/marketplace',
   // Pipeline

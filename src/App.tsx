@@ -21,7 +21,7 @@ import ForgotPasswordPage from './components/ForgotPasswordPage';
 import ResetPasswordPage from './components/ResetPasswordPage';
 import OnboardingWizard from './components/OnboardingWizard';
 import SpecForgePanelPage from './panels/SpecForgePanelPage';
-import ReviewQueuePanel from './panels/ReviewQueuePanel';
+// ReviewQueuePanel removed — pending specs are now inline in Forge (UX-007)
 import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
 import WorktreesPanel from './panels/WorktreesPanel';
 import ArchivePanel from './panels/ArchivePanel';
@@ -154,7 +154,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
   forge: 'Spec Forge',
   stack: 'Direction',
   'team-direction': 'Team Direction',
-  queue: 'Review Queue',
+  queue: 'Forge',
   pipeline: 'Pipeline Monitor',
   worktrees: 'Worktree Manager',
   compare: 'Compare Runs',
@@ -198,7 +198,7 @@ function AppRoutes() {
         <Route index element={<PanelRoute panel="hub" />} />
         {/* Specs */}
         <Route path="forge" element={<PanelRoute panel="forge" />} />
-        <Route path="queue" element={<PanelRoute panel="queue" />} />
+        <Route path="queue" element={<Navigate to="/forge" replace />} />
         <Route path="archive" element={<PanelRoute panel="archive" />} />
         <Route path="marketplace" element={<PanelRoute panel="marketplace" />} />
         {/* Pipeline */}
@@ -274,7 +274,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'stack': return <DirectionTabbedPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'memory': return <MemoryPanel />;
-    case 'queue': return <ReviewQueuePanel />;
+    case 'queue': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} showPending {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
     // Runs tabbed panel — embeds Pipeline Monitor, Worktrees, Compare
     case 'pipeline': return <RunsTabbedPanel onNavigate={onNavigate} />;
     case 'worktrees': return <WorktreesPanel />;
@@ -398,8 +398,8 @@ function AppLayout() {
     { key: 'mod+3', handler: () => handleNavigate('pipeline') },
     { key: 'mod+4', handler: () => handleNavigate('settings') },
     { key: 'mod+n', handler: () => handleNavigate('forge') },
-    { key: 'mod+enter', handler: () => { if (activePanel !== 'queue' && activePanel !== 'spec-review') handleNavigate('queue'); } },
-    { key: 'mod+backspace', handler: () => { if (activePanel !== 'queue' && activePanel !== 'spec-review') handleNavigate('queue'); } },
+    { key: 'mod+enter', handler: () => { if (activePanel !== 'forge' && activePanel !== 'spec-review') handleNavigate('forge'); } },
+    { key: 'mod+backspace', handler: () => { if (activePanel !== 'forge' && activePanel !== 'spec-review') handleNavigate('forge'); } },
     { key: 'mod+shift+n', handler: () => { handleSendToForge(''); handleNavigate('forge'); } },
     { key: 'mod+shift+r', handler: () => handleNavigate('pipeline') },
   ], [handleNavigate, handleSendToForge, navigateToSettingsTab, activePanel]);

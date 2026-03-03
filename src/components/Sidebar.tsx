@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Activity, Archive, Settings,
   Plus, Search, LayoutDashboard,
-  ListChecks, GitBranch, ArrowLeftRight,
+  GitBranch, ArrowLeftRight,
   Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
   BarChart3, HeartPulse, ScrollText, Calculator, Settings2, BookOpen,
 } from 'lucide-react';
@@ -46,7 +46,6 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Specs',
     items: [
       { id: 'forge', label: 'Forge', icon: Wand2 },
-      { id: 'queue', label: 'Review Queue', icon: ListChecks },
       { id: 'archive', label: 'Archive', icon: Archive },
       { id: 'marketplace', label: 'Templates', icon: LayoutGrid },
     ],
