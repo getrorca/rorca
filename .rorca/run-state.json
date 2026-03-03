@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T05:12:31.368Z",
+  "lastUpdatedAt": "2026-03-03T05:19:37.797Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -66,6 +66,15 @@
       "finishedAt": "2026-03-03T05:12:31.368Z",
       "agentType": "claude",
       "elapsedMs": 888815
+    },
+    {
+      "storyId": "UX-008",
+      "title": "Context Health Indicator",
+      "status": "passed",
+      "startedAt": "2026-03-03T05:13:16.690Z",
+      "finishedAt": "2026-03-03T05:19:37.797Z",
+      "agentType": "claude",
+      "elapsedMs": 381107
     }
   ],
   "failedStories": [],
