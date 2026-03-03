@@ -8,7 +8,7 @@ import SpecForgePreview from '../components/SpecForgePreview';
 import TemplatePickerModal from '../components/TemplatePickerModal';
 import AppHeader from '../components/AppHeader';
 
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
 import { briefToSlug, KEBAB_RE } from '../lib/slugify';
 import type { GeneratedSpec } from './SpecForgeOutput';
@@ -164,6 +164,9 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const advancedInnerRef = useRef<HTMLDivElement>(null);
   const [advancedHeight, setAdvancedHeight] = useState<number>(0);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+
+  // Brief collapse state — collapsed after spec generation, expanded on click
+  const [briefExpanded, setBriefExpanded] = useState(false);
 
   // Context health dots state
   const [directionLayers, setDirectionLayers] = useState<DirectionAllResponse['layers'] | null>(null);
@@ -423,18 +426,39 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
               </button>
             </div>
 
-            {/* Brief textarea — primary input */}
-            <textarea
-              ref={briefRef}
-              rows={6}
-              value={specBrief}
-              onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
-              placeholder="What do you want to build?"
-              className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors resize-none leading-relaxed"
-            />
+            {/* Brief textarea — collapses to single line after generation */}
+            {generatedSpec && !isGenerating && !briefExpanded ? (
+              <button
+                onClick={() => setBriefExpanded(true)}
+                className="w-full flex items-center gap-2 px-4 py-3 text-sm bg-panel border border-border rounded-lg text-left text-muted hover:text-text hover:border-accent/30 transition-colors group"
+              >
+                <ChevronRight size={14} className="shrink-0 text-muted group-hover:text-accent transition-colors" />
+                <span className="truncate">{specBrief}</span>
+              </button>
+            ) : (
+              <div className="relative">
+                {generatedSpec && !isGenerating && (
+                  <button
+                    onClick={() => setBriefExpanded(false)}
+                    className="absolute top-2 right-2 z-10 p-1 text-muted hover:text-text rounded transition-colors"
+                    title="Collapse brief"
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                )}
+                <textarea
+                  ref={briefRef}
+                  rows={6}
+                  value={specBrief}
+                  onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
+                  placeholder="What do you want to build?"
+                  className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors resize-none leading-relaxed"
+                />
+              </div>
+            )}
 
-            {/* Context health dots */}
-            <div className="flex items-center justify-center gap-6 relative">
+            {/* Context health dots — hidden after generation */}
+            {!generatedSpec && <div className="flex items-center justify-center gap-6 relative">
               {CONTEXT_DOTS.map(dot => {
                 const layer = directionLayers?.[dot.key];
                 const populated = !!layer?.content;
@@ -491,14 +515,15 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                   </div>
                 );
               })}
-            </div>
+            </div>}
 
             {/* Click-away to close popover */}
             {contextPopover && (
               <div className="fixed inset-0 z-40" onClick={() => setContextPopover(null)} />
             )}
 
-            {/* Generate Spec + Quick Run buttons */}
+            {/* Generate Spec + Quick Run buttons — hidden after generation */}
+            {(!generatedSpec || isGenerating) && (
             <div className="space-y-2">
               {isGenerating || (generateError && !generatedSpec) ? (
                 <SpecForgeProgress
@@ -546,9 +571,10 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                 </>
               ) : null}
             </div>
+            )}
 
-            {/* Advanced Options — below buttons, collapsed by default */}
-            <section>
+            {/* Advanced Options — below buttons, collapsed by default, hidden after generation */}
+            {!generatedSpec && <section>
               <button
                 onClick={() => setAdvancedOpen(o => !o)}
                 aria-expanded={advancedOpen}
@@ -664,7 +690,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                   </Field>
                 </div>
               </div>
-            </section>
+            </section>}
 
             {/* Inline spec preview after generation */}
             {generatedSpec && !isGenerating && (
@@ -676,11 +702,21 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                   setGeneratedSpec(null);
                   setGenerateError(null);
                   setApiDone(false);
+                  setBriefExpanded(false);
                   setTimeout(() => briefRef.current?.focus(), 50);
                 }}
                 isRegenerating={isGenerating}
                 onNavigate={onNavigate}
                 onNavigateToRun={onNavigateToRun}
+                onReset={() => {
+                  setGeneratedSpec(null);
+                  setGenerateError(null);
+                  setApiDone(false);
+                  setSpecBrief('');
+                  setBriefExpanded(false);
+                  try { localStorage.removeItem('rorca:forge:brief'); } catch { /* ignore */ }
+                  setTimeout(() => briefRef.current?.focus(), 50);
+                }}
               />
             )}
           </div>
