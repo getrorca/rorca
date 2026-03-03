@@ -69,9 +69,12 @@ export const NAV_SECTIONS: NavSection[] = [
     ],
   },
   {
-    id: 'analytics',
-    label: 'Analytics',
+    id: 'settings',
+    label: 'Settings',
     items: [
+      { id: 'settings', label: 'Settings', icon: Settings },
+      { id: 'workspace-settings', label: 'Workspace Settings', icon: Settings2 },
+      // Analytics & System accessible via Settings tabs and Command Palette
       { id: 'usage', label: 'Token Usage', icon: Coins },
       { id: 'costs', label: 'Cost Breakdown', icon: DollarSign },
       { id: 'models', label: 'Model Comparison', icon: Zap },
@@ -80,17 +83,9 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: 'roi', label: 'ROI Calculator', icon: Calculator },
       { id: 'finops', label: 'FinOps', icon: DollarSign },
       { id: 'health', label: 'Health', icon: HeartPulse },
-    ],
-  },
-  {
-    id: 'system',
-    label: 'System',
-    items: [
       { id: 'audit-log', label: 'Audit Log', icon: ScrollText },
       { id: 'activity', label: 'Activity Feed', icon: Rss },
       { id: 'github', label: 'GitHub', icon: Github },
-      { id: 'workspace-settings', label: 'Workspace Settings', icon: Settings2 },
-      { id: 'settings', label: 'Settings', icon: Settings },
     ],
   },
 ];
