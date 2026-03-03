@@ -52,9 +52,9 @@ interface DirectionAllResponse {
 }
 
 const CONTEXT_DOTS = [
-  { key: 'l1' as const, label: 'Standards', emptyMessage: 'Standards not configured' },
-  { key: 'l2' as const, label: 'Conventions', emptyMessage: 'Conventions not configured' },
-  { key: 'l3' as const, label: 'Project', emptyMessage: 'Project context not configured' },
+  { key: 'l1' as const, layer: 1, label: 'Standards', emptyHeading: 'Standards not configured', emptyDesc: 'Engineering principles and coding style — applied across all workspaces.' },
+  { key: 'l2' as const, layer: 2, label: 'Conventions', emptyHeading: 'Conventions not configured', emptyDesc: 'Patterns for this type of project — detected from your codebase or entered manually.' },
+  { key: 'l3' as const, layer: 3, label: 'Project', emptyHeading: 'Project context not configured', emptyDesc: 'Stack, architecture, and key constraints specific to this workspace.' },
 ] as const;
 
 export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initialBrief, onBriefConsumed, showPending }: { onNavigate?: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; initialBrief?: string | null; onBriefConsumed?: () => void; showPending?: boolean }) {
@@ -385,13 +385,11 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   };
 
   const handleContextDotClick = (dotKey: string) => {
-    const layer = directionLayers?.[dotKey as keyof typeof directionLayers];
-    if (layer?.content) return;
     setContextPopover(contextPopover === dotKey ? null : dotKey);
     setQuickDirectionText('');
   };
 
-  const handleQuickDirectionSave = async (layerKey: string) => {
+  const handleQuickDirectionSave = async (layerNum: number) => {
     if (!quickDirectionText.trim() || !workspaceId) return;
     try {
       await apiFetch('/api/direction', {
@@ -399,8 +397,9 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workspaceId,
-          layer: layerKey,
-          content: quickDirectionText.trim(),
+          layer: layerNum,
+          contentYaml: quickDirectionText.trim(),
+          skipValidation: true,
         }),
       });
       const res = await apiFetch<DirectionAllResponse>(`/api/direction/all?workspaceId=${workspaceId}`);
@@ -410,6 +409,30 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
       showToast('Direction saved', 'success');
     } catch {
       showToast('Failed to save direction', 'error');
+    }
+  };
+
+  // Auto-detect direction for a single layer via scan-direction
+  const [autoDetecting, setAutoDetecting] = useState<string | null>(null);
+  const handleAutoDetect = async (dot: typeof CONTEXT_DOTS[number]) => {
+    if (!workspaceId || autoDetecting) return;
+    setAutoDetecting(dot.key);
+    try {
+      const res = await apiFetch<{ l1Draft: string; l2Draft: string; l3Draft: string }>(
+        `/api/workspaces/${workspaceId}/scan-direction`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      );
+      const draftMap: Record<string, string> = { l1: res.l1Draft, l2: res.l2Draft, l3: res.l3Draft };
+      const draft = draftMap[dot.key];
+      if (draft) {
+        setQuickDirectionText(draft);
+      } else {
+        showToast('Auto-detect returned no content for this layer', 'error');
+      }
+    } catch {
+      showToast('Auto-detect failed', 'error');
+    } finally {
+      setAutoDetecting(null);
     }
   };
 
@@ -788,67 +811,117 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                 )}
 
                 {/* Context health dots — hidden after generation */}
-                {!generatedSpec && <div className="flex items-center justify-center gap-6 relative">
-                  {CONTEXT_DOTS.map(dot => {
-                    const layer = directionLayers?.[dot.key];
-                    const populated = !!layer?.content;
-                    return (
-                      <div key={dot.key} className="relative">
-                        <button
-                          onClick={() => handleContextDotClick(dot.key)}
-                          className="flex items-center gap-1.5 group"
-                          title={populated ? `${dot.label} configured` : dot.emptyMessage}
-                        >
-                          <span className={`w-2 h-2 rounded-full transition-colors ${populated ? 'bg-green-500' : 'bg-border group-hover:bg-muted/50'}`} />
-                          <span className={`text-xs transition-colors ${populated ? 'text-muted' : 'text-muted/50 group-hover:text-muted'}`}>
-                            {dot.label}
-                          </span>
-                        </button>
+                {!generatedSpec && <>
+                  {/* All-grey banner */}
+                  {directionLayers && !directionLayers.l1.content && !directionLayers.l2.content && !directionLayers.l3.content && (
+                    <div className="px-3 py-2 rounded-lg bg-surface-200 border border-border text-xs text-muted">
+                      No direction configured yet — your specs will be better with context.{' '}
+                      <button
+                        onClick={() => onNavigate?.('stack')}
+                        className="text-accent hover:text-accent-hover transition-colors"
+                      >
+                        Set up now
+                      </button>
+                    </div>
+                  )}
 
-                        {contextPopover === dot.key && !populated && (
-                          <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-72 bg-bg border border-border rounded-lg shadow-lg z-50 p-3 space-y-2">
-                            <p className="text-xs text-muted">{dot.emptyMessage}</p>
-                            <textarea
-                              rows={3}
-                              value={quickDirectionText}
-                              onChange={(e) => setQuickDirectionText(e.target.value)}
-                              placeholder={`Add ${dot.label.toLowerCase()}...`}
-                              className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none"
-                              autoFocus
-                            />
-                            <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-center gap-6 relative">
+                    {CONTEXT_DOTS.map(dot => {
+                      const layerData = directionLayers?.[dot.key];
+                      const populated = !!layerData?.content;
+                      return (
+                        <div key={dot.key} className="relative">
+                          <button
+                            onClick={() => handleContextDotClick(dot.key)}
+                            className="flex items-center gap-1.5 group"
+                            title={populated ? `${dot.label} configured` : dot.emptyHeading}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full transition-colors ${populated ? 'bg-emerald-500' : 'bg-border group-hover:bg-muted/50'}`} />
+                            <span className={`text-xs transition-colors ${populated ? 'text-muted' : 'text-muted/50 group-hover:text-muted'}`}>
+                              {dot.label}
+                            </span>
+                          </button>
+
+                          {/* Populated popover — preview of content */}
+                          {contextPopover === dot.key && populated && (
+                            <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-72 bg-bg border border-border rounded-lg shadow-lg z-50 p-3 space-y-2">
+                              <p className="text-xs font-medium text-text">{dot.label}</p>
+                              <p className="text-xs text-muted whitespace-pre-wrap break-words leading-relaxed">
+                                {layerData!.content!.length > 200
+                                  ? layerData!.content!.slice(0, 200) + '...'
+                                  : layerData!.content}
+                              </p>
                               <button
-                                onClick={() => onNavigate?.('stack')}
+                                onClick={() => { setContextPopover(null); onNavigate?.('stack'); }}
                                 className="text-[10px] text-accent hover:text-accent-hover transition-colors"
                               >
-                                Set up in Direction
+                                View full &rarr;
                               </button>
-                              <div className="flex gap-1.5">
+                            </div>
+                          )}
+
+                          {/* Empty popover — configure layer */}
+                          {contextPopover === dot.key && !populated && (
+                            <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-72 bg-bg border border-border rounded-lg shadow-lg z-50 p-3 space-y-2">
+                              <p className="text-xs font-medium text-text">{dot.emptyHeading}</p>
+                              <p className="text-[10px] text-muted leading-relaxed">{dot.emptyDesc}</p>
+                              <button
+                                onClick={() => handleAutoDetect(dot)}
+                                disabled={autoDetecting === dot.key}
+                                className="w-full px-2 py-1.5 text-[10px] font-medium rounded border border-border bg-panel text-text hover:border-accent/30 hover:bg-accent/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                              >
+                                {autoDetecting === dot.key ? (
+                                  <>
+                                    <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
+                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                    </svg>
+                                    Scanning...
+                                  </>
+                                ) : 'Auto-detect'}
+                              </button>
+                              <textarea
+                                rows={3}
+                                value={quickDirectionText}
+                                onChange={(e) => setQuickDirectionText(e.target.value)}
+                                placeholder={`Add ${dot.label.toLowerCase()}...`}
+                                className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none"
+                                autoFocus
+                              />
+                              <div className="flex items-center justify-between">
                                 <button
-                                  onClick={() => setContextPopover(null)}
-                                  className="px-2 py-1 text-[10px] text-muted hover:text-text rounded transition-colors"
+                                  onClick={() => { setContextPopover(null); onNavigate?.('stack'); }}
+                                  className="text-[10px] text-accent hover:text-accent-hover transition-colors"
                                 >
-                                  Cancel
+                                  Set up in Direction
                                 </button>
-                                <button
-                                  onClick={() => handleQuickDirectionSave(dot.key)}
-                                  disabled={!quickDirectionText.trim()}
-                                  className={`px-2 py-1 text-[10px] rounded transition-colors ${quickDirectionText.trim() ? 'bg-accent text-white hover:bg-accent-hover' : 'bg-accent/30 text-white/40 cursor-not-allowed'}`}
-                                >
-                                  Save
-                                </button>
+                                <div className="flex gap-1.5">
+                                  <button
+                                    onClick={() => setContextPopover(null)}
+                                    className="px-2 py-1 text-[10px] text-muted hover:text-text rounded transition-colors"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={() => handleQuickDirectionSave(dot.layer)}
+                                    disabled={!quickDirectionText.trim()}
+                                    className={`px-2 py-1 text-[10px] rounded transition-colors ${quickDirectionText.trim() ? 'bg-accent text-white hover:bg-accent-hover' : 'bg-accent/30 text-white/40 cursor-not-allowed'}`}
+                                  >
+                                    Save
+                                  </button>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>}
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
 
-                {contextPopover && (
-                  <div className="fixed inset-0 z-40" onClick={() => setContextPopover(null)} />
-                )}
+                  {contextPopover && (
+                    <div className="fixed inset-0 z-40" onClick={() => setContextPopover(null)} />
+                  )}
+                </>}
 
                 {/* Generate Spec + Quick Run buttons — hidden after generation */}
                 {(!generatedSpec || isGenerating) && (
