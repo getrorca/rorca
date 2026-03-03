@@ -1,7 +1,14 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+/**
+ * SpecReviewInline — Extracted from ReviewQueuePanel.tsx (UX-007)
+ *
+ * Shared components for inline spec review in Forge:
+ *   - SpecPreview (header + tabs + action bar)
+ *   - PreviewStoriesTab (story list with inline editing)
+ *   - PreviewJsonTab (raw JSON viewer)
+ *   - Types + helpers
+ */
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  ChevronRight,
-  Inbox,
   Copy,
   Check,
   Clock,
@@ -19,29 +26,22 @@ import {
   Link2,
   ExternalLink,
 } from 'lucide-react';
-import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
-import { StoryCard } from '../components/StoryCard';
-import type { Story } from '../components/StoryCard';
-import AppHeader from '../components/AppHeader';
-import { InlineStoryEditor } from '../components/InlineStoryEditor';
-import { StoryComments } from '../components/StoryComments';
-import DependencyGraph from '../components/DependencyGraph';
-import MermaidDiagram from '../components/MermaidDiagram';
-import { useToast, ToastContainer } from '../components/Toast';
-import { ReadinessRing } from '../components/ReadinessRing';
-import { TagChipsReadonly } from '../components/TagChips';
-import { AssigneeDropdown, AssigneeAvatar } from '../components/AssigneeDropdown';
-import type { Assignee } from '../components/AssigneeDropdown';
-import { SpecConfirmDialog } from '../components/SpecConfirmDialog';
-import { useHotkeys, modLabel } from '../hooks/useHotkeys';
+import { StoryCard } from './StoryCard';
+import type { Story } from './StoryCard';
+import { InlineStoryEditor } from './InlineStoryEditor';
+import { StoryComments } from './StoryComments';
+import DependencyGraph from './DependencyGraph';
+import MermaidDiagram from './MermaidDiagram';
+import { ReadinessRing } from './ReadinessRing';
+import { AssigneeDropdown } from './AssigneeDropdown';
+import type { Assignee } from './AssigneeDropdown';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
-type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
-type ReviewFilter = 'all' | 'review_requested' | 'changes_requested';
+export type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
 
-interface SpecSummary {
+export interface SpecSummary {
   id: string;
   specName: string;
   storyCount: number;
@@ -54,20 +54,14 @@ interface SpecSummary {
   assignee?: Assignee;
 }
 
-const REVIEW_STATUS_CONFIG: Record<ReviewStatus, { label: string; className: string; icon: typeof Eye }> = {
+export const REVIEW_STATUS_CONFIG: Record<ReviewStatus, { label: string; className: string; icon: typeof Eye }> = {
   draft: { label: 'Draft', className: 'bg-muted/15 text-muted border-muted/30', icon: AlertCircle },
   review_requested: { label: 'Needs Review', className: 'bg-accent/15 text-accent border-accent/30', icon: Eye },
   approved: { label: 'Review Approved', className: 'bg-success/15 text-success border-success/30', icon: CheckCircle2 },
   changes_requested: { label: 'Changes Requested', className: 'bg-warning/15 text-warning border-warning/30', icon: MessageSquare },
 };
 
-const REVIEW_FILTERS: { id: ReviewFilter; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'review_requested', label: 'Needs Review' },
-  { id: 'changes_requested', label: 'Changes Requested' },
-];
-
-interface SpecDetail {
+export interface SpecDetail {
   title?: string;
   userStories?: Story[];
   stories?: Story[];
@@ -82,7 +76,7 @@ type PreviewTab = 'stories' | 'graph' | 'diagram' | 'json';
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
 
-function relativeTime(iso: string): string {
+export function relativeTime(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   const seconds = Math.floor(ms / 1000);
   if (seconds < 60) return 'just now';
@@ -95,7 +89,6 @@ function relativeTime(iso: string): string {
 }
 
 function extractDiagramText(spec: SpecDetail): { text: string; type: 'mermaid' | 'ascii' } | null {
-  // Prefer the dedicated mermaidDiagram field (story dependency diagram)
   if (spec.mermaidDiagram && typeof spec.mermaidDiagram === 'string' && spec.mermaidDiagram.trim()) {
     return { text: spec.mermaidDiagram, type: 'mermaid' };
   }
@@ -109,541 +102,9 @@ function extractDiagramText(spec: SpecDetail): { text: string; type: 'mermaid' |
   return null;
 }
 
-/* ─── Main Component ──────────────────────────────────────────────── */
+/* ─── SpecPreview ─────────────────────────────────────────────────── */
 
-export default function ReviewQueuePanel() {
-  const { workspaceId } = useWorkspace();
-  const { toasts, show: showToast, dismiss } = useToast();
-
-  const [specs, setSpecs] = useState<SpecSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [specDetail, setSpecDetail] = useState<SpecDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-
-  // ─── Resizable split pane ────────────────────────────────────────
-  const [leftWidth, setLeftWidth] = useState(380);
-  const isDragging = useRef(false);
-  const dragStartX = useRef(0);
-  const dragStartWidth = useRef(0);
-
-  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    isDragging.current = true;
-    dragStartX.current = e.clientX;
-    dragStartWidth.current = leftWidth;
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!isDragging.current) return;
-      const delta = ev.clientX - dragStartX.current;
-      const next = Math.min(Math.max(dragStartWidth.current + delta, 260), 700);
-      setLeftWidth(next);
-    };
-    const onMouseUp = () => {
-      isDragging.current = false;
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  }, [leftWidth]);
-
-  const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
-  const [rejectingId, setRejectingId] = useState<string | null>(null);
-  const [rejectReason, setRejectReason] = useState('');
-  const [actionLoading, setActionLoading] = useState(false);
-  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>('all');
-  const [reviewingId, setReviewingId] = useState<string | null>(null);
-  const [reviewComment, setReviewComment] = useState('');
-  const [dialogMode, setDialogMode] = useState<'approve' | 'reject' | 'post-approve' | null>(null);
-  const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
-
-  // ⌘↩ approve, ⌘⌫ reject — only when a spec is selected
-  useHotkeys(useMemo(() => [
-    { key: 'mod+enter', handler: () => { if (selectedId && !dialogMode) setDialogMode('approve'); } },
-    { key: 'mod+backspace', handler: () => { if (selectedId && !dialogMode) setDialogMode('reject'); } },
-  ], [selectedId, dialogMode]));
-
-  // ─── Fetch spec list ───────────────────────────────────────────────
-  const fetchSpecs = useCallback(async () => {
-    if (!workspaceId) return;
-    setLoading(true);
-    setError('');
-    try {
-      const res = await apiFetch<{ items: SpecSummary[]; total: number; hasMore: boolean; cursor?: string }>(
-        `/api/specs?workspaceId=${workspaceId}&status=pending`,
-      );
-      setSpecs(res.items);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load specs');
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceId]);
-
-  useEffect(() => {
-    fetchSpecs();
-  }, [fetchSpecs]);
-
-  // ─── Fetch spec detail when selected ───────────────────────────────
-  useEffect(() => {
-    if (!selectedId || !workspaceId) {
-      setSpecDetail(null);
-      return;
-    }
-    let cancelled = false;
-    setDetailLoading(true);
-    apiFetch<SpecDetail>(`/api/specs/${selectedId}?workspaceId=${workspaceId}`)
-      .then((detail) => {
-        if (!cancelled) {
-          setSpecDetail(detail);
-          setActiveTab('stories');
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setSpecDetail(null);
-      })
-      .finally(() => {
-        if (!cancelled) setDetailLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [selectedId, workspaceId]);
-
-  // ─── Actions ───────────────────────────────────────────────────────
-  const handleApprove = async (specId: string) => {
-    if (hasUnsavedEdits) {
-      if (!window.confirm('You have unsaved story edits. Approve without saving?')) return;
-      setHasUnsavedEdits(false);
-    }
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${specId}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
-      });
-      showToast('Spec approved', 'success');
-      if (selectedId === specId) {
-        setSelectedId(null);
-        setSpecDetail(null);
-      }
-      await fetchSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Approve failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  // Dialog-driven approve (with post-approve prompt)
-  const handleDialogApprove = async () => {
-    if (!selectedId) return;
-    if (hasUnsavedEdits) {
-      if (!window.confirm('You have unsaved story edits. Approve without saving?')) return;
-      setHasUnsavedEdits(false);
-    }
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${selectedId}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
-      });
-      showToast('Spec approved', 'success');
-      setDialogMode('post-approve');
-      await fetchSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Approve failed', 'error');
-      setDialogMode(null);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  // Dialog-driven reject (with reason)
-  const handleDialogReject = async (reason?: string) => {
-    if (!selectedId) return;
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${selectedId}/reject`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, reason: reason || undefined }),
-      });
-      showToast('Spec rejected', 'success');
-      setDialogMode(null);
-      setSelectedId(null);
-      setSpecDetail(null);
-      await fetchSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Reject failed', 'error');
-      setDialogMode(null);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleReject = async (specId: string) => {
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${specId}/reject`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, reason: rejectReason || undefined }),
-      });
-      showToast('Spec rejected', 'success');
-      setRejectingId(null);
-      setRejectReason('');
-      if (selectedId === specId) {
-        setSelectedId(null);
-        setSpecDetail(null);
-      }
-      await fetchSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Reject failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleRequestReview = async (specId: string) => {
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${specId}/request-review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
-      });
-      showToast('Review requested', 'success');
-      await fetchSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Request review failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleReview = async (specId: string, action: 'approve' | 'request_changes') => {
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${specId}/review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workspaceId,
-          action,
-          comment: reviewComment || undefined,
-        }),
-      });
-      showToast(action === 'approve' ? 'Review approved' : 'Changes requested', 'success');
-      setReviewingId(null);
-      setReviewComment('');
-      if (selectedId === specId) {
-        setSelectedId(null);
-        setSpecDetail(null);
-      }
-      await fetchSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Review failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  // Apply review status filter
-  const filteredSpecs = reviewFilter === 'all'
-    ? specs
-    : specs.filter(s => (s.reviewStatus ?? 'draft') === reviewFilter);
-
-  // ─── No workspace selected ────────────────────────────────────────
-  if (!workspaceId) {
-    return (
-      <div className="flex items-center justify-center h-full text-muted text-sm">
-        Select a workspace to view pending specs
-      </div>
-    );
-  }
-
-  // ─── Loading state ────────────────────────────────────────────────
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full text-muted text-sm">
-        Loading specs...
-      </div>
-    );
-  }
-
-  // ─── Error state ──────────────────────────────────────────────────
-  if (error) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center">
-          <p className="text-sm text-error mb-2">{error}</p>
-          <button
-            onClick={fetchSpecs}
-            className="text-xs text-accent hover:text-accent-hover transition-colors"
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // ─── Empty state ──────────────────────────────────────────────────
-  if (specs.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
-          <Inbox size={64} className="text-muted/40" strokeWidth={1.2} />
-          <div>
-            <p className="text-sm font-medium text-text mb-1">No specs pending review</p>
-            <p className="text-xs text-muted">
-              Generate one in Spec Forge
-            </p>
-          </div>
-        </div>
-        <ToastContainer toasts={toasts} onDismiss={dismiss} />
-      </div>
-    );
-  }
-
-  const selectedSpec = filteredSpecs.find((s) => s.id === selectedId);
-
-  return (
-    <div className="flex flex-col h-full bg-bg">
-      <AppHeader
-        breadcrumbs={
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-[var(--text)] text-sm tracking-tight">
-              {workspaceId ? 'Workspace' : 'Pending'}
-            </span>
-            <ChevronRight size={14} className="text-muted" />
-            <span className="text-sm text-muted">Review Queue</span>
-          </div>
-        }
-      />
-      <div className="flex flex-1 min-h-0">
-        {/* ─── Left column: Spec list ──────────────────────────────────── */}
-        <div
-          className="flex flex-col overflow-hidden shrink-0 border-r border-border"
-          style={{ width: selectedId ? leftWidth : '100%' }}
-        >
-          <div className="px-4 py-3 border-b border-border shrink-0">
-            <h2 className="text-sm font-semibold text-text">
-              Pending Review
-            </h2>
-            <p className="text-xs text-muted mt-0.5">
-              {filteredSpecs.length} of {specs.length} {specs.length === 1 ? 'spec' : 'specs'}
-            </p>
-            <div className="flex gap-1 mt-2">
-              {REVIEW_FILTERS.map((f) => {
-                const count = f.id === 'all'
-                  ? specs.length
-                  : specs.filter(s => (s.reviewStatus ?? 'draft') === f.id).length;
-                return (
-                  <button
-                    key={f.id}
-                    onClick={() => setReviewFilter(f.id)}
-                    className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${reviewFilter === f.id
-                        ? 'bg-accent/15 text-accent border border-accent/30'
-                        : 'text-muted border border-transparent hover:text-text hover:border-border'
-                      }`}
-                  >
-                    {f.label}
-                    {count > 0 && <span className="ml-1 opacity-70">({count})</span>}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto">
-            {filteredSpecs.map((spec) => (
-              <button
-                key={spec.id}
-                onClick={() => {
-                  if (hasUnsavedEdits && spec.id !== selectedId) {
-                    if (!window.confirm('You have unsaved story edits. Discard them?')) return;
-                    setHasUnsavedEdits(false);
-                  }
-                  setSelectedId(spec.id === selectedId ? null : spec.id);
-                }}
-                className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${spec.id === selectedId
-                    ? 'bg-accent/10'
-                    : 'hover:bg-panel'
-                  }`}
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <span className="inline-block w-2 h-2 rounded-full bg-warning shrink-0" />
-                    <span className="text-[10px] font-medium text-muted uppercase tracking-wide">
-                      US
-                    </span>
-                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
-                      {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
-                    </span>
-                    {(() => {
-                      const rs = spec.reviewStatus ?? 'draft';
-                      const cfg = REVIEW_STATUS_CONFIG[rs];
-                      const Icon = cfg.icon;
-                      return (
-                        <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded border ${cfg.className}`}>
-                          <Icon size={10} />
-                          {cfg.label}
-                        </span>
-                      );
-                    })()}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {spec.assignee && <AssigneeAvatar assignee={spec.assignee} size="sm" />}
-                    {spec.readinessPercent != null && (
-                      <ReadinessRing percent={spec.readinessPercent} size={28} />
-                    )}
-                    <span className="text-[10px] text-muted flex items-center gap-1">
-                      <Clock size={10} />
-                      {relativeTime(spec.generatedAt)}
-                    </span>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-mono text-text truncate pr-2">
-                    {spec.id}
-                  </span>
-                  <ChevronRight
-                    size={14}
-                    className={`shrink-0 text-muted transition-transform ${spec.id === selectedId ? 'rotate-90' : ''
-                      }`}
-                  />
-                </div>
-                {spec.tags && spec.tags.length > 0 && (
-                  <div className="mt-1">
-                    <TagChipsReadonly tags={spec.tags} />
-                  </div>
-                )}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* ─── Draggable divider ───────────────────────────────────────── */}
-        {selectedId && (
-          <div
-            onMouseDown={handleDividerMouseDown}
-            className="w-1 shrink-0 bg-border hover:bg-accent/60 cursor-col-resize transition-colors active:bg-accent"
-          />
-        )}
-
-        {/* ─── Right column: Spec preview ──────────────────────────────── */}
-        {selectedId && (
-        <div className="flex flex-col flex-1 overflow-hidden">
-          {!specDetail ? (
-            <div className="flex items-center justify-center h-full text-muted text-sm">
-              {detailLoading ? 'Loading spec...' : 'Select a spec to preview'}
-            </div>
-          ) : (
-            <SpecPreview
-              spec={specDetail}
-              summary={selectedSpec!}
-              activeTab={activeTab}
-              onTabChange={setActiveTab}
-              rejectingId={rejectingId}
-              rejectReason={rejectReason}
-              actionLoading={actionLoading}
-              onRejectReasonChange={setRejectReason}
-              onStartReject={() => setRejectingId(selectedId)}
-              onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
-              onConfirmReject={() => handleReject(selectedId)}
-              onApprove={() => handleApprove(selectedId)}
-              onRequestReview={() => handleRequestReview(selectedId)}
-              reviewingId={reviewingId}
-              reviewComment={reviewComment}
-              onReviewCommentChange={setReviewComment}
-              onStartReview={() => setReviewingId(selectedId)}
-              onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
-              onConfirmReview={(action) => handleReview(selectedId, action)}
-              workspaceId={workspaceId!}
-              onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
-              onDirtyChange={setHasUnsavedEdits}
-            />
-          )}
-        </div>
-        )}
-
-        {/* ─── Mobile/tablet: detail as overlay when selected ────────── */}
-        {selectedId && specDetail && (
-          <div className="xl:hidden fixed inset-0 z-40 bg-bg flex flex-col">
-            <div className="flex items-center px-4 py-3 border-b border-border shrink-0">
-              <button
-                onClick={() => {
-                  if (hasUnsavedEdits) {
-                    if (!window.confirm('You have unsaved story edits. Discard them?')) return;
-                    setHasUnsavedEdits(false);
-                  }
-                  setSelectedId(null); setRejectingId(null); setRejectReason(''); setReviewingId(null); setReviewComment('');
-                }}
-                className="text-xs text-accent hover:text-accent-hover transition-colors mr-3"
-              >
-                &larr; Back
-              </button>
-              <span className="text-sm font-mono text-text truncate">{selectedId}</span>
-            </div>
-            <div className="flex-1 overflow-hidden">
-              <SpecPreview
-                spec={specDetail}
-                summary={selectedSpec!}
-                activeTab={activeTab}
-                onTabChange={setActiveTab}
-                rejectingId={rejectingId}
-                rejectReason={rejectReason}
-                actionLoading={actionLoading}
-                onRejectReasonChange={setRejectReason}
-                onStartReject={() => setRejectingId(selectedId)}
-                onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
-                onConfirmReject={() => handleReject(selectedId)}
-                onApprove={() => handleApprove(selectedId)}
-                onRequestReview={() => handleRequestReview(selectedId)}
-                reviewingId={reviewingId}
-                reviewComment={reviewComment}
-                onReviewCommentChange={setReviewComment}
-                onStartReview={() => setReviewingId(selectedId)}
-                onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
-                onConfirmReview={(action) => handleReview(selectedId, action)}
-                workspaceId={workspaceId!}
-                onAssignSpec={(a) => setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, assignee: a ?? undefined } : s))}
-                onDirtyChange={setHasUnsavedEdits}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* ─── Keyboard-triggered confirmation dialog ────────────────── */}
-        {dialogMode && selectedId && (
-          <SpecConfirmDialog
-            mode={dialogMode}
-            specName={selectedSpec?.specName ?? selectedId}
-            loading={actionLoading}
-            onConfirm={(reason) => {
-              if (dialogMode === 'approve') handleDialogApprove();
-              else if (dialogMode === 'reject') handleDialogReject(reason);
-            }}
-            onCancel={() => setDialogMode(null)}
-            onGoToForge={() => { setDialogMode(null); setSelectedId(null); setSpecDetail(null); }}
-            onTriggerRun={() => { setDialogMode(null); setSelectedId(null); setSpecDetail(null); }}
-          />
-        )}
-
-        <ToastContainer toasts={toasts} onDismiss={dismiss} />
-      </div>
-    </div>
-  );
-}
-
-/* ─── Spec Preview ────────────────────────────────────────────────── */
-
-function SpecPreview({
+export function SpecPreview({
   spec,
   summary,
   activeTab,
@@ -701,13 +162,9 @@ function SpecPreview({
   const [shareCopied, setShareCopied] = useState(false);
   const [hasNewComments, setHasNewComments] = useState(false);
 
-  // Track when user last viewed comments (per spec)
-  const lastViewedRef = useRef<Record<string, number>>({});
-
   // Check for new review comments by polling comment counts
   const prevCommentCountRef = useRef<number | null>(null);
   useEffect(() => {
-    // Reset on spec change
     setShareUrl(null);
     setHasNewComments(false);
     prevCommentCountRef.current = null;
@@ -725,11 +182,10 @@ function SpecPreview({
     };
 
     checkNewComments();
-    const interval = setInterval(checkNewComments, 15_000); // poll every 15s
+    const interval = setInterval(checkNewComments, 15_000);
     return () => clearInterval(interval);
   }, [summary.id]);
 
-  // Sync when summary changes
   useEffect(() => {
     setSpecAssignee(summary.assignee ?? null);
   }, [summary.assignee]);
@@ -747,7 +203,6 @@ function SpecPreview({
         },
       );
       setShareUrl(result.url);
-      // Auto-copy to clipboard
       await navigator.clipboard.writeText(result.url);
       setShareCopied(true);
       setTimeout(() => setShareCopied(false), 3000);
@@ -795,7 +250,6 @@ function SpecPreview({
         <div className="flex items-center justify-between">
           <h3 className="text-base font-mono font-semibold text-text">{summary.specName}</h3>
           <div className="flex items-center gap-2">
-            {/* Share for Review button */}
             <div className="relative">
               <button
                 onClick={handleShareForReview}
@@ -818,7 +272,6 @@ function SpecPreview({
             />
           </div>
         </div>
-        {/* Share URL display */}
         {shareUrl && (
           <div className="flex items-center gap-2 mt-2 px-2.5 py-2 rounded bg-panel border border-border">
             <Link2 size={12} className="text-muted shrink-0" />
@@ -894,7 +347,6 @@ function SpecPreview({
         {(() => {
           const rs = summary.reviewStatus ?? 'draft';
 
-          // Reject confirmation panel (shared across statuses)
           if (rejectingId === summary.id) {
             return (
               <div className="space-y-2">
@@ -925,7 +377,6 @@ function SpecPreview({
             );
           }
 
-          // Review comment panel (for reviewer performing a review)
           if (reviewingId === summary.id) {
             return (
               <div className="space-y-2">
@@ -964,7 +415,6 @@ function SpecPreview({
             );
           }
 
-          // Draft / Changes Requested: show "Request Review" + original approve/reject
           if (rs === 'draft' || rs === 'changes_requested') {
             return (
               <div className="flex gap-2">
@@ -995,7 +445,6 @@ function SpecPreview({
             );
           }
 
-          // Review Requested: show review actions for reviewer
           if (rs === 'review_requested') {
             return (
               <div className="flex gap-2">
@@ -1026,7 +475,6 @@ function SpecPreview({
             );
           }
 
-          // Review Approved: show approve (move to approved/) + reject
           return (
             <div className="flex gap-2">
               <button
@@ -1071,7 +519,6 @@ function PreviewStoriesTab({
   stories: Story[];
   specId: string;
   workspaceId: string;
-  /** Called when any story editor has unsaved changes */
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
@@ -1086,7 +533,6 @@ function PreviewStoriesTab({
   const [modifiedIds, setModifiedIds] = useState<Set<string>>(new Set());
   const [editorDirty, setEditorDirty] = useState(false);
 
-  // Fetch assignments for this spec
   useEffect(() => {
     apiFetch<{ assignments: SpecAssignment[] }>(`/api/specs/${specId}/assignments?workspaceId=${workspaceId}`)
       .then(data => {
@@ -1099,17 +545,15 @@ function PreviewStoriesTab({
       .catch(() => { });
   }, [specId, workspaceId]);
 
-  // Fetch unresolved comment counts per story
   useEffect(() => {
     apiFetch<{ counts: Record<string, number> }>(`/api/specs/${specId}/comments/counts`)
       .then(data => setCommentCounts(data.counts))
       .catch(() => { });
   }, [specId]);
 
-  // Sync when prop changes
   useEffect(() => {
     setLocalStories(stories);
-    setSelectedIds(new Set()); // clear selection on story data refresh
+    setSelectedIds(new Set());
   }, [stories]);
 
   const toggleSelect = (id: string) => {
@@ -1181,7 +625,6 @@ function PreviewStoriesTab({
 
   return (
     <div className="p-4 space-y-2">
-      {/* Header with Select All + stats */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <label className="flex items-center gap-1.5 cursor-pointer">
@@ -1219,7 +662,6 @@ function PreviewStoriesTab({
         )}
       </div>
 
-      {/* Bulk action toolbar */}
       {hasSelection && (
         <div className="flex items-center gap-2 px-3 py-2 rounded border border-accent/30 bg-accent/5">
           <span className="text-xs font-medium text-text mr-1">
@@ -1286,7 +728,6 @@ function PreviewStoriesTab({
         </div>
       )}
 
-      {/* Story cards */}
       {localStories.map((story) =>
         editingStoryId === story.id ? (
           <InlineStoryEditor
@@ -1368,9 +809,6 @@ function PreviewStoriesTab({
     </div>
   );
 }
-
-/* ─── Diagram Tab ─────────────────────────────────────────────────── */
-/* Uses shared MermaidDiagram component with zoom/pan/copy controls */
 
 /* ─── Raw JSON Tab ────────────────────────────────────────────────── */
 

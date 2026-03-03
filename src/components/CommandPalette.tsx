@@ -126,7 +126,7 @@ const CONTEXT_BOOSTS: Record<string, string[]> = {
   ],
   // Hub: pending review actions first
   hub: [
-    'action:review', 'panel:queue', 'action:new-spec', 'panel:forge',
+    'action:review', 'panel:forge', 'action:new-spec',
   ],
 };
 
@@ -186,7 +186,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
         category: 'spec',
         description: `${spec.status} \u00B7 ${spec.storyCount} stories`,
         action: () => {
-          onNavigate(spec.status === 'pending' ? 'queue' : 'archive');
+          onNavigate(spec.status === 'pending' ? 'forge' : 'archive');
           onClose();
         },
       });
@@ -227,7 +227,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
             category: 'spec',
             description: `Story in ${spec.specName}`,
             action: () => {
-              onNavigate(spec.status === 'pending' ? 'queue' : 'archive');
+              onNavigate(spec.status === 'pending' ? 'forge' : 'archive');
               onClose();
             },
           });
@@ -273,8 +273,8 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       id: 'action:review',
       label: 'Review Pending Specs',
       category: 'action',
-      description: 'Go to Review Queue',
-      action: () => { onNavigate('queue'); onClose(); },
+      description: 'View pending specs in Forge',
+      action: () => { onNavigate('forge'); onClose(); },
     });
     items.push({
       id: 'action:worktrees',
