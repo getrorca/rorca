@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T05:19:37.797Z",
+  "lastUpdatedAt": "2026-03-03T05:23:37.525Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -75,6 +75,15 @@
       "finishedAt": "2026-03-03T05:19:37.797Z",
       "agentType": "claude",
       "elapsedMs": 381107
+    },
+    {
+      "storyId": "UX-009",
+      "title": "Remove Stale and Internal Text",
+      "status": "passed",
+      "startedAt": "2026-03-03T05:20:23.843Z",
+      "finishedAt": "2026-03-03T05:23:37.524Z",
+      "agentType": "claude",
+      "elapsedMs": 193681
     }
   ],
   "failedStories": [],
