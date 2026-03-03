@@ -768,7 +768,7 @@ export default function PipelineMonitorPanel() {
         <div className="text-center max-w-md space-y-3">
           <Terminal className="w-10 h-10 mx-auto text-[var(--text-muted)]" />
           <p className="text-[var(--text-muted)] text-sm leading-relaxed">
-            No pipeline runs yet. Approve a spec in the Review Queue, then run it with the Ralph Loop.
+            No pipeline runs yet. Approve a spec in Forge, then run it from the Pipeline.
           </p>
           <button
             onClick={() => setShowStartHelp(!showStartHelp)}

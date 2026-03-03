@@ -142,10 +142,6 @@ export default function DirectionStackPanel() {
     if (workspaceId) localStorage.setItem(BOOTSTRAP_DISMISSED_KEY(workspaceId), 'true');
   }, [scanResult, l1, l2, l3, workspaceId]);
 
-  // L4/L5 ephemeral (no save)
-  const [l4, setL4] = useState('');
-  const [l5, setL5] = useState('');
-
   // Synthesized preview
   const [synthesized, setSynthesized] = useState('');
   const [isSynthesizing, setIsSynthesizing] = useState(false);
@@ -159,14 +155,12 @@ export default function DirectionStackPanel() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         workspaceId,
-        l4SpecBrief: l4,
-        l5Annotations: l5,
       }),
     })
       .then((data) => setSynthesized(data.synthesized))
       .catch(console.error)
       .finally(() => setIsSynthesizing(false));
-  }, [workspaceId, l4, l5]);
+  }, [workspaceId]);
 
   // Debounced synthesize when any input changes
   useEffect(() => {
@@ -175,7 +169,7 @@ export default function DirectionStackPanel() {
     return () => {
       if (synthTimerRef.current) clearTimeout(synthTimerRef.current);
     };
-  }, [l1.content, l2.content, l3.content, l4, l5, synthesize]);
+  }, [l1.content, l2.content, l3.content, synthesize]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(synthesized).catch(console.error);
@@ -438,37 +432,7 @@ export default function DirectionStackPanel() {
         )}
       </div>
 
-      {/* Column 2: Spec Brief + Story Annotations (auto-populated at runtime) */}
-      <div className="flex-1 flex flex-col bg-bg min-w-0">
-        <div className="flex-1 flex flex-col border-b border-border">
-          <label className="px-3 py-2 text-xs font-medium text-muted border-b border-border flex items-center gap-1">
-            Spec Brief
-            <HelpTooltip helpKey="direction-stack-l4" size={11} />
-          </label>
-          <textarea
-            value={l4}
-            onChange={(e) => setL4(e.target.value)}
-            className="flex-1 w-full p-3 font-mono text-sm bg-bg text-text border-none outline-none resize-none"
-            placeholder="Paste the spec brief here. This is auto-populated from your spec and feeds into the synthesized output."
-            spellCheck={false}
-          />
-        </div>
-        <div className="flex-1 flex flex-col">
-          <label className="px-3 py-2 text-xs font-medium text-muted border-b border-border flex items-center gap-1">
-            Story Annotations
-            <HelpTooltip helpKey="direction-stack-l5" size={11} />
-          </label>
-          <textarea
-            value={l5}
-            onChange={(e) => setL5(e.target.value)}
-            className="flex-1 w-full p-3 font-mono text-sm bg-bg text-text border-none outline-none resize-none"
-            placeholder="Per-story overrides and annotations. Auto-populated at runtime."
-            spellCheck={false}
-          />
-        </div>
-      </div>
-
-      {/* Column 3: Synthesized preview (read-only) */}
+      {/* Column 2: Synthesized preview (read-only) */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
           <span className="text-xs font-medium text-muted inline-flex items-center gap-1">
