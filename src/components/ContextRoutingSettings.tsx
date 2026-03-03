@@ -363,7 +363,7 @@ export default function ContextRoutingSettings({ workspaceId, showToast }: Props
         <div>
           <h2 className="text-sm font-semibold text-[var(--text)]">Rules Engine</h2>
           <p className="text-xs text-muted mt-0.5">
-            Configure context routing rules. Skills are injected into story prompts based on directory path and tags.
+            Control which skills the AI uses for different parts of your project.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -500,7 +500,7 @@ function VisualEditor({
           Global Context Files
         </h3>
         <p className="text-xs text-muted mb-3">
-          Always injected into every story prompt. Cannot be dropped by token budget.
+          Always included when the AI works on any story. These are never skipped.
         </p>
         <div className="flex flex-wrap gap-2">
           {config.routing.global.map((f, i) => (
@@ -525,7 +525,7 @@ function VisualEditor({
           Scope Rules
         </h3>
         <p className="text-xs text-muted mb-3">
-          Click a directory to create a scope rule. Matching story files inject the attached skills.
+          Click a directory to create a rule. When a story touches files in that directory, the attached skills are automatically included.
         </p>
 
         <div className="flex gap-4 min-h-[300px]">
@@ -571,7 +571,7 @@ function VisualEditor({
               Tag Rules
             </h3>
             <p className="text-xs text-muted mt-1">
-              Additive context injection based on story tags. Always combined with scope rules.
+              Extra skills added when a story has a matching tag. These are combined with directory rules above.
             </p>
           </div>
           <button
@@ -607,7 +607,7 @@ function VisualEditor({
           Token Budget
         </h3>
         <p className="text-xs text-muted mb-3">
-          Max tokens for injected context per story. Lowest-priority scoped files dropped first. Globals never dropped.
+          Maximum amount of context the AI receives per story. When the limit is reached, lower-priority skills are dropped first. Global files are never dropped.
         </p>
         <div className="flex items-center gap-4">
           <input
@@ -1073,7 +1073,7 @@ function MonorepoDiscoveryPanel({
             <Boxes size={12} /> Monorepo Discovery
           </h3>
           <p className="text-xs text-muted mt-1">
-            Auto-detect apps, stacks, and generate per-app scope rules, AGENTS.md roles, and CLAUDE.md monorepo section.
+            Auto-detect apps and stacks in your monorepo, and set up per-app rules and context files.
           </p>
         </div>
         <button
