@@ -11,8 +11,9 @@ import {
 import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
-import { echolocate, computeHealthReport, discoverMonorepo, generateMonorepoCLAUDESection } from '../lib/workspace-echolocation';
-import { loadRorcaConfig, writeRorcaConfig } from '../lib/rorca-config';
+import { echolocate, computeHealthReport, discoverMonorepo, generateMonorepoCLAUDESection, inferSkillsFromStack } from '../lib/workspace-echolocation';
+import { loadRorcaConfig, writeRorcaConfig, hasRorcaDir, ensureRorcaDirStructure, defaultRorcaConfig } from '../lib/rorca-config';
+import type { RorcaConfig } from '../lib/rorca-config';
 import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-scaffold';
 import type { ScaffoldFile } from '../lib/workspace-scaffold';
 
@@ -1500,6 +1501,340 @@ router.post('/:id/scaffold', async (req, res) => {
 
   res.status(400).json({ error: `Unknown mode: ${mode}. Use "preview" or "write".` });
 });
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/bootstrap:
+ *   post:
+ *     tags: [Workspaces]
+ *     summary: Chain all workspace intelligence into one call
+ *     operationId: bootstrapWorkspace
+ *     description: >
+ *       Chains echolocation, monorepo discovery, LLM-based direction generation,
+ *       .rorca/config.json initialization, skill inference, and MEMORY.md setup
+ *       into a single endpoint. Returns surfaces, direction drafts, scopes,
+ *       suggested skills, health scores, and files created. If workspace already
+ *       has .rorca/config.json, returns existing config with configured=true
+ *       instead of overwriting. Completes in <15s for typical projects (<1000 files).
+ *       LLM calls for direction generation timeout at 30s with partial results returned.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Bootstrap result with surfaces, direction, scopes, skills, health
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 configured:
+ *                   type: boolean
+ *                   description: True if workspace already had .rorca/config.json
+ *                 empty:
+ *                   type: boolean
+ *                   description: True if echolocate found no recognizable stack
+ *                 surfaces:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       path: { type: string }
+ *                       name: { type: string }
+ *                       stack: { type: array, items: { type: object, properties: { name: { type: string }, version: { type: string }, source: { type: string } } } }
+ *                       suggestedL2: { type: string }
+ *                 direction:
+ *                   type: object
+ *                   properties:
+ *                     standards: { type: string }
+ *                     conventions: { type: string }
+ *                     project: { type: string }
+ *                 scopes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       path: { type: string }
+ *                       inject: { type: array, items: { type: string } }
+ *                       priority: { type: integer }
+ *                 suggestedSkills:
+ *                   type: array
+ *                   items: { type: string }
+ *                 healthBefore: { type: integer, minimum: 0, maximum: 100 }
+ *                 healthAfter: { type: integer, minimum: 0, maximum: 100 }
+ *                 filesCreated:
+ *                   type: array
+ *                   items: { type: string }
+ *       404: { description: "Workspace not found" }
+ *       400: { description: "Workspace path does not exist" }
+ *       500: { description: "Bootstrap failed" }
+ */
+router.post('/:id/bootstrap', async (req, res) => {
+  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.params.id) as WorkspaceRow | undefined;
+  if (!workspace) {
+    res.status(404).json({ error: 'Workspace not found' });
+    return;
+  }
+
+  if (!fs.existsSync(workspace.path)) {
+    res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+    return;
+  }
+
+  try {
+    // 1. Check if already configured
+    if (hasRorcaDir(workspace.path)) {
+      const existingConfig = loadRorcaConfig(workspace.path);
+      const report = echolocate(workspace.path);
+      const health = computeHealthReport(workspace.path);
+
+      res.json({
+        configured: true,
+        empty: false,
+        surfaces: report.monorepo.detected
+          ? report.monorepo.apps.map(app => ({
+              path: app.path,
+              name: app.name,
+              stack: app.stack,
+              suggestedL2: '',
+            }))
+          : [{
+              path: '.',
+              name: path.basename(workspace.path),
+              stack: report.stack,
+              suggestedL2: '',
+            }],
+        direction: { standards: '', conventions: '', project: '' },
+        scopes: existingConfig.routing.scopes.map(s => ({
+          path: s.path,
+          inject: s.inject,
+          priority: s.priority,
+        })),
+        suggestedSkills: inferSkillsFromStack(report.stack),
+        healthBefore: health.score,
+        healthAfter: health.score,
+        filesCreated: [],
+      });
+      return;
+    }
+
+    // 2. Echolocate — detect stack, context files, monorepo
+    const report = echolocate(workspace.path);
+    const healthBefore = computeHealthReport(workspace.path).score;
+
+    // 3. Handle empty workspace (no recognizable stack)
+    if (report.stack.length === 0) {
+      // Read existing L1 from DB as fallback default
+      const l1Row = db.prepare(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+      ).get() as { content_yaml: string } | undefined;
+
+      res.json({
+        configured: false,
+        empty: true,
+        surfaces: [],
+        direction: {
+          standards: l1Row?.content_yaml || '',
+          conventions: '',
+          project: '',
+        },
+        scopes: [],
+        suggestedSkills: [],
+        healthBefore,
+        healthAfter: healthBefore,
+        filesCreated: [],
+      });
+      return;
+    }
+
+    // 4. Monorepo discovery
+    let monoResult: { apps: Array<{ path: string; name: string; stack: Array<{ name: string; version?: string; source: string }>; inferredSkills: string[] }>; scopes: Array<{ path: string; inject: string[]; priority: number }> } | null = null;
+    if (report.monorepo.detected && report.monorepo.apps.length > 0) {
+      const discovery = discoverMonorepo(workspace.path);
+      monoResult = {
+        apps: discovery.apps,
+        scopes: discovery.scopes.map(s => ({
+          path: s.path,
+          inject: s.inject,
+          priority: s.priority,
+        })),
+      };
+    }
+
+    // 5. LLM-based direction generation with 30s timeout
+    let directionDraft = { standards: '', conventions: '', project: '' };
+    try {
+      const directionResult = await Promise.race([
+        generateDirectionDrafts(workspace),
+        new Promise<null>((_, reject) => setTimeout(() => reject(new Error('direction_timeout')), 30_000)),
+      ]);
+      if (directionResult) {
+        directionDraft = directionResult;
+      }
+    } catch (err: any) {
+      // Timeout or LLM failure — continue with partial results
+      console.warn(`[bootstrap] Direction generation failed: ${err.message}`);
+    }
+
+    // 6. Build .rorca/config.json
+    const config: RorcaConfig = defaultRorcaConfig();
+    config.routing.global = ['CLAUDE.md', 'AGENTS.md'];
+
+    if (monoResult && monoResult.scopes.length > 0) {
+      config.routing.scopes = monoResult.scopes.map(s => ({
+        path: s.path,
+        inject: s.inject,
+        priority: s.priority,
+        managed: 'rorca' as const,
+      }));
+    }
+
+    // 7. Write .rorca/config.json + initialize MEMORY.md
+    ensureRorcaDirStructure(workspace.path);
+    writeRorcaConfig(workspace.path, config);
+    const filesCreated: string[] = ['.rorca/config.json'];
+
+    // Initialize MEMORY.md if missing
+    const memoryPath = path.join(workspace.path, 'MEMORY.md');
+    if (!fs.existsSync(memoryPath)) {
+      const memoryContent = `# Memory Ledger\n\n## ${new Date().toISOString().split('T')[0]} [Architecture] Workspace Bootstrap\n> Rule: Workspace bootstrapped by Rorca. Stack: ${report.stack.map(s => s.name).join(', ')}.\n> Context: Auto-generated during workspace setup.\n> Source: bootstrap\n`;
+      fs.writeFileSync(memoryPath, memoryContent, 'utf-8');
+      filesCreated.push('MEMORY.md');
+    }
+
+    // 8. Compute health after
+    const healthAfter = computeHealthReport(workspace.path).score;
+
+    // 9. Build surfaces
+    const surfaces = monoResult
+      ? monoResult.apps.map(app => ({
+          path: app.path,
+          name: app.name,
+          stack: app.stack,
+          suggestedL2: inferL2Domain(app.stack.map(s => s.name)),
+        }))
+      : [{
+          path: '.',
+          name: path.basename(workspace.path),
+          stack: report.stack,
+          suggestedL2: inferL2Domain(report.stack.map(s => s.name)),
+        }];
+
+    // 10. WAL event
+    db.prepare(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workspace_bootstrap', ?, ?)"
+    ).run(req.params.id, JSON.stringify({
+      surfaceCount: surfaces.length,
+      stackCount: report.stack.length,
+      monorepo: report.monorepo.detected,
+      healthBefore,
+      healthAfter,
+      filesCreated,
+    }));
+
+    res.json({
+      configured: false,
+      empty: false,
+      surfaces,
+      direction: directionDraft,
+      scopes: monoResult?.scopes ?? [],
+      suggestedSkills: inferSkillsFromStack(report.stack),
+      healthBefore,
+      healthAfter,
+      filesCreated,
+    });
+  } catch (err: any) {
+    console.error('[bootstrap] error:', err.message);
+    res.status(500).json({ error: err.message || 'Bootstrap failed' });
+  }
+});
+
+/**
+ * Infer L2 domain label from stack names.
+ */
+function inferL2Domain(stackNames: string[]): string {
+  const set = new Set(stackNames);
+  if (set.has('Next.js') || set.has('React') || set.has('Vue.js') || set.has('Angular') || set.has('Svelte')) {
+    if (set.has('Express') || set.has('Fastify') || set.has('Prisma') || set.has('Drizzle ORM') || set.has('Stripe')) {
+      return 'saas';
+    }
+    return 'web';
+  }
+  if (set.has('React Native') || set.has('Expo')) return 'mobile';
+  if (set.has('Electron') || set.has('Tauri')) return 'desktop';
+  if (set.has('Django') || set.has('FastAPI') || set.has('Flask') || set.has('Express') || set.has('Fastify') || set.has('Hono')) return 'api';
+  if (set.has('Terraform') || set.has('Docker')) return 'infrastructure';
+  if (set.has('Rust') || set.has('Go')) return 'systems';
+  return '';
+}
+
+/**
+ * Generate direction layer drafts (L1/L2/L3) via LLM.
+ * Reuses the same logic as scan-direction but returns structured result.
+ */
+async function generateDirectionDrafts(workspace: WorkspaceRow): Promise<{ standards: string; conventions: string; project: string }> {
+  const scannedFiles: Record<string, string> = {};
+  const filesToScan = ['package.json', 'CLAUDE.md', 'README.md', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'tsconfig.json'];
+
+  for (const filename of filesToScan) {
+    const filePath = path.join(workspace.path, filename);
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      scannedFiles[filename] = content.length > 4000 ? content.slice(0, 4000) + '\n... (truncated)' : content;
+    }
+  }
+
+  let dirListing: string[] = [];
+  try {
+    const entries = fs.readdirSync(workspace.path, { withFileTypes: true });
+    dirListing = entries
+      .slice(0, 500)
+      .map(e => e.isDirectory() ? `${e.name}/` : e.name)
+      .filter(name => !name.startsWith('.'));
+  } catch { /* non-fatal */ }
+
+  const foundFiles = Object.keys(scannedFiles);
+  const fileContext = foundFiles.length > 0
+    ? foundFiles.map(f => `--- ${f} ---\n${scannedFiles[f]}`).join('\n\n')
+    : '(no recognized project files found)';
+
+  const prompt = `=== INSTRUCTIONS ===
+Return ONLY a JSON object with three keys: "l1", "l2", "l3". No markdown, no fences, no explanation.
+
+Generate a "Direction Stack" — a 3-layer context cascade for AI code generation:
+- L1 (Standards): Engineering principles, coding style, testing philosophy. Plain text.
+- L2 (Conventions): Domain-specific knowledge, business terminology. Plain text.
+- L3 (Project): YAML with: name, type, stack (array), purpose, key_modules (array).
+
+=== REPOSITORY ===
+Name: ${path.basename(workspace.path)}
+Label: ${workspace.label}
+Domains: ${JSON.parse(workspace.domains).join(', ') || '(none)'}
+
+Files:
+${fileContext}
+
+Directories:
+${dirListing.join('\n') || '(empty)'}
+
+=== OUTPUT ===
+{"l1": "...", "l2": "...", "l3": "..."}`;
+
+  const result = await chatComplete([{ role: 'user', content: prompt }]);
+  let text = result.text.trim();
+  if (text.startsWith('```')) {
+    text = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+  }
+
+  const parsed = JSON.parse(text);
+  return {
+    standards: parsed.l1 || '',
+    conventions: parsed.l2 || '',
+    project: parsed.l3 || '',
+  };
+}
 
 // DELETE /api/workspaces/:id
 router.delete('/:id', (req, res) => {
