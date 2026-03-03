@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T04:36:45.010Z",
+  "lastUpdatedAt": "2026-03-03T04:48:37.113Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-03T04:36:45.010Z",
       "agentType": "claude",
       "elapsedMs": 535810
+    },
+    {
+      "storyId": "UX-005",
+      "title": "Kill L1-L5 Naming Everywhere",
+      "status": "passed",
+      "startedAt": "2026-03-03T04:37:29.517Z",
+      "finishedAt": "2026-03-03T04:48:37.112Z",
+      "agentType": "claude",
+      "elapsedMs": 667595
     }
   ],
   "failedStories": [],

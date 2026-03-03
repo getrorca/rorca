@@ -61,14 +61,14 @@ describe('BootstrapContextModal', () => {
   it('pre-selects the activeLayer and switches when clicked', () => {
     renderModal({ activeLayer: 2 as 1 | 2 | 3 });
     const radios = screen.getAllByRole('radio');
-    // Layer radio group (L1, L2, L3)
+    // Layer radio group (Standards, Conventions, Project)
     const l2Radio = radios.find((r) => (r as HTMLInputElement).checked);
     expect(l2Radio).toBeDefined();
   });
 
   it('layer selector switches target layer label', async () => {
     renderModal({ activeLayer: 1 as 1 | 2 | 3 });
-    const l3Radio = screen.getByLabelText(/L3 Project Brief/);
+    const l3Radio = screen.getByLabelText(/Project/);
     await userEvent.click(l3Radio);
     expect((l3Radio as HTMLInputElement).checked).toBe(true);
   });

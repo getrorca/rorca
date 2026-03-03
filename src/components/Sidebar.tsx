@@ -52,7 +52,7 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'direction',
     label: 'Direction',
     items: [
-      { id: 'stack', label: 'Direction Stack', icon: Layers },
+      { id: 'stack', label: 'Direction', icon: Layers },
       { id: 'team-direction', label: 'Team Direction', icon: Users },
       { id: 'memory', label: 'Memory Ledger', icon: BookOpen },
     ],

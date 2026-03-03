@@ -42,9 +42,9 @@ interface UrlPreview {
 // ---------------------------------------------------------------------------
 
 const LAYER_LABELS: Record<LayerTarget, string> = {
-  1: 'L1 Global Brain',
-  2: 'L2 Domain Profile',
-  3: 'L3 Project Brief',
+  1: 'Standards',
+  2: 'Conventions',
+  3: 'Project',
 };
 
 const TABS: { id: TabId; icon: string; label: string }[] = [

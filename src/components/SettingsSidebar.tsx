@@ -10,7 +10,7 @@ interface SettingsSidebarProps {
 
 export default function SettingsSidebar({ onNavigate, directionDirty }: SettingsSidebarProps) {
     const TABS: { id: SettingsTab; label: string; icon: typeof Layers }[] = [
-        { id: 'direction', label: 'Direction Stack', icon: Layers },
+        { id: 'direction', label: 'Direction', icon: Layers },
         { id: 'providers', label: 'Model & Providers', icon: Zap },
         { id: 'github', label: 'GitHub', icon: Github },
         { id: 'personas', label: 'Personas', icon: Drama },

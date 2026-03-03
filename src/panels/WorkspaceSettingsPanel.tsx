@@ -45,7 +45,7 @@ interface GithubStatus {
 
 const TABS: { id: WsSettingsTab; label: string; icon: typeof Settings2 }[] = [
   { id: 'general',   label: 'General',           icon: Settings2 },
-  { id: 'direction', label: 'Direction Stack',    icon: Layers    },
+  { id: 'direction', label: 'Direction',           icon: Layers    },
   { id: 'context',   label: 'Workspace Context',  icon: Route     },
   { id: 'github',    label: 'GitHub',             icon: Github    },
   { id: 'env-vars',  label: 'Env Vars',           icon: Variable  },
@@ -73,7 +73,7 @@ export default function WorkspaceSettingsPanel() {
     <div className="h-full flex flex-col overflow-hidden">
       <div className="p-4 sm:p-6 border-b border-border shrink-0">
         <h1 className="text-lg font-semibold text-[var(--text)]">Workspace Settings</h1>
-        <p className="text-xs text-muted mt-1">Manage direction stack, connections, environment, and pipeline configuration</p>
+        <p className="text-xs text-muted mt-1">Manage direction, connections, environment, and pipeline configuration</p>
       </div>
 
       <div className="flex flex-1 min-h-0">
@@ -333,7 +333,7 @@ function GeneralSection({ workspaceId, showToast }: SectionProps) {
               placeholder="saas, fintech"
               className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
             />
-            <p className="text-xs text-muted mt-1">Comma-separated domain tags for L2 direction matching</p>
+            <p className="text-xs text-muted mt-1">Comma-separated domain tags for Conventions direction matching</p>
           </div>
 
           <div>
@@ -366,7 +366,7 @@ function GeneralSection({ workspaceId, showToast }: SectionProps) {
   );
 }
 
-// ─── Direction Stack Section ─────────────────────────────────────────────────
+// ─── Direction Section ──────────────────────────────────────────────────────
 
 function DirectionSection({ workspaceId, showToast }: SectionProps) {
   const [loading, setLoading] = useState(true);
@@ -386,7 +386,7 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
       setContent(dirData.layers.l3?.content ?? '');
       setActivePack(packData.packs.length > 0 ? packData.packs[0] : null);
     })
-      .catch(() => showToast('Failed to load direction stack', 'error'))
+      .catch(() => showToast('Failed to load direction', 'error'))
       .finally(() => setLoading(false));
   }, [workspaceId, showToast]);
 
@@ -415,7 +415,8 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
         setLayers({ ...layers, [key]: { ...layers[key], content } });
       }
       setSaved(true);
-      showToast(`L${activeLayer} direction saved`);
+      const layerNames = { 1: 'Standards', 2: 'Conventions', 3: 'Project' } as const;
+      showToast(`${layerNames[activeLayer]} direction saved`);
       setTimeout(() => setSaved(false), 2000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to save';
@@ -426,7 +427,7 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
   };
 
   if (loading) {
-    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading direction stack...</div>;
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading direction...</div>;
   }
 
   return (
@@ -449,14 +450,14 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
         </div>
         <p className="text-[11px] text-muted mt-1">
           {activePack
-            ? 'Pack provides L0 direction layers (lowest priority, overridable by L1+).'
-            : 'Install a pack from Marketplace to add L0 conventions.'}
+            ? 'Pack provides base direction layers (lowest priority, overridable by your layers).'
+            : 'Install a pack from Marketplace to add base conventions.'}
         </p>
       </div>
 
       <div>
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-2">Direction Stack</h2>
-        <p className="text-xs text-muted">Edit the 5-layer context cascade. L1 is global, L2 is domain-scoped, L3 is project-scoped. L4/L5 are per-request.</p>
+        <h2 className="text-sm font-semibold text-[var(--text)] mb-2">Direction</h2>
+        <p className="text-xs text-muted">Edit the context cascade. Standards are global, Conventions are domain-scoped, Project is workspace-specific. Project beats Conventions beats Standards.</p>
       </div>
 
       <div className="flex gap-2">
@@ -470,7 +471,7 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
                 : 'border-border text-muted hover:text-[var(--text)] hover:border-accent/50'
             }`}
           >
-            L{n} — {n === 1 ? 'Global' : n === 2 ? 'Domain' : 'Project'}
+            {n === 1 ? 'Standards' : n === 2 ? 'Conventions' : 'Project'}
           </button>
         ))}
       </div>
@@ -481,7 +482,7 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
         rows={16}
         spellCheck={false}
         className="w-full px-3 py-2 text-sm font-mono bg-bg border border-border rounded focus:border-accent outline-none resize-y"
-        placeholder={`Enter YAML content for L${activeLayer}...`}
+        placeholder={`Enter content for ${activeLayer === 1 ? 'Standards' : activeLayer === 2 ? 'Conventions' : 'Project'}...`}
       />
 
       <button
@@ -490,7 +491,7 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
         className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
       >
         {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
-        {saved ? 'Saved' : `Save L${activeLayer}`}
+        {saved ? 'Saved' : `Save ${activeLayer === 1 ? 'Standards' : activeLayer === 2 ? 'Conventions' : 'Project'}`}
       </button>
     </div>
   );

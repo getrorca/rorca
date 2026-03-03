@@ -19,9 +19,9 @@ interface DirectionAllResponse {
 }
 
 const LAYER_LABELS: Record<string, { label: string; description: string }> = {
-  l1: { label: 'L1 — Global', description: 'Engineering principles, preferred libraries' },
-  l2: { label: 'L2 — Domain', description: 'Auth patterns, API conventions' },
-  l3: { label: 'L3 — Project', description: 'Stack, architecture, key constraints' },
+  l1: { label: 'Standards', description: 'Engineering principles, preferred libraries' },
+  l2: { label: 'Conventions', description: 'Framework and domain conventions' },
+  l3: { label: 'Project', description: 'Stack, architecture, key constraints' },
 };
 
 export default function DirectionPreviewSidebar({ onNavigateToStack }: { onNavigateToStack?: () => void }) {
@@ -84,14 +84,14 @@ export default function DirectionPreviewSidebar({ onNavigateToStack }: { onNavig
           <div className="px-4 py-6 text-center">
             <p className="text-xs text-muted mb-3">No direction configured</p>
             <p className="text-xs text-muted/70 mb-4">
-              Configure your direction stack to provide context to the LLM during spec generation.
+              Configure your direction to provide context to the LLM during spec generation.
             </p>
             {onNavigateToStack && (
               <button
                 onClick={onNavigateToStack}
                 className="text-xs text-accent hover:text-accent-hover underline underline-offset-2 transition-colors"
               >
-                Open Direction Stack
+                Open Direction
               </button>
             )}
           </div>

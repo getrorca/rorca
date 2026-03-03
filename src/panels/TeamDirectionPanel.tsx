@@ -11,8 +11,8 @@ interface Team {
 type LayerTab = 1 | 2;
 
 const LAYER_LABELS: Record<LayerTab, string> = {
-  1: 'L1 Team Standards',
-  2: 'L2 Team Domain Profile',
+  1: 'Team Standards',
+  2: 'Team Conventions',
 };
 
 export default function TeamDirectionPanel() {
@@ -187,7 +187,7 @@ export default function TeamDirectionPanel() {
 
         {/* Info banner */}
         <div className="px-3 py-2 text-xs text-muted border-b border-border bg-panel/50">
-          Team direction layers apply to all workspaces in this team. They override global defaults but are overridden by workspace-specific L3+ layers.
+          Team direction layers apply to all workspaces in this team. They override global defaults but are overridden by workspace-specific Project layers.
         </div>
 
         {/* Editor */}
@@ -217,7 +217,7 @@ export default function TeamDirectionPanel() {
           </button>
         </div>
         <div className="px-3 py-2 text-xs text-muted border-b border-border bg-panel/50">
-          Shows how team L1/L2 merge with global layers and workspace L3.
+          Shows how team Standards/Conventions merge with global layers and workspace Project context.
           Team layers override global defaults.
         </div>
         <div className="flex-1 overflow-auto p-3">
