@@ -703,7 +703,7 @@ function PacksTab() {
               Uninstall <code className="bg-bg px-1 py-0.5 rounded font-mono">{confirmUninstall}</code>?
             </p>
             <p className="text-xs text-muted mb-4">
-              This will remove L0 direction layers and pack skills from the database. Scaffold files already copied to your workspace will remain.
+              This will remove pack direction layers and skills from the database. Scaffold files already copied to your workspace will remain.
             </p>
             <div className="flex justify-end gap-2">
               <button

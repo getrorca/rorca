@@ -264,7 +264,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
     });
     items.push({
       id: 'action:direction',
-      label: 'Edit Direction Stack',
+      label: 'Edit Direction',
       category: 'action',
       description: 'Configure direction layers',
       action: () => { onNavigate('stack'); onClose(); },

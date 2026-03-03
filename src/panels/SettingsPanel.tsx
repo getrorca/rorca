@@ -80,23 +80,26 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   mention: 'Mentions',
 };
 
-// ─── Direction Stack Layer Config ────────────────────────────────────────────
+// ─── Direction Layer Config ──────────────────────────────────────────────────
 
-const LAYER_INFO: Record<1 | 2 | 3, { title: string; description: string; placeholder: string }> = {
+const LAYER_INFO: Record<1 | 2 | 3, { title: string; description: string; placeholder: string; tooltip: string }> = {
   1: {
-    title: 'L1 — Global Standards',
+    title: 'Standards',
     description: 'Engineering principles, coding style, and preferences that apply to all projects.',
     placeholder: 'e.g. "Always use TypeScript strict mode. Prefer functional components. Use Tailwind for styling."',
+    tooltip: 'How you build software — engineering principles that apply to all projects',
   },
   2: {
-    title: 'L2 — Domain Knowledge',
+    title: 'Conventions',
     description: 'Industry concepts, business rules, and domain-specific patterns.',
     placeholder: 'e.g. "This is a fintech product. Follow PCI-DSS compliance. Use cents for monetary values."',
+    tooltip: 'Patterns for this type of project — framework and domain conventions',
   },
   3: {
-    title: 'L3 — Project Context',
+    title: 'Project',
     description: 'Tech stack, architecture, and key constraints for this specific project.',
     placeholder: 'e.g. "React + Express app. PostgreSQL database. Deployed on Vercel."',
+    tooltip: 'What makes this project unique — its stack, architecture, and constraints',
   },
 };
 
@@ -126,7 +129,7 @@ export default function SettingsPanel() {
   );
 }
 
-// ─── Direction Stack Section ─────────────────────────────────────────────────
+// ─── Direction Section ──────────────────────────────────────────────────────
 
 interface DirectionLayerHook {
   content: string;
@@ -147,7 +150,7 @@ function DirectionStackSection({ l1, l2, l3 }: { l1: DirectionLayerHook; l2: Dir
       {/* Cascade explanation */}
       <div className="border border-border rounded p-3 bg-panel">
         <p className="text-xs text-muted">
-          <span className="font-medium text-[var(--text)]">Direction Stack</span> — Context flows from L1 (global) through L3 (project-specific). Lower layers override higher ones, like CSS specificity. L4 (spec brief) and L5 (story annotations) are injected at runtime.
+          <span className="font-medium text-[var(--text)]">Direction</span> — Context flows from Standards (global) through Project (specific). Project beats Conventions beats Standards.
         </p>
       </div>
 
@@ -1825,7 +1828,7 @@ function DisplaySection() {
             )}
           </div>
           <p className="text-xs text-muted mb-3">
-            Override the global default for this workspace. Persists to the Direction Stack L3.
+            Override the global default for this workspace. Persists to the Project direction layer.
           </p>
           <div className="flex gap-2">
             <select

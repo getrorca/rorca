@@ -168,8 +168,8 @@ export default function AISetupWizard({
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          <div className="text-sm text-text font-medium">Generating your Direction Stack...</div>
-          <div className="text-xs text-muted mt-1">Claude is synthesizing L1, L2, and L3 from your answers</div>
+          <div className="text-sm text-text font-medium">Generating your direction...</div>
+          <div className="text-xs text-muted mt-1">Claude is synthesizing Standards, Conventions, and Project from your answers</div>
         </div>
       </ModalShell>
     );
@@ -179,7 +179,7 @@ export default function AISetupWizard({
   if (phase === 'preview' && result) {
     const layers = { 1: editedL1, 2: editedL2, 3: editedL3 };
     const setters = { 1: setEditedL1, 2: setEditedL2, 3: setEditedL3 };
-    const labels = { 1: 'L1 Global Brain', 2: 'L2 Domain Profile', 3: 'L3 Project Brief' };
+    const labels = { 1: 'Standards', 2: 'Conventions', 3: 'Project' };
 
     return (
       <ModalShell onClose={onClose} wide>
@@ -188,7 +188,7 @@ export default function AISetupWizard({
           <div className="px-5 py-4 border-b border-border">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-text">
-                Preview Generated Direction Stack
+                Preview Generated Direction
               </h2>
               <button onClick={onClose} className="text-muted hover:text-text text-lg leading-none">&times;</button>
             </div>
@@ -196,7 +196,7 @@ export default function AISetupWizard({
               <span>Tokens: ~{((result.usage.inputTokens || 0) + (result.usage.outputTokens || 0)).toLocaleString()}</span>
               {!result.l3Valid && (
                 <span className="text-[var(--warning)]">
-                  L3 has validation warnings — review before saving
+                  Project has validation warnings — review before saving
                 </span>
               )}
             </div>
@@ -286,7 +286,7 @@ export default function AISetupWizard({
             <button onClick={onClose} className="text-muted hover:text-text text-lg leading-none">&times;</button>
           </div>
           <div className="text-xs text-muted mt-1">
-            Answer a few questions and Claude will generate your L1, L2, and L3 direction layers.
+            Answer a few questions and Claude will generate your Standards, Conventions, and Project direction layers.
           </div>
         </div>
 
@@ -329,7 +329,7 @@ export default function AISetupWizard({
                   disabled={answeredCount < 2}
                   className="px-4 py-1.5 text-xs font-medium bg-accent hover:bg-[var(--accent-hover)] text-white rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ml-auto"
                 >
-                  Generate Direction Stack &rarr;
+                  Generate Direction &rarr;
                 </button>
               </div>
               {answeredCount < 2 && (
