@@ -11,6 +11,7 @@ import Sidebar, { type PanelId } from './components/Sidebar';
 import ResizableSidebar from './components/ResizableSidebar';
 import ErrorBoundary from './components/ErrorBoundary';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
+import WorkspaceBootstrapBanner from './components/WorkspaceBootstrapBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { apiFetch, onApiFetchError } from './lib/apiFetch';
 import PublicReviewPage from './pages/PublicReviewPage';
@@ -438,6 +439,10 @@ function AppLayout() {
         onNavigate={handleNavigate}
       >
         <EmailVerificationBanner />
+        <WorkspaceBootstrapBanner onSetUpNow={() => {
+          handleNavigate('hub');
+          window.dispatchEvent(new CustomEvent('rorca:open-wizard'));
+        }} />
         {/* Router-driven panel content */}
         <Outlet />
 

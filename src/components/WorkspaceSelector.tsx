@@ -103,6 +103,11 @@ export default function WorkspaceSelector({ onNavigateSettings }: WorkspaceSelec
                     onSuccess={(ws) => {
                         addWorkspace(ws);
                         setShowAddModal(false);
+                        if (ws.needsBootstrap) {
+                            // Signal to HubPanel that this workspace needs bootstrap immediately
+                            sessionStorage.setItem(`rorca_needs_bootstrap_${ws.id}`, '1');
+                            window.dispatchEvent(new CustomEvent('rorca:navigate', { detail: 'hub' }));
+                        }
                     }}
                 />
             )}

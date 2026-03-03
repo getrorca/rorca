@@ -4,7 +4,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface AddWorkspaceModalProps {
   onClose: () => void;
-  onSuccess: (workspace: { id: string; name: string; git_path: string }) => void;
+  onSuccess: (workspace: { id: string; name: string; git_path: string; needsBootstrap?: boolean }) => void;
 }
 
 export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceModalProps) {
@@ -54,7 +54,7 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
       .filter(Boolean);
 
     try {
-      const res = await apiFetch<{ workspace: { id: string; label: string; path: string; domains: string[] } }>(
+      const res = await apiFetch<{ workspace: { id: string; label: string; path: string; domains: string[] }; needsBootstrap?: boolean }>(
         '/api/workspaces',
         {
           method: 'POST',
@@ -62,7 +62,7 @@ export default function AddWorkspaceModal({ onClose, onSuccess }: AddWorkspaceMo
           body: JSON.stringify({ id, label: label.trim(), path: path.trim(), domains: domainList }),
         },
       );
-      onSuccess({ id: res.workspace.id, name: res.workspace.label, git_path: res.workspace.path });
+      onSuccess({ id: res.workspace.id, name: res.workspace.label, git_path: res.workspace.path, needsBootstrap: res.needsBootstrap });
     } catch (err: any) {
       const msg = err.message || 'Failed to create workspace';
       if (msg.includes('Path does not exist')) {
