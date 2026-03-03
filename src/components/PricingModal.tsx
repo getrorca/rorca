@@ -37,7 +37,7 @@ const PLANS = [
     features: [
       'Everything in Pro',
       'Team collaboration',
-      'Shared direction stack',
+      'Shared direction',
       'Admin controls',
     ],
   },

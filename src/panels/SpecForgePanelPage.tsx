@@ -492,7 +492,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                             onClick={() => onNavigate?.('stack')}
                             className="text-[10px] text-accent hover:text-accent-hover transition-colors"
                           >
-                            Set up in Direction Stack
+                            Set up in Direction
                           </button>
                           <div className="flex gap-1.5">
                             <button

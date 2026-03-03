@@ -33,9 +33,9 @@ function computeHealth(l1: LayerState, l2: LayerState, l3: LayerState) {
     return { layer, label, status: 'ok', warning: null };
   };
 
-  diags.push(assess('L1', 'Global Standards', l1.content, 'No global standards — specs will lack engineering guardrails'));
-  diags.push(assess('L2', 'Domain Knowledge', l2.content, 'No domain context — Claude won\'t understand your industry patterns'));
-  diags.push(assess('L3', 'Project Context', l3.content, 'No project context — Claude won\'t know your stack or architecture'));
+  diags.push(assess('L1', 'Standards', l1.content, 'No standards — specs will lack engineering guardrails'));
+  diags.push(assess('L2', 'Conventions', l2.content, 'No conventions — Claude won\'t understand your industry patterns'));
+  diags.push(assess('L3', 'Project', l3.content, 'No project context — Claude won\'t know your stack or architecture'));
 
   const emptyCount = diags.filter(d => d.status === 'empty').length;
   const sparseCount = diags.filter(d => d.status === 'sparse').length;
@@ -115,7 +115,7 @@ export default function DirectionHealthIndicator({ l1, l2, l3 }: Props) {
           {/* Header */}
           <div className="px-3 py-2 border-b border-border">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-text">Direction Stack Health</span>
+              <span className="text-xs font-medium text-text">Direction Health</span>
               <span className={`text-xs font-medium ${style.badge.includes('red') ? 'text-red-400' : style.badge.includes('yellow') ? 'text-yellow-400' : 'text-emerald-400'}`}>
                 {health.score}%
               </span>
@@ -151,7 +151,7 @@ export default function DirectionHealthIndicator({ l1, l2, l3 }: Props) {
             <div className="px-3 py-2 border-t border-border bg-bg">
               <p className="text-xs text-muted">
                 {health.level === 'red'
-                  ? 'Generated specs will be generic and miss project-specific requirements. Configure at least L1 and L3 for meaningful results.'
+                  ? 'Generated specs will be generic and miss project-specific requirements. Configure at least Standards and Project for meaningful results.'
                   : 'Specs will work but may lack nuance in areas without direction. Fill in remaining layers for best quality.'}
               </p>
             </div>

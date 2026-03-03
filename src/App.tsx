@@ -151,7 +151,7 @@ function GlobalErrorWiring() {
 const PANEL_LABELS: Record<PanelId, string> = {
   hub: 'Hub',
   forge: 'Spec Forge',
-  stack: 'Direction Stack',
+  stack: 'Direction',
   'team-direction': 'Team Direction',
   queue: 'Review Queue',
   pipeline: 'Pipeline Monitor',

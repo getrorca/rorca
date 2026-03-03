@@ -11,26 +11,26 @@ export interface HelpEntry {
 }
 
 export const HELP_CONTENT: Record<string, HelpEntry> = {
-  // Direction Stack layers
+  // Direction layers
   'direction-stack-l1': {
-    title: 'L1 Global Brain',
-    body: 'Engineering principles and preferred libraries that apply to **all workspaces**. Think coding standards, naming conventions, and shared tooling preferences.\n\nHigher layers (L2-L5) can override L1 when more specific context is needed.',
+    title: 'Standards',
+    body: 'How you build software — engineering principles that apply to **all projects**. Think coding standards, naming conventions, and shared tooling preferences.\n\nMore specific layers (Conventions, Project) override Standards when needed.',
   },
   'direction-stack-l2': {
-    title: 'L2 Domain Profile',
-    body: 'Patterns specific to your **domain** (e.g., SaaS, fintech, e-commerce). Covers auth patterns, API conventions, and domain-specific best practices.\n\nShared across workspaces in the same domain.',
+    title: 'Conventions',
+    body: 'Patterns for this type of project — **framework and domain conventions** (e.g., SaaS, fintech, e-commerce). Covers auth patterns, API conventions, and domain-specific best practices.\n\nShared across workspaces in the same domain.',
   },
   'direction-stack-l3': {
-    title: 'L3 Project Brief',
-    body: 'Stack, architecture, and key constraints for **this workspace**. Include your tech stack, folder structure, and any project-specific gotchas.\n\nThis is the most impactful layer for spec quality.',
+    title: 'Project',
+    body: 'What makes this project unique — its **stack, architecture, and constraints**. Include your tech stack, folder structure, and any project-specific gotchas.\n\nThis is the most impactful layer for spec quality.',
   },
   'direction-stack-l4': {
-    title: 'L4 Spec Brief',
-    body: 'The **feature brief** for the current spec being generated. Describes what to build and why.\n\nEphemeral — not saved to the direction stack.',
+    title: 'Spec Brief',
+    body: 'The **feature brief** for the current spec being generated. Describes what to build and why.\n\nAuto-populated from your spec — not saved to direction.',
   },
   'direction-stack-l5': {
-    title: 'L5 Story Annotations',
-    body: 'Per-story overrides, edge cases, and reviewer notes. Use this to add **fine-grained context** to individual stories.\n\nEphemeral — not saved to the direction stack.',
+    title: 'Story Annotations',
+    body: 'Per-story overrides, edge cases, and reviewer notes. Use this to add **fine-grained context** to individual stories.\n\nAuto-populated at runtime — not saved to direction.',
   },
 
   // Complexity scores
@@ -48,7 +48,7 @@ export const HELP_CONTENT: Record<string, HelpEntry> = {
   // Pipeline parallelism
   'pipeline-parallelism': {
     title: 'Pipeline Execution',
-    body: 'Each story runs as an **isolated subprocess** — completely stateless between stories. The direction stack (L1-L5) is the only cross-story context.\n\nStories execute sequentially by default, respecting dependency order.',
+    body: 'Each story runs as an **isolated subprocess** — completely stateless between stories. Direction (Standards, Conventions, Project) is the only cross-story context.\n\nStories execute sequentially by default, respecting dependency order.',
   },
 
   // Context budget / token usage
@@ -64,7 +64,7 @@ export const HELP_CONTENT: Record<string, HelpEntry> = {
   },
   'cost-input-tokens': {
     title: 'Input Tokens',
-    body: 'Tokens sent to the model — includes your prompt, direction stack context, and code context. Input tokens are typically **cheaper** than output tokens.',
+    body: 'Tokens sent to the model — includes your prompt, direction context, and code context. Input tokens are typically **cheaper** than output tokens.',
   },
   'cost-output-tokens': {
     title: 'Output Tokens',
@@ -74,7 +74,7 @@ export const HELP_CONTENT: Record<string, HelpEntry> = {
   // Synthesized output
   'synthesized-output': {
     title: 'Synthesized Output',
-    body: 'The merged result of all direction layers (L1-L5). Lower layers **override** higher ones, like CSS specificity.\n\nThis is the actual context injected into every story prompt during pipeline execution.',
+    body: 'The merged result of all direction layers. **Project beats Conventions beats Standards.**\n\nThis is the actual context injected into every story prompt during pipeline execution.',
   },
 
   // Story priority
