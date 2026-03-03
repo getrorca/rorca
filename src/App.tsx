@@ -8,6 +8,7 @@ import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
+import SettingsSidebar from './components/SettingsSidebar';
 import ResizableSidebar from './components/ResizableSidebar';
 import ErrorBoundary from './components/ErrorBoundary';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
@@ -31,7 +32,6 @@ import GitHubSettingsPanel from './panels/GitHubSettingsPanel';
 import TeamDirectionPanel from './panels/TeamDirectionPanel';
 import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
 import SettingsPanel, { type SettingsTab } from './panels/SettingsPanel';
-import WorkspaceSettingsPanel from './panels/WorkspaceSettingsPanel';
 import HubPanel from './panels/HubPanel';
 import RunViewPanel from './panels/RunViewPanel';
 import SpecReviewPanel from './panels/SpecReviewPanel';
@@ -213,9 +213,9 @@ function AppRoutes() {
         <Route path="audit-log" element={<Navigate to="/settings/system" replace />} />
         <Route path="activity" element={<Navigate to="/settings/system" replace />} />
         <Route path="github" element={<Navigate to="/settings/github" replace />} />
-        <Route path="workspace-settings" element={<PanelRoute panel="workspace-settings" />} />
+        <Route path="workspace-settings" element={<Navigate to="/settings/general" replace />} />
         {/* FR-004: Settings with nested sub-tab routes */}
-        <Route path="settings" element={<Navigate to="/settings/account" replace />} />
+        <Route path="settings" element={<Navigate to="/settings/general" replace />} />
         <Route path="settings/:tab" element={<PanelRoute panel="settings" />} />
         {/* Slide-over nested routes — render Hub underneath, SlideOver opens on top */}
         <Route path="runs/:runId" element={<PanelRoute panel="hub" />} />
@@ -280,7 +280,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'audit-log': case 'activity':
       return <SettingsPanel />;
     case 'github': return <GitHubSettingsPanel />;
-    case 'workspace-settings': return <WorkspaceSettingsPanel />;
+    case 'workspace-settings': return <SettingsPanel />;
     case 'settings': return <SettingsPanel />;
     default: return null;
   }
@@ -413,12 +413,16 @@ function AppLayout() {
       <Shell
         sidebar={
           <ResizableSidebar>
-            <Sidebar
-              onNavigate={handleNavigate}
-              mobileOpen={mobileNavOpen}
-              onMobileClose={() => setMobileNavOpen(false)}
-              queueCount={queueCount}
-            />
+            {activePanel === 'settings' ? (
+              <SettingsSidebar onNavigate={handleNavigate} />
+            ) : (
+              <Sidebar
+                onNavigate={handleNavigate}
+                mobileOpen={mobileNavOpen}
+                onMobileClose={() => setMobileNavOpen(false)}
+                queueCount={queueCount}
+              />
+            )}
           </ResizableSidebar>
         }
         showMenuButton

@@ -4,8 +4,17 @@ import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
 import { apiFetch, clearTokens, BASE_URL } from '../lib/apiFetch';
-import { useNavigate } from 'react-router-dom';
+import { useGlobalToast } from '../contexts/ToastContext';
 import GitHubSettingsPanel from './GitHubSettingsPanel';
+import {
+  WsGeneralSection as WsGeneralSectionBase,
+  WsDirectionSection as WsDirectionSectionBase,
+  WsContextSection as WsContextSectionBase,
+  WsEnvVarsSection as WsEnvVarsSectionBase,
+  WsPipelineSection as WsPipelineSectionBase,
+  WsHooksSection as WsHooksSectionBase,
+} from './WorkspaceSettingsPanel';
+import AgentsEditorSection from '../components/AgentsEditorSection';
 import UsageDashboardPanel from './UsageDashboardPanel';
 import CostBreakdownPanel from './CostBreakdownPanel';
 import ModelComparisonPanel from './ModelComparisonPanel';
@@ -22,7 +31,13 @@ import { useActiveSettingsTab } from '../routes';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'account' | 'providers' | 'github' | 'analytics' | 'system' | 'billing' | 'shortcuts';
+export type SettingsTab =
+  // Workspace-scoped
+  | 'general' | 'direction' | 'context' | 'providers' | 'github' | 'env-vars' | 'pipeline' | 'hooks' | 'agents'
+  // Account-scoped
+  | 'shortcuts' | 'account' | 'billing'
+  // Aggregate tabs
+  | 'analytics' | 'system';
 
 interface ProfileData {
   id: string;
@@ -91,54 +106,29 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof User }[] = [
-  { id: 'account', label: 'Account', icon: User },
-  { id: 'providers', label: 'Providers', icon: Zap },
-  { id: 'github', label: 'GitHub', icon: Github },
-  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
-  { id: 'system', label: 'System', icon: ScrollText },
-  { id: 'billing', label: 'Billing', icon: CreditCard },
-];
-
 export default function SettingsPanel() {
   const activeTab = useActiveSettingsTab();
-  const routerNavigate = useNavigate();
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Internal tab bar */}
-      <div className="flex items-center border-b border-border bg-panel shrink-0 overflow-x-auto">
-        {SETTINGS_TABS.map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => routerNavigate(`/settings/${tab.id}`)}
-              className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium transition-colors relative whitespace-nowrap ${
-                isActive
-                  ? 'text-text border-b-2 border-accent'
-                  : 'text-muted hover:text-text'
-              }`}
-            >
-              <Icon size={13} />
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Tab content */}
-      <div className="flex-1 overflow-y-auto">
-        <div className="p-4 sm:p-6 mx-auto w-full max-w-4xl">
-          {activeTab === 'account' && <AccountSection />}
-          {activeTab === 'providers' && <ProvidersAndDisplaySection />}
-          {activeTab === 'github' && <GitHubSettingsPanel />}
-          {activeTab === 'analytics' && <AnalyticsSection />}
-          {activeTab === 'system' && <SystemSection />}
-          {activeTab === 'billing' && <BillingSection />}
-          {activeTab === 'shortcuts' && <ShortcutsSection />}
-        </div>
+    <div className="h-full flex flex-col overflow-y-auto">
+      <div className="p-4 sm:p-6 mx-auto w-full max-w-4xl">
+        {/* Workspace-scoped tabs */}
+        {activeTab === 'general' && <WsGeneralSection />}
+        {activeTab === 'direction' && <WsDirectionSection />}
+        {activeTab === 'context' && <WsContextSection />}
+        {activeTab === 'providers' && <ProvidersAndDisplaySection />}
+        {activeTab === 'github' && <GitHubSettingsPanel />}
+        {activeTab === 'env-vars' && <WsEnvVarsSection />}
+        {activeTab === 'pipeline' && <WsPipelineSection />}
+        {activeTab === 'hooks' && <WsHooksSection />}
+        {activeTab === 'agents' && <WsAgentsSection />}
+        {/* Account-scoped tabs */}
+        {activeTab === 'account' && <AccountSection />}
+        {activeTab === 'billing' && <BillingSection />}
+        {activeTab === 'shortcuts' && <ShortcutsSection />}
+        {/* Aggregate tabs */}
+        {activeTab === 'analytics' && <AnalyticsSection />}
+        {activeTab === 'system' && <SystemSection />}
       </div>
     </div>
   );
@@ -3282,6 +3272,65 @@ function ThresholdSlider({
       </div>
     </div>
   );
+}
+
+// ─── Workspace Section Wrappers (delegate to WorkspaceSettingsPanel sections) ─
+
+function WsNoWorkspace() {
+  return (
+    <div className="h-48 flex items-center justify-center text-muted text-sm">
+      Select a workspace to manage these settings.
+    </div>
+  );
+}
+
+function WsGeneralSection() {
+  const { workspaceId } = useWorkspace();
+  const { show } = useGlobalToast();
+  if (!workspaceId) return <WsNoWorkspace />;
+  return <WsGeneralSectionBase workspaceId={workspaceId} showToast={show} />;
+}
+
+function WsDirectionSection() {
+  const { workspaceId } = useWorkspace();
+  const { show } = useGlobalToast();
+  if (!workspaceId) return <WsNoWorkspace />;
+  return <WsDirectionSectionBase workspaceId={workspaceId} showToast={show} />;
+}
+
+function WsContextSection() {
+  const { workspaceId } = useWorkspace();
+  const { show } = useGlobalToast();
+  if (!workspaceId) return <WsNoWorkspace />;
+  return <WsContextSectionBase workspaceId={workspaceId} showToast={show} />;
+}
+
+function WsEnvVarsSection() {
+  const { workspaceId } = useWorkspace();
+  const { show } = useGlobalToast();
+  if (!workspaceId) return <WsNoWorkspace />;
+  return <WsEnvVarsSectionBase workspaceId={workspaceId} showToast={show} />;
+}
+
+function WsPipelineSection() {
+  const { workspaceId } = useWorkspace();
+  const { show } = useGlobalToast();
+  if (!workspaceId) return <WsNoWorkspace />;
+  return <WsPipelineSectionBase workspaceId={workspaceId} showToast={show} />;
+}
+
+function WsHooksSection() {
+  const { workspaceId } = useWorkspace();
+  const { show } = useGlobalToast();
+  if (!workspaceId) return <WsNoWorkspace />;
+  return <WsHooksSectionBase workspaceId={workspaceId} showToast={show} />;
+}
+
+function WsAgentsSection() {
+  const { workspaceId } = useWorkspace();
+  const { show } = useGlobalToast();
+  if (!workspaceId) return <WsNoWorkspace />;
+  return <AgentsEditorSection workspaceId={workspaceId} showToast={show} />;
 }
 
 // ─── Toggle Switch ───────────────────────────────────────────────────────────
