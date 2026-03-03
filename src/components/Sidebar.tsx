@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
-import { useHotkeys, type HotkeyBinding } from '../hooks/useHotkeys';
 import {
-  Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight,
+  Wand2, Layers, Activity, Archive, Settings,
+  Plus, Search, LayoutDashboard,
+  ListChecks, GitBranch, ArrowLeftRight,
   Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
-  BarChart3, HeartPulse, ScrollText, Calculator, Settings, Settings2,
-  Plus, X, Search, ChevronDown, BookOpen, LayoutDashboard,
+  BarChart3, HeartPulse, ScrollText, Calculator, Settings2, BookOpen,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -27,7 +27,19 @@ interface NavSection {
   items: NavItem[];
 }
 
-// Kept for CommandPalette and other consumers that need the full panel list
+// ─── Sidebar top-level items (5 flat links) ──────────────────────────────────
+
+const SIDEBAR_ITEMS: NavItem[] = [
+  { id: 'forge', label: 'Forge', icon: Wand2 },
+  { id: 'pipeline', label: 'Runs', icon: Activity },
+  { id: 'archive', label: 'Archive', icon: Archive },
+  { id: 'stack', label: 'Direction', icon: Layers },
+  { id: 'settings', label: 'Settings', icon: Settings },
+];
+
+// ─── Full panel list for CommandPalette and deep-linking ─────────────────────
+// Kept as NAV_SECTIONS so CommandPalette can still reach every panel by name.
+
 export const NAV_SECTIONS: NavSection[] = [
   {
     id: 'specs',
@@ -43,7 +55,7 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'pipeline',
     label: 'Pipeline',
     items: [
-      { id: 'pipeline', label: 'Monitor', icon: Activity },
+      { id: 'pipeline', label: 'Runs', icon: Activity },
       { id: 'worktrees', label: 'Worktrees', icon: GitBranch },
       { id: 'compare', label: 'Compare Runs', icon: ArrowLeftRight },
     ],
@@ -87,42 +99,6 @@ export const NAV_SECTIONS: NavSection[] = [
 // Flat list for backward compat (used by CommandPalette, etc.)
 export const NAV_ITEMS: NavItem[] = NAV_SECTIONS.flatMap((s) => s.items);
 
-// ─── Section collapse persistence ────────────────────────────────────────────
-
-const COLLAPSED_KEY = 'rorca:sidebar-collapsed-sections';
-
-function getCollapsedSections(): Set<string> {
-  try {
-    const stored = localStorage.getItem(COLLAPSED_KEY);
-    if (stored) return new Set(JSON.parse(stored));
-  } catch { /* noop */ }
-  return new Set();
-}
-
-function persistCollapsedSections(sections: Set<string>) {
-  try {
-    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...sections]));
-  } catch { /* noop */ }
-}
-
-// ─── Minimal 5-icon nav (kept for resolveActiveNav compat) ───────────────────
-
-type MinimalNavId = 'search' | 'hub' | 'forge' | 'pipeline' | 'settings';
-
-/** Maps any PanelId to the MinimalNavId that should be highlighted */
-function resolveActiveNav(panel: PanelId): MinimalNavId {
-  switch (panel) {
-    case 'hub': case 'queue': return 'hub';
-    case 'pipeline': case 'worktrees': case 'compare': return 'pipeline';
-    case 'settings': case 'workspace-settings': case 'github': case 'stack':
-    case 'team-direction': case 'usage': case 'costs': case 'models':
-    case 'velocity': case 'completion': case 'health': case 'roi':
-    case 'audit-log': case 'activity': return 'settings';
-    case 'forge': case 'archive': case 'marketplace': case 'spec-review':
-    default: return 'forge';
-  }
-}
-
 interface SidebarProps {
   onNavigate: (panel: PanelId) => void;
   mobileOpen?: boolean;
@@ -130,9 +106,7 @@ interface SidebarProps {
   queueCount?: number;
 }
 
-export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0 }: SidebarProps) {
-  const [collapsedSections, setCollapsedSections] = useState(getCollapsedSections);
-
+export default function Sidebar({ onNavigate, mobileOpen, onMobileClose }: SidebarProps) {
   // Map toggle drawer event to Command Palette trigger for backwards compat
   useEffect(() => {
     const handler = () => {
@@ -141,79 +115,6 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
     window.addEventListener('rorca:toggle-drawer', handler);
     return () => window.removeEventListener('rorca:toggle-drawer', handler);
   }, []);
-
-  const toggleSection = (sectionId: string) => {
-    setCollapsedSections((prev) => {
-      const next = new Set(prev);
-      if (next.has(sectionId)) next.delete(sectionId);
-      else next.add(sectionId);
-      persistCollapsedSections(next);
-      return next;
-    });
-  };
-
-  // Expand standard nav sections with collapsible headers
-  const renderNavSection = (section: NavSection) => {
-    const isCollapsed = collapsedSections.has(section.id);
-
-    return (
-      <div key={section.id} className="mb-1">
-        {/* Collapsible section header */}
-        <button
-          onClick={() => toggleSection(section.id)}
-          className="w-full flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted/70 hover:text-muted transition-colors cursor-pointer select-none group"
-        >
-          <span>{section.label}</span>
-          <ChevronDown
-            size={12}
-            className={`text-muted/50 group-hover:text-muted transition-transform duration-200 ${isCollapsed ? '-rotate-90' : ''}`}
-          />
-        </button>
-
-        {/* Collapsible items container */}
-        <div
-          className="overflow-hidden transition-all duration-200 ease-out"
-          style={{
-            maxHeight: isCollapsed ? 0 : `${section.items.length * 32 + 8}px`,
-            opacity: isCollapsed ? 0 : 1,
-          }}
-        >
-          <div className="space-y-[1px] pb-1">
-            {section.items.map((item) => {
-              const Icon = item.icon;
-              return (
-                <NavLink
-                  key={item.id}
-                  to={PANEL_ROUTES[item.id]}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    onNavigate(item.id);
-                    onMobileClose?.();
-                  }}
-                  className={({ isActive }) => `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] transition-colors ${isActive
-                    ? 'text-[var(--text)] bg-surface-200 font-medium'
-                    : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
-                    }`}
-                >
-                  {({ isActive }) => (
-                    <>
-                      <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
-                      <span className="truncate">{item.label}</span>
-                      {item.id === 'queue' && queueCount > 0 && (
-                        <span className="ml-auto min-w-[16px] h-4 flex items-center justify-center px-1 text-[10px] font-bold rounded-full bg-accent text-white leading-none">
-                          {queueCount > 99 ? '99+' : queueCount}
-                        </span>
-                      )}
-                    </>
-                  )}
-                </NavLink>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    );
-  };
 
   const sidebarContent = (
     <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
@@ -250,9 +151,35 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
         </NavLink>
       </div>
 
-      {/* Main Navigation Sections */}
+      {/* Main Navigation — 5 flat items */}
       <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0">
-        {NAV_SECTIONS.map(renderNavSection)}
+        <div className="space-y-[1px]">
+          {SIDEBAR_ITEMS.map((item) => {
+            const Icon = item.icon;
+            return (
+              <NavLink
+                key={item.id}
+                to={PANEL_ROUTES[item.id]}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onNavigate(item.id);
+                  onMobileClose?.();
+                }}
+                className={({ isActive }) => `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1.5 rounded text-[13px] transition-colors ${isActive
+                  ? 'text-[var(--text)] bg-surface-200 font-medium'
+                  : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
+                  }`}
+              >
+                {({ isActive }) => (
+                  <>
+                    <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
+                    <span className="truncate">{item.label}</span>
+                  </>
+                )}
+              </NavLink>
+            );
+          })}
+        </div>
       </div>
 
       {/* Bottom Section: Compact Controls */}

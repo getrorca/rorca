@@ -8,7 +8,6 @@ import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import Shell from './components/Shell';
 import Sidebar, { type PanelId } from './components/Sidebar';
-import SettingsSidebar from './components/SettingsSidebar';
 import ResizableSidebar from './components/ResizableSidebar';
 import ErrorBoundary from './components/ErrorBoundary';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
@@ -46,6 +45,8 @@ import HubPanel from './panels/HubPanel';
 import RunViewPanel from './panels/RunViewPanel';
 import SpecReviewPanel from './panels/SpecReviewPanel';
 import MemoryPanel from './panels/MemoryPanel';
+import DirectionTabbedPanel from './panels/DirectionTabbedPanel';
+import RunsTabbedPanel from './panels/RunsTabbedPanel';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
 
@@ -223,7 +224,7 @@ function AppRoutes() {
         <Route path="github" element={<PanelRoute panel="github" />} />
         <Route path="workspace-settings" element={<PanelRoute panel="workspace-settings" />} />
         {/* FR-004: Settings with nested sub-tab routes */}
-        <Route path="settings" element={<Navigate to="/settings/direction" replace />} />
+        <Route path="settings" element={<Navigate to="/settings/account" replace />} />
         <Route path="settings/:tab" element={<PanelRoute panel="settings" />} />
         {/* Slide-over nested routes — render Hub underneath, SlideOver opens on top */}
         <Route path="runs/:runId" element={<PanelRoute panel="hub" />} />
@@ -269,11 +270,13 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
     case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
-    case 'stack': return <SettingsPanel />;
+    // Direction tabbed panel — embeds Direction Stack, Team, Memory, Rules
+    case 'stack': return <DirectionTabbedPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'memory': return <MemoryPanel />;
     case 'queue': return <ReviewQueuePanel />;
-    case 'pipeline': return <PipelineMonitorPanel />;
+    // Runs tabbed panel — embeds Pipeline Monitor, Worktrees, Compare
+    case 'pipeline': return <RunsTabbedPanel onNavigate={onNavigate} />;
     case 'worktrees': return <WorktreesPanel />;
     case 'compare': return <CompareRunsPanel onBack={() => onNavigate('pipeline')} />;
     case 'archive': return <ArchivePanel onNavigate={onNavigate} />;
@@ -404,7 +407,6 @@ function AppLayout() {
   useHotkeys(hotkeys);
 
   const showRunView = activeRunId !== null;
-  const isSettingsContext = ['settings', 'workspace-settings', 'github', 'stack'].includes(activePanel);
 
   const contextValue = useMemo<AppContentContextValue>(() => ({
     navigateToRun,
@@ -423,18 +425,12 @@ function AppLayout() {
       <Shell
         sidebar={
           <ResizableSidebar>
-            {isSettingsContext ? (
-              <SettingsSidebar
-                onNavigate={handleNavigate}
-              />
-            ) : (
-              <Sidebar
-                onNavigate={handleNavigate}
-                mobileOpen={mobileNavOpen}
-                onMobileClose={() => setMobileNavOpen(false)}
-                queueCount={queueCount}
-              />
-            )}
+            <Sidebar
+              onNavigate={handleNavigate}
+              mobileOpen={mobileNavOpen}
+              onMobileClose={() => setMobileNavOpen(false)}
+              queueCount={queueCount}
+            />
           </ResizableSidebar>
         }
         showMenuButton

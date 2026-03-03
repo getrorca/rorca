@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T04:48:37.113Z",
+  "lastUpdatedAt": "2026-03-03T04:56:57.735Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-03T04:48:37.112Z",
       "agentType": "claude",
       "elapsedMs": 667595
+    },
+    {
+      "storyId": "UX-006",
+      "title": "Sidebar Simplification",
+      "status": "passed",
+      "startedAt": "2026-03-03T04:49:21.447Z",
+      "finishedAt": "2026-03-03T04:56:57.735Z",
+      "agentType": "claude",
+      "elapsedMs": 456288
     }
   ],
   "failedStories": [],
