@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T04:27:04.214Z",
+  "lastUpdatedAt": "2026-03-03T04:36:45.010Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-03T04:27:04.214Z",
       "agentType": "claude",
       "elapsedMs": 402303
+    },
+    {
+      "storyId": "UX-004",
+      "title": "Forge Redesign — Post-Generate Flow",
+      "status": "passed",
+      "startedAt": "2026-03-03T04:27:49.200Z",
+      "finishedAt": "2026-03-03T04:36:45.010Z",
+      "agentType": "claude",
+      "elapsedMs": 535810
     }
   ],
   "failedStories": [],
