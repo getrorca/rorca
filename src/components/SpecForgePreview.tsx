@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { ChevronDown, ChevronRight, CheckCircle2, RefreshCw, PenLine, Loader2, Play, X, GitBranch, ExternalLink, MinusCircle, PlusCircle } from 'lucide-react';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { ChevronDown, ChevronRight, CheckCircle2, Loader2, Play, X, GitBranch, MinusCircle, PlusCircle, Check, Trash2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -24,6 +24,7 @@ interface SpecForgePreviewProps {
   isRegenerating?: boolean;
   onNavigate?: (panel: PanelId) => void;
   onNavigateToRun?: (runId: number) => void;
+  onReset?: () => void;
 }
 
 export default function SpecForgePreview({
@@ -34,12 +35,17 @@ export default function SpecForgePreview({
   isRegenerating,
   onNavigate,
   onNavigateToRun,
+  onReset,
 }: SpecForgePreviewProps) {
   const { show } = useGlobalToast();
   const { workspaces } = useWorkspace();
   const [approving, setApproving] = useState(false);
-  const [approved, setApproved] = useState(false);
   const [expandedStories, setExpandedStories] = useState<Set<string>>(new Set());
+
+  // Editable spec name
+  const [editingName, setEditingName] = useState(false);
+  const [editedName, setEditedName] = useState(spec.specName);
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   // Trigger run modal state
   const [showTriggerModal, setShowTriggerModal] = useState(false);
@@ -47,13 +53,60 @@ export default function SpecForgePreview({
   const [autoWorktree, setAutoWorktree] = useState(false);
   const [triggering, setTriggering] = useState(false);
 
-  // Excluded stories tracking (local state synced to spec JSON via API)
+  // Reject confirmation
+  const [showRejectConfirm, setShowRejectConfirm] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+
+  // Diagram expand
+  const [showDiagram, setShowDiagram] = useState(false);
+  const mermaidRef = useRef<HTMLDivElement>(null);
+  const [svgContent, setSvgContent] = useState('');
+
+  // "Approve & Run" flow: approve first, then show trigger modal
+  const [approveAndRunMode, setApproveAndRunMode] = useState(false);
+
+  // Excluded stories tracking
   const [excludedIds, setExcludedIds] = useState<Set<string>>(
     () => new Set(spec.stories.filter(s => s.excluded).map(s => s.id))
   );
 
   const excludedCount = excludedIds.size;
   const activeCount = spec.stories.length - excludedCount;
+
+  // Focus name input when editing starts
+  useEffect(() => {
+    if (editingName) nameInputRef.current?.select();
+  }, [editingName]);
+
+  // Render mermaid when diagram is shown
+  const isMermaid = spec.diagramType === 'mermaid-flowchart' || spec.diagramType === 'mermaid-sequence';
+  useEffect(() => {
+    if (!showDiagram || !spec.diagram || !isMermaid) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const mermaid = (await import('mermaid')).default;
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: 'dark',
+          themeVariables: {
+            primaryColor: '#6366f1',
+            primaryTextColor: '#fafafa',
+            primaryBorderColor: '#3f3f46',
+            lineColor: '#a1a1aa',
+            secondaryColor: '#1c1c21',
+            tertiaryColor: '#0f0f11',
+          },
+        });
+        const id = `mermaid-${Date.now()}`;
+        const { svg } = await mermaid.render(id, spec.diagram!);
+        if (!cancelled) setSvgContent(svg);
+      } catch {
+        if (!cancelled) setSvgContent('');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [showDiagram, spec.diagram, isMermaid]);
 
   const toggleStory = useCallback((id: string) => {
     setExpandedStories(prev => {
@@ -66,7 +119,6 @@ export default function SpecForgePreview({
 
   const handleToggleExclude = useCallback(async (storyId: string) => {
     const willExclude = !excludedIds.has(storyId);
-    // Optimistic update
     setExcludedIds(prev => {
       const next = new Set(prev);
       if (willExclude) next.add(storyId);
@@ -80,7 +132,6 @@ export default function SpecForgePreview({
         body: JSON.stringify({ workspaceId, excluded: willExclude }),
       });
     } catch {
-      // Revert on failure
       setExcludedIds(prev => {
         const next = new Set(prev);
         if (willExclude) next.delete(storyId);
@@ -91,8 +142,8 @@ export default function SpecForgePreview({
     }
   }, [excludedIds, spec.specName, workspaceId, show]);
 
-  const handleApprove = async () => {
-    if (approving || approved) return;
+  const handleApprove = async (thenRun: boolean) => {
+    if (approving) return;
     setApproving(true);
     try {
       await apiFetch(`/api/specs/${spec.specName}/approve`, {
@@ -100,13 +151,36 @@ export default function SpecForgePreview({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspaceId }),
       });
-      setApproved(true);
-      show('Spec approved — ready to run', 'success');
+      if (thenRun) {
+        setApproveAndRunMode(true);
+        setTriggerWorkspaceId(workspaceId);
+        setShowTriggerModal(true);
+      } else {
+        show('Spec approved — ready to run from Pipeline', 'success');
+        onReset?.();
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Approval failed';
-      show(message, 'error');
+      show(err instanceof Error ? err.message : 'Approval failed', 'error');
     } finally {
       setApproving(false);
+    }
+  };
+
+  const handleReject = async () => {
+    setRejecting(true);
+    try {
+      await apiFetch(`/api/specs/${spec.specName}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      show('Spec rejected', 'success');
+      onReset?.();
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Rejection failed', 'error');
+    } finally {
+      setRejecting(false);
+      setShowRejectConfirm(false);
     }
   };
 
@@ -128,9 +202,9 @@ export default function SpecForgePreview({
       if (res.conflict) {
         show('A run is already active — use worktree mode or wait for it to finish', 'error');
       } else {
-        show('Pipeline triggered successfully', 'success');
+        show('Spec approved — running now', 'success');
         setShowTriggerModal(false);
-        // Navigate to Run View if we got a runId
+        onReset?.();
         if (res.runId && onNavigateToRun) {
           onNavigateToRun(res.runId);
         } else if (onNavigate) {
@@ -138,29 +212,46 @@ export default function SpecForgePreview({
         }
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to trigger run';
-      show(message, 'error');
+      show(err instanceof Error ? err.message : 'Failed to trigger run', 'error');
     } finally {
       setTriggering(false);
     }
   };
 
+  const handleNameBlur = () => {
+    setEditingName(false);
+    // Name editing is cosmetic for now — the spec is identified by specName from generation
+  };
+
   return (
     <div className="space-y-4">
-      {/* Summary banner */}
-      <div className="flex items-center justify-between px-4 py-3 bg-success/5 border border-success/20 rounded-lg">
-        <div className="flex items-center gap-2">
-          <CheckCircle2 size={16} className="text-success" />
-          <span className="text-sm font-medium text-text">
-            Generated {spec.stories.length} {spec.stories.length === 1 ? 'story' : 'stories'}
-          </span>
+      {/* Spec header: editable name + story count badge */}
+      <div className="flex items-center gap-3">
+        <CheckCircle2 size={16} className="text-success shrink-0" />
+        {editingName ? (
+          <input
+            ref={nameInputRef}
+            value={editedName}
+            onChange={(e) => setEditedName(e.target.value)}
+            onBlur={handleNameBlur}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleNameBlur(); }}
+            className="flex-1 text-sm font-semibold text-text bg-transparent border-b border-accent outline-none py-0.5"
+          />
+        ) : (
+          <button
+            onClick={() => setEditingName(true)}
+            className="flex-1 text-left text-sm font-semibold text-text hover:text-accent transition-colors truncate"
+            title="Click to edit spec name"
+          >
+            {editedName}
+          </button>
+        )}
+        <span className="shrink-0 px-2 py-0.5 text-xs font-semibold rounded-full bg-accent/15 text-accent">
+          {activeCount} {activeCount === 1 ? 'story' : 'stories'}
           {excludedCount > 0 && (
-            <span className="text-xs text-warning font-medium">
-              ({excludedCount} excluded)
-            </span>
+            <span className="text-warning ml-1">({excludedCount} excluded)</span>
           )}
-        </div>
-        <span className="text-xs text-muted font-mono">{spec.specName}</span>
+        </span>
       </div>
 
       {/* Story cards */}
@@ -175,7 +266,6 @@ export default function SpecForgePreview({
                 isExcluded ? 'border-border/50 opacity-50' : 'border-border'
               }`}
             >
-              {/* Card header */}
               <div className="w-full px-3 py-2.5 flex items-start gap-2">
                 <button
                   onClick={() => toggleStory(story.id)}
@@ -198,7 +288,7 @@ export default function SpecForgePreview({
                     {story.title}
                   </div>
                   {story.description && !isExpanded && (
-                    <p className="text-xs text-muted mt-0.5 line-clamp-1">
+                    <p className="text-xs text-muted mt-0.5 line-clamp-2">
                       {story.description}
                     </p>
                   )}
@@ -224,7 +314,6 @@ export default function SpecForgePreview({
                 </button>
               </div>
 
-              {/* Expanded content */}
               {isExpanded && (
                 <div className="px-3 pb-3 pt-0 ml-6 border-t border-border/50">
                   {story.description && (
@@ -259,90 +348,128 @@ export default function SpecForgePreview({
         })}
       </div>
 
-      {/* Action buttons */}
-      <div className="flex items-center gap-3 pt-2">
-        {!approved ? (
-          <>
-            <button
-              onClick={handleApprove}
-              disabled={approving}
-              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded text-sm font-medium transition-colors ${
-                approving
-                  ? 'bg-accent/30 text-white/40 cursor-not-allowed'
-                  : 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
-              }`}
-            >
-              {approving && <Loader2 size={14} className="animate-spin" />}
-              {approving ? 'Approving...' : 'Approve & Queue'}
-            </button>
+      {/* View diagram link */}
+      {spec.diagram && (
+        <div>
+          <button
+            onClick={() => setShowDiagram(v => !v)}
+            className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover transition-colors"
+          >
+            {showDiagram ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            {showDiagram ? 'Hide diagram' : 'View diagram'}
+          </button>
+          {showDiagram && (
+            <div className="mt-2 border border-border rounded bg-panel p-4 overflow-x-auto">
+              {isMermaid && svgContent ? (
+                <div ref={mermaidRef} dangerouslySetInnerHTML={{ __html: svgContent }} />
+              ) : (
+                <pre className="text-xs font-mono text-text whitespace-pre">
+                  {spec.diagram}
+                </pre>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
-            <button
-              onClick={onRegenerate}
-              disabled={isRegenerating}
-              className="flex items-center gap-1.5 px-4 py-2.5 rounded text-sm font-medium text-muted hover:text-text border border-border hover:border-border-hover transition-colors disabled:opacity-50"
-            >
-              <RefreshCw size={14} className={isRegenerating ? 'animate-spin' : ''} />
-              Regenerate
-            </button>
-
-            <button
-              onClick={onEditBrief}
-              className="flex items-center gap-1.5 px-4 py-2.5 rounded text-sm font-medium text-muted hover:text-text border border-border hover:border-border-hover transition-colors"
-            >
-              <PenLine size={14} />
-              Edit Brief
-            </button>
-          </>
-        ) : (
-          <>
-            <button
-              onClick={() => {
-                setTriggerWorkspaceId(workspaceId);
-                setShowTriggerModal(true);
-              }}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded text-sm font-medium bg-accent text-white hover:bg-accent-hover cursor-pointer transition-colors"
-            >
+      {/* Action bar */}
+      <div className="flex items-center gap-3 pt-2 border-t border-border">
+        {/* Approve & Run — primary */}
+        <button
+          onClick={() => handleApprove(true)}
+          disabled={approving}
+          className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+            approving
+              ? 'bg-accent/30 text-white/40 cursor-not-allowed'
+              : 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
+          }`}
+        >
+          {approving && approveAndRunMode ? (
+            <>
+              <Loader2 size={14} className="animate-spin" />
+              Approving...
+            </>
+          ) : (
+            <>
               <Play size={14} />
-              Trigger Run
-            </button>
+              Approve & Run
+            </>
+          )}
+        </button>
 
-            {onNavigate && (
-              <button
-                onClick={() => onNavigate('queue')}
-                className="flex items-center gap-1.5 px-4 py-2.5 rounded text-sm font-medium text-muted hover:text-text border border-border hover:border-border-hover transition-colors"
-              >
-                <ExternalLink size={14} />
-                View in Queue
-              </button>
-            )}
-          </>
+        {/* Approve — secondary */}
+        <button
+          onClick={() => handleApprove(false)}
+          disabled={approving}
+          className={`px-4 py-2.5 rounded-lg text-sm font-medium border transition-colors ${
+            approving
+              ? 'border-border/50 text-muted/40 cursor-not-allowed'
+              : 'border-border text-text hover:bg-accent/10 hover:border-accent/30 cursor-pointer'
+          }`}
+        >
+          {approving && !approveAndRunMode ? (
+            <span className="flex items-center gap-1.5">
+              <Loader2 size={14} className="animate-spin" />
+              Approving...
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5">
+              <Check size={14} />
+              Approve
+            </span>
+          )}
+        </button>
+
+        {/* Reject — tertiary, text-only, red */}
+        {showRejectConfirm ? (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleReject}
+              disabled={rejecting}
+              className="flex items-center gap-1 px-3 py-2.5 text-sm font-medium text-red-400 hover:text-red-300 transition-colors"
+            >
+              {rejecting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+              Confirm
+            </button>
+            <button
+              onClick={() => setShowRejectConfirm(false)}
+              className="text-xs text-muted hover:text-text transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setShowRejectConfirm(true)}
+            className="flex items-center gap-1 px-3 py-2.5 text-sm font-medium text-red-400/60 hover:text-red-400 transition-colors"
+          >
+            <Trash2 size={14} />
+            Reject
+          </button>
         )}
       </div>
 
-      {/* Trigger Run Modal */}
+      {/* Trigger Run Modal (shown after Approve & Run succeeds) */}
       {showTriggerModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowTriggerModal(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => { setShowTriggerModal(false); setApproveAndRunMode(false); }}>
           <div
             className="bg-bg border border-border rounded-lg shadow-xl w-full max-w-md mx-4"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Modal header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-border">
               <div>
-                <h3 className="text-sm font-semibold text-text">Trigger Pipeline Run</h3>
+                <h3 className="text-sm font-semibold text-text">Run Pipeline</h3>
                 <p className="text-xs text-muted mt-0.5 font-mono">{spec.specName}</p>
               </div>
               <button
-                onClick={() => setShowTriggerModal(false)}
+                onClick={() => { setShowTriggerModal(false); setApproveAndRunMode(false); }}
                 className="p-1 text-muted hover:text-text rounded transition-colors"
               >
                 <X size={16} />
               </button>
             </div>
 
-            {/* Modal body */}
             <div className="px-5 py-4 space-y-4">
-              {/* Workspace selector */}
               <div>
                 <label className="block text-xs font-medium text-muted mb-1.5">Workspace</label>
                 <select
@@ -358,7 +485,6 @@ export default function SpecForgePreview({
                 </select>
               </div>
 
-              {/* Auto-worktree toggle */}
               <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -377,7 +503,6 @@ export default function SpecForgePreview({
                 </div>
               </label>
 
-              {/* Spec summary */}
               <div className="px-3 py-2 bg-panel/50 border border-border/50 rounded text-xs text-muted">
                 {activeCount} {activeCount === 1 ? 'story' : 'stories'} will be executed sequentially
                 {excludedCount > 0 && (
@@ -386,10 +511,9 @@ export default function SpecForgePreview({
               </div>
             </div>
 
-            {/* Modal footer */}
             <div className="flex items-center justify-end gap-3 px-5 py-4 border-t border-border">
               <button
-                onClick={() => setShowTriggerModal(false)}
+                onClick={() => { setShowTriggerModal(false); setApproveAndRunMode(false); }}
                 className="px-4 py-2 text-sm font-medium text-muted hover:text-text rounded border border-border hover:border-border-hover transition-colors"
               >
                 Cancel
