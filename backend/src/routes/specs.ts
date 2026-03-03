@@ -5,7 +5,7 @@ import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
 import { db } from '../db/index';
-import { synthesize } from '../lib/direction-stack';
+import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
 import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
@@ -611,7 +611,7 @@ router.post('/generate', async (req: Request, res: Response) => {
     const gitMemory = ctx?.git_memory || undefined;
 
     // 6. Synthesize direction stack
-    const synthesized = synthesize({
+    const synthResult = synthesizeWithMeta({
       l1: l1Row?.content_yaml,
       l2: l2Row?.content_yaml,
       l3: l3Row?.content_yaml,
@@ -620,6 +620,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       specBrief: brief,
       storyAnnotations,
     });
+    const synthesized = synthResult.text;
 
     // 6b. Fetch template if templateId provided
     let templateContext = '';
@@ -1599,7 +1600,16 @@ router.post('/generate', async (req: Request, res: Response) => {
       fs.unlinkSync(existingApproved);
     }
 
-    // 14. Write spec to workspace directory
+    // 14. Build contextUsed payload
+    const contextUsed = {
+      text: synthesized,
+      meta: {
+        ...synthResult.meta,
+        scopesMatched: [] as string[],
+      },
+    };
+
+    // 15. Write spec to workspace directory
     let specPath: string;
     let diagramsPath: string;
     try {
@@ -1610,6 +1620,7 @@ router.post('/generate', async (req: Request, res: Response) => {
         diagrams: allDiagrams as any,
         mermaidDiagram: mermaidDiagram || undefined,
         model: resolvedModel,
+        contextUsed,
       });
       specPath = writeResult.specPath;
       diagramsPath = writeResult.diagramsPath;
@@ -1618,7 +1629,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       return;
     }
 
-    // 15. Return response
+    // 16. Return response
     res.json({
       slug,
       title: effectiveTitle,
@@ -1630,6 +1641,7 @@ router.post('/generate', async (req: Request, res: Response) => {
       usage: tokenUsage,
       specPath,
       diagramsPath,
+      contextUsed,
       ...(multiPass ? {
         multiPass: true,
         passCount: 6,

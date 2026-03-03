@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T05:40:18.613Z",
+  "lastUpdatedAt": "2026-03-03T05:52:23.447Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -102,6 +102,15 @@
       "finishedAt": "2026-03-03T05:40:18.612Z",
       "agentType": "claude",
       "elapsedMs": 398989
+    },
+    {
+      "storyId": "UX-012",
+      "title": "Fix Context Used — Show What Was Injected",
+      "status": "passed",
+      "startedAt": "2026-03-03T05:41:03.331Z",
+      "finishedAt": "2026-03-03T05:52:23.447Z",
+      "agentType": "claude",
+      "elapsedMs": 680116
     }
   ],
   "failedStories": [],
