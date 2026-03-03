@@ -115,13 +115,13 @@ export default function WorkspaceSettingsPanel() {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-          {activeTab === 'general'   && <GeneralSection workspaceId={workspaceId} showToast={showToast} />}
-          {activeTab === 'direction' && <DirectionSection workspaceId={workspaceId} showToast={showToast} />}
-          {activeTab === 'context'   && <ContextSection workspaceId={workspaceId} showToast={showToast} />}
-          {activeTab === 'github'    && <GithubSection workspaceId={workspaceId} showToast={showToast} />}
-          {activeTab === 'env-vars'  && <EnvVarsSection workspaceId={workspaceId} showToast={showToast} />}
-          {activeTab === 'pipeline'  && <PipelineSection workspaceId={workspaceId} showToast={showToast} />}
-          {activeTab === 'hooks'     && <HooksSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'general'   && <WsGeneralSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'direction' && <WsDirectionSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'context'   && <WsContextSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'github'    && <WsGithubSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'env-vars'  && <WsEnvVarsSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'pipeline'  && <WsPipelineSection workspaceId={workspaceId} showToast={showToast} />}
+          {activeTab === 'hooks'     && <WsHooksSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'agents'    && <AgentsEditorSection workspaceId={workspaceId} showToast={showToast} />}
         </div>
       </div>
@@ -133,14 +133,14 @@ export default function WorkspaceSettingsPanel() {
 
 // ─── Section Props ───────────────────────────────────────────────────────────
 
-interface SectionProps {
+export interface WsSectionProps {
   workspaceId: string;
   showToast: (message: string, type?: 'success' | 'error') => void;
 }
 
 // ─── Context Section (sub-tabs: Routing | Files) ────────────────────────────
 
-function ContextSection({ workspaceId, showToast }: SectionProps) {
+export function WsContextSection({ workspaceId, showToast }: WsSectionProps) {
   const [subTab, setSubTab] = useState<'routing' | 'files' | 'skills'>('skills');
 
   return (
@@ -191,7 +191,7 @@ function ContextSection({ workspaceId, showToast }: SectionProps) {
 
 // ─── General Section ─────────────────────────────────────────────────────────
 
-function GeneralSection({ workspaceId, showToast }: SectionProps) {
+export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
   const { refreshWorkspaces } = useWorkspace();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -368,7 +368,7 @@ function GeneralSection({ workspaceId, showToast }: SectionProps) {
 
 // ─── Direction Section ──────────────────────────────────────────────────────
 
-function DirectionSection({ workspaceId, showToast }: SectionProps) {
+export function WsDirectionSection({ workspaceId, showToast }: WsSectionProps) {
   const [loading, setLoading] = useState(true);
   const [layers, setLayers] = useState<DirectionLayers | null>(null);
   const [activeLayer, setActiveLayer] = useState<1 | 2 | 3>(3);
@@ -499,7 +499,7 @@ function DirectionSection({ workspaceId, showToast }: SectionProps) {
 
 // ─── GitHub Section ──────────────────────────────────────────────────────────
 
-function GithubSection({ workspaceId, showToast }: SectionProps) {
+export function WsGithubSection({ workspaceId, showToast }: WsSectionProps) {
   const [status, setStatus] = useState<GithubStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [prTemplate, setPrTemplate] = useState('');
@@ -602,7 +602,7 @@ interface EnvVar {
   isSecret: boolean;
 }
 
-function EnvVarsSection({ workspaceId, showToast }: SectionProps) {
+export function WsEnvVarsSection({ workspaceId, showToast }: WsSectionProps) {
   const [vars, setVars] = useState<EnvVar[]>([]);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
@@ -727,7 +727,7 @@ function EnvVarsSection({ workspaceId, showToast }: SectionProps) {
 
 // ─── Pipeline Section ────────────────────────────────────────────────────────
 
-function PipelineSection({ workspaceId, showToast }: SectionProps) {
+export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -852,7 +852,7 @@ const HOOK_EVENTS = [
   { value: 'on_story_fail',  label: 'Story Failed' },
 ];
 
-function HooksSection({ workspaceId, showToast }: SectionProps) {
+export function WsHooksSection({ workspaceId, showToast }: WsSectionProps) {
   const [hooks, setHooks] = useState<AgentHook[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
