@@ -3,7 +3,8 @@
 Spec: rorca-ux-overhaul
 Run ID: 894
 Started: 2026-03-03T04:02:26.202Z
-Last Updated: 2026-03-03T04:10:29.790Z
+Last Updated: 2026-03-03T04:19:36.833Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - UX-001: Workspace Bootstrap Orchestrator — DONE (claude, 443s)
+- UX-002: First-Run Workspace Wizard — DONE (claude, 499s)
