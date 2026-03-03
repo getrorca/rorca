@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T06:01:46.137Z",
+  "lastUpdatedAt": "2026-03-03T06:07:26.388Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -120,6 +120,15 @@
       "finishedAt": "2026-03-03T06:01:46.137Z",
       "agentType": "claude",
       "elapsedMs": 517278
+    },
+    {
+      "storyId": "UX-014",
+      "title": "Eliminate Navigation Redundancies",
+      "status": "passed",
+      "startedAt": "2026-03-03T06:02:31.645Z",
+      "finishedAt": "2026-03-03T06:07:26.387Z",
+      "agentType": "claude",
+      "elapsedMs": 294742
     }
   ],
   "failedStories": [],

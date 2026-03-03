@@ -2,9 +2,9 @@ import { useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Activity, Archive, Settings,
-  Plus, Search, LayoutDashboard,
+  Search, LayoutDashboard,
   GitBranch, ArrowLeftRight,
-  Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
+  Github, Rss, Users, Coins, DollarSign, Zap, TrendingUp,
   BarChart3, HeartPulse, ScrollText, Calculator, BookOpen,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
@@ -27,9 +27,10 @@ interface NavSection {
   items: NavItem[];
 }
 
-// ─── Sidebar top-level items (5 flat links) ──────────────────────────────────
+// ─── Sidebar top-level items (6 flat links, each a unique destination) ───────
 
 const SIDEBAR_ITEMS: NavItem[] = [
+  { id: 'hub', label: 'Overview', icon: LayoutDashboard },
   { id: 'forge', label: 'Forge', icon: Wand2 },
   { id: 'pipeline', label: 'Runs', icon: Activity },
   { id: 'archive', label: 'Archive', icon: Archive },
@@ -37,9 +38,9 @@ const SIDEBAR_ITEMS: NavItem[] = [
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
-// ─── Full panel list for CommandPalette and deep-linking ─────────────────────
-// Kept as NAV_SECTIONS so CommandPalette can still reach every panel by name.
-
+// Full panel list for CommandPalette deep-linking — kept so ⌘K can reach every panel.
+// Each PanelId appears exactly ONCE. Sidebar items are the primary navigation;
+// items here that aren't in SIDEBAR_ITEMS are only reachable via Command Palette.
 export const NAV_SECTIONS: NavSection[] = [
   {
     id: 'specs',
@@ -47,7 +48,6 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { id: 'forge', label: 'Forge', icon: Wand2 },
       { id: 'archive', label: 'Archive', icon: Archive },
-      { id: 'marketplace', label: 'Templates', icon: LayoutGrid },
     ],
   },
   {
@@ -73,7 +73,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Settings',
     items: [
       { id: 'settings', label: 'Settings', icon: Settings },
-      // Analytics & System accessible via Settings tabs and Command Palette
+      // Analytics & System accessible via Settings sub-tabs and Command Palette
       { id: 'usage', label: 'Token Usage', icon: Coins },
       { id: 'costs', label: 'Cost Breakdown', icon: DollarSign },
       { id: 'models', label: 'Model Comparison', icon: Zap },
@@ -111,7 +111,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose }: Sideb
 
   const sidebarContent = (
     <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
-      {/* Top Section: Workspace & Primary Actions */}
+      {/* Top Section: Workspace & Search */}
       <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
         <WorkspaceSelector />
 
@@ -123,28 +123,9 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose }: Sideb
           <span className="flex-1 text-left truncate">Search...</span>
           <span className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</span>
         </button>
-
-        <NavLink
-          to={PANEL_ROUTES.hub}
-          onClick={(e) => { e.preventDefault(); onNavigate('hub'); onMobileClose?.(); }}
-          className={({ isActive }) => `flex items-center gap-2 px-2 py-1 rounded text-[13px] transition-colors ${isActive ? 'text-[var(--text)] bg-surface-200 font-medium' : 'text-muted hover:text-[var(--text)] hover:bg-surface-100'}`}
-        >
-          <LayoutDashboard size={14} className="shrink-0 text-muted/70" />
-          <span className="truncate">Overview</span>
-        </NavLink>
-
-        <NavLink
-          to={PANEL_ROUTES.forge}
-          onClick={(e) => { e.preventDefault(); onNavigate('forge'); }}
-          className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-accent hover:bg-accent/10 transition-colors focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-accent"
-        >
-          <Plus size={14} className="shrink-0" />
-          <span className="font-medium truncate">New Spec</span>
-          <span className="ml-auto text-[10px] font-mono text-accent/50 border border-accent/20 rounded px-1 shrink-0">C</span>
-        </NavLink>
       </div>
 
-      {/* Main Navigation — 5 flat items */}
+      {/* Main Navigation */}
       <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0">
         <div className="space-y-[1px]">
           {SIDEBAR_ITEMS.map((item) => {
@@ -153,6 +134,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose }: Sideb
               <NavLink
                 key={item.id}
                 to={PANEL_ROUTES[item.id]}
+                end={item.id === 'hub'}
                 onClick={(e) => {
                   e.preventDefault();
                   onNavigate(item.id);
