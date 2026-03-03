@@ -196,6 +196,7 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [original, setOriginal] = useState<WorkspaceDetail | null>(null);
   const [label, setLabel] = useState('');
@@ -284,16 +285,6 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
         <h2 className="text-sm font-semibold text-[var(--text)] mb-4">General</h2>
         <div className="space-y-4">
           <div>
-            <label className="block text-xs text-muted mb-1">Workspace ID</label>
-            <input
-              type="text"
-              value={workspaceId}
-              disabled
-              className="w-full px-3 py-2 text-sm bg-bg border border-border rounded opacity-60 cursor-not-allowed font-mono"
-            />
-          </div>
-
-          <div>
             <label className="block text-xs text-muted mb-1">Label</label>
             <input
               type="text"
@@ -321,11 +312,11 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
                 <FolderOpen size={16} />
               </button>
             </div>
-            <p className="text-xs text-muted mt-1">Absolute path to the project workspace. Must exist on filesystem.</p>
+            <p className="text-xs text-muted mt-1">Where this project lives on your computer</p>
           </div>
 
           <div>
-            <label className="block text-xs text-muted mb-1">Domains</label>
+            <label className="block text-xs text-muted mb-1">Project Type</label>
             <input
               type="text"
               value={domains}
@@ -333,7 +324,7 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
               placeholder="saas, fintech"
               className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
             />
-            <p className="text-xs text-muted mt-1">Comma-separated domain tags for Conventions direction matching</p>
+            <p className="text-xs text-muted mt-1">What kind of project is this? (e.g., saas, marketing-site, api, cli)</p>
           </div>
 
           <div>
@@ -347,7 +338,7 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
                 <option key={m.id} value={m.id}>{m.label}</option>
               ))}
             </select>
-            <p className="text-xs text-muted mt-1">Default LLM model for spec generation in this workspace</p>
+            <p className="text-xs text-muted mt-1">Model used when generating specs for this workspace</p>
           </div>
 
           {error && <p className="text-xs text-red-500">{error}</p>}
@@ -360,6 +351,28 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
             {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
             {saved ? 'Saved' : 'Save General'}
           </button>
+
+          {/* Advanced toggle with Workspace ID */}
+          <div className="pt-2 border-t border-border mt-2">
+            <button
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="text-xs text-muted hover:text-[var(--text)] transition-colors"
+            >
+              {showAdvanced ? 'Hide' : 'Show'} Advanced
+            </button>
+            {showAdvanced && (
+              <div className="mt-3">
+                <label className="block text-xs text-muted mb-1">Workspace ID</label>
+                <input
+                  type="text"
+                  value={workspaceId}
+                  disabled
+                  className="w-full px-3 py-2 text-sm bg-bg border border-border rounded opacity-60 cursor-not-allowed font-mono"
+                />
+                <p className="text-xs text-muted mt-1">Auto-generated identifier. Used in API calls and file paths.</p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -450,14 +463,14 @@ export function WsDirectionSection({ workspaceId, showToast }: WsSectionProps) {
         </div>
         <p className="text-[11px] text-muted mt-1">
           {activePack
-            ? 'Pack provides base direction layers (lowest priority, overridable by your layers).'
+            ? 'Pack provides default conventions for your project. Your own settings always take priority.'
             : 'Install a pack from Marketplace to add base conventions.'}
         </p>
       </div>
 
       <div>
         <h2 className="text-sm font-semibold text-[var(--text)] mb-2">Direction</h2>
-        <p className="text-xs text-muted">Edit the context cascade. Standards are global, Conventions are domain-scoped, Project is workspace-specific. Project beats Conventions beats Standards.</p>
+        <p className="text-xs text-muted">Customize the instructions given to the AI when working on this project. Project-specific settings take priority over general ones.</p>
       </div>
 
       <div className="flex gap-2">
