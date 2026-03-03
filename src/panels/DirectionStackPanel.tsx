@@ -22,26 +22,29 @@ type LayerTab = 1 | 2 | 3;
 type ViewMode = 'simple' | 'advanced';
 
 const LAYER_LABELS: Record<LayerTab, string> = {
-  1: 'L1 Global Brain',
-  2: 'L2 Domain Profile',
-  3: 'L3 Project Brief',
+  1: 'Standards',
+  2: 'Conventions',
+  3: 'Project',
 };
 
-const SIMPLE_LABELS: Record<LayerTab, { title: string; description: string; placeholder: string }> = {
+const SIMPLE_LABELS: Record<LayerTab, { title: string; description: string; placeholder: string; tooltip: string }> = {
   1: {
-    title: 'Global Standards',
+    title: 'Standards',
     description: 'Engineering principles, coding style, and preferences that apply to all projects.',
     placeholder: 'e.g. "Always use TypeScript strict mode. Prefer functional components. Use Tailwind for styling. Never use var — always const/let."',
+    tooltip: 'How you build software — engineering principles that apply to all projects',
   },
   2: {
-    title: 'Domain Knowledge',
+    title: 'Conventions',
     description: 'Industry concepts, business rules, and domain-specific patterns for this workspace.',
     placeholder: 'e.g. "This is a fintech product. Follow PCI-DSS compliance for payment data. Use cents (integers) for all monetary values, never floats."',
+    tooltip: 'Patterns for this type of project — framework and domain conventions',
   },
   3: {
-    title: 'Project Context',
+    title: 'Project',
     description: 'What this specific project is, its tech stack, architecture, and key constraints.',
     placeholder: 'e.g. "A React + Express web app for managing customer invoices. Uses PostgreSQL, deployed on Vercel. Key modules: auth, invoicing, reporting, notifications."',
+    tooltip: 'What makes this project unique — its stack, architecture, and constraints',
   },
 };
 
@@ -194,7 +197,7 @@ export default function DirectionStackPanel() {
   if (!workspaceId) {
     return (
       <div className="flex items-center justify-center h-full text-muted">
-        Select a workspace to view the direction stack.
+        Select a workspace to view direction.
       </div>
     );
   }
@@ -290,7 +293,7 @@ export default function DirectionStackPanel() {
           <div className="flex items-center justify-between px-3 py-2.5 bg-accent/5 border-b border-accent/20">
             <div className="text-xs text-text">
               <span className="mr-1">&#10022;</span>
-              This workspace has no context yet. Answer a few questions and AI will set up your Direction Stack.
+              This workspace has no context yet. Answer a few questions and AI will set up your direction.
             </div>
             <div className="flex items-center gap-2 ml-3 shrink-0">
               <button
@@ -327,7 +330,7 @@ export default function DirectionStackPanel() {
                   {scanResult.filesScanned.join(', ')} | {scanResult.dirCount} dirs | confidence: {scanResult.confidence}
                 </span>
                 {!scanResult.l3Valid && scanResult.l3Errors.length > 0 && (
-                  <span className="text-warning ml-2">L3 has validation issues</span>
+                  <span className="text-warning ml-2">Project layer has validation issues</span>
                 )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -418,6 +421,10 @@ export default function DirectionStackPanel() {
                 </div>
               );
             })}
+            {/* Cascade rule */}
+            <div className="px-4 py-2 text-[11px] text-muted/70">
+              Project beats Conventions beats Standards
+            </div>
           </div>
         ) : (
           /* Advanced view: YAML editor for active tab */
@@ -431,31 +438,31 @@ export default function DirectionStackPanel() {
         )}
       </div>
 
-      {/* Column 2: L4 Spec Brief + L5 Story Annotations (ephemeral) */}
+      {/* Column 2: Spec Brief + Story Annotations (auto-populated at runtime) */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         <div className="flex-1 flex flex-col border-b border-border">
           <label className="px-3 py-2 text-xs font-medium text-muted border-b border-border flex items-center gap-1">
-            Spec Brief (L4)
+            Spec Brief
             <HelpTooltip helpKey="direction-stack-l4" size={11} />
           </label>
           <textarea
             value={l4}
             onChange={(e) => setL4(e.target.value)}
             className="flex-1 w-full p-3 font-mono text-sm bg-bg text-text border-none outline-none resize-none"
-            placeholder="Paste the spec brief here. This ephemeral layer feeds into the synthesized output but is not saved."
+            placeholder="Paste the spec brief here. This is auto-populated from your spec and feeds into the synthesized output."
             spellCheck={false}
           />
         </div>
         <div className="flex-1 flex flex-col">
           <label className="px-3 py-2 text-xs font-medium text-muted border-b border-border flex items-center gap-1">
-            Story Annotations (L5)
+            Story Annotations
             <HelpTooltip helpKey="direction-stack-l5" size={11} />
           </label>
           <textarea
             value={l5}
             onChange={(e) => setL5(e.target.value)}
             className="flex-1 w-full p-3 font-mono text-sm bg-bg text-text border-none outline-none resize-none"
-            placeholder="Per-story overrides and annotations. Ephemeral — not saved."
+            placeholder="Per-story overrides and annotations. Auto-populated at runtime."
             spellCheck={false}
           />
         </div>

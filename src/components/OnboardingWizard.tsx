@@ -118,7 +118,7 @@ key_modules:
 
 const SAMPLE_BRIEF = `Add a user profile page that displays the user's name, email, and avatar. Include an edit form that allows updating name and avatar. The page should be responsive and follow existing design patterns.`;
 
-const STEPS = ['Welcome', 'Connect Repository', 'Direction Stack', 'First Spec'];
+const STEPS = ['Welcome', 'Connect Repository', 'Direction', 'First Spec'];
 
 export default function OnboardingWizard() {
   const { addWorkspace } = useWorkspace();
@@ -361,7 +361,7 @@ export default function OnboardingWizard() {
               </p>
               <div className="text-left bg-bg rounded-lg p-4 my-6 text-sm space-y-2">
                 <p><span className="text-accent font-medium">1.</span> Connect a git repository as your workspace</p>
-                <p><span className="text-accent font-medium">2.</span> Configure your direction stack (coding standards + project context)</p>
+                <p><span className="text-accent font-medium">2.</span> Configure your direction (coding standards + project context)</p>
                 <p><span className="text-accent font-medium">3.</span> Generate your first spec and see the full flow</p>
               </div>
               <button
@@ -445,12 +445,12 @@ export default function OnboardingWizard() {
             </div>
           )}
 
-          {/* Step 2: Direction Stack */}
+          {/* Step 2: Direction */}
           {step === 2 && (
             <div>
-              <h2 className="text-xl font-semibold mb-1">Configure Direction Stack</h2>
+              <h2 className="text-xl font-semibold mb-1">Configure Direction</h2>
               <p className="text-muted text-sm mb-4">
-                The direction stack guides AI spec generation. Pick a template that matches your project, then customize.
+                Direction guides AI spec generation. Pick a template that matches your project, then customize.
               </p>
 
               {/* Scan Repo button */}
@@ -506,9 +506,9 @@ export default function OnboardingWizard() {
                 </div>
               </div>
 
-              {/* L1: Global Standards */}
+              {/* Standards */}
               <div className="mb-4">
-                <label className="block text-sm font-medium mb-1">L1 — Global Standards</label>
+                <label className="block text-sm font-medium mb-1">Standards</label>
                 <textarea
                   value={l1Content}
                   onChange={(e) => { setL1Content(e.target.value); setDirSaved(false); }}
@@ -517,10 +517,10 @@ export default function OnboardingWizard() {
                 />
               </div>
 
-              {/* L2: Domain Profile (shown when populated from scan) */}
+              {/* Conventions (shown when populated from scan) */}
               {l2Content.trim() && (
                 <div className="mb-4">
-                  <label className="block text-sm font-medium mb-1">L2 — Domain Profile</label>
+                  <label className="block text-sm font-medium mb-1">Conventions</label>
                   <textarea
                     value={l2Content}
                     onChange={(e) => { setL2Content(e.target.value); setDirSaved(false); }}
@@ -530,9 +530,9 @@ export default function OnboardingWizard() {
                 </div>
               )}
 
-              {/* L3: Project Context */}
+              {/* Project */}
               <div className="mb-4">
-                <label className="block text-sm font-medium mb-1">L3 — Project Context</label>
+                <label className="block text-sm font-medium mb-1">Project</label>
                 <textarea
                   value={l3Content}
                   onChange={(e) => { setL3Content(e.target.value); setDirSaved(false); }}

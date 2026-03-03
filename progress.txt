@@ -3,10 +3,11 @@
 Spec: rorca-ux-overhaul
 Run ID: 894
 Started: 2026-03-03T04:02:26.202Z
-Last Updated: 2026-03-03T04:36:45.010Z
+Last Updated: 2026-03-03T04:48:37.113Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - UX-001: Workspace Bootstrap Orchestrator — DONE (claude, 443s)
 - UX-002: First-Run Workspace Wizard — DONE (claude, 499s)
 - UX-003: Forge Redesign — Brief-First Minimal — DONE (claude, 402s)
 - UX-004: Forge Redesign — Post-Generate Flow — DONE (claude, 536s)
+- UX-005: Kill L1-L5 Naming Everywhere — DONE (claude, 668s)

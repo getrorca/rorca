@@ -398,9 +398,9 @@ export default function WorkspaceWizard({
                   </p>
                   {(['standards', 'conventions', 'project'] as const).map((key) => {
                     const labels = {
-                      standards: 'L1 — Standards',
-                      conventions: 'L2 — Conventions',
-                      project: 'L3 — Project',
+                      standards: 'Standards',
+                      conventions: 'Conventions',
+                      project: 'Project',
                     };
                     const content = result.direction[key];
                     if (!content) return null;
