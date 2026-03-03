@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T06:07:26.388Z",
+  "lastUpdatedAt": "2026-03-03T06:12:46.977Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -129,6 +129,15 @@
       "finishedAt": "2026-03-03T06:07:26.387Z",
       "agentType": "claude",
       "elapsedMs": 294742
+    },
+    {
+      "storyId": "UX-015",
+      "title": "Kill Jargon in Workspace Settings Fields",
+      "status": "passed",
+      "startedAt": "2026-03-03T06:08:12.987Z",
+      "finishedAt": "2026-03-03T06:12:46.977Z",
+      "agentType": "claude",
+      "elapsedMs": 273990
     }
   ],
   "failedStories": [],
