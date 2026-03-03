@@ -422,7 +422,7 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
 
   return (
     <button
-      onClick={() => onNavigateToSpecReview ? onNavigateToSpecReview(spec.id) : onNavigate('queue')}
+      onClick={() => onNavigateToSpecReview ? onNavigateToSpecReview(spec.id) : onNavigate('forge')}
       className="w-full text-left py-4 hover:bg-surface-200 transition-colors group flex flex-col gap-2 px-2"
     >
       {/* Title + chevron */}

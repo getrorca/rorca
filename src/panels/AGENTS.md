@@ -7,7 +7,7 @@ All 7 panel components live here. Each panel is a full-height React component re
 |------|-------|-----------|
 | `SpecForgePanelPage.tsx` | Spec Forge | brief, title, model, generating state |
 | `DirectionStackPanel.tsx` | Direction Stack | layers (L1–L3), hydration state |
-| `ReviewQueuePanel.tsx` | Review Queue | pending specs list, approve/reject state |
+| *(deleted — UX-007)* | Review Queue merged into Forge | pending specs now inline in SpecForgePanelPage |
 | `PipelineMonitorPanel.tsx` | Pipeline Monitor | runs list, selectedRunId, detailTab, SSE events |
 | `WorktreesPanel.tsx` | Worktrees | worktrees list, selectedWorktree, mergeState |
 | `ArchivePanel.tsx` | Archive | specs list, selectedId, search, addState, runState |
@@ -50,5 +50,5 @@ The `spec.id` field is derived from `fileName.replace('.json', '')` in the backe
 - 409 response = merge conflict; surface inline with the error message
 - After successful merge: `mergeState: 'done'` green banner; worktree still exists (user must delete manually)
 
-### ReviewQueuePanel — Model Badge
-Shows the `model` field from the spec JSON. Added in US-003 — older specs generated before this feature won't have the field.
+### Forge — Pending Specs (UX-007)
+ReviewQueuePanel was deleted. Pending specs now show inline in SpecForgePanelPage. The `queue` PanelId still works (redirects to `/forge` with `showPending` prop). Shared review components live in `src/components/SpecReviewInline.tsx`.
