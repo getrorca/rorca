@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T05:23:37.525Z",
+  "lastUpdatedAt": "2026-03-03T05:32:52.937Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -84,6 +84,15 @@
       "finishedAt": "2026-03-03T05:23:37.524Z",
       "agentType": "claude",
       "elapsedMs": 193681
+    },
+    {
+      "storyId": "UX-010",
+      "title": "Auto-Bootstrap on Workspace Add",
+      "status": "passed",
+      "startedAt": "2026-03-03T05:24:23.178Z",
+      "finishedAt": "2026-03-03T05:32:52.937Z",
+      "agentType": "claude",
+      "elapsedMs": 509759
     }
   ],
   "failedStories": [],

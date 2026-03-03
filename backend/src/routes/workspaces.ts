@@ -155,7 +155,8 @@ router.post('/', (req, res) => {
     // Non-fatal — workspace still registers even if echolocation fails
   }
 
-  res.status(201).json({ workspace: parseWorkspace(row), health });
+  const needsBootstrap = (health?.score ?? 0) < 40;
+  res.status(201).json({ workspace: parseWorkspace(row), health, needsBootstrap });
 });
 
 // GET /api/workspaces

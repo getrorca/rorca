@@ -1211,6 +1211,15 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     if (wizardChecked.current) return;
     wizardChecked.current = true;
 
+    // Check if this workspace was just created with needsBootstrap (from WorkspaceSelector)
+    const bootstrapKey = `rorca_needs_bootstrap_${workspaceId}`;
+    if (sessionStorage.getItem(bootstrapKey)) {
+      sessionStorage.removeItem(bootstrapKey);
+      setHealthScore(0);
+      setShowWizard(true);
+      return;
+    }
+
     // Check localStorage for wizard dismissal/completion
     const dismissKey = `rorca_wizard_dismissed_${workspaceId}`;
     const completeKey = `rorca_wizard_completed_${workspaceId}`;
@@ -1260,6 +1269,13 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     }
   }, [workspaceId]);
 
+  // ── Listen for external "open wizard" event (from bootstrap banner) ──
+  useEffect(() => {
+    const handler = () => setShowWizard(true);
+    window.addEventListener('rorca:open-wizard', handler);
+    return () => window.removeEventListener('rorca:open-wizard', handler);
+  }, []);
+
   // ── Empty state: No workspace registered ──
   if (workspaces.length === 0) {
     return (
@@ -1285,6 +1301,10 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
             onSuccess={(ws) => {
               addWorkspace(ws);
               setShowAddWorkspace(false);
+              if (ws.needsBootstrap) {
+                setShowWizard(true);
+                setHealthScore(0);
+              }
             }}
           />
         )}
@@ -1329,28 +1349,42 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
         <ToastContainer toasts={completionToasts} onDismiss={dismissCompletionToast} position="top-right" />
 
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8">
-          {/* Dismissed wizard banner — persistent until workspace is setup */}
-          {wizardDismissed && !wizardCompleted && healthScore !== null && healthScore < 40 && (
-            <div className="flex items-center justify-between px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
-              <div className="flex items-center gap-3">
-                <Sparkles size={16} className="text-amber-500 shrink-0" />
-                <p className="text-sm text-[var(--text)]">
-                  Finish setting up your workspace
-                </p>
+          {/* Unconfigured workspace — prominent setup prompt */}
+          {!wizardCompleted && healthScore !== null && healthScore < 40 && !showWizard && (
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-6">
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 rounded-lg bg-amber-500/15 flex items-center justify-center shrink-0">
+                  <Sparkles size={20} className="text-amber-500" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-base font-semibold text-[var(--text)] mb-1">Set up your workspace</h3>
+                  <p className="text-sm text-muted mb-4">
+                    Rorca scans your codebase to build a context profile — stack detection, direction layers, and skill mapping. This makes your specs dramatically more accurate.
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        setShowWizard(true);
+                        setWizardDismissed(false);
+                        if (workspaceId) {
+                          localStorage.removeItem(`rorca_wizard_dismissed_${workspaceId}`);
+                        }
+                      }}
+                      className="px-4 py-2 text-sm font-medium rounded-lg bg-accent text-white hover:bg-accent/90 transition-colors"
+                    >
+                      Run setup wizard
+                    </button>
+                    {!wizardDismissed && (
+                      <button
+                        onClick={handleWizardDismiss}
+                        className="px-4 py-2 text-sm font-medium rounded-lg border border-border text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
+                      >
+                        Skip for now
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
-              <button
-                onClick={() => {
-                  setShowWizard(true);
-                  setWizardDismissed(false);
-                  if (workspaceId) {
-                    localStorage.removeItem(`rorca_wizard_dismissed_${workspaceId}`);
-                  }
-                }}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500/20 text-amber-600 hover:bg-amber-500/30 transition-colors shrink-0"
-              >
-                Resume setup
-                <ChevronRight size={12} />
-              </button>
             </div>
           )}
           {/* Workspace Health */}
