@@ -1,11 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal, Crown, Users, ChevronUp, Download, ExternalLink, FileText, CreditCard } from 'lucide-react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Layers, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal, Crown, Users, ChevronUp, Download, ExternalLink, FileText, CreditCard, BarChart3, Drama } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
 import { useDirectionLayer } from '../hooks/useDirectionLayer';
 import { apiFetch, clearTokens, BASE_URL } from '../lib/apiFetch';
+import { useNavigate } from 'react-router-dom';
 import GitHubSettingsPanel from './GitHubSettingsPanel';
+import UsageDashboardPanel from './UsageDashboardPanel';
+import CostBreakdownPanel from './CostBreakdownPanel';
+import ModelComparisonPanel from './ModelComparisonPanel';
+import VelocityChartPanel from './VelocityChartPanel';
+import CompletionRatePanel from './CompletionRatePanel';
+import RoiCalculatorPanel from './RoiCalculatorPanel';
+import FinOpsDashboardPanel from './FinOpsDashboardPanel';
+import HealthDashboardPanel from './HealthDashboardPanel';
 import { modLabel } from '../hooks/useHotkeys';
 import OpenCodeSetupGuide from '../components/OpenCodeSetupGuide';
 import { useActiveSettingsTab } from '../routes';
@@ -13,7 +22,7 @@ import PersonasSection from '../components/PersonasSection';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account' | 'billing' | 'personas';
+export type SettingsTab = 'direction' | 'providers' | 'github' | 'shortcuts' | 'account' | 'billing' | 'personas' | 'analytics';
 
 interface ProfileData {
   id: string;
@@ -105,9 +114,18 @@ const LAYER_INFO: Record<1 | 2 | 3, { title: string; description: string; placeh
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
+const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof Layers }[] = [
+  { id: 'account', label: 'Account', icon: User },
+  { id: 'providers', label: 'Providers', icon: Zap },
+  { id: 'github', label: 'GitHub', icon: Github },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+  { id: 'billing', label: 'Billing', icon: CreditCard },
+];
+
 export default function SettingsPanel() {
   const { workspaceId } = useWorkspace();
   const activeTab = useActiveSettingsTab();
+  const routerNavigate = useNavigate();
 
   // Direction layer hooks — always call (hooks can't be conditional)
   const l1 = useDirectionLayer(workspaceId, 1, { skipValidation: true });
@@ -115,16 +133,92 @@ export default function SettingsPanel() {
   const l3 = useDirectionLayer(workspaceId, 3, { skipValidation: true });
 
   return (
-    <div className="h-full flex flex-col overflow-y-auto">
-      <div className="flex-1 p-4 sm:p-6 mx-auto w-full max-w-4xl">
-        {activeTab === 'direction' && <DirectionStackSection l1={l1} l2={l2} l3={l3} />}
-        {activeTab === 'providers' && <ProvidersAndDisplaySection />}
-        {activeTab === 'github' && <GitHubSettingsPanel />}
-        {activeTab === 'shortcuts' && <ShortcutsSection />}
-        {activeTab === 'account' && <AccountSection />}
-        {activeTab === 'billing' && <BillingSection />}
-        {activeTab === 'personas' && <PersonasSection />}
+    <div className="h-full flex flex-col">
+      {/* Internal tab bar */}
+      <div className="flex items-center border-b border-border bg-panel shrink-0 overflow-x-auto">
+        {SETTINGS_TABS.map((tab) => {
+          const Icon = tab.icon;
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => routerNavigate(`/settings/${tab.id}`)}
+              className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium transition-colors relative whitespace-nowrap ${
+                isActive
+                  ? 'text-text border-b-2 border-accent'
+                  : 'text-muted hover:text-text'
+              }`}
+            >
+              <Icon size={13} />
+              {tab.label}
+            </button>
+          );
+        })}
       </div>
+
+      {/* Tab content */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="p-4 sm:p-6 mx-auto w-full max-w-4xl">
+          {activeTab === 'direction' && <DirectionStackSection l1={l1} l2={l2} l3={l3} />}
+          {activeTab === 'providers' && <ProvidersAndDisplaySection />}
+          {activeTab === 'github' && <GitHubSettingsPanel />}
+          {activeTab === 'shortcuts' && <ShortcutsSection />}
+          {activeTab === 'account' && <AccountSection />}
+          {activeTab === 'billing' && <BillingSection />}
+          {activeTab === 'personas' && <PersonasSection />}
+          {activeTab === 'analytics' && <AnalyticsSection />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Analytics Section (embeds all 8 analytics panels) ────────────────────────
+
+type AnalyticsSubTab = 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'roi' | 'finops' | 'health';
+
+const ANALYTICS_SUBTABS: { id: AnalyticsSubTab; label: string }[] = [
+  { id: 'usage', label: 'Token Usage' },
+  { id: 'costs', label: 'Costs' },
+  { id: 'models', label: 'Models' },
+  { id: 'velocity', label: 'Velocity' },
+  { id: 'completion', label: 'Completion' },
+  { id: 'roi', label: 'ROI' },
+  { id: 'finops', label: 'FinOps' },
+  { id: 'health', label: 'Health' },
+];
+
+function AnalyticsSection() {
+  const [activeSubTab, setActiveSubTab] = useState<AnalyticsSubTab>('usage');
+
+  return (
+    <div>
+      {/* Sub-tab pills */}
+      <div className="flex flex-wrap gap-1 mb-4">
+        {ANALYTICS_SUBTABS.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveSubTab(tab.id)}
+            className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
+              activeSubTab === tab.id
+                ? 'bg-accent text-white'
+                : 'bg-surface-100 text-muted hover:text-text hover:bg-surface-200'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Sub-tab content */}
+      {activeSubTab === 'usage' && <UsageDashboardPanel />}
+      {activeSubTab === 'costs' && <CostBreakdownPanel />}
+      {activeSubTab === 'models' && <ModelComparisonPanel />}
+      {activeSubTab === 'velocity' && <VelocityChartPanel />}
+      {activeSubTab === 'completion' && <CompletionRatePanel />}
+      {activeSubTab === 'roi' && <RoiCalculatorPanel />}
+      {activeSubTab === 'finops' && <FinOpsDashboardPanel />}
+      {activeSubTab === 'health' && <HealthDashboardPanel />}
     </div>
   );
 }
