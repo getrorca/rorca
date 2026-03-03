@@ -4,7 +4,11 @@ import type { PanelId } from './components/Sidebar';
 import type { SettingsTab } from './panels/SettingsPanel';
 
 /** Valid settings sub-tabs for URL validation */
-const VALID_SETTINGS_TABS: readonly SettingsTab[] = ['account', 'providers', 'github', 'analytics', 'system', 'billing', 'shortcuts'] as const;
+const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
+  'general', 'direction', 'context', 'providers', 'github', 'env-vars', 'pipeline', 'hooks', 'agents',
+  'shortcuts', 'account', 'billing',
+  'analytics', 'system',
+] as const;
 
 /**
  * Maps every PanelId to its URL path segment.
@@ -38,7 +42,7 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   'audit-log': '/settings/system',
   activity: '/settings/system',
   github: '/settings/github',
-  'workspace-settings': '/workspace-settings',
+  'workspace-settings': '/settings/general',
   settings: '/settings',
   // CIE-005: Memory Ledger
   memory: '/memory',
@@ -97,5 +101,5 @@ export function useActiveSettingsTab(): SettingsTab {
   if (tab && (VALID_SETTINGS_TABS as readonly string[]).includes(tab)) {
     return tab as SettingsTab;
   }
-  return 'account';
+  return 'general';
 }
