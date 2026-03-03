@@ -3,9 +3,9 @@
 Spec: rorca-ux-overhaul
 Run ID: 894
 Started: 2026-03-03T04:02:26.202Z
-Last Updated: 2026-03-03T05:52:23.447Z
+Last Updated: 2026-03-03T06:01:46.137Z
 
-## Completed Stories (12)
+## Completed Stories (13)
 - UX-001: Workspace Bootstrap Orchestrator — DONE (claude, 443s)
 - UX-002: First-Run Workspace Wizard — DONE (claude, 499s)
 - UX-003: Forge Redesign — Brief-First Minimal — DONE (claude, 402s)
@@ -18,3 +18,4 @@ Last Updated: 2026-03-03T05:52:23.447Z
 - UX-010: Auto-Bootstrap on Workspace Add — DONE (claude, 510s)
 - UX-011: Settings Simplification — DONE (claude, 399s)
 - UX-012: Fix Context Used — Show What Was Injected — DONE (claude, 680s)
+- UX-013: Kill the Double Sidebar in Settings — DONE (claude, 517s)

@@ -5,7 +5,7 @@ import {
   Plus, Search, LayoutDashboard,
   GitBranch, ArrowLeftRight,
   Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
-  BarChart3, HeartPulse, ScrollText, Calculator, Settings2, BookOpen,
+  BarChart3, HeartPulse, ScrollText, Calculator, BookOpen,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -73,7 +73,6 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Settings',
     items: [
       { id: 'settings', label: 'Settings', icon: Settings },
-      { id: 'workspace-settings', label: 'Workspace Settings', icon: Settings2 },
       // Analytics & System accessible via Settings tabs and Command Palette
       { id: 'usage', label: 'Token Usage', icon: Coins },
       { id: 'costs', label: 'Cost Breakdown', icon: DollarSign },
