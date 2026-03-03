@@ -2,9 +2,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
-import SpecForgeOutput, { type GeneratedSpec } from './SpecForgeOutput';
 import BatchForge from './BatchForge';
-import DirectionPreviewSidebar from '../components/DirectionPreviewSidebar';
 import SpecForgeProgress from '../components/SpecForgeProgress';
 import SpecForgePreview from '../components/SpecForgePreview';
 import TemplatePickerModal from '../components/TemplatePickerModal';
@@ -13,10 +11,9 @@ import AppHeader from '../components/AppHeader';
 import { ChevronRight } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
 import { briefToSlug, KEBAB_RE } from '../lib/slugify';
+import type { GeneratedSpec } from './SpecForgeOutput';
 
 type ForgeMode = 'single' | 'batch';
-type DiagramType = 'flowchart' | 'sequenceDiagram' | 'ascii';
-type OutputFormat = 'json' | 'markdown' | 'both';
 
 interface ModelOption {
   id: string;
@@ -27,15 +24,32 @@ interface ModelOption {
   recommended: boolean;
 }
 
+interface DirectionLayerData {
+  content: string | null;
+}
+
+interface DirectionAllResponse {
+  layers: {
+    l1: DirectionLayerData;
+    l2: DirectionLayerData;
+    l3: DirectionLayerData;
+  };
+}
+
+const CONTEXT_DOTS = [
+  { key: 'l1' as const, label: 'Standards', emptyMessage: 'Standards not configured' },
+  { key: 'l2' as const, label: 'Conventions', emptyMessage: 'Conventions not configured' },
+  { key: 'l3' as const, label: 'Project', emptyMessage: 'Project context not configured' },
+] as const;
+
 export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initialBrief, onBriefConsumed }: { onNavigate?: (panel: PanelId) => void; onNavigateToRun?: (runId: number) => void; initialBrief?: string | null; onBriefConsumed?: () => void }) {
   const { workspaceId, workspaces } = useWorkspace();
   const workspace = workspaces.find((w) => w.id === workspaceId);
   const [forgeMode, setForgeMode] = useState<ForgeMode>('single');
 
-  // Section 1: Spec Identity
+  // Spec Identity
   const [specName, setSpecName] = useState('');
   const [specNameError, setSpecNameError] = useState('');
-  const [domain, setDomain] = useState('');
 
   // Model selection (persisted in localStorage)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
@@ -69,14 +83,12 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     } catch { /* quota */ }
   }, [selectedModel]);
 
-  // Section 2: Direction Stack Overrides
+  // Advanced Options
   const [advancedOpen, setAdvancedOpen] = useState(() => {
     try { return localStorage.getItem('rorca:forge:advancedOpen') === 'true'; } catch { return false; }
   });
-  const [l4Override, setL4Override] = useState('');
-  const [l5Override, setL5Override] = useState('');
 
-  // Section 3: Spec Parameters
+  // Story Count
   const STORY_COUNT_PRESETS = [3, 5, 8, 10, 15, 20] as const;
   const [storyCount, setStoryCount] = useState(() => {
     try {
@@ -85,19 +97,11 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     } catch { /* ignore */ }
     return 0; // Auto
   });
-  const isAutoCount = storyCount === 0;
-  const isCustomCount = !isAutoCount && !STORY_COUNT_PRESETS.includes(storyCount as typeof STORY_COUNT_PRESETS[number]);
+  const isCustomCount = storyCount !== 0 && !STORY_COUNT_PRESETS.includes(storyCount as typeof STORY_COUNT_PRESETS[number]);
   const [showCustomInput, setShowCustomInput] = useState(isCustomCount);
   const [storyCountRaw, setStoryCountRaw] = useState(String(storyCount));
-  const [storyPrefix, setStoryPrefix] = useState('US');
-  const [includeDiagram, setIncludeDiagram] = useState(true);
-  const [diagramType, setDiagramType] = useState<DiagramType>('flowchart');
-  const [outputFormat, setOutputFormat] = useState<OutputFormat>('json');
-  const [multiPass, setMultiPass] = useState(() => {
-    try { return localStorage.getItem('rorca:forge:multiPass') === 'true'; } catch { return false; }
-  });
 
-  // Section 4: Spec Brief (persisted in localStorage)
+  // Brief (persisted in localStorage)
   const [specBrief, setSpecBrief] = useState(() => {
     try { return localStorage.getItem('rorca:forge:brief') ?? ''; } catch { return ''; }
   });
@@ -112,17 +116,16 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     return () => clearTimeout(timer);
   }, [specBrief, specName]);
 
-  // The effective slug that will be used (manual specName takes precedence)
   const effectiveSlug = useMemo(() => specName || previewSlug, [specName, previewSlug]);
 
-  // Auto-resize textarea between 4 and 16 rows
+  // Auto-resize textarea between 6 and 20 rows
   const autoResizeBrief = useCallback(() => {
     const el = briefRef.current;
     if (!el) return;
     el.style.height = 'auto';
     const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
-    const minH = lineHeight * 4;
-    const maxH = lineHeight * 16;
+    const minH = lineHeight * 6;
+    const maxH = lineHeight * 20;
     el.style.height = `${Math.min(maxH, Math.max(minH, el.scrollHeight))}px`;
   }, []);
 
@@ -141,7 +144,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Apply initialBrief from command palette (empty string = focus only, non-empty = pre-fill + focus)
+  // Apply initialBrief from command palette
   useEffect(() => {
     if (initialBrief != null) {
       if (initialBrief.length > 0) {
@@ -151,9 +154,6 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
       onBriefConsumed?.();
     }
   }, [initialBrief, onBriefConsumed]);
-
-  // Token estimate: word count × 1.3
-  const estimatedTokens = Math.ceil((specBrief.trim().split(/\s+/).filter(Boolean).length) * 1.3);
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
@@ -165,6 +165,19 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [advancedHeight, setAdvancedHeight] = useState<number>(0);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
+  // Context health dots state
+  const [directionLayers, setDirectionLayers] = useState<DirectionAllResponse['layers'] | null>(null);
+  const [contextPopover, setContextPopover] = useState<string | null>(null);
+  const [quickDirectionText, setQuickDirectionText] = useState('');
+
+  // Fetch direction layers for context health dots
+  useEffect(() => {
+    if (!workspaceId) { setDirectionLayers(null); return; }
+    apiFetch<DirectionAllResponse>(`/api/direction/all?workspaceId=${workspaceId}`)
+      .then(res => setDirectionLayers(res.layers))
+      .catch(() => setDirectionLayers(null));
+  }, [workspaceId]);
+
   // Measure inner content height for smooth transition
   useEffect(() => {
     if (!advancedOpen) return;
@@ -174,10 +187,9 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
       }
     };
     measure();
-    // Re-measure on window resize
     window.addEventListener('resize', measure);
     return () => window.removeEventListener('resize', measure);
-  }, [advancedOpen, includeDiagram, showCustomInput]);
+  }, [advancedOpen, showCustomInput]);
 
   const validateSpecName = useCallback((value: string) => {
     if (!value) {
@@ -205,17 +217,10 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const customizedCount = useMemo(() => {
     let count = 0;
     if (specName) count++;
-    if (domain) count++;
     if (selectedModel) count++;
     if (storyCount !== 0) count++;
-    if (storyPrefix !== 'US') count++;
-    if (!includeDiagram) count++;
-    if (diagramType !== 'flowchart') count++;
-    if (outputFormat !== 'json') count++;
-    if (l4Override) count++;
-    if (l5Override) count++;
     return count;
-  }, [specName, domain, selectedModel, storyCount, storyPrefix, includeDiagram, diagramType, outputFormat, l4Override, l5Override]);
+  }, [specName, selectedModel, storyCount]);
 
   const handleStoryCountSelect = (value: string) => {
     if (value === 'custom') {
@@ -246,20 +251,6 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     setStoryCount(clamped);
     setStoryCountRaw(String(clamped));
   };
-
-  const handleStoryPrefixChange = (value: string) => {
-    setStoryPrefix(value.toUpperCase().slice(0, 4));
-  };
-
-  // Defaults summary line (reactive)
-  const defaultsSummary = useMemo(() => {
-    const storyLabel = storyCount === 0 ? 'Auto stories' : `${storyCount} stories`;
-    const effectiveModelId = selectedModel || defaultModelId || 'claude-sonnet-4-5-20250929';
-    const modelLabel = availableModels.find(m => m.id === effectiveModelId)?.label || effectiveModelId;
-    const formatLabel = outputFormat === 'json' ? 'JSON output' : outputFormat === 'markdown' ? 'Markdown output' : 'Both formats';
-    const pipelineLabel = multiPass ? '6-pass' : 'Single-pass';
-    return `${storyLabel}  ·  ${modelLabel}  ·  ${formatLabel}  ·  ${pipelineLabel}`;
-  }, [storyCount, selectedModel, defaultModelId, availableModels, outputFormat, multiPass]);
 
   // Quick Run state
   const [isQuickRunning, setIsQuickRunning] = useState(false);
@@ -292,22 +283,13 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
         body: JSON.stringify({
           workspaceId,
           specName: specName || undefined,
-          domain,
-          l4Override: l4Override || undefined,
-          l5Override: l5Override || undefined,
           storyCount,
-          storyPrefix,
-          includeDiagram,
-          diagramType: includeDiagram ? diagramType : undefined,
-          outputFormat,
           specBrief,
           model: selectedModel || undefined,
-          multiPass: multiPass || undefined,
         }),
       });
       setApiDone(true);
       setGeneratedSpec(result);
-      // Brief delay so user sees the validating stage complete
       setTimeout(() => setIsGenerating(false), 800);
     } catch (err: unknown) {
       if (controller.signal.aborted) return;
@@ -356,6 +338,36 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     }
   };
 
+  const handleContextDotClick = (dotKey: string) => {
+    const layer = directionLayers?.[dotKey as keyof typeof directionLayers];
+    if (layer?.content) return; // Already populated — no action needed
+    setContextPopover(contextPopover === dotKey ? null : dotKey);
+    setQuickDirectionText('');
+  };
+
+  const handleQuickDirectionSave = async (layerKey: string) => {
+    if (!quickDirectionText.trim() || !workspaceId) return;
+    try {
+      await apiFetch('/api/direction', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId,
+          layer: layerKey,
+          content: quickDirectionText.trim(),
+        }),
+      });
+      // Refresh layers
+      const res = await apiFetch<DirectionAllResponse>(`/api/direction/all?workspaceId=${workspaceId}`);
+      setDirectionLayers(res.layers);
+      setContextPopover(null);
+      setQuickDirectionText('');
+      showToast('Direction saved', 'success');
+    } catch {
+      showToast('Failed to save direction', 'error');
+    }
+  };
+
   if (!workspaceId) {
     return (
       <div className="flex items-center justify-center h-full text-muted">
@@ -398,389 +410,279 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
       {forgeMode === 'batch' ? (
         <BatchForge />
       ) : (
-        <div className="flex flex-1 min-h-0 gap-px bg-border">
-          {/* Left pane: Form (~50% width) */}
-          <div className="flex-1 flex flex-col bg-bg min-w-0">
-            <div className="flex-1 overflow-y-auto">
-              <div className="max-w-xl mx-auto px-6 py-6 space-y-6">
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-2xl mx-auto px-6 py-10 space-y-6">
 
-                {/* Section 1: Brief (primary input — first and most prominent) */}
-                <section>
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
-                      Spec Brief
-                    </h3>
+            {/* "Start from template" link */}
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowTemplatePicker(true)}
+                className="text-xs text-accent hover:text-accent-hover transition-colors"
+              >
+                Start from template &rarr;
+              </button>
+            </div>
+
+            {/* Brief textarea — primary input */}
+            <textarea
+              ref={briefRef}
+              rows={6}
+              value={specBrief}
+              onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
+              placeholder="What do you want to build?"
+              className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors resize-none leading-relaxed"
+            />
+
+            {/* Context health dots */}
+            <div className="flex items-center justify-center gap-6 relative">
+              {CONTEXT_DOTS.map(dot => {
+                const layer = directionLayers?.[dot.key];
+                const populated = !!layer?.content;
+                return (
+                  <div key={dot.key} className="relative">
                     <button
-                      onClick={() => setShowTemplatePicker(true)}
-                      className="text-xs text-accent hover:text-accent-hover transition-colors"
+                      onClick={() => handleContextDotClick(dot.key)}
+                      className="flex items-center gap-1.5 group"
+                      title={populated ? `${dot.label} configured` : dot.emptyMessage}
                     >
-                      Start from template &rarr;
+                      <span className={`w-2 h-2 rounded-full transition-colors ${populated ? 'bg-green-500' : 'bg-border group-hover:bg-muted/50'}`} />
+                      <span className={`text-xs transition-colors ${populated ? 'text-muted' : 'text-muted/50 group-hover:text-muted'}`}>
+                        {dot.label}
+                      </span>
                     </button>
-                  </div>
-                  <textarea
-                    ref={briefRef}
-                    rows={4}
-                    value={specBrief}
-                    onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
-                    placeholder="Describe what you want to build..."
-                    className="w-full px-3 py-3 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors resize-none font-mono"
-                  />
-                  <div className="flex items-center justify-between mt-1.5">
-                    <div className="flex items-center gap-3">
-                      <span className={`text-xs ${estimatedTokens >= 2000 ? 'text-warning' : 'text-muted/60'}`}>
-                        ~{estimatedTokens.toLocaleString()} tokens
-                      </span>
-                      <span className={`text-xs ${specBrief.length >= 3500 ? 'text-warning' : 'text-muted/60'}`}>
-                        {specBrief.length.toLocaleString()} chars
-                      </span>
-                    </div>
-                    {estimatedTokens >= 2000 && (
-                      <span className="text-xs text-warning">
-                        Brief is long — consider breaking into smaller specs
-                      </span>
-                    )}
-                  </div>
-                </section>
 
-                {/* Section 2: Auto-generated spec name preview */}
-                {effectiveSlug && (
-                  <p className="text-xs text-muted/60 font-mono truncate -mt-3">
-                    {effectiveSlug}
-                  </p>
-                )}
-
-                {/* Section 3: Generate Spec + Quick Run buttons */}
-                <div className="space-y-2">
-                  <p className="text-xs text-muted/60 text-center">{defaultsSummary}</p>
-                  {isGenerating || (generateError && !generatedSpec) ? (
-                    <SpecForgeProgress
-                      isActive={isGenerating}
-                      onCancel={handleCancel}
-                      error={generateError}
-                      apiDone={apiDone}
-                      multiPass={multiPass}
-                      specSlug={effectiveSlug}
-                    />
-                  ) : !generatedSpec ? (
-                    <>
-                      <button
-                        onClick={handleGenerate}
-                        disabled={!canGenerate || isGenerating}
-                        className={`w-full py-2.5 rounded text-sm font-medium transition-colors ${canGenerate && !isGenerating
-                            ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
-                            : 'bg-accent/30 text-white/40 cursor-not-allowed'
-                          }`}
-                      >
-                        Generate Spec
-                      </button>
-                      {canQuickRun && (
-                        <button
-                          onClick={handleQuickRun}
-                          disabled={isQuickRunning || isGenerating}
-                          className={`w-full py-2 rounded text-sm font-medium transition-colors border ${isQuickRunning || isGenerating
-                              ? 'bg-panel/50 border-border/50 text-muted/40 cursor-not-allowed'
-                              : 'bg-panel border-border text-text hover:bg-accent/10 hover:border-accent/30 cursor-pointer'
-                            }`}
-                        >
-                          {isQuickRunning ? (
-                            <span className="flex items-center justify-center gap-2">
-                              <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                              </svg>
-                              Generating & running...
-                            </span>
-                          ) : (
-                            'Quick Run'
-                          )}
-                        </button>
-                      )}
-                    </>
-                  ) : null}
-                </div>
-
-                {/* Section 4: Advanced Options (collapsed by default, CSS transition) */}
-                <section>
-                  <button
-                    onClick={() => setAdvancedOpen(o => !o)}
-                    aria-expanded={advancedOpen}
-                    aria-label="Toggle advanced options"
-                    className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-text transition-colors w-full"
-                  >
-                    <svg
-                      className={`w-3 h-3 transition-transform duration-200 ${advancedOpen ? 'rotate-90' : ''}`}
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                    Advanced Options
-                    {customizedCount > 0 ? (
-                      <span className="ml-1 px-1.5 py-0.5 text-[10px] font-medium rounded-full bg-accent/15 text-accent normal-case tracking-normal">
-                        {customizedCount} customized
-                      </span>
-                    ) : (
-                      <span className="ml-1 text-[10px] font-normal text-muted/50 normal-case tracking-normal">
-                        Using defaults
-                      </span>
-                    )}
-                  </button>
-                  <div
-                    className="overflow-hidden transition-[max-height] duration-300 ease-in-out"
-                    style={{ maxHeight: advancedOpen ? advancedHeight || 2000 : 0 }}
-                  >
-                    <div ref={advancedInnerRef} className="mt-4 space-y-6">
-                      {/* Spec Identity */}
-                      <div className="space-y-4">
-                        <h4 className="text-xs font-medium text-muted/80">Spec Identity</h4>
-                        <Field label="Spec Name (optional)" error={specNameError}>
-                          <input
-                            type="text"
-                            value={specName}
-                            onChange={(e) => setSpecName(e.target.value)}
-                            onBlur={() => validateSpecName(specName)}
-                            placeholder={effectiveSlug || 'auto-generated from brief'}
-                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
-                          />
-                          <p className="text-xs text-muted/60 mt-1">
-                            Leave blank to auto-generate from your brief
-                          </p>
-                        </Field>
-                        <Field label="Domain">
-                          <input
-                            type="text"
-                            value={domain}
-                            onChange={(e) => setDomain(e.target.value)}
-                            placeholder="backend, frontend, infra"
-                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
-                          />
-                        </Field>
-                        <Field label="Target Workspace">
-                          <span className="inline-flex items-center px-2.5 py-1 rounded text-xs font-medium bg-accent/10 text-accent border border-accent/20">
-                            {workspace?.name ?? workspaceId}
-                          </span>
-                        </Field>
-                      </div>
-
-                      {/* Direction Stack Overrides */}
-                      <div className="space-y-4">
-                        <h4 className="text-xs font-medium text-muted/80">Direction Stack Overrides</h4>
-                        <Field label="L4 Spec Brief">
-                          <textarea
-                            rows={4}
-                            value={l4Override}
-                            onChange={(e) => setL4Override(e.target.value)}
-                            placeholder="One paragraph describing what this spec builds"
-                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
-                          />
-                        </Field>
-                        <Field label="L5 Story Annotations">
-                          <textarea
-                            rows={4}
-                            value={l5Override}
-                            onChange={(e) => setL5Override(e.target.value)}
-                            placeholder="Per-story hints, constraints, or design decisions"
-                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none font-mono"
-                          />
-                        </Field>
-                        <p className="text-xs text-muted/70">
-                          These override L4/L5 from the Direction Stack Composer for this generation only
-                        </p>
-                      </div>
-
-                      {/* Spec Parameters */}
-                      <div className="space-y-4">
-                        <h4 className="text-xs font-medium text-muted/80">Spec Parameters</h4>
-                        <Field label={
-                          <span className="flex items-center gap-2">
-                            LLM Model
-                            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${activeProvider === 'claude-cli'
-                                ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                                : 'bg-accent/10 text-accent border border-accent/20'
-                              }`}>
-                              <span className={`w-1.5 h-1.5 rounded-full ${activeProvider === 'claude-cli' ? 'bg-green-500' : 'bg-accent'
-                                }`} />
-                              {activeProvider === 'claude-cli' ? 'Subscription' :
-                                activeProvider === 'anthropic' ? 'Anthropic API' :
-                                  activeProvider === 'openai-compat' ? 'OpenAI Compat' :
-                                    activeProvider === 'openrouter' ? 'OpenRouter' :
-                                      activeProvider}
-                            </span>
-                          </span>
-                        }>
-                          <select
-                            value={selectedModel || defaultModelId || ''}
-                            onChange={(e) => setSelectedModel(e.target.value)}
-                            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center]"
-                            aria-label="Select LLM model"
+                    {/* Inline popover for empty dots */}
+                    {contextPopover === dot.key && !populated && (
+                      <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-72 bg-bg border border-border rounded-lg shadow-lg z-50 p-3 space-y-2">
+                        <p className="text-xs text-muted">{dot.emptyMessage}</p>
+                        <textarea
+                          rows={3}
+                          value={quickDirectionText}
+                          onChange={(e) => setQuickDirectionText(e.target.value)}
+                          placeholder={`Add ${dot.label.toLowerCase()}...`}
+                          className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none"
+                          autoFocus
+                        />
+                        <div className="flex items-center justify-between">
+                          <button
+                            onClick={() => onNavigate?.('stack')}
+                            className="text-[10px] text-accent hover:text-accent-hover transition-colors"
                           >
-                            {availableModels.map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {m.label} — {m.provider}{m.recommended ? ' (Recommended)' : ''} · ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
-                              </option>
-                            ))}
-                          </select>
-                        </Field>
-
-                        <div className="flex gap-4">
-                          <Field label="Story Count" className="w-40">
-                            <div className="flex gap-2">
-                              <select
-                                value={showCustomInput ? 'custom' : String(storyCount)}
-                                onChange={(e) => handleStoryCountSelect(e.target.value)}
-                                className="flex-1 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center]"
-                                aria-label="Select story count"
-                              >
-                                <option value="0">Auto</option>
-                                {STORY_COUNT_PRESETS.map((n) => (
-                                  <option key={n} value={n}>{n} stories</option>
-                                ))}
-                                <option value="custom">Custom</option>
-                              </select>
-                              {showCustomInput && (
-                                <input
-                                  type="text"
-                                  inputMode="numeric"
-                                  value={storyCountRaw}
-                                  onChange={(e) => handleCustomCountChange(e.target.value)}
-                                  onBlur={handleCustomCountBlur}
-                                  className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center"
-                                  aria-label="Custom story count"
-                                  autoFocus
-                                />
-                              )}
-                            </div>
-                          </Field>
-                          <Field label="Story Prefix" className="w-28">
-                            <input
-                              type="text"
-                              maxLength={4}
-                              value={storyPrefix}
-                              onChange={(e) => handleStoryPrefixChange(e.target.value)}
-                              className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors font-mono"
-                            />
-                          </Field>
-                        </div>
-
-                        <div className="space-y-3">
-                          <label className="flex items-center gap-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={includeDiagram}
-                              onChange={(e) => setIncludeDiagram(e.target.checked)}
-                              className="w-4 h-4 rounded border-border bg-panel accent-accent"
-                            />
-                            <span className="text-sm text-text">Include diagram</span>
-                          </label>
-
-                          {includeDiagram && (
-                            <div className="ml-6 space-y-2">
-                              <RadioOption
-                                name="diagramType"
-                                value="flowchart"
-                                checked={diagramType === 'flowchart'}
-                                onChange={() => setDiagramType('flowchart')}
-                                label="Mermaid flowchart"
-                              />
-                              <RadioOption
-                                name="diagramType"
-                                value="sequenceDiagram"
-                                checked={diagramType === 'sequenceDiagram'}
-                                onChange={() => setDiagramType('sequenceDiagram')}
-                                label="Mermaid sequenceDiagram"
-                              />
-                              <RadioOption
-                                name="diagramType"
-                                value="ascii"
-                                checked={diagramType === 'ascii'}
-                                onChange={() => setDiagramType('ascii')}
-                                label="ASCII block"
-                              />
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="space-y-3">
-                          <label className="flex items-center gap-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={multiPass}
-                              onChange={(e) => {
-                                setMultiPass(e.target.checked);
-                                try { localStorage.setItem('rorca:forge:multiPass', String(e.target.checked)); } catch { /* ignore */ }
-                              }}
-                              className="w-4 h-4 rounded border-border bg-panel accent-accent"
-                            />
-                            <span className="text-sm text-text">6-pass pipeline</span>
-                          </label>
-                          {multiPass && (
-                            <p className="ml-6 text-xs text-muted/60">
-                              PM &rarr; Spec Writer &rarr; UX Designer &rarr; Best Practices &rarr; Adversarial Review &rarr; Spec Verifier
-                            </p>
-                          )}
-                        </div>
-
-                        <div className="space-y-2">
-                          <span className="text-xs font-medium text-muted">Output Format</span>
-                          <div className="space-y-2">
-                            <RadioOption
-                              name="outputFormat"
-                              value="json"
-                              checked={outputFormat === 'json'}
-                              onChange={() => setOutputFormat('json')}
-                              label="JSON for run-loop.sh"
-                            />
-                            <RadioOption
-                              name="outputFormat"
-                              value="markdown"
-                              checked={outputFormat === 'markdown'}
-                              onChange={() => setOutputFormat('markdown')}
-                              label="Markdown spec doc"
-                            />
-                            <RadioOption
-                              name="outputFormat"
-                              value="both"
-                              checked={outputFormat === 'both'}
-                              onChange={() => setOutputFormat('both')}
-                              label="Both"
-                            />
+                            Set up in Direction Stack
+                          </button>
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={() => setContextPopover(null)}
+                              className="px-2 py-1 text-[10px] text-muted hover:text-text rounded transition-colors"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => handleQuickDirectionSave(dot.key)}
+                              disabled={!quickDirectionText.trim()}
+                              className={`px-2 py-1 text-[10px] rounded transition-colors ${quickDirectionText.trim() ? 'bg-accent text-white hover:bg-accent-hover' : 'bg-accent/30 text-white/40 cursor-not-allowed'}`}
+                            >
+                              Save
+                            </button>
                           </div>
                         </div>
                       </div>
-                    </div>
+                    )}
                   </div>
-                </section>
-
-                {/* Inline spec preview after generation */}
-                {generatedSpec && !isGenerating && (
-                  <SpecForgePreview
-                    spec={generatedSpec}
-                    workspaceId={workspaceId}
-                    onRegenerate={handleGenerate}
-                    onEditBrief={() => {
-                      setGeneratedSpec(null);
-                      setGenerateError(null);
-                      setApiDone(false);
-                      setTimeout(() => briefRef.current?.focus(), 50);
-                    }}
-                    isRegenerating={isGenerating}
-                    onNavigate={onNavigate}
-                    onNavigateToRun={onNavigateToRun}
-                  />
-                )}
-              </div>
+                );
+              })}
             </div>
-          </div>
 
-          {/* Center pane: Direction preview sidebar (30% width) */}
-          <div className="w-[30%] shrink-0 min-w-[200px] max-w-[320px]">
-            <DirectionPreviewSidebar onNavigateToStack={onNavigate ? () => onNavigate('stack') : undefined} />
-          </div>
+            {/* Click-away to close popover */}
+            {contextPopover && (
+              <div className="fixed inset-0 z-40" onClick={() => setContextPopover(null)} />
+            )}
 
-          {/* Right pane: Output tabs */}
-          <div className="flex-1 flex flex-col bg-bg min-w-0">
-            <SpecForgeOutput spec={generatedSpec} onOpenTemplatePicker={() => setShowTemplatePicker(true)} />
+            {/* Generate Spec + Quick Run buttons */}
+            <div className="space-y-2">
+              {isGenerating || (generateError && !generatedSpec) ? (
+                <SpecForgeProgress
+                  isActive={isGenerating}
+                  onCancel={handleCancel}
+                  error={generateError}
+                  apiDone={apiDone}
+                  multiPass={false}
+                  specSlug={effectiveSlug}
+                />
+              ) : !generatedSpec ? (
+                <>
+                  <button
+                    onClick={handleGenerate}
+                    disabled={!canGenerate || isGenerating}
+                    className={`w-full py-2.5 rounded-lg text-sm font-medium transition-colors ${canGenerate && !isGenerating
+                        ? 'bg-accent text-white hover:bg-accent-hover cursor-pointer'
+                        : 'bg-accent/30 text-white/40 cursor-not-allowed'
+                      }`}
+                  >
+                    Generate Spec
+                  </button>
+                  {canQuickRun && (
+                    <button
+                      onClick={handleQuickRun}
+                      disabled={isQuickRunning || isGenerating}
+                      className={`w-full py-2 rounded-lg text-sm font-medium transition-colors border ${isQuickRunning || isGenerating
+                          ? 'bg-panel/50 border-border/50 text-muted/40 cursor-not-allowed'
+                          : 'bg-panel border-border text-text hover:bg-accent/10 hover:border-accent/30 cursor-pointer'
+                        }`}
+                    >
+                      {isQuickRunning ? (
+                        <span className="flex items-center justify-center gap-2">
+                          <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                          Generating & running...
+                        </span>
+                      ) : (
+                        'Quick Run'
+                      )}
+                    </button>
+                  )}
+                </>
+              ) : null}
+            </div>
+
+            {/* Advanced Options — below buttons, collapsed by default */}
+            <section>
+              <button
+                onClick={() => setAdvancedOpen(o => !o)}
+                aria-expanded={advancedOpen}
+                aria-label="Toggle advanced options"
+                className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-text transition-colors w-full"
+              >
+                <svg
+                  className={`w-3 h-3 transition-transform duration-200 ${advancedOpen ? 'rotate-90' : ''}`}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+                Advanced Options
+                {customizedCount > 0 ? (
+                  <span className="ml-1 px-1.5 py-0.5 text-[10px] font-medium rounded-full bg-accent/15 text-accent normal-case tracking-normal">
+                    {customizedCount} customized
+                  </span>
+                ) : (
+                  <span className="ml-1 text-[10px] font-normal text-muted/50 normal-case tracking-normal">
+                    Using defaults
+                  </span>
+                )}
+              </button>
+              <div
+                className="overflow-hidden transition-[max-height] duration-300 ease-in-out"
+                style={{ maxHeight: advancedOpen ? advancedHeight || 2000 : 0 }}
+              >
+                <div ref={advancedInnerRef} className="mt-4 space-y-4">
+                  {/* Spec Name */}
+                  <Field label="Spec Name (optional)" error={specNameError}>
+                    <input
+                      type="text"
+                      value={specName}
+                      onChange={(e) => setSpecName(e.target.value)}
+                      onBlur={() => validateSpecName(specName)}
+                      placeholder={effectiveSlug || 'auto-generated from brief'}
+                      className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
+                    />
+                    <p className="text-xs text-muted/60 mt-1">
+                      Leave blank to auto-generate from your brief
+                    </p>
+                  </Field>
+
+                  {/* LLM Model */}
+                  <Field label={
+                    <span className="flex items-center gap-2">
+                      LLM Model
+                      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${activeProvider === 'claude-cli'
+                          ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                          : 'bg-accent/10 text-accent border border-accent/20'
+                        }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${activeProvider === 'claude-cli' ? 'bg-green-500' : 'bg-accent'
+                          }`} />
+                        {activeProvider === 'claude-cli' ? 'Subscription' :
+                          activeProvider === 'anthropic' ? 'Anthropic API' :
+                            activeProvider === 'openai-compat' ? 'OpenAI Compat' :
+                              activeProvider === 'openrouter' ? 'OpenRouter' :
+                                activeProvider}
+                      </span>
+                    </span>
+                  }>
+                    <select
+                      value={selectedModel || defaultModelId || ''}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center]"
+                      aria-label="Select LLM model"
+                    >
+                      {availableModels.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label} — {m.provider}{m.recommended ? ' (Recommended)' : ''} · ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+
+                  {/* Story Count */}
+                  <Field label="Story Count" className="max-w-xs">
+                    <div className="flex gap-2">
+                      <select
+                        value={showCustomInput ? 'custom' : String(storyCount)}
+                        onChange={(e) => handleStoryCountSelect(e.target.value)}
+                        className="flex-1 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center]"
+                        aria-label="Select story count"
+                      >
+                        <option value="0">Auto</option>
+                        {STORY_COUNT_PRESETS.map((n) => (
+                          <option key={n} value={n}>{n} stories</option>
+                        ))}
+                        <option value="custom">Custom</option>
+                      </select>
+                      {showCustomInput && (
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={storyCountRaw}
+                          onChange={(e) => handleCustomCountChange(e.target.value)}
+                          onBlur={handleCustomCountBlur}
+                          className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center"
+                          aria-label="Custom story count"
+                          autoFocus
+                        />
+                      )}
+                    </div>
+                  </Field>
+
+                  {/* Target Workspace */}
+                  <Field label="Target Workspace">
+                    <span className="inline-flex items-center px-2.5 py-1 rounded text-xs font-medium bg-accent/10 text-accent border border-accent/20">
+                      {workspace?.name ?? workspaceId}
+                    </span>
+                  </Field>
+                </div>
+              </div>
+            </section>
+
+            {/* Inline spec preview after generation */}
+            {generatedSpec && !isGenerating && (
+              <SpecForgePreview
+                spec={generatedSpec}
+                workspaceId={workspaceId}
+                onRegenerate={handleGenerate}
+                onEditBrief={() => {
+                  setGeneratedSpec(null);
+                  setGenerateError(null);
+                  setApiDone(false);
+                  setTimeout(() => briefRef.current?.focus(), 50);
+                }}
+                isRegenerating={isGenerating}
+                onNavigate={onNavigate}
+                onNavigateToRun={onNavigateToRun}
+              />
+            )}
           </div>
         </div>
       )}
@@ -819,33 +721,5 @@ function Field({
       {children}
       {error && <p className="mt-1 text-xs text-error">{error}</p>}
     </div>
-  );
-}
-
-function RadioOption({
-  name,
-  value,
-  checked,
-  onChange,
-  label,
-}: {
-  name: string;
-  value: string;
-  checked: boolean;
-  onChange: () => void;
-  label: string;
-}) {
-  return (
-    <label className="flex items-center gap-2 cursor-pointer">
-      <input
-        type="radio"
-        name={name}
-        value={value}
-        checked={checked}
-        onChange={onChange}
-        className="w-4 h-4 border-border bg-panel accent-accent"
-      />
-      <span className="text-sm text-text">{label}</span>
-    </label>
   );
 }
