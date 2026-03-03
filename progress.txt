@@ -3,9 +3,9 @@
 Spec: rorca-ux-overhaul
 Run ID: 894
 Started: 2026-03-03T04:02:26.202Z
-Last Updated: 2026-03-03T05:23:37.525Z
+Last Updated: 2026-03-03T05:32:52.937Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - UX-001: Workspace Bootstrap Orchestrator — DONE (claude, 443s)
 - UX-002: First-Run Workspace Wizard — DONE (claude, 499s)
 - UX-003: Forge Redesign — Brief-First Minimal — DONE (claude, 402s)
@@ -15,3 +15,4 @@ Last Updated: 2026-03-03T05:23:37.525Z
 - UX-007: Merge Review Queue into Forge — DONE (claude, 889s)
 - UX-008: Context Health Indicator — DONE (claude, 381s)
 - UX-009: Remove Stale and Internal Text — DONE (claude, 194s)
+- UX-010: Auto-Bootstrap on Workspace Add — DONE (claude, 510s)
