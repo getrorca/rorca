@@ -12,15 +12,31 @@ export interface SynthesizeParams {
   gitMemory?: string;       // Synthesized memory.yaml
 }
 
+export interface SynthesizeMeta {
+  standards: boolean;
+  conventions: boolean;
+  project: boolean;
+  memory: boolean;
+  schema: boolean;
+  totalTokens: number;
+}
+
+export interface SynthesizeResult {
+  text: string;
+  meta: SynthesizeMeta;
+}
+
 export function synthesize(params: SynthesizeParams): string {
+  return synthesizeWithMeta(params).text;
+}
+
+export function synthesizeWithMeta(params: SynthesizeParams): SynthesizeResult {
   const sections: string[] = [];
-  // Team L1 overrides global L1; if no team L1, fall back to global
   const effectiveL1 = params.teamL1?.trim() || params.l1?.trim();
   const effectiveL2 = params.teamL2?.trim() || params.l2?.trim();
   if (effectiveL1) sections.push(`=== GLOBAL STANDARDS (L1) ===\n${effectiveL1}`);
   if (effectiveL2) sections.push(`=== DOMAIN PROFILE (L2) ===\n${effectiveL2}`);
   if (params.l3?.trim()) sections.push(`=== PROJECT CONTEXT (L3) ===\n${params.l3.trim()}`);
-  // Auto-hydrated sections (injected when workspace has been hydrated)
   if (params.schemaSnapshot?.trim()) {
     sections.push(`=== DATABASE SCHEMA (Auto-Hydrated) ===\n${params.schemaSnapshot.trim()}`);
   }
@@ -29,5 +45,20 @@ export function synthesize(params: SynthesizeParams): string {
   }
   sections.push(`=== SPEC BRIEF (L4) ===\n${params.specBrief.trim()}`);
   if (params.storyAnnotations?.trim()) sections.push(`=== STORY ANNOTATIONS (L5) ===\n${params.storyAnnotations.trim()}`);
-  return sections.join('\n\n');
+
+  const text = sections.join('\n\n');
+  // Rough token estimate: ~4 chars per token
+  const totalTokens = Math.ceil(text.length / 4);
+
+  return {
+    text,
+    meta: {
+      standards: !!effectiveL1,
+      conventions: !!effectiveL2,
+      project: !!params.l3?.trim(),
+      memory: !!params.gitMemory?.trim(),
+      schema: !!params.schemaSnapshot?.trim(),
+      totalTokens,
+    },
+  };
 }
