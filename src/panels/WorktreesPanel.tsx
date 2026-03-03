@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   GitBranch, ChevronRight, Plus, X, Copy, Check,
-  Terminal, Play, Trash2, AlertTriangle, Loader2,
+  Terminal, Trash2, AlertTriangle, Loader2,
   FileWarning, ChevronDown, ChevronUp, Eye, EyeOff, Merge,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -92,7 +92,6 @@ export default function WorktreesPanel() {
   // Copy states
   const [copiedPath, setCopiedPath] = useState(false);
   const [copiedTerminal, setCopiedTerminal] = useState(false);
-  const [copiedRalph, setCopiedRalph] = useState(false);
 
   // SSE for real-time updates
   const sseEvents = usePipelineSSE('all');
@@ -491,24 +490,6 @@ export default function WorktreesPanel() {
                 <code className="ml-auto text-[10px] font-mono text-[var(--text-muted)] truncate max-w-[200px]">
                   cd {selectedWorktree.path}
                 </code>
-              </button>
-
-              {/* Run Ralph Loop Here */}
-              <button
-                onClick={() =>
-                  copyToClipboard(
-                    `cd ${selectedWorktree.path} && ./forge/run-loop.sh`,
-                    setCopiedRalph,
-                  )
-                }
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs rounded border border-[var(--border)] hover:bg-[var(--surface)] transition-colors"
-              >
-                {copiedRalph ? (
-                  <Check className="w-3.5 h-3.5 text-emerald-500" />
-                ) : (
-                  <Play className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                )}
-                <span>{copiedRalph ? 'Copied!' : 'Run Ralph Loop Here'}</span>
               </button>
 
               {/* Merge to main — only for non-main worktrees */}
