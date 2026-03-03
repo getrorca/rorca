@@ -306,6 +306,38 @@
   animation: slideToRecent 400ms ease-out forwards;
 }
 
+/* ─── Workspace Wizard animations ────────────────────────────────────────── */
+
+@keyframes indeterminateProgress {
+  0% { transform: translateX(-100%); width: 40%; }
+  50% { width: 60%; }
+  100% { transform: translateX(250%); width: 40%; }
+}
+
+.animate-indeterminate-progress {
+  animation: indeterminateProgress 1.8s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.animate-scale-in {
+  animation: scaleIn 400ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes checkDraw {
+  from { stroke-dashoffset: 24; }
+  to { stroke-dashoffset: 0; }
+}
+
+.animate-check-draw {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: checkDraw 400ms ease-out 200ms forwards;
+}
+
 /* ─── Skill Preview — Markdown renderer styles ───────────────────────────── */
 
 .skill-preview .md-h1 { font-size: 1.25rem; font-weight: 700; margin: 1rem 0 0.5rem; color: var(--text); }

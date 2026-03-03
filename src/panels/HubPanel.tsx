@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Play, Clock, ListChecks, ChevronRight, ChevronDown, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, AlertCircle, Search, HeartPulse, RefreshCw, Wand2, FileText, Save, X, Eye } from 'lucide-react';
+import { Play, Clock, ListChecks, ChevronRight, ChevronDown, Pause, Square, CheckCircle, XCircle, ArrowRight, FolderGit2, Compass, PenLine, Settings, Rocket, Loader2, ListPlus, AlertCircle, Search, HeartPulse, RefreshCw, Wand2, FileText, Save, X, Eye, Sparkles } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
@@ -13,6 +13,7 @@ import type { PanelId } from '../components/Sidebar';
 import AgentBadge from '../components/AgentBadge';
 import MemoryUpdatesCard from '../components/MemoryUpdatesCard';
 import AppHeader from '../components/AppHeader';
+import WorkspaceWizard from '../components/WorkspaceWizard';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -1055,6 +1056,14 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [nextQueueSpecName, setNextQueueSpecName] = useState<string | null>(null);
   const [justCompletedRunIds, setJustCompletedRunIds] = useState<Set<number>>(new Set());
   const [violations, setViolations] = useState<Array<{ story_id: string; role_name: string; violations: Array<{ file: string; pattern: string }>; run_id: number; created_at: string }>>([]);
+
+  // Workspace Wizard state
+  const [showWizard, setShowWizard] = useState(false);
+  const [wizardDismissed, setWizardDismissed] = useState(false);
+  const [wizardCompleted, setWizardCompleted] = useState(false);
+  const [healthScore, setHealthScore] = useState<number | null>(null);
+  const wizardChecked = useRef(false);
+
   const { toasts: completionToasts, show: showCompletionToastRaw, dismiss: dismissCompletionToast } = useToast();
   const showCompletionToast = useCallback((status: string, label: string) => {
     showCompletionToastRaw(
@@ -1195,6 +1204,62 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     return () => es.close();
   }, []);
 
+  // ── Wizard: check health score on workspace change ──
+  useEffect(() => {
+    if (!workspaceId || wizardCompleted) return;
+    // Only check once per workspace load (not on every re-render)
+    if (wizardChecked.current) return;
+    wizardChecked.current = true;
+
+    // Check localStorage for wizard dismissal/completion
+    const dismissKey = `rorca_wizard_dismissed_${workspaceId}`;
+    const completeKey = `rorca_wizard_completed_${workspaceId}`;
+    if (localStorage.getItem(completeKey)) {
+      setWizardCompleted(true);
+      return;
+    }
+    if (localStorage.getItem(dismissKey)) {
+      setWizardDismissed(true);
+      // Still fetch health to decide if banner should show
+    }
+
+    apiFetch<{ score: number }>(`/api/workspaces/${workspaceId}/health`)
+      .then(data => {
+        setHealthScore(data.score);
+        if (data.score < 40 && !localStorage.getItem(dismissKey) && !localStorage.getItem(completeKey)) {
+          setShowWizard(true);
+        }
+      })
+      .catch(() => { /* health endpoint failure is non-fatal */ });
+  }, [workspaceId, wizardCompleted]);
+
+  // Reset wizard check when workspace changes
+  useEffect(() => {
+    wizardChecked.current = false;
+    setShowWizard(false);
+    setWizardDismissed(false);
+    setWizardCompleted(false);
+    setHealthScore(null);
+  }, [workspaceId]);
+
+  const handleWizardDismiss = useCallback(() => {
+    setShowWizard(false);
+    setWizardDismissed(true);
+    if (workspaceId) {
+      localStorage.setItem(`rorca_wizard_dismissed_${workspaceId}`, '1');
+    }
+  }, [workspaceId]);
+
+  const handleWizardComplete = useCallback(() => {
+    setShowWizard(false);
+    setWizardCompleted(true);
+    setWizardDismissed(false);
+    if (workspaceId) {
+      localStorage.setItem(`rorca_wizard_completed_${workspaceId}`, '1');
+      localStorage.removeItem(`rorca_wizard_dismissed_${workspaceId}`);
+    }
+  }, [workspaceId]);
+
   // ── Empty state: No workspace registered ──
   if (workspaces.length === 0) {
     return (
@@ -1248,11 +1313,46 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
           </div>
         }
       />
+      {/* Workspace Wizard overlay */}
+      {showWizard && workspaceId && (
+        <WorkspaceWizard
+          workspaceId={workspaceId}
+          workspaceName={selectedWorkspace?.name ?? 'Workspace'}
+          onComplete={handleWizardComplete}
+          onDismiss={handleWizardDismiss}
+          onNavigate={onNavigate}
+        />
+      )}
+
       <div className="h-full overflow-y-auto">
         {/* Completion toast — top-right slide-in */}
         <ToastContainer toasts={completionToasts} onDismiss={dismissCompletionToast} position="top-right" />
 
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8">
+          {/* Dismissed wizard banner — persistent until workspace is setup */}
+          {wizardDismissed && !wizardCompleted && healthScore !== null && healthScore < 40 && (
+            <div className="flex items-center justify-between px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
+              <div className="flex items-center gap-3">
+                <Sparkles size={16} className="text-amber-500 shrink-0" />
+                <p className="text-sm text-[var(--text)]">
+                  Finish setting up your workspace
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowWizard(true);
+                  setWizardDismissed(false);
+                  if (workspaceId) {
+                    localStorage.removeItem(`rorca_wizard_dismissed_${workspaceId}`);
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500/20 text-amber-600 hover:bg-amber-500/30 transition-colors shrink-0"
+              >
+                Resume setup
+                <ChevronRight size={12} />
+              </button>
+            </div>
+          )}
           {/* Workspace Health */}
           {workspaceId && (
             <section>

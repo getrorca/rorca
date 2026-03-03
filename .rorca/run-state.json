@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T04:10:29.790Z",
+  "lastUpdatedAt": "2026-03-03T04:19:36.833Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-03T04:10:29.790Z",
       "agentType": "claude",
       "elapsedMs": 442636
+    },
+    {
+      "storyId": "UX-002",
+      "title": "First-Run Workspace Wizard",
+      "status": "passed",
+      "startedAt": "2026-03-03T04:11:17.680Z",
+      "finishedAt": "2026-03-03T04:19:36.833Z",
+      "agentType": "claude",
+      "elapsedMs": 499153
     }
   ],
   "failedStories": [],
