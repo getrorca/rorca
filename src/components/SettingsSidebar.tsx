@@ -1,21 +1,19 @@
 import { Link, NavLink } from 'react-router-dom';
-import { Layers, Zap, Github, Keyboard, User, CreditCard, ArrowLeft, Drama } from 'lucide-react';
+import { Zap, Github, User, CreditCard, ArrowLeft, BarChart3, ScrollText } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
 
 interface SettingsSidebarProps {
     onNavigate: (panel: PanelId) => void;
-    directionDirty?: boolean;
 }
 
-export default function SettingsSidebar({ onNavigate, directionDirty }: SettingsSidebarProps) {
-    const TABS: { id: SettingsTab; label: string; icon: typeof Layers }[] = [
-        { id: 'direction', label: 'Direction', icon: Layers },
+export default function SettingsSidebar({ onNavigate }: SettingsSidebarProps) {
+    const TABS: { id: SettingsTab; label: string; icon: typeof User }[] = [
+        { id: 'account', label: 'Account', icon: User },
         { id: 'providers', label: 'Model & Providers', icon: Zap },
         { id: 'github', label: 'GitHub', icon: Github },
-        { id: 'personas', label: 'Personas', icon: Drama },
-        { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
-        { id: 'account', label: 'Account', icon: User },
+        { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+        { id: 'system', label: 'System', icon: ScrollText },
         { id: 'billing', label: 'Billing', icon: CreditCard },
     ];
 
@@ -37,7 +35,7 @@ export default function SettingsSidebar({ onNavigate, directionDirty }: Settings
             <div className="flex-1 overflow-y-auto pt-2 pb-6 min-h-0">
                 <div className="mb-1">
                     <div className="px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted/70">
-                        Your Account
+                        Settings
                     </div>
                     <div className="space-y-[1px]">
                         {TABS.map((item) => {
@@ -56,11 +54,6 @@ export default function SettingsSidebar({ onNavigate, directionDirty }: Settings
                                         <>
                                             <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
                                             <span className="truncate">{item.label}</span>
-                                            {item.id === 'direction' && directionDirty && (
-                                                <span className="ml-auto px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
-                                                    Unsaved
-                                                </span>
-                                            )}
                                         </>
                                     )}
                                 </NavLink>

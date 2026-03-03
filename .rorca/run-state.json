@@ -2,7 +2,7 @@
   "specId": "rorca-ux-overhaul",
   "runId": 894,
   "startedAt": "2026-03-03T04:02:26.202Z",
-  "lastUpdatedAt": "2026-03-03T05:32:52.937Z",
+  "lastUpdatedAt": "2026-03-03T05:40:18.613Z",
   "completedStories": [
     {
       "storyId": "UX-001",
@@ -93,6 +93,15 @@
       "finishedAt": "2026-03-03T05:32:52.937Z",
       "agentType": "claude",
       "elapsedMs": 509759
+    },
+    {
+      "storyId": "UX-011",
+      "title": "Settings Simplification",
+      "status": "passed",
+      "startedAt": "2026-03-03T05:33:39.623Z",
+      "finishedAt": "2026-03-03T05:40:18.612Z",
+      "agentType": "claude",
+      "elapsedMs": 398989
     }
   ],
   "failedStories": [],
