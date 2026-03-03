@@ -26,6 +26,21 @@ export interface GeneratedStory {
   suggestedReviewers?: string[];
 }
 
+export interface ContextUsedMeta {
+  standards: boolean;     // L1 was present
+  conventions: boolean;   // L2 was present
+  project: boolean;       // L3 was present
+  memory: boolean;        // gitMemory was present
+  schema: boolean;        // schemaSnapshot was present
+  scopesMatched: string[];
+  totalTokens: number;
+}
+
+export interface ContextUsed {
+  text: string;
+  meta: ContextUsedMeta;
+}
+
 export interface GeneratedSpec {
   title: string;
   slug: string;
@@ -33,6 +48,7 @@ export interface GeneratedSpec {
   diagrams: Record<string, DiagramOutput>;
   mermaidDiagram?: string;
   model?: string;
+  contextUsed?: ContextUsed;
 }
 
 export interface WriteResult {
@@ -71,6 +87,7 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
       passes: false
     })),
     ...(spec.mermaidDiagram ? { mermaidDiagram: spec.mermaidDiagram } : {}),
+    ...(spec.contextUsed ? { contextUsed: spec.contextUsed } : {}),
   };
   fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2), 'utf8');
 

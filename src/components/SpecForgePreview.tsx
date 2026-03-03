@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, CheckCircle2, Loader2, Play, X, GitBranch, MinusCircle, PlusCircle, Check, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2, Loader2, Play, X, GitBranch, MinusCircle, PlusCircle, Check, Trash2, Layers, CheckCircle, XCircle } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import type { Story } from './StoryCard';
 import type { PanelId } from './Sidebar';
+import type { ContextUsed } from '../panels/SpecForgeOutput';
 
 export interface GeneratedSpecPreview {
   specName: string;
@@ -13,7 +14,7 @@ export interface GeneratedSpecPreview {
   diagramType?: 'mermaid-flowchart' | 'mermaid-sequence' | 'ascii';
   savedPath?: string;
   generatedAt: string;
-  contextUsed?: string;
+  contextUsed?: ContextUsed;
 }
 
 interface SpecForgePreviewProps {
@@ -59,6 +60,8 @@ export default function SpecForgePreview({
 
   // Diagram expand
   const [showDiagram, setShowDiagram] = useState(false);
+  // Context info expand
+  const [showContext, setShowContext] = useState(false);
   const mermaidRef = useRef<HTMLDivElement>(null);
   const [svgContent, setSvgContent] = useState('');
 
@@ -371,6 +374,78 @@ export default function SpecForgePreview({
           )}
         </div>
       )}
+
+      {/* Context info */}
+      <div>
+        {spec.contextUsed ? (() => {
+          const m = spec.contextUsed!.meta;
+          const hasDirection = m.standards || m.conventions || m.project;
+          return (
+            <>
+              <button
+                onClick={() => setShowContext(v => !v)}
+                className={`flex items-center gap-1.5 text-xs transition-colors ${
+                  hasDirection
+                    ? 'text-muted hover:text-accent'
+                    : 'text-warning/70 hover:text-warning'
+                }`}
+              >
+                <Layers size={12} />
+                {showContext ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                {hasDirection
+                  ? `Context injected (${m.totalTokens.toLocaleString()} tokens)`
+                  : 'No direction configured — set up direction to improve spec quality'
+                }
+              </button>
+              {showContext && (
+                <div className="mt-2 border border-border rounded bg-panel p-3 space-y-3">
+                  <div className="flex flex-wrap gap-3">
+                    {([
+                      ['Standards (L1)', m.standards],
+                      ['Conventions (L2)', m.conventions],
+                      ['Project (L3)', m.project],
+                      ['Schema', m.schema],
+                      ['Memory', m.memory],
+                    ] as [string, boolean][]).map(([label, active]) => (
+                      <span key={label} className="flex items-center gap-1 text-xs">
+                        {active
+                          ? <CheckCircle size={12} className="text-success" />
+                          : <XCircle size={12} className="text-muted/40" />
+                        }
+                        <span className={active ? 'text-text' : 'text-muted/40'}>{label}</span>
+                      </span>
+                    ))}
+                  </div>
+                  {!hasDirection && (
+                    <button
+                      onClick={() => onNavigate?.('stack')}
+                      className="text-xs text-accent hover:text-accent-hover transition-colors"
+                    >
+                      Configure Direction Stack
+                    </button>
+                  )}
+                  <details className="group">
+                    <summary className="text-xs text-muted hover:text-accent cursor-pointer select-none transition-colors">
+                      Show full context text
+                    </summary>
+                    <pre className="mt-2 text-[11px] font-mono text-muted bg-bg/50 rounded p-3 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap break-words">
+                      {spec.contextUsed!.text}
+                    </pre>
+                  </details>
+                </div>
+              )}
+            </>
+          );
+        })() : (
+          <button
+            onClick={() => onNavigate?.('stack')}
+            className="flex items-center gap-1.5 text-xs text-warning/70 hover:text-warning transition-colors"
+          >
+            <Layers size={12} />
+            No context injected — set up direction to improve spec quality
+          </button>
+        )}
+      </div>
 
       {/* Action bar */}
       <div className="flex items-center gap-3 pt-2 border-t border-border">
