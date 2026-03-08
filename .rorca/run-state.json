@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T12:25:43.150Z",
+  "lastUpdatedAt": "2026-03-08T12:46:52.164Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -243,6 +243,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 398803
+    },
+    {
+      "storyId": "PR-033",
+      "title": "Frontend Component Tests — Core Panels",
+      "status": "passed",
+      "startedAt": "2026-03-08T12:25:53.366Z",
+      "finishedAt": "2026-03-08T12:46:52.164Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 1258798
     }
   ],
   "failedStories": [],
