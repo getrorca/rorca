@@ -3,9 +3,9 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T10:27:13.803Z
+Last Updated: 2026-03-08T10:34:09.954Z
 
-## Completed Stories (11)
+## Completed Stories (12)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
@@ -17,6 +17,7 @@ Last Updated: 2026-03-08T10:27:13.803Z
 - PR-009: Auth Middleware Conditional Enforcement — DONE (claude, claude-opus-4-6, 555s)
 - PR-010: Webhook Signature Verification Audit — DONE (claude, claude-opus-4-6, 544s)
 - PR-019: Memory Rotation & Archival Policy — DONE (claude, claude-sonnet-4-6, 219s)
+- PR-020: WAL → Generative Feedback Loop — DONE (claude, claude-opus-4-6, 405s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined
