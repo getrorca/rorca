@@ -90,6 +90,8 @@ interface UserStory {
   timeoutMinutes?: number;
   /** Per-story agent override. If unset, uses the run-level agentType. */
   agent?: AgentType;
+  /** Per-story model override (e.g. 'claude-opus-4-6', 'openai/gpt-4o'). If unset, uses run-level model. */
+  model?: string;
   /** Tags for context routing (CIE-004). Matched against routing.tags rules. */
   tags?: string[];
   /** CA-009: Persona name from PersonaRegistry to inject into prompt. */
@@ -1895,7 +1897,8 @@ async function executeStory(
   // ── Escalation: determine current model tier ────────────────────────
   // Escalation only applies to opencode (API-key models). Claude and Codex are subscription-based.
   const escalationEnabled = effectiveAgent === 'opencode' && escalationStates !== undefined;
-  let currentModel = config.agentModel;
+  // Per-story model override takes precedence over run-level model; escalation still applies on top.
+  let currentModel = story.model ?? config.agentModel;
 
   if (escalationEnabled && escalationStates) {
     const orchConfig = loadOrchestrationConfig(config.cwd);
