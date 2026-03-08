@@ -791,7 +791,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
       ) : (
         /* ─── Main Forge view: Create + Pending ──────────────────────── */
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-2xl mx-auto px-6 pt-10 pb-20 space-y-6">
+          <div className="max-w-2xl mx-auto w-full px-4 sm:px-6 pt-6 sm:pt-10 pb-20 space-y-6">
 
             {/* Create area — collapsible when pending specs exist */}
             {hasPending && !createExpanded && !generatedSpec && !isGenerating ? (
@@ -875,7 +875,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                     </div>
                   )}
 
-                  <div className="flex items-center justify-center gap-6 relative">
+                  <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6 relative">
                     {CONTEXT_DOTS.map(dot => {
                       const layerData = directionLayers?.[dot.key];
                       const populated = !!layerData?.content;
@@ -883,7 +883,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                         <div key={dot.key} className="relative">
                           <button
                             onClick={() => handleContextDotClick(dot.key)}
-                            className="flex items-center gap-1.5 group"
+                            className="flex items-center gap-1.5 group min-h-[44px] px-2"
                             title={populated ? `${dot.label} configured` : dot.emptyHeading}
                           >
                             <span className={`w-1.5 h-1.5 rounded-full transition-colors ${populated ? 'bg-emerald-500' : 'bg-border group-hover:bg-muted/50'}`} />
@@ -894,7 +894,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
                           {/* Populated popover — preview of content */}
                           {contextPopover === dot.key && populated && (
-                            <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-72 bg-bg border border-border rounded-lg shadow-lg z-50 p-3 space-y-2">
+                            <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-[min(18rem,90vw)] bg-bg border border-border rounded-lg shadow-lg z-50 p-3 space-y-2">
                               <p className="text-xs font-medium text-text">{dot.label}</p>
                               <p className="text-xs text-muted whitespace-pre-wrap break-words leading-relaxed">
                                 {layerData!.content!.length > 200
@@ -912,7 +912,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
                           {/* Empty popover — configure layer */}
                           {contextPopover === dot.key && !populated && (
-                            <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-72 bg-bg border border-border rounded-lg shadow-lg z-50 p-3 space-y-2">
+                            <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 w-[min(18rem,90vw)] bg-bg border border-border rounded-lg shadow-lg z-50 p-3 space-y-2">
                               <p className="text-xs font-medium text-text">{dot.emptyHeading}</p>
                               <p className="text-[10px] text-muted leading-relaxed">{dot.emptyDesc}</p>
                               <button
