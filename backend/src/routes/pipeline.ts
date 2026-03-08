@@ -4,7 +4,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import simpleGit from 'simple-git';
+import { z } from 'zod';
 import { db } from '../db/index';
+import { validateBody } from '../lib/validate';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
@@ -854,14 +856,21 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or spec not found" }
  */
-router.post('/trigger', async (req: Request, res: Response) => {
+const PipelineTriggerSchema = z.object({
+  specPath: z.string().min(1),
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  autoWorktree: z.boolean().optional(),
+  dryRun: z.boolean().optional(),
+  triggerType: z.enum(['manual', 'scheduled']).optional(),
+  forceSequential: z.boolean().optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'codex']).optional(),
+  modelOverride: z.string().optional(),
+  storyId: z.string().optional(),
+});
+
+router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId, autoWorktree, dryRun, triggerType, forceSequential } = req.body;
-
-    if (!specPath || !workspaceId) {
-      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
-      return;
-    }
 
     // 1. Look up workspace path
     const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as

@@ -12,7 +12,9 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import { z } from 'zod';
 import { db } from '../db/index';
+import { validateBody } from '../lib/validate';
 import {
   loadRorcaConfig,
   writeRorcaConfig,
@@ -245,31 +247,18 @@ router.get('/:id/rorca-config', (req: Request, res: Response) => {
  *       400:
  *         description: Validation errors
  */
-router.put('/:id/rorca-config', (req: Request, res: Response) => {
+const RorcaConfigBodySchema = z.object({
+  config: RorcaConfigSchema,
+});
+
+router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), (req: Request, res: Response) => {
   const wsPath = resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
   }
 
-  const { config } = req.body;
-  if (!config) {
-    res.status(400).json({ error: 'Missing config in request body' });
-    return;
-  }
-
-  // Validate with zod
-  const parsed = RorcaConfigSchema.safeParse(config);
-  if (!parsed.success) {
-    const errors = parsed.error.issues.map(i => ({
-      path: i.path.join('.'),
-      message: i.message,
-    }));
-    res.status(400).json({ error: 'Config validation failed', details: errors });
-    return;
-  }
-
-  writeRorcaConfig(wsPath, parsed.data);
+  writeRorcaConfig(wsPath, req.body.config);
 
   // Return the saved config (with defaults filled)
   const saved = loadRorcaConfig(wsPath);

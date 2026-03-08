@@ -4,7 +4,9 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
+import { z } from 'zod';
 import { db } from '../db/index';
+import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
 import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
@@ -546,7 +548,26 @@ function extractSkillNames(story: Record<string, unknown>): string[] {
   }).filter(Boolean);
 }
 
-router.post('/generate', async (req: Request, res: Response) => {
+const GenerateSpecSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  brief: z.string().min(1).optional(),
+  specBrief: z.string().min(1).optional(),
+  title: z.string().optional(),
+  specName: z.string().optional(),
+  domain: z.string().optional(),
+  diagramTypes: z.array(z.string()).optional(),
+  storyAnnotations: z.record(z.string(), z.unknown()).optional(),
+  templateId: z.string().optional(),
+  storyCount: z.union([z.number(), z.string()]).optional(),
+  model: z.string().optional(),
+  multiPass: z.boolean().optional(),
+  storyPrefix: z.string().optional(),
+}).refine(data => !!(data.brief || data.specBrief), {
+  message: 'brief (or specBrief) is required',
+  path: ['brief'],
+});
+
+router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, res: Response) => {
   try {
     const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
     const title: string = req.body.title || req.body.specName;
@@ -555,12 +576,6 @@ router.post('/generate', async (req: Request, res: Response) => {
     const storyCount: number = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
     const requestedModel: string | undefined = req.body.model;
     const multiPass: boolean = req.body.multiPass === true;
-
-    // 1. Validate required fields (title is optional — auto-generated from brief)
-    if (!workspaceId || !brief) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, brief (or specBrief)' });
-      return;
-    }
 
     const effectiveTitle = title || brief;
 

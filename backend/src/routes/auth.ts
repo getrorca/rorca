@@ -3,7 +3,9 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import Stripe from 'stripe';
+import { z } from 'zod';
 import { db } from '../db';
+import { validateBody } from '../lib/validate';
 
 const router = Router();
 
@@ -175,35 +177,16 @@ function generateAndStoreVerificationToken(userId: string, email: string): strin
  *       400: { description: "Validation error", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
  *       409: { description: "Email already registered" }
  */
-router.post('/register', (req: Request, res: Response) => {
+const RegisterSchema = z.object({
+  email: z.string().min(1, 'Email is required').regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email format'),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  displayName: z.string().min(1, 'Display name is required'),
+});
+
+router.post('/register', validateBody(RegisterSchema), (req: Request, res: Response) => {
   const { email, password, displayName } = req.body;
 
-  // Validate required fields
-  if (!email || typeof email !== 'string') {
-    res.status(400).json({ error: 'Email is required' });
-    return;
-  }
-  if (!password || typeof password !== 'string') {
-    res.status(400).json({ error: 'Password is required' });
-    return;
-  }
-  if (!displayName || typeof displayName !== 'string') {
-    res.status(400).json({ error: 'Display name is required' });
-    return;
-  }
-
-  // Validate email format
   const trimmedEmail = email.trim().toLowerCase();
-  if (!EMAIL_REGEX.test(trimmedEmail)) {
-    res.status(400).json({ error: 'Invalid email format' });
-    return;
-  }
-
-  // Validate password length
-  if (password.length < 8) {
-    res.status(400).json({ error: 'Password must be at least 8 characters' });
-    return;
-  }
 
   // Check for existing user
   const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(trimmedEmail) as UserRow | undefined;
@@ -284,17 +267,13 @@ router.post('/register', (req: Request, res: Response) => {
  *                 refreshToken: { type: string }
  *       401: { description: "Invalid email or password" }
  */
-router.post('/login', (req: Request, res: Response) => {
-  const { email, password } = req.body;
+const LoginSchema = z.object({
+  email: z.string().min(1, 'Email is required'),
+  password: z.string().min(1, 'Password is required'),
+});
 
-  if (!email || typeof email !== 'string') {
-    res.status(400).json({ error: 'Email is required' });
-    return;
-  }
-  if (!password || typeof password !== 'string') {
-    res.status(400).json({ error: 'Password is required' });
-    return;
-  }
+router.post('/login', validateBody(LoginSchema), (req: Request, res: Response) => {
+  const { email, password } = req.body;
 
   const trimmedEmail = email.trim().toLowerCase();
 
