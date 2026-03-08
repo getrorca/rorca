@@ -43,7 +43,7 @@ function emitWalEvent(eventType: string, workspaceId: string, payload: Record<st
  *     tags: [Conventions]
  *     summary: Discover conventions in a workspace codebase
  *     operationId: discoverConventions
- *     description: Spawns an analysis agent to scan the workspace codebase and generate a convention proposal.
+ *     description: Spawns an async convention analysis agent to scan the workspace codebase. Detects stack, architecture pattern, and generates a convention proposal with L3 direction layer, AGENTS.md template, and per-library guides. Stores the result as a pending proposal in the convention_proposals table.
  *     requestBody:
  *       required: true
  *       content:
@@ -52,15 +52,29 @@ function emitWalEvent(eventType: string, workspaceId: string, payload: Record<st
  *             type: object
  *             required: [workspaceId]
  *             properties:
- *               workspaceId:
- *                 type: string
+ *               workspaceId: { type: string }
  *     responses:
  *       200:
  *         description: Convention proposal created
- *       400:
- *         description: Missing workspaceId
- *       404:
- *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 proposalId: { type: integer }
+ *                 proposal:
+ *                   type: object
+ *                   properties:
+ *                     stack: { type: array, items: { type: string } }
+ *                     conventions: { type: array, items: { type: object } }
+ *                     architecture: { type: object, properties: { pattern: { type: string } } }
+ *                     directionL3: { type: string, description: "YAML content for L3 direction layer" }
+ *                     fileGovernance: { type: string, description: "Generated AGENTS.md content" }
+ *                     perLibraryGuides: { type: object, additionalProperties: { type: string }, description: "filename → markdown content map" }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found or path missing on disk" }
+ *       500: { description: "Convention discovery failed" }
  */
 router.post('/discover', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
@@ -123,11 +137,26 @@ router.post('/discover', async (req: Request, res: Response) => {
  *       - in: path
  *         name: workspaceId
  *         required: true
- *         schema:
- *           type: string
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: List of proposals
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 proposals:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       workspaceId: { type: string }
+ *                       proposal: { type: object }
+ *                       status: { type: string, enum: [pending, approved, rejected] }
+ *                       createdAt: { type: string }
+ *                       resolvedAt: { type: string, nullable: true }
  */
 router.get('/proposals/:workspaceId', (req: Request, res: Response) => {
   const { workspaceId } = req.params;
@@ -162,20 +191,28 @@ router.get('/proposals/:workspaceId', (req: Request, res: Response) => {
  *     tags: [Conventions]
  *     summary: Approve and apply a convention proposal
  *     operationId: approveConventionProposal
- *     description: Applies the proposal's L3 direction layer, AGENTS.md, and per-library convention guides to the workspace.
+ *     description: "Applies the proposal's changes to the workspace: upserts L3 direction layer to DB, writes AGENTS.md if not present, and writes per-library convention guides to .rorca/conventions/. Emits convention_approved WAL event."
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
- *         schema:
- *           type: integer
+ *         schema: { type: integer }
  *     responses:
  *       200:
  *         description: Proposal approved and applied
- *       404:
- *         description: Proposal not found
- *       409:
- *         description: Proposal already resolved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 applied:
+ *                   type: array
+ *                   items: { type: string }
+ *                   description: List of changes applied (e.g. 'L3 direction layer', 'AGENTS.md (created)')
+ *       400: { description: "Invalid proposal ID" }
+ *       404: { description: "Proposal or workspace not found" }
+ *       409: { description: "Proposal already resolved" }
  */
 router.post('/proposals/:id/approve', (req: Request, res: Response) => {
   const proposalId = parseInt(String(req.params.id), 10);
@@ -270,18 +307,24 @@ router.post('/proposals/:id/approve', (req: Request, res: Response) => {
  *     tags: [Conventions]
  *     summary: Reject a convention proposal
  *     operationId: rejectConventionProposal
- *     description: Marks a pending convention proposal as rejected without applying any changes.
+ *     description: Marks a pending convention proposal as rejected without applying any changes to the workspace. Emits convention_rejected WAL event.
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
- *         schema:
- *           type: integer
+ *         schema: { type: integer }
  *     responses:
  *       200:
  *         description: Proposal rejected
- *       404:
- *         description: Proposal not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *       400: { description: "Invalid proposal ID" }
+ *       404: { description: "Proposal not found" }
+ *       409: { description: "Proposal already resolved" }
  */
 router.post('/proposals/:id/reject', (req: Request, res: Response) => {
   const proposalId = parseInt(String(req.params.id), 10);
@@ -321,7 +364,7 @@ router.post('/proposals/:id/reject', (req: Request, res: Response) => {
  *     tags: [Conventions]
  *     summary: Run convention drift detection on a workspace
  *     operationId: checkConventionDrift
- *     description: Spawns a drift analysis agent that reads .rorca/conventions/*.md and direction stack L0-L3, samples up to 50 source files, and checks for violations.
+ *     description: Spawns a drift analysis agent that reads .rorca/conventions/*.md and direction stack L0-L3, samples up to 50 source files, and checks for violations. Stores the report in drift_reports table and emits convention_drift_detected WAL event.
  *     requestBody:
  *       required: true
  *       content:
@@ -330,15 +373,35 @@ router.post('/proposals/:id/reject', (req: Request, res: Response) => {
  *             type: object
  *             required: [workspaceId]
  *             properties:
- *               workspaceId:
- *                 type: string
+ *               workspaceId: { type: string }
  *     responses:
  *       200:
  *         description: Drift report generated
- *       400:
- *         description: Missing workspaceId
- *       404:
- *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 report:
+ *                   type: object
+ *                   properties:
+ *                     violations:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           file: { type: string }
+ *                           convention: { type: string }
+ *                           severity: { type: string, enum: [error, warning] }
+ *                           message: { type: string }
+ *                     score: { type: integer, description: "Compliance score 0-100" }
+ *                     conventionsChecked: { type: integer }
+ *                     filesSampled: { type: integer }
+ *                     checkedAt: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found or path missing on disk" }
+ *       500: { description: "Drift detection failed" }
  */
 router.post('/check', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
@@ -400,18 +463,32 @@ router.post('/check', async (req: Request, res: Response) => {
  *     tags: [Conventions]
  *     summary: Get the latest drift report for a workspace
  *     operationId: getLatestDriftReport
- *     description: Returns the most recent convention drift report for the specified workspace.
+ *     description: "Returns the most recent convention drift report from the drift_reports table. Returns { report: null } if no drift check has been run yet."
  *     parameters:
  *       - in: path
  *         name: workspaceId
  *         required: true
- *         schema:
- *           type: string
+ *         schema: { type: string }
  *     responses:
  *       200:
- *         description: Latest drift report
- *       404:
- *         description: No drift report found
+ *         description: Latest drift report or null
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: integer, nullable: true }
+ *                 workspaceId: { type: string, nullable: true }
+ *                 triggerType: { type: string, nullable: true }
+ *                 report:
+ *                   nullable: true
+ *                   type: object
+ *                   properties:
+ *                     violations: { type: array, items: { type: object } }
+ *                     score: { type: integer }
+ *                     conventionsChecked: { type: integer }
+ *                     filesSampled: { type: integer }
+ *                     checkedAt: { type: string }
  */
 router.get('/drift/:workspaceId', (req: Request, res: Response) => {
   const { workspaceId } = req.params;
