@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T10:14:09.362Z",
+  "lastUpdatedAt": "2026-03-08T10:23:24.184Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -93,6 +93,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 554848
+    },
+    {
+      "storyId": "PR-010",
+      "title": "Webhook Signature Verification Audit",
+      "status": "passed",
+      "startedAt": "2026-03-08T10:14:20.200Z",
+      "finishedAt": "2026-03-08T10:23:24.183Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 543983
     }
   ],
   "failedStories": [],
