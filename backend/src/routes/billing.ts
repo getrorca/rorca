@@ -344,6 +344,95 @@ router.post('/portal', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/billing/quotas ─────────────────────────────────────────────────
+
+interface QuotaRow {
+  plan_name: string;
+  feature: string;
+  quota_limit: number;
+}
+
+function getFeatureUsage(userId: string, feature: string): number {
+  switch (feature) {
+    case 'workspaces': {
+      const row = db.prepare('SELECT COUNT(*) as cnt FROM workspaces').get() as { cnt: number };
+      return row.cnt;
+    }
+    case 'specs_per_month': {
+      const row = db.prepare(
+        `SELECT COUNT(*) as cnt FROM wal_events
+         WHERE event_type = 'generate' AND ts >= datetime('now', '-30 days')`
+      ).get() as { cnt: number };
+      return row.cnt;
+    }
+    case 'team_members': {
+      const row = db.prepare(
+        `SELECT COUNT(DISTINCT tm.user_id) as cnt
+         FROM teams t
+         JOIN team_members tm ON tm.team_id = t.id
+         WHERE t.owner_id = ?`
+      ).get(userId) as { cnt: number };
+      return (row?.cnt ?? 0) + 1;
+    }
+    case 'marketplace_publish':
+    case 'exa_search':
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * @swagger
+ * /api/billing/quotas:
+ *   get:
+ *     tags: [Billing]
+ *     summary: Get current user's plan quotas and usage
+ *     operationId: getBillingQuotas
+ *     description: Returns the current user's plan, usage counts, and remaining quotas for each feature.
+ *     responses:
+ *       200:
+ *         description: Plan quotas and usage
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 plan:
+ *                   type: string
+ *                   enum: [free, solo, pro, team]
+ *                 quotas:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       feature: { type: string }
+ *                       limit: { type: integer, description: "-1 = unlimited, 0 = disabled" }
+ *                       used: { type: integer }
+ *                       remaining: { type: integer, nullable: true, description: "null if unlimited" }
+ */
+router.get('/quotas', (req: Request, res: Response) => {
+  const authReq = req as Request & { user: AuthUser };
+  const userId = authReq.user?.id;
+  const plan = getUserPlan(userId || 'local-admin');
+
+  const rows = db.prepare(
+    'SELECT feature, quota_limit FROM plan_quotas WHERE plan_name = ?'
+  ).all(plan) as QuotaRow[];
+
+  const quotas = rows.map(row => {
+    const used = getFeatureUsage(userId || 'local-admin', row.feature);
+    return {
+      feature: row.feature,
+      limit: row.quota_limit,
+      used,
+      remaining: row.quota_limit === -1 ? null : Math.max(0, row.quota_limit - used),
+    };
+  });
+
+  res.json({ plan, quotas });
+});
+
 // ─── POST /api/billing/webhook (Stripe webhook — no auth) ───────────────────
 // NOTE: This route is registered BEFORE authRequired in server.ts
 export const webhookRouter = Router();
