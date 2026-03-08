@@ -170,30 +170,36 @@ export default function ActivityFeedPanel() {
   const dateGroups = groupByDate(items);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden bg-bg">
+    <div className="flex flex-col h-full overflow-hidden bg-bg" role="main" aria-label="Activity Feed panel">
       <AppHeader
         breadcrumbs={
           <div className="flex items-center gap-2">
             <span className="font-medium text-[var(--text)] text-sm tracking-tight">
               {workspaceId ? 'Workspace' : 'Global'}
             </span>
-            <ChevronRight size={14} className="text-muted" />
+            <ChevronRight size={14} className="text-muted" aria-hidden="true" />
             <span className="text-sm text-muted flex items-center gap-1.5">
               Activity Feed
-              <span className="text-xs px-1.5 py-0.5 rounded-full bg-surface text-muted">
+              <span className="text-xs px-1.5 py-0.5 rounded-full bg-surface text-muted" aria-label={`${total} total activities`}>
                 {total}
               </span>
             </span>
           </div>
         }
         actions={
-          <div className="flex items-center gap-1.5 flex-wrap flex-1 max-w-full overflow-x-auto no-scrollbar pb-1 pt-1 pr-2">
-            <Filter size={14} className="text-muted mr-1 md:hidden" />
+          <div
+            className="flex items-center gap-1.5 flex-wrap flex-1 max-w-full overflow-x-auto no-scrollbar pb-1 pt-1 pr-2"
+            role="group"
+            aria-label="Filter activity by type"
+            aria-live="polite"
+          >
+            <Filter size={14} className="text-muted mr-1 md:hidden" aria-hidden="true" />
             {TYPE_FILTERS.map((f) => (
               <button
                 key={f.id}
                 onClick={() => setTypeFilter(f.id)}
-                className={`px-2.5 py-1 text-xs whitespace-nowrap rounded-full transition-colors ${typeFilter === f.id
+                aria-pressed={typeFilter === f.id}
+                className={`px-2.5 py-1 text-xs whitespace-nowrap rounded-full transition-colors ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50 ${typeFilter === f.id
                   ? 'bg-accent text-white'
                   : 'bg-surface text-muted hover:text-[var(--text)]'
                   }`}
@@ -206,10 +212,10 @@ export default function ActivityFeedPanel() {
       />
 
       {/* Timeline */}
-      <div className="flex-1 overflow-y-auto px-5 py-4">
+      <div className="flex-1 overflow-y-auto px-5 py-4" aria-live="polite" aria-busy={loading}>
         {loading ? (
           <div className="flex items-center justify-center h-32">
-            <Loader2 size={24} className="animate-spin text-muted" />
+            <Loader2 size={24} className="animate-spin text-muted" aria-label="Loading activity feed" />
           </div>
         ) : items.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 text-muted text-sm">
@@ -228,14 +234,14 @@ export default function ActivityFeedPanel() {
                 </div>
 
                 {/* Timeline items */}
-                <div className="relative pl-6">
+                <ol className="relative pl-6" aria-label={`Activities on ${group.date}`}>
                   {/* Vertical timeline line */}
-                  <div className="absolute left-[11px] top-2 bottom-2 w-px bg-border" />
+                  <div className="absolute left-[11px] top-2 bottom-2 w-px bg-border" aria-hidden="true" />
 
                   {group.items.map(item => (
-                    <div key={item.id} className="relative flex items-start gap-3 mb-4 group">
+                    <li key={item.id} className="relative flex items-start gap-3 mb-4 group">
                       {/* Timeline dot */}
-                      <div className="absolute left-[-13px] top-1 w-[22px] h-[22px] rounded-full bg-panel border border-border flex items-center justify-center z-10">
+                      <div className="absolute left-[-13px] top-1 w-[22px] h-[22px] rounded-full bg-panel border border-border flex items-center justify-center z-10" aria-hidden="true">
                         {activityIcon(item.activityType)}
                       </div>
 
@@ -250,7 +256,7 @@ export default function ActivityFeedPanel() {
                               className="w-6 h-6 rounded-full shrink-0 mt-0.5"
                             />
                           ) : (
-                            <div className="w-6 h-6 rounded-full bg-border flex items-center justify-center shrink-0 mt-0.5">
+                            <div className="w-6 h-6 rounded-full bg-border flex items-center justify-center shrink-0 mt-0.5" aria-hidden="true">
                               <span className="text-[10px] font-medium text-muted">
                                 {avatarInitials(item.actor.name)}
                               </span>
@@ -262,9 +268,9 @@ export default function ActivityFeedPanel() {
                               {item.description}
                             </p>
                             <div className="flex items-center gap-2 mt-0.5">
-                              <span className="text-xs text-muted">
+                              <time className="text-xs text-muted" dateTime={item.timestamp}>
                                 {relativeTime(item.timestamp)}
-                              </span>
+                              </time>
                               {item.target && (
                                 <span className="text-xs text-muted/60">
                                   {item.target.type === 'spec' && `spec: ${item.target.id}`}
@@ -276,9 +282,9 @@ export default function ActivityFeedPanel() {
                           </div>
                         </div>
                       </div>
-                    </div>
+                    </li>
                   ))}
-                </div>
+                </ol>
               </div>
             ))}
 
@@ -288,12 +294,13 @@ export default function ActivityFeedPanel() {
                 <button
                   onClick={() => fetchActivity(items.length, true)}
                   disabled={loadingMore}
-                  className="flex items-center gap-2 px-4 py-2 text-sm rounded bg-bg text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+                  aria-label="Load more activity items"
+                  className="flex items-center gap-2 px-4 py-2 text-sm rounded bg-bg text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50 ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
                 >
                   {loadingMore ? (
-                    <Loader2 size={14} className="animate-spin" />
+                    <Loader2 size={14} className="animate-spin" aria-hidden="true" />
                   ) : (
-                    <ChevronDown size={14} />
+                    <ChevronDown size={14} aria-hidden="true" />
                   )}
                   Load more
                 </button>

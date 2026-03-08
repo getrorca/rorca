@@ -160,22 +160,24 @@ export default function VelocityChartPanel() {
   }));
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden" role="main" aria-label="Velocity Chart analytics panel">
       {/* Header */}
       <div className="px-5 py-4 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <TrendingUp size={20} strokeWidth={1.5} className="text-accent" />
+          <TrendingUp size={20} strokeWidth={1.5} className="text-accent" aria-hidden="true" />
           <h2 className="text-lg font-semibold">Velocity Chart</h2>
         </div>
         <div className="flex items-center gap-2">
           {/* Date range selector */}
-          <div className="flex items-center gap-1 text-xs">
-            <Calendar size={14} className="text-muted" />
+          <div className="flex items-center gap-1 text-xs" role="group" aria-label="Date range filter">
+            <Calendar size={14} className="text-muted" aria-hidden="true" />
             {(['4w', '8w', '12w', '24w'] as DateRange[]).map(r => (
               <button
                 key={r}
                 onClick={() => setDateRange(r)}
-                className={`px-2 py-1 rounded transition-colors ${
+                aria-pressed={dateRange === r}
+                aria-label={`Show last ${r}`}
+                className={`px-2 py-1 rounded transition-colors ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                   dateRange === r
                     ? 'bg-accent text-white'
                     : 'text-muted hover:text-[var(--text)] hover:bg-bg'
@@ -188,24 +190,26 @@ export default function VelocityChartPanel() {
           <button
             onClick={fetchVelocity}
             disabled={loading}
-            className="p-1.5 text-muted hover:text-[var(--text)] transition-colors"
-            title="Refresh"
+            className="p-1.5 text-muted hover:text-[var(--text)] transition-colors ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
+            aria-label="Refresh velocity data"
           >
-            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} aria-hidden="true" />
           </button>
         </div>
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto p-5 space-y-5">
+      <div className="flex-1 overflow-y-auto p-5 space-y-5" aria-live="polite" aria-busy={loading}>
         {/* Filters */}
         <div className="flex items-center gap-3">
-          <Filter size={14} className="text-muted" />
+          <Filter size={14} className="text-muted" aria-hidden="true" />
           {/* Workspace filter */}
+          <label htmlFor="velocity-workspace-filter" className="sr-only">Filter by workspace</label>
           <select
+            id="velocity-workspace-filter"
             value={filterWorkspace}
             onChange={e => { setFilterWorkspace(e.target.value); setFilterSpec(''); }}
-            className="text-xs bg-bg border border-border rounded px-2 py-1.5 text-[var(--text)]"
+            className="text-xs bg-bg border border-border rounded px-2 py-1.5 text-[var(--text)] ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
           >
             <option value="">All workspaces</option>
             {workspaces.map(ws => (
@@ -213,10 +217,12 @@ export default function VelocityChartPanel() {
             ))}
           </select>
           {/* Spec filter */}
+          <label htmlFor="velocity-spec-filter" className="sr-only">Filter by spec</label>
           <select
+            id="velocity-spec-filter"
             value={filterSpec}
             onChange={e => setFilterSpec(e.target.value)}
-            className="text-xs bg-bg border border-border rounded px-2 py-1.5 text-[var(--text)]"
+            className="text-xs bg-bg border border-border rounded px-2 py-1.5 text-[var(--text)] ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
           >
             <option value="">All specs</option>
             {(data?.availableSpecs ?? []).map(s => (
@@ -227,22 +233,22 @@ export default function VelocityChartPanel() {
 
         {/* Summary cards */}
         <div className="grid grid-cols-4 gap-3">
-          <div className="bg-bg rounded-lg p-3 border border-border">
+          <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Total stories: ${totalStories}`}>
             <p className="text-xs text-muted mb-1">Total Stories</p>
-            <p className="text-xl font-bold">{totalStories}</p>
+            <p className="text-xl font-bold" aria-hidden="true">{totalStories}</p>
           </div>
-          <div className="bg-bg rounded-lg p-3 border border-border">
+          <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Average stories per week: ${avgPerWeek}`}>
             <p className="text-xs text-muted mb-1">Avg / Week</p>
-            <p className="text-xl font-bold">{avgPerWeek}</p>
+            <p className="text-xl font-bold" aria-hidden="true">{avgPerWeek}</p>
           </div>
-          <div className="bg-bg rounded-lg p-3 border border-border">
+          <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Current trend: ${latestAvg} (4-week rolling average)`}>
             <p className="text-xs text-muted mb-1">Current Trend</p>
-            <p className="text-xl font-bold">{latestAvg}</p>
+            <p className="text-xl font-bold" aria-hidden="true">{latestAvg}</p>
             <p className="text-xs text-muted">4-week rolling avg</p>
           </div>
-          <div className="bg-bg rounded-lg p-3 border border-border">
+          <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Pass rate: ${totalStories > 0 ? Math.round((totalPassed / totalStories) * 100) : 0}%`}>
             <p className="text-xs text-muted mb-1">Pass Rate</p>
-            <p className="text-xl font-bold">
+            <p className="text-xl font-bold" aria-hidden="true">
               {totalStories > 0 ? Math.round((totalPassed / totalStories) * 100) : 0}%
             </p>
           </div>
@@ -251,7 +257,7 @@ export default function VelocityChartPanel() {
         {/* Chart */}
         {loading ? (
           <div className="flex items-center justify-center h-64 text-muted">
-            <Loader2 size={24} className="animate-spin" />
+            <Loader2 size={24} className="animate-spin" aria-label="Loading velocity data" />
           </div>
         ) : chartData.length === 0 ? (
           <div className="flex items-center justify-center h-64 text-muted text-sm">
@@ -259,57 +265,82 @@ export default function VelocityChartPanel() {
           </div>
         ) : (
           <div className="h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis
-                  dataKey="label"
-                  tick={{ fontSize: 12, fill: 'var(--muted)' }}
-                  tickLine={false}
-                />
-                <YAxis
-                  allowDecimals={false}
-                  tick={{ fontSize: 12, fill: 'var(--muted)' }}
-                  tickLine={false}
-                />
-                <Tooltip
-                  content={<VelocityTooltip />}
-                  cursor={{ fill: 'var(--border)', opacity: 0.3 }}
-                />
-                <Legend
-                  wrapperStyle={{ fontSize: 12 }}
-                  iconType="square"
-                />
-                <Bar dataKey="passed" name="Passed" stackId="stories" fill={COLOR_PASSED} radius={[0, 0, 0, 0]} />
-                <Bar dataKey="failed" name="Failed" stackId="stories" fill={COLOR_FAILED} radius={[0, 0, 0, 0]} />
-                <Bar dataKey="skipped" name="Skipped" stackId="stories" fill={COLOR_SKIPPED} radius={[2, 2, 0, 0]} />
-                <Line
-                  type="monotone"
-                  dataKey="rollingAvg"
-                  name="4-week avg"
-                  stroke={COLOR_TREND}
-                  strokeWidth={2}
-                  strokeDasharray="5 3"
-                  dot={false}
-                />
-              </BarChart>
-            </ResponsiveContainer>
+            <div role="img" aria-label="Stacked bar chart showing weekly story velocity with passed, failed, and skipped counts and a 4-week rolling average trend line">
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 12, fill: 'var(--muted)' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    tick={{ fontSize: 12, fill: 'var(--muted)' }}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    content={<VelocityTooltip />}
+                    cursor={{ fill: 'var(--border)', opacity: 0.3 }}
+                  />
+                  <Legend
+                    wrapperStyle={{ fontSize: 12 }}
+                    iconType="square"
+                  />
+                  <Bar dataKey="passed" name="Passed" stackId="stories" fill={COLOR_PASSED} radius={[0, 0, 0, 0]} />
+                  <Bar dataKey="failed" name="Failed" stackId="stories" fill={COLOR_FAILED} radius={[0, 0, 0, 0]} />
+                  <Bar dataKey="skipped" name="Skipped" stackId="stories" fill={COLOR_SKIPPED} radius={[2, 2, 0, 0]} />
+                  <Line
+                    type="monotone"
+                    dataKey="rollingAvg"
+                    name="4-week avg"
+                    stroke={COLOR_TREND}
+                    strokeWidth={2}
+                    strokeDasharray="5 3"
+                    dot={false}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            {/* Screen-reader table alternative */}
+            <table className="sr-only" aria-label="Weekly velocity data table">
+              <thead>
+                <tr>
+                  <th scope="col" role="columnheader">Week</th>
+                  <th scope="col" role="columnheader">Passed</th>
+                  <th scope="col" role="columnheader">Failed</th>
+                  <th scope="col" role="columnheader">Skipped</th>
+                  <th scope="col" role="columnheader">4-week avg</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chartData.map((w) => (
+                  <tr key={w.week}>
+                    <td>{w.label}</td>
+                    <td>{w.passed}</td>
+                    <td>{w.failed}</td>
+                    <td>{w.skipped}</td>
+                    <td>{w.rollingAvg}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
 
         {/* Weekly breakdown table */}
         {chartData.length > 0 && (
           <div className="border border-border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
+            <table className="w-full text-sm" role="table" aria-label="Weekly story breakdown table">
               <thead>
                 <tr className="bg-bg border-b border-border text-left text-xs text-muted">
-                  <th className="px-3 py-2">Week</th>
-                  <th className="px-3 py-2 text-right">Passed</th>
-                  <th className="px-3 py-2 text-right">Failed</th>
-                  <th className="px-3 py-2 text-right">Skipped</th>
-                  <th className="px-3 py-2 text-right">Total</th>
-                  <th className="px-3 py-2 text-right">Avg</th>
-                  <th className="px-3 py-2">Notable Specs</th>
+                  <th className="px-3 py-2" role="columnheader">Week</th>
+                  <th className="px-3 py-2 text-right" role="columnheader">Passed</th>
+                  <th className="px-3 py-2 text-right" role="columnheader">Failed</th>
+                  <th className="px-3 py-2 text-right" role="columnheader">Skipped</th>
+                  <th className="px-3 py-2 text-right" role="columnheader">Total</th>
+                  <th className="px-3 py-2 text-right" role="columnheader">Avg</th>
+                  <th className="px-3 py-2" role="columnheader">Notable Specs</th>
                 </tr>
               </thead>
               <tbody>
