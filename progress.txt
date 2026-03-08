@@ -3,9 +3,9 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T11:05:40.885Z
+Last Updated: 2026-03-08T11:39:07.761Z
 
-## Completed Stories (15)
+## Completed Stories (17)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
@@ -21,6 +21,8 @@ Last Updated: 2026-03-08T11:05:40.885Z
 - PR-022: Accessibility Audit — Core Panels (8 panels) — DONE (claude, claude-sonnet-4-6, 793s)
 - PR-023: Accessibility Audit — Analytics Panels (7 panels) — DONE (claude, claude-sonnet-4-6, 528s)
 - PR-024: Accessibility Audit — System Panels (7 panels) — DONE (claude, claude-sonnet-4-6, 538s)
+- PR-025: Responsive Layout — Core Panels (8 panels) — DONE (claude, claude-sonnet-4-6, 1740s)
+- PR-025: Responsive Design — Core Panels (8 panels) — DONE (claude, claude-sonnet-4-6, 1996s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined
