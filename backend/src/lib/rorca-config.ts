@@ -111,12 +111,20 @@ const AdversarialReviewSchema = z.object({
   reviewTimeoutMin: z.number().int().min(1).max(30).default(5),
 });
 
+const GatesSchema = z.object({
+  typecheck: z.boolean().default(true),
+  e2e: z.boolean().default(true),
+  /** 'blocking' = gate failure fails the story (old behaviour). 'warning' = log and continue. */
+  mode: z.enum(['blocking', 'warning']).default('warning'),
+});
+
 const ExecutionSchema = z.object({
   waveParallelism: z.boolean().default(false),
   storyTimeoutMin: z.number().int().min(1).default(45),
   maxRetries: z.number().int().min(0).default(3),
   autoCommit: z.boolean().default(true),
   adversarialReview: AdversarialReviewSchema.default(() => AdversarialReviewSchema.parse({})),
+  gates: GatesSchema.default(() => GatesSchema.parse({})),
 });
 
 const PersonasConfigSchema = z.object({
@@ -147,6 +155,7 @@ export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
 export type TeleologyConfig = z.infer<typeof TeleologySchema>;
 export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
 export type ExecutionConfig = z.infer<typeof ExecutionSchema>;
+export type GatesConfig = z.infer<typeof GatesSchema>;
 export type AdversarialReviewConfig = z.infer<typeof AdversarialReviewSchema>;
 export type PersonasConfig = z.infer<typeof PersonasConfigSchema>;
 
