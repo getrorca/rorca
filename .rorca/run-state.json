@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T10:23:24.184Z",
+  "lastUpdatedAt": "2026-03-08T10:27:13.803Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -103,6 +103,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 543983
+    },
+    {
+      "storyId": "PR-019",
+      "title": "Memory Rotation & Archival Policy",
+      "status": "passed",
+      "startedAt": "2026-03-08T10:23:35.179Z",
+      "finishedAt": "2026-03-08T10:27:13.803Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 218624
     }
   ],
   "failedStories": [],
