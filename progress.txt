@@ -3,9 +3,9 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T14:58:49.763Z
+Last Updated: 2026-03-08T15:02:35.804Z
 
-## Completed Stories (31)
+## Completed Stories (32)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
@@ -37,6 +37,7 @@ Last Updated: 2026-03-08T14:58:49.763Z
 - PR-040: OpenAPI Annotation Audit — Wave 1 (12 routes with 0 annotations) — DONE (claude, claude-sonnet-4-6, 2690s)
 - PR-041: OpenAPI Annotation Audit — Wave 2 (routes with partial coverage) — DONE (claude, claude-sonnet-4-6, 194s)
 - PR-042: DB Migrations — Marketplace Tables — DONE (claude, claude-haiku-4-5-20251001, 96s)
+- PR-043: Spec Sanitizer — PII Scrubbing — DONE (claude, claude-sonnet-4-6, 216s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined

@@ -62,6 +62,7 @@ import conventionsRouter from './routes/conventions';
 import packsRouter from './routes/packs';
 import skillsRouter from './routes/skills';
 import personasRouter from './routes/personas';
+import marketplaceRouter from './routes/marketplace';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 import { createMcpRequestHandler } from './lib/mcp-http';
@@ -205,6 +206,7 @@ app.use('/api/conventions', conventionsRouter);
 app.use('/api/packs', packsRouter);
 app.use('/api/skills', skillsRouter);
 app.use('/api/personas', personasRouter);
+app.use('/api/marketplace', marketplaceRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
