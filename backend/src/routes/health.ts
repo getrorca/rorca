@@ -4,6 +4,7 @@ import { listBackups } from '../lib/backup';
 import { agentType } from '../lib/config';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
+import { isTelemetryEnabled } from '../lib/telemetry-config';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -40,7 +41,7 @@ function checkDbConnected(): boolean {
  *     tags: [Health]
  *     summary: Basic health check
  *     operationId: getHealth
- *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, and MCP transport mode. When agent type is opencode or codex, includes installation status.
+ *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status.
  *     responses:
  *       200:
  *         description: Server is healthy
@@ -55,6 +56,7 @@ function checkDbConnected(): boolean {
  *                 db_connected: { type: boolean }
  *                 active_runs: { type: integer }
  *                 mcpTransport: { type: string }
+ *                 telemetryEnabled: { type: boolean }
  *                 opencodeInstalled: { type: boolean }
  *                 opencodeVersion: { type: string }
  *                 codexInstalled: { type: boolean }
@@ -93,6 +95,8 @@ router.get('/', (_req: Request, res: Response) => {
     active_runs: activeRuns,
     // CA-021: Report MCP transport mode
     mcpTransport: 'http',
+    // PR-005: Report telemetry status
+    telemetryEnabled: isTelemetryEnabled(),
     ...(agentType === 'opencode' && opencode ? {
       opencodeInstalled: opencode.opencodeInstalled,
       opencodeVersion: opencode.opencodeVersion,

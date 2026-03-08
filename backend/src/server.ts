@@ -63,6 +63,7 @@ import personasRouter from './routes/personas';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 import { createMcpRequestHandler } from './lib/mcp-http';
+import telemetryRouter from './routes/telemetry';
 
 dotenv.config();
 
@@ -96,6 +97,7 @@ app.use(queryTimerMiddleware);
 
 // ─── Public routes (no auth required) ───
 app.use('/api/health', healthRouter);
+app.use('/api/telemetry', telemetryRouter);
 
 app.get('/api/docs/openapi.json', (_req, res) => {
   res.json(swaggerSpec);

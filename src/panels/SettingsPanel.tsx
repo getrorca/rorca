@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal, Crown, Users, ChevronUp, Download, ExternalLink, FileText, CreditCard, BarChart3, ScrollText, Rss } from 'lucide-react';
+import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal, Crown, Users, ChevronUp, Download, ExternalLink, FileText, CreditCard, BarChart3, ScrollText, Rss, Shield } from 'lucide-react';
 import AgentPicker from '../components/AgentPicker';
 import type { ModelOption } from '../components/ModelSearchSelect';
 import { useAuth } from '../contexts/AuthContext';
@@ -2212,7 +2212,7 @@ function BillingSection() {
   );
 }
 
-// ─── Account Section (Profile + Notifications + Danger Zone) ─────────────────
+// ─── Account Section (Profile + Notifications + Telemetry + Danger Zone) ─────────────────
 
 function AccountSection() {
   return (
@@ -2220,6 +2220,9 @@ function AccountSection() {
       <ProfileSection />
       <div className="border-t border-border pt-6">
         <NotificationsSection />
+      </div>
+      <div className="border-t border-border pt-6">
+        <TelemetrySection />
       </div>
       <div className="border-t border-border pt-6">
         <AccountDeletionSection />
@@ -2521,6 +2524,97 @@ function NotificationsSection() {
         {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
         {saved ? 'Saved' : 'Save Preferences'}
       </button>
+    </div>
+  );
+}
+
+// ─── Telemetry Section ───────────────────────────────────────────────────────
+// PR-005: Privacy-first telemetry toggle (read-only, controlled by env var)
+
+function TelemetrySection() {
+  const [telemetryStatus, setTelemetryStatus] = useState<{ enabled: boolean; note: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiFetch<{ enabled: boolean; note: string }>('/api/telemetry/status')
+      .then(data => setTelemetryStatus(data))
+      .catch(() => { })
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading telemetry settings...</div>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2 mb-2">
+          <Shield size={16} className="text-accent" />
+          Privacy & Telemetry
+        </h2>
+        <p className="text-xs text-muted">
+          Help improve Rorca by sending anonymous usage statistics. No spec content, code, or file paths are ever sent.
+        </p>
+      </div>
+
+      <div className="border border-border rounded p-3 bg-surface-100 space-y-3">
+        <div className="flex items-start gap-3">
+          <div className="flex-1">
+            <p className="text-sm text-[var(--text)] font-medium">Anonymous telemetry</p>
+            <p className="text-xs text-muted mt-0.5">
+              {telemetryStatus?.enabled
+                ? 'Enabled — Rorca is sending anonymous metrics to help us improve the product.'
+                : 'Disabled (default) — No data is being collected or sent.'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs px-2 py-1 rounded bg-surface-200 text-muted">
+            {telemetryStatus?.enabled ? (
+              <>
+                <Check size={12} className="text-green-500" />
+                <span>ON</span>
+              </>
+            ) : (
+              <>
+                <XCircle size={12} className="text-muted" />
+                <span>OFF</span>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="text-xs text-muted bg-bg rounded p-2 space-y-1">
+          <p className="font-medium text-[var(--text)]">When enabled, we collect:</p>
+          <ul className="list-disc list-inside space-y-0.5">
+            <li>Event type (spec generated, run completed)</li>
+            <li>Agent type (claude, opencode, codex)</li>
+            <li>Story count and duration</li>
+          </ul>
+        </div>
+
+        <div className="text-xs text-muted bg-bg rounded p-2 space-y-1">
+          <p className="font-medium text-[var(--text)]">We NEVER collect:</p>
+          <ul className="list-disc list-inside space-y-0.5">
+            <li>Spec content, code, or file paths</li>
+            <li>Workspace names or organization info</li>
+            <li>API keys or credentials</li>
+            <li>Personal information (email, IP, device)</li>
+          </ul>
+        </div>
+
+        <p className="text-xs text-muted">
+          Telemetry is controlled by the <span className="font-mono bg-bg px-1.5 py-0.5 rounded text-[11px]">RORCA_TELEMETRY</span> environment variable. See{' '}
+          <a
+            href="https://github.com/anthropics/rorca/blob/main/PRIVACY.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-accent hover:underline"
+          >
+            PRIVACY.md
+          </a>{' '}
+          for details.
+        </p>
+      </div>
     </div>
   );
 }
