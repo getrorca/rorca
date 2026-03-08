@@ -116,23 +116,25 @@ export default function RoiCalculatorPanel() {
   };
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden" role="main" aria-label="ROI Calculator analytics panel">
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
-          <Calculator size={20} className="text-accent" />
+          <Calculator size={20} className="text-accent" aria-hidden="true" />
           <h2 className="text-lg font-semibold">ROI Calculator</h2>
         </div>
 
         <div className="flex items-center gap-2">
           {/* Date range */}
-          <div className="flex items-center gap-1 bg-panel-alt rounded-md p-0.5">
-            <Calendar size={14} className="text-muted ml-1.5" />
+          <div className="flex items-center gap-1 bg-panel-alt rounded-md p-0.5" role="group" aria-label="Date range filter">
+            <Calendar size={14} className="text-muted ml-1.5" aria-hidden="true" />
             {(['7d', '30d', '90d', 'all'] as DateRange[]).map(r => (
               <button
                 key={r}
                 onClick={() => setDateRange(r)}
-                className={`px-2.5 py-1 text-xs rounded transition-colors ${
+                aria-pressed={dateRange === r}
+                aria-label={`Filter by ${r === 'all' ? 'all time' : `last ${r}`}`}
+                className={`px-2.5 py-1 text-xs rounded transition-colors ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                   dateRange === r
                     ? 'bg-accent text-white'
                     : 'text-muted hover:text-[var(--text)]'
@@ -146,59 +148,65 @@ export default function RoiCalculatorPanel() {
           {/* Settings toggle */}
           <button
             onClick={() => setShowSettings(!showSettings)}
-            className={`p-1.5 rounded transition-colors ${
+            aria-pressed={showSettings}
+            aria-label="Toggle ROI settings"
+            className={`p-1.5 rounded transition-colors ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50 ${
               showSettings ? 'bg-accent text-white' : 'text-muted hover:text-[var(--text)]'
             }`}
-            title="ROI Settings"
           >
-            <Settings2 size={16} />
+            <Settings2 size={16} aria-hidden="true" />
           </button>
         </div>
       </div>
 
       {/* Settings panel */}
       {showSettings && (
-        <div className="px-5 py-3 border-b border-border bg-panel-alt flex items-center gap-4 text-sm">
-          <label className="flex items-center gap-2">
+        <div className="px-5 py-3 border-b border-border bg-panel-alt flex items-center gap-4 text-sm" role="group" aria-label="ROI calculation settings">
+          <label className="flex items-center gap-2" htmlFor="roi-hours-per-story">
             <span className="text-muted">Hours per story:</span>
             <input
+              id="roi-hours-per-story"
               type="number"
               min={0.5}
               max={100}
               step={0.5}
               value={hoursPerStory}
               onChange={e => setHoursPerStory(parseFloat(e.target.value) || 0)}
-              className="w-20 bg-bg border border-border rounded px-2 py-1 text-sm"
+              className="w-20 bg-bg border border-border rounded px-2 py-1 text-sm ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
+              aria-label="Hours saved per story"
             />
           </label>
-          <label className="flex items-center gap-2">
+          <label className="flex items-center gap-2" htmlFor="roi-hourly-rate">
             <span className="text-muted">Hourly rate ($):</span>
             <input
+              id="roi-hourly-rate"
               type="number"
               min={1}
               max={1000}
               step={5}
               value={hourlyRate}
               onChange={e => setHourlyRate(parseFloat(e.target.value) || 0)}
-              className="w-24 bg-bg border border-border rounded px-2 py-1 text-sm"
+              className="w-24 bg-bg border border-border rounded px-2 py-1 text-sm ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
+              aria-label="Developer hourly rate in dollars"
             />
           </label>
           <button
             onClick={saveConfig}
             disabled={saving}
-            className="flex items-center gap-1 px-3 py-1 bg-accent text-white rounded text-xs hover:bg-accent/80 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1 px-3 py-1 bg-accent text-white rounded text-xs hover:bg-accent/80 transition-colors disabled:opacity-50 ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
+            aria-label="Save ROI settings"
           >
-            {saving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+            {saving ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <Check size={12} aria-hidden="true" />}
             Save
           </button>
         </div>
       )}
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto p-5 space-y-6">
+      <div className="flex-1 overflow-y-auto p-5 space-y-6" aria-live="polite" aria-busy={loading}>
         {loading ? (
           <div className="flex items-center justify-center h-64">
-            <Loader2 className="animate-spin text-muted" size={28} />
+            <Loader2 className="animate-spin text-muted" size={28} aria-label="Loading ROI data" />
           </div>
         ) : !data ? (
           <div className="flex flex-col items-center justify-center h-64 text-muted text-sm gap-2">
@@ -259,46 +267,67 @@ export default function RoiCalculatorPanel() {
             {data.timeSeries.length > 1 && (
               <div className="bg-panel-alt rounded-lg p-4">
                 <h3 className="text-sm font-medium text-muted mb-3">Cumulative Net Savings Over Time</h3>
-                <ResponsiveContainer width="100%" height={280}>
-                  <LineChart data={data.timeSeries} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis
-                      dataKey="date"
-                      tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                      tickLine={false}
-                    />
-                    <YAxis
-                      tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                      tickFormatter={(v: number) => formatCurrency(v)}
-                      tickLine={false}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        background: 'var(--panel)',
-                        border: '1px solid var(--border)',
-                        borderRadius: '6px',
-                        fontSize: '12px',
-                      }}
-                      formatter={(value?: number, name?: string) => {
-                        const v = value ?? 0;
-                        if (name === 'net_savings') return [formatCurrency(v), 'Net Savings'];
-                        if (name === 'llm_cost') return [formatCurrency(v), 'LLM Cost'];
-                        if (name === 'hours_saved') return [`${v}h`, 'Hours Saved'];
-                        return [String(v), name ?? ''];
-                      }}
-                    />
-                    <Legend
-                      formatter={(value: string) => {
-                        if (value === 'net_savings') return 'Cumulative Net Savings';
-                        if (value === 'llm_cost') return 'Daily LLM Cost';
-                        if (value === 'hours_saved') return 'Daily Hours Saved';
-                        return value;
-                      }}
-                    />
-                    <Line type="monotone" dataKey="net_savings" stroke="#10b981" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="llm_cost" stroke="#ef4444" strokeWidth={1.5} dot={false} strokeDasharray="4 4" />
-                  </LineChart>
-                </ResponsiveContainer>
+                <div role="img" aria-label="Line chart showing cumulative net savings and daily LLM cost over time">
+                  <ResponsiveContainer width="100%" height={280}>
+                    <LineChart data={data.timeSeries} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
+                        tickLine={false}
+                      />
+                      <YAxis
+                        tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
+                        tickFormatter={(v: number) => formatCurrency(v)}
+                        tickLine={false}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          background: 'var(--panel)',
+                          border: '1px solid var(--border)',
+                          borderRadius: '6px',
+                          fontSize: '12px',
+                        }}
+                        formatter={(value?: number, name?: string) => {
+                          const v = value ?? 0;
+                          if (name === 'net_savings') return [formatCurrency(v), 'Net Savings'];
+                          if (name === 'llm_cost') return [formatCurrency(v), 'LLM Cost'];
+                          if (name === 'hours_saved') return [`${v}h`, 'Hours Saved'];
+                          return [String(v), name ?? ''];
+                        }}
+                      />
+                      <Legend
+                        formatter={(value: string) => {
+                          if (value === 'net_savings') return 'Cumulative Net Savings';
+                          if (value === 'llm_cost') return 'Daily LLM Cost';
+                          if (value === 'hours_saved') return 'Daily Hours Saved';
+                          return value;
+                        }}
+                      />
+                      <Line type="monotone" dataKey="net_savings" stroke="#10b981" strokeWidth={2.5} dot={false} />
+                      <Line type="monotone" dataKey="llm_cost" stroke="#ef4444" strokeWidth={1.5} dot={false} strokeDasharray="4 4" />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                {/* Screen-reader table alternative */}
+                <table className="sr-only" aria-label="Cumulative net savings data table">
+                  <thead>
+                    <tr>
+                      <th scope="col" role="columnheader">Date</th>
+                      <th scope="col" role="columnheader">Net Savings</th>
+                      <th scope="col" role="columnheader">LLM Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.timeSeries.map((row) => (
+                      <tr key={row.date}>
+                        <td>{row.date}</td>
+                        <td>{formatCurrency(row.net_savings)}</td>
+                        <td>{formatCurrency(row.llm_cost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
 
@@ -307,14 +336,14 @@ export default function RoiCalculatorPanel() {
               <div className="bg-panel-alt rounded-lg p-4">
                 <h3 className="text-sm font-medium text-muted mb-3">Daily Breakdown</h3>
                 <div className="max-h-64 overflow-y-auto">
-                  <table className="w-full text-sm">
+                  <table className="w-full text-sm" role="table" aria-label="Daily ROI breakdown table">
                     <thead className="sticky top-0 bg-panel-alt">
                       <tr className="text-left text-muted border-b border-border">
-                        <th className="pb-2 font-medium">Date</th>
-                        <th className="pb-2 font-medium text-right">Stories</th>
-                        <th className="pb-2 font-medium text-right">Hours Saved</th>
-                        <th className="pb-2 font-medium text-right">LLM Cost</th>
-                        <th className="pb-2 font-medium text-right">Net Savings</th>
+                        <th className="pb-2 font-medium" role="columnheader">Date</th>
+                        <th className="pb-2 font-medium text-right" role="columnheader">Stories</th>
+                        <th className="pb-2 font-medium text-right" role="columnheader">Hours Saved</th>
+                        <th className="pb-2 font-medium text-right" role="columnheader">LLM Cost</th>
+                        <th className="pb-2 font-medium text-right" role="columnheader">Net Savings</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -359,9 +388,9 @@ function MetricCard({ label, value, sub, highlight }: {
   return (
     <div className={`rounded-lg p-4 flex flex-col gap-1 ${
       highlight ? 'bg-emerald-500/10 border border-emerald-500/30' : 'bg-panel-alt'
-    }`}>
+    }`} aria-label={`${label}: ${value}`}>
       <span className="text-xs text-muted">{label}</span>
-      <span className={`text-2xl font-bold ${highlight ? 'text-emerald-400' : ''}`}>{value}</span>
+      <span className={`text-2xl font-bold ${highlight ? 'text-emerald-400' : ''}`} aria-hidden="true">{value}</span>
       <span className="text-xs text-muted">{sub}</span>
     </div>
   );
