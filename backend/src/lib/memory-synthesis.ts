@@ -18,6 +18,7 @@ import {
 } from './memory-ledger';
 import { chatComplete } from './llm-client';
 import { logger } from './logger';
+import { isAutoSynthesisEnabled } from './wal-feedback';
 
 interface StoryResultRow {
   story_id: string;
@@ -55,6 +56,9 @@ export function startMemorySynthesis(): void {
 
     const workspaceId = event.workspace_id;
     if (!workspaceId) return;
+
+    // PR-020: Auto-synthesis is opt-in via workspace setting AUTO_MEMORY_SYNTHESIS=true
+    if (!isAutoSynthesisEnabled(workspaceId)) return;
 
     synthesizeMemory(workspaceId, payload.run_id, payload.status).catch(err => {
       logger.error(`[memory-synthesis] Error for run ${payload.run_id}:`, err);
