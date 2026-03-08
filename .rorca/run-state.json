@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T09:33:09.044Z",
+  "lastUpdatedAt": "2026-03-08T09:38:41.785Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 144236
+    },
+    {
+      "storyId": "PR-004",
+      "title": "rorca CLI — start and init commands",
+      "status": "passed",
+      "startedAt": "2026-03-08T09:33:13.694Z",
+      "finishedAt": "2026-03-08T09:38:41.784Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 328090
     }
   ],
   "failedStories": [],
