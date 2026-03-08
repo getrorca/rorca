@@ -40,33 +40,37 @@ interface OpenCodeModel {
   name: string;
   provider: string;
   contextWindow: number;
+  costPer1kInput?: number;
+  costPer1kOutput?: number;
+  speedTier?: 'fast' | 'medium' | 'slow';
+  costTier?: 'free' | 'low' | 'medium' | 'high' | 'premium';
 }
 
 const OPENCODE_MODELS: OpenCodeModel[] = [
   // OpenAI
-  { id: 'openai/gpt-4o', name: 'GPT-4o', provider: 'OpenAI', contextWindow: 128000 },
-  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', provider: 'OpenAI', contextWindow: 128000 },
-  { id: 'openai/o3', name: 'o3', provider: 'OpenAI', contextWindow: 200000 },
-  { id: 'openai/o3-mini', name: 'o3 Mini', provider: 'OpenAI', contextWindow: 200000 },
-  { id: 'openai/o4-mini', name: 'o4 Mini', provider: 'OpenAI', contextWindow: 200000 },
+  { id: 'openai/gpt-4o', name: 'GPT-4o', provider: 'OpenAI', contextWindow: 128000, costPer1kInput: 0.0025, costPer1kOutput: 0.01, speedTier: 'medium', costTier: 'medium' },
+  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', provider: 'OpenAI', contextWindow: 128000, costPer1kInput: 0.00015, costPer1kOutput: 0.0006, speedTier: 'fast', costTier: 'low' },
+  { id: 'openai/o3', name: 'o3', provider: 'OpenAI', contextWindow: 200000, costPer1kInput: 0.01, costPer1kOutput: 0.04, speedTier: 'slow', costTier: 'premium' },
+  { id: 'openai/o3-mini', name: 'o3 Mini', provider: 'OpenAI', contextWindow: 200000, costPer1kInput: 0.0011, costPer1kOutput: 0.0044, speedTier: 'medium', costTier: 'low' },
+  { id: 'openai/o4-mini', name: 'o4 Mini', provider: 'OpenAI', contextWindow: 200000, costPer1kInput: 0.0011, costPer1kOutput: 0.0044, speedTier: 'fast', costTier: 'low' },
   // Google
-  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'Google', contextWindow: 1048576 },
-  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'Google', contextWindow: 1048576 },
-  { id: 'google/gemini-2.0-flash', name: 'Gemini 2.0 Flash', provider: 'Google', contextWindow: 1048576 },
+  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'Google', contextWindow: 1048576, costPer1kInput: 0.00125, costPer1kOutput: 0.01, speedTier: 'medium', costTier: 'medium' },
+  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'Google', contextWindow: 1048576, costPer1kInput: 0.000075, costPer1kOutput: 0.0003, speedTier: 'fast', costTier: 'low' },
+  { id: 'google/gemini-2.0-flash', name: 'Gemini 2.0 Flash', provider: 'Google', contextWindow: 1048576, costPer1kInput: 0.0001, costPer1kOutput: 0.0004, speedTier: 'fast', costTier: 'low' },
   // Anthropic
-  { id: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6', provider: 'Anthropic', contextWindow: 200000 },
-  { id: 'anthropic/claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5', provider: 'Anthropic', contextWindow: 200000 },
-  { id: 'anthropic/claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', provider: 'Anthropic', contextWindow: 200000 },
+  { id: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.015, costPer1kOutput: 0.075, speedTier: 'slow', costTier: 'premium' },
+  { id: 'anthropic/claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.003, costPer1kOutput: 0.015, speedTier: 'medium', costTier: 'medium' },
+  { id: 'anthropic/claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', provider: 'Anthropic', contextWindow: 200000, costPer1kInput: 0.0008, costPer1kOutput: 0.004, speedTier: 'fast', costTier: 'low' },
   // OpenRouter
-  { id: 'openrouter/auto', name: 'Auto (Best Available)', provider: 'OpenRouter', contextWindow: 200000 },
-  { id: 'openrouter/deepseek/deepseek-r1', name: 'DeepSeek R1', provider: 'OpenRouter', contextWindow: 131072 },
-  { id: 'openrouter/meta-llama/llama-4-maverick', name: 'Llama 4 Maverick', provider: 'OpenRouter', contextWindow: 1048576 },
+  { id: 'openrouter/auto', name: 'Auto (Best Available)', provider: 'OpenRouter', contextWindow: 200000, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'medium', costTier: 'medium' },
+  { id: 'openrouter/deepseek/deepseek-r1', name: 'DeepSeek R1', provider: 'OpenRouter', contextWindow: 131072, costPer1kInput: 0.00055, costPer1kOutput: 0.0022, speedTier: 'medium', costTier: 'low' },
+  { id: 'openrouter/meta-llama/llama-4-maverick', name: 'Llama 4 Maverick', provider: 'OpenRouter', contextWindow: 1048576, costPer1kInput: 0.0005, costPer1kOutput: 0.0015, speedTier: 'medium', costTier: 'low' },
   // GitHub Copilot (subscription-based — no API key, uses OAuth token)
-  { id: 'github/copilot', name: 'GitHub Copilot', provider: 'GitHub Copilot', contextWindow: 128000 },
+  { id: 'github/copilot', name: 'GitHub Copilot', provider: 'GitHub Copilot', contextWindow: 128000, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'medium', costTier: 'free' },
   // Local
-  { id: 'ollama/llama3.3', name: 'Llama 3.3 (Ollama)', provider: 'Local', contextWindow: 131072 },
-  { id: 'ollama/deepseek-r1:14b', name: 'DeepSeek R1 14B (Ollama)', provider: 'Local', contextWindow: 131072 },
-  { id: 'ollama/qwen2.5-coder:14b', name: 'Qwen 2.5 Coder 14B (Ollama)', provider: 'Local', contextWindow: 131072 },
+  { id: 'ollama/llama3.3', name: 'Llama 3.3 (Ollama)', provider: 'Local', contextWindow: 131072, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'medium', costTier: 'free' },
+  { id: 'ollama/deepseek-r1:14b', name: 'DeepSeek R1 14B (Ollama)', provider: 'Local', contextWindow: 131072, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'slow', costTier: 'free' },
+  { id: 'ollama/qwen2.5-coder:14b', name: 'Qwen 2.5 Coder 14B (Ollama)', provider: 'Local', contextWindow: 131072, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'slow', costTier: 'free' },
 ];
 
 // Map provider group to the vault provider keys that satisfy it

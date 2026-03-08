@@ -1,42 +1,36 @@
-import { useState, useEffect } from 'react';
-import { BASE_URL } from '../lib/apiFetch';
+import { useState, useRef } from 'react';
+import { useWalSSE, type WalEvent } from './useWalSSE';
 
-export interface WalEvent {
-  id: number;
-  ts: string;
-  event_type: string;
-  workspace_id: string | null;
-  spec_id: string | null;
-  story_id: string | null;
-  actor: string;
-  payload: string | null;
-}
+export type { WalEvent };
 
-export function usePipelineSSE(runId: string | null) {
+export function usePipelineSSE(runId: string | null, workspaceId?: string | null) {
   const [events, setEvents] = useState<WalEvent[]>([]);
 
-  useEffect(() => {
-    if (!runId) {
-      setEvents([]);
-      return;
+  // Track previous runId so we can reset the event list when it changes.
+  // Using a ref comparison + state reset avoids an extra useEffect.
+  const prevRunIdRef = useRef<string | null>(runId);
+  if (prevRunIdRef.current !== runId) {
+    prevRunIdRef.current = runId;
+    // Trigger a synchronous reset before the next render.
+    setEvents([]);
+  }
+
+  // Register with the shared WAL SSE singleton.
+  // useWalSSE keeps the callback in a ref so we don't need useCallback here.
+  useWalSSE((event: WalEvent) => {
+    if (!runId) return;
+
+    // Filter: only accept events belonging to THIS run.
+    // The shared SSE broadcasts all events — ignore unrelated runs.
+    if (event.payload) {
+      try {
+        const p = JSON.parse(event.payload);
+        if (p.run_id != null && String(p.run_id) !== runId) return;
+      } catch { /* non-JSON payload — allow through */ }
     }
 
-    const url = `${BASE_URL}/api/pipeline/stream?runId=${runId}`;
-    const es = new EventSource(url);
-
-    es.addEventListener('wal_event', (e) => {
-      const event: WalEvent = JSON.parse(e.data);
-      setEvents((prev) => [...prev, event]);
-    });
-
-    es.onerror = () => {
-      // EventSource auto-reconnects; no action needed
-    };
-
-    return () => {
-      es.close();
-    };
-  }, [runId]);
+    setEvents((prev) => [...prev, event]);
+  });
 
   return events;
 }

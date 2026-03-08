@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { BookOpen, Check, X, Pencil, ChevronRight, ChevronDown, CheckCheck, Undo2 } from 'lucide-react';
-import { apiFetch, BASE_URL } from '../lib/apiFetch';
+import { apiFetch } from '../lib/apiFetch';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -147,19 +147,10 @@ export default function MemoryUpdatesCard({ workspaceId, onNavigateToMemory }: {
     } catch { /* ignore */ }
   }, [workspaceId]);
 
-  // Listen for memory_proposals WAL events via SSE for real-time updates
+  // Poll for new memory proposals every 30s (avoids opening a dedicated SSE connection)
   useEffect(() => {
-    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
-    es.addEventListener('wal_event', (e) => {
-      try {
-        const evt = JSON.parse(e.data);
-        if (evt.event_type === 'memory_proposals') {
-          // Refresh from DB to get the authoritative state
-          fetchProposals();
-        }
-      } catch { /* ignore */ }
-    });
-    return () => es.close();
+    const interval = setInterval(fetchProposals, 30_000);
+    return () => clearInterval(interval);
   }, [fetchProposals]);
 
   useEffect(() => { fetchData(); fetchProposals(); }, [fetchData, fetchProposals]);

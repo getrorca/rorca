@@ -350,8 +350,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     setActiveTab(tab);
   }, []);
 
-  // SSE for live status updates
-  const walEvents = usePipelineSSE(String(runId));
+  // SSE for live status updates — scoped to workspace
+  const walEvents = usePipelineSSE(String(runId), workspaceId);
 
   // Derive effective status from SSE events
   const effectiveStatus = useMemo(() => {
@@ -400,6 +400,11 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
     if (!workspaceId) return;
     try {
       const data = await apiFetch<RunApiResponse>(`/api/pipeline/runs/${runId}`);
+      // Validate the run belongs to the current workspace
+      if (data.run.workspace_id && String(data.run.workspace_id) !== String(workspaceId)) {
+        setLoading(false);
+        return;
+      }
       setRun(data.run);
       if (data.specModel !== undefined) setSpecModel(data.specModel);
       if (data.tokenSummary) setTokenSummary(data.tokenSummary);
@@ -614,7 +619,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             left={
               useMultiPane
                 ? <MultiPaneTerminal runId={run.id} walEvents={walEvents} />
-                : <RunTerminal ref={terminalRef} runId={run.id} />
+                : <RunTerminal ref={terminalRef} runId={run.id} workspaceId={workspaceId} />
             }
             right={
               <div className="h-full flex flex-col min-h-0">

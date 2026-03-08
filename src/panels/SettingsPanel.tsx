@@ -1,9 +1,12 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { User, Key, Save, Loader2, Trash2, Plus, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Keyboard, Cpu, ChevronDown, BookOpen, SlidersHorizontal, Crown, Users, ChevronUp, Download, ExternalLink, FileText, CreditCard, BarChart3, ScrollText, Rss } from 'lucide-react';
+import AgentPicker from '../components/AgentPicker';
+import type { ModelOption } from '../components/ModelSearchSelect';
 import { useAuth } from '../contexts/AuthContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../contexts/ThemeContext';
-import { apiFetch, clearTokens, BASE_URL } from '../lib/apiFetch';
+import { apiFetch, clearTokens } from '../lib/apiFetch';
+import { useWalSSE } from '../hooks/useWalSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import GitHubSettingsPanel from './GitHubSettingsPanel';
 import {
@@ -74,7 +77,9 @@ interface DisplaySettings {
   itemsPerPage: number;
 }
 
-interface ModelOption {
+// ModelOption is imported from '../components/ModelSearchSelect' (used by AgentPicker)
+// Local alias for the Display/Providers section model shape (extends the shared one with required fields)
+interface DisplayModelOption {
   id: string;
   label: string;
   provider: string;
@@ -313,20 +318,12 @@ function ClaudeAuthStatus() {
     fetchAuth();
   }, [fetchAuth]);
 
-  // Listen for SSE events for auth changes
-  useEffect(() => {
-    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
-    const handler = (e: MessageEvent) => {
-      try {
-        const event = JSON.parse(e.data);
-        if (event.event_type === 'claude_auth_connected' || event.event_type === 'claude_auth_disconnected') {
-          fetchAuth();
-        }
-      } catch { /* ignore parse errors */ }
-    };
-    es.addEventListener('wal_event', handler);
-    return () => { es.close(); };
-  }, [fetchAuth]);
+  // Listen for SSE events for auth changes via shared singleton
+  useWalSSE((event) => {
+    if (event.event_type === 'claude_auth_connected' || event.event_type === 'claude_auth_disconnected') {
+      fetchAuth();
+    }
+  });
 
   const handleLogin = async () => {
     setActionLoading(true);
@@ -475,20 +472,12 @@ function CodexAuthStatus() {
     fetchAuth();
   }, [fetchAuth]);
 
-  // Listen for SSE events for auth changes
-  useEffect(() => {
-    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
-    const handler = (e: MessageEvent) => {
-      try {
-        const event = JSON.parse(e.data);
-        if (event.event_type === 'codex_auth_connected' || event.event_type === 'codex_auth_disconnected') {
-          fetchAuth();
-        }
-      } catch { /* ignore parse errors */ }
-    };
-    es.addEventListener('wal_event', handler);
-    return () => { es.close(); };
-  }, [fetchAuth]);
+  // Listen for SSE events for auth changes via shared singleton
+  useWalSSE((event) => {
+    if (event.event_type === 'codex_auth_connected' || event.event_type === 'codex_auth_disconnected') {
+      fetchAuth();
+    }
+  });
 
   const handleLogin = async () => {
     setActionLoading(true);
@@ -797,6 +786,40 @@ function ExecutionEngineSection() {
     }
   };
 
+  // Transform backend models into ModelOption format for AgentPicker
+  // IMPORTANT: useMemo must be called before any early returns to satisfy Rules of Hooks
+  const modelOptions: ModelOption[] = useMemo(() => {
+    // Static OpenCode models (already have cost/tier from backend)
+    const staticOptions: ModelOption[] = models.map(m => ({
+      id: m.id,
+      label: m.name,
+      provider: m.provider,
+      costPer1kInput: (m as any).costPer1kInput ?? 0,
+      costPer1kOutput: (m as any).costPer1kOutput ?? 0,
+      contextWindow: m.contextWindow,
+      speedTier: (m as any).speedTier,
+      costTier: (m as any).costTier,
+      recommended: false,
+    }));
+
+    // OpenRouter models (if connected)
+    const orOptions: ModelOption[] = openRouterModels.map(m => ({
+      id: `openrouter/${m.id}`,
+      label: m.name,
+      provider: `OpenRouter`,
+      costPer1kInput: (m as any).pricingPrompt ? (m as any).pricingPrompt * 1000 : 0,
+      costPer1kOutput: (m as any).pricingCompletion ? (m as any).pricingCompletion * 1000 : 0,
+      contextWindow: m.contextWindow,
+      speedTier: 'medium' as const,
+      costTier: m.free ? 'free' as const : 'medium' as const,
+      recommended: false,
+    }));
+
+    // Merge, removing duplicates (prefer static entries)
+    const seen = new Set(staticOptions.map(m => m.id));
+    return [...staticOptions, ...orOptions.filter(m => !seen.has(m.id))];
+  }, [models, openRouterModels]);
+
   if (loading) {
     return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading execution engine config...</div>;
   }
@@ -805,8 +828,6 @@ function ExecutionEngineSection() {
     selectedType !== config.agentType ||
     (selectedType === 'opencode' && selectedModel !== (config.agentModel ?? ''))
   );
-
-  const PROVIDER_ORDER = ['OpenAI', 'Google', 'Anthropic', 'OpenRouter', 'GitHub Copilot', 'Local'];
 
   return (
     <div className="space-y-5">
@@ -828,114 +849,19 @@ function ExecutionEngineSection() {
             </button>
           </p>
         </div>
-        {/* Status badge */}
-        <div className="flex items-center gap-2">
-          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${config?.agentType === 'codex'
-              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-              : config?.agentType === 'opencode'
-                ? config?.agentModel === 'github/copilot'
-                  ? 'bg-[#24292f]/20 text-[#8b949e] border border-[#30363d]'
-                  : config?.agentModel?.startsWith('ollama/')
-                    ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                    : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
-                : 'bg-accent/10 text-accent border border-accent/20'
-            }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${config?.agentType === 'codex'
-                ? 'bg-emerald-400'
-                : config?.agentType === 'opencode'
-                  ? config?.agentModel === 'github/copilot' ? 'bg-[#8b949e]'
-                    : config?.agentModel?.startsWith('ollama/') ? 'bg-green-400' : 'bg-purple-400'
-                  : 'bg-accent'
-              }`} />
-            {config?.agentType === 'codex'
-              ? 'Codex CLI'
-              : config?.agentType === 'opencode'
-                ? config?.agentModel === 'github/copilot' ? 'GitHub Copilot'
-                  : config?.agentModel?.startsWith('ollama/') ? 'Local (Ollama)' : 'OpenCode'
-                : 'Claude'}
-            {config?.agentType === 'opencode' && config?.agentModel && config?.agentModel !== 'github/copilot' && (
-              <span className="text-muted ml-0.5">
-                {models.find(m => m.id === config.agentModel)?.name ?? config.agentModel}
-              </span>
-            )}
-          </span>
-          {config?.agentType === 'codex' && (
-            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-500/15 text-emerald-400">
-              Subscription
-            </span>
-          )}
-          {config?.agentType === 'opencode' && config?.agentModel === 'github/copilot' && (
-            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400">
-              Subscription
-            </span>
-          )}
-          {config?.agentType === 'opencode' && config?.agentModel?.startsWith('ollama/') && (
-            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-green-500/15 text-green-400">
-              Free
-            </span>
-          )}
-        </div>
       </div>
 
-      {/* Agent type toggle */}
-      <div className="flex gap-3">
-        <button
-          onClick={() => setSelectedType('claude')}
-          className={`flex-1 border rounded-lg p-4 text-left transition-all ${selectedType === 'claude'
-              ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
-              : 'border-border bg-bg hover:border-accent/30'
-            }`}
-        >
-          <div className="flex items-center gap-2 mb-1">
-            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${selectedType === 'claude' ? 'border-accent' : 'border-border'
-              }`}>
-              {selectedType === 'claude' && <div className="w-1.5 h-1.5 rounded-full bg-accent" />}
-            </div>
-            <span className="text-sm font-medium text-[var(--text)]">Claude Subscription</span>
-          </div>
-          <p className="text-[11px] text-muted ml-5">
-            Uses <code className="text-xs bg-panel px-1 rounded">claude --print</code> via your Pro/Max subscription. No API key needed.
-          </p>
-        </button>
-
-        <button
-          onClick={() => setSelectedType('opencode')}
-          className={`flex-1 border rounded-lg p-4 text-left transition-all ${selectedType === 'opencode'
-              ? 'border-purple-500/60 bg-purple-500/5 ring-1 ring-purple-500/30'
-              : 'border-border bg-bg hover:border-purple-500/30'
-            }`}
-        >
-          <div className="flex items-center gap-2 mb-1">
-            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${selectedType === 'opencode' ? 'border-purple-500' : 'border-border'
-              }`}>
-              {selectedType === 'opencode' && <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />}
-            </div>
-            <span className="text-sm font-medium text-[var(--text)]">OpenCode (API Key)</span>
-          </div>
-          <p className="text-[11px] text-muted ml-5">
-            75+ models via API key: OpenAI, Google, Anthropic, OpenRouter, local Ollama.
-          </p>
-        </button>
-
-        <button
-          onClick={() => setSelectedType('codex')}
-          className={`flex-1 border rounded-lg p-4 text-left transition-all ${selectedType === 'codex'
-              ? 'border-emerald-500/60 bg-emerald-500/5 ring-1 ring-emerald-500/30'
-              : 'border-border bg-bg hover:border-emerald-500/30'
-            }`}
-        >
-          <div className="flex items-center gap-2 mb-1">
-            <div className={`w-3 h-3 rounded-full border-2 flex items-center justify-center ${selectedType === 'codex' ? 'border-emerald-500' : 'border-border'
-              }`}>
-              {selectedType === 'codex' && <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
-            </div>
-            <span className="text-sm font-medium text-[var(--text)]">Codex CLI (ChatGPT subscription)</span>
-          </div>
-          <p className="text-[11px] text-muted ml-5">
-            Uses <code className="text-xs bg-panel px-1 rounded">codex --approval-mode auto-edit</code> via your ChatGPT Plus/Pro subscription.
-          </p>
-        </button>
-      </div>
+      {/* Agent type + model selection */}
+      <AgentPicker
+        agentType={selectedType}
+        agentModel={selectedModel || null}
+        onAgentTypeChange={setSelectedType}
+        onModelChange={setSelectedModel}
+        models={modelOptions}
+        claudeInstalled={config?.opencodeInstalled !== false}
+        opencodeInstalled={config?.opencodeInstalled ?? undefined}
+        codexInstalled={config?.codexInstalled ?? undefined}
+      />
 
       {/* Claude auth status (OC-025) */}
       {selectedType === 'claude' && <ClaudeAuthStatus />}
@@ -982,60 +908,6 @@ function ExecutionEngineSection() {
               <AlertTriangle size={14} />
               Ollama not detected. Start with: <code className="bg-panel px-1 rounded">ollama serve</code>
             </>
-          )}
-        </div>
-      )}
-
-      {/* Model selector (only when OpenCode selected) */}
-      {selectedType === 'opencode' && (
-        <div>
-          <label className="block text-xs text-muted mb-2">Model</label>
-          <div className="relative">
-            <select
-              value={selectedModel}
-              onChange={e => setSelectedModel(e.target.value)}
-              className="w-full px-3 py-2.5 text-sm bg-bg border border-border rounded-lg focus:border-purple-500/60 outline-none appearance-none pr-8"
-            >
-              <option value="">Select a model...</option>
-              {PROVIDER_ORDER.filter(p => grouped[p]).map(provider => (
-                <optgroup key={provider} label={provider === 'Local' ? 'Local (Ollama) — Free' : provider === 'GitHub Copilot' ? 'GitHub Copilot — Subscription' : provider}>
-                  {grouped[provider].map(m => (
-                    <option key={m.id} value={m.id}>
-                      {m.name} — {m.contextWindow >= 1000000
-                        ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
-                        : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-              {/* OpenRouter models grouped by provider family (OC-027) */}
-              {openRouterConnected && Object.entries(openRouterGrouped)
-                .sort(([a], [b]) => a.localeCompare(b))
-                .map(([family, familyModels]) => (
-                  <optgroup key={`or-${family}`} label={`OpenRouter — ${family}`}>
-                    {familyModels.map(m => (
-                      <option key={`or-${m.id}`} value={`openrouter/${m.id}`}>
-                        {m.name}{m.free && m.contextWindow >= 8192 ? ' [Free]' : ''} — {m.contextWindow >= 1000000
-                          ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
-                          : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-            </select>
-            <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
-          </div>
-          {!selectedModel && (
-            <p className="text-[11px] text-amber-400 mt-1.5">Select a model to enable OpenCode execution</p>
-          )}
-          {/* Free tier badge for selected Ollama model */}
-          {selectedModel.startsWith('ollama/') && (
-            <div className="flex items-center gap-2 mt-2">
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
-                Local — Free
-              </span>
-              <span className="text-[11px] text-muted">No API key required. Runs entirely on your machine.</span>
-            </div>
           )}
         </div>
       )}
@@ -1212,34 +1084,6 @@ function ExecutionEngineSection() {
             </div>
           )}
 
-          {/* OpenRouter model selector (shown when connected and an OpenRouter model is selected or browsing) */}
-          {openRouterConnected && openRouterModels.length > 0 && selectedModel.startsWith('openrouter/') && (
-            <div className="mt-3">
-              <label className="block text-xs text-muted mb-1.5">OpenRouter Model</label>
-              <div className="relative">
-                <select
-                  value={selectedModel}
-                  onChange={e => setSelectedModel(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-orange-500/60 outline-none appearance-none pr-8"
-                >
-                  {Object.entries(openRouterGrouped)
-                    .sort(([a], [b]) => a.localeCompare(b))
-                    .map(([family, familyModels]) => (
-                      <optgroup key={family} label={family}>
-                        {familyModels.map(m => (
-                          <option key={m.id} value={`openrouter/${m.id}`}>
-                            {m.name}{m.free ? ' [Free]' : ''} — {m.contextWindow >= 1000000
-                              ? `${(m.contextWindow / 1000000).toFixed(m.contextWindow % 1000000 === 0 ? 0 : 1)}M`
-                              : `${(m.contextWindow / 1000).toFixed(0)}K`} ctx
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                </select>
-                <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -1615,7 +1459,7 @@ function formatContextWindow(tokens: number): string {
 }
 
 function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, testResult, isTesting }: {
-  model: ModelOption;
+  model: DisplayModelOption;
   isSelected: boolean;
   isWorkspaceOverride: boolean;
   onSelect: () => void;
@@ -1693,7 +1537,7 @@ function DisplaySection() {
   const { mode, setMode } = useTheme();
   const { workspaceId } = useWorkspace();
   const [settings, setSettings] = useState<DisplaySettings | null>(null);
-  const [models, setModels] = useState<ModelOption[]>([]);
+  const [models, setModels] = useState<DisplayModelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -1714,7 +1558,7 @@ function DisplaySection() {
   useEffect(() => {
     const fetchPromises: Promise<any>[] = [
       apiFetch<DisplaySettings>('/api/settings/display'),
-      apiFetch<{ models: ModelOption[]; defaultModel: string }>(`/api/direction/models${workspaceId ? `?workspaceId=${workspaceId}` : ''}`),
+      apiFetch<{ models: DisplayModelOption[]; defaultModel: string }>(`/api/direction/models${workspaceId ? `?workspaceId=${workspaceId}` : ''}`),
     ];
     // Fetch workspace L3 preferred model if workspace selected
     if (workspaceId) {
@@ -1809,7 +1653,7 @@ function DisplaySection() {
   const effectiveModel = workspaceModel ?? defaultModel;
 
   // Group models by provider
-  const modelsByProvider = models.reduce<Record<string, ModelOption[]>>((acc, m) => {
+  const modelsByProvider = models.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
     (acc[m.provider] ??= []).push(m);
     return acc;
   }, {});

@@ -1,0 +1,57 @@
+{
+  "id": "rorca-mcp-cli",
+  "specName": "MCP Forge-and-Run + CLI Commands",
+  "title": "rorca-mcp-cli",
+  "model": "claude-opus-4-6",
+  "generatedAt": "2026-03-06T00:00:00.000Z",
+  "_notes": "Adds the missing end-to-end workflow tools: rorca_forge_and_run (single MCP tool that goes brief → spec → approve → run → completion), rorca_cancel_run, and CLI commands (rorca forge, rorca run, rorca status). The individual tools (rorca_generate_spec, rorca_approve_spec, rorca_trigger_run, rorca_run_status) already exist in backend/src/mcp/server.ts from V2-067/068. This spec layers the combined workflow on top and adds the terminal CLI entry points.",
+  "_executionOrder": "After rorca-convention-agents TK-001. Can run in parallel with rorca-integrations since it touches different files (mcp/server.ts + CLI entry point, not integration routes).",
+  "userStories": [
+    {
+      "id": "MC-001",
+      "title": "rorca_forge_and_run — Brief-to-Completion Single MCP Tool",
+      "description": "Add rorca_forge_and_run to backend/src/mcp/server.ts. This is the one-shot tool: accepts a plain-English brief and workspace_id, internally sequences rorca_generate_spec → rorca_approve_spec → rorca_trigger_run → polls rorca_run_status every 15s until done, and returns a structured completion result. MCP progress notifications are emitted at each phase so the calling model (Claude Code, OpenCode) sees live updates rather than waiting blind. This is the primary tool for the 'I have an idea, build it' workflow from inside a Claude Code or OpenCode session.",
+      "acceptanceCriteria": [
+        "rorca_forge_and_run registered in mcp/server.ts with inputSchema: { brief: string (required), workspace_id: string (required), model?: string (execution model), spec_model?: string (spec generation model), auto_worktree?: boolean (default true) }",
+        "Internally sequences: POST /api/specs/generate → POST /api/specs/:id/approve → POST /api/pipeline/trigger → poll GET /api/pipeline/runs/:id every 15s",
+        "MCP progress notifications emitted via server.notification() at each phase: { phase: 'spec_generated', spec_id, spec_title, story_count } → { phase: 'pipeline_started', run_id, branch } → { phase: 'story_passed', story_id, title, elapsed } → { phase: 'story_failed', story_id, title, retries } → { phase: 'complete', ... }",
+        "Returns on completion: { spec_id, spec_title, run_id, passed: number, failed: number, skipped: number, branch: string, worktree_path: string, elapsed_seconds: number }",
+        "On pipeline failure: returns partial results with { error, failed_stories: Array<{ id, title, retries }> } — does not throw, lets caller decide how to handle",
+        "Timeout: 90 minutes max (configurable via options.timeout_minutes). Returns timeout result with partial progress if exceeded",
+        "Tool is available in both stdio MCP server (mcp/server.ts) and HTTP transport at /mcp (auto-generated from OpenAPI @swagger annotation on a new POST /api/mcp/forge-and-run route)"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "MC-002",
+      "title": "rorca_cancel_run MCP Tool",
+      "description": "Add rorca_cancel_run to mcp/server.ts. Accepts { run_id } and sends SIGTERM to the pipeline process, marks the run as cancelled in pipeline_runs, and returns { success, message, stories_completed, stories_remaining }. Completes the control surface alongside rorca_trigger_run.",
+      "acceptanceCriteria": [
+        "rorca_cancel_run registered with inputSchema: { run_id: number }",
+        "Calls POST /api/pipeline/runs/:id/cancel (or equivalent) — sends SIGTERM to process PID stored in pipeline_runs",
+        "Returns { success: boolean, message: string, stories_completed: number, stories_remaining: number }",
+        "If run is not found or already completed, returns { success: false, message: 'Run not found or already completed' }",
+        "Available in both stdio MCP and HTTP /mcp transport"
+      ],
+      "dependsOn": ["MC-001"],
+      "passes": false
+    },
+    {
+      "id": "MC-003",
+      "title": "rorca CLI — forge, run, and status Commands",
+      "description": "Extend the rorca CLI (PR-004 adds start/init) with forge, run, and status commands. These make the full Rorca loop usable from any terminal without opening the UI — designed to pair directly with Claude Code and OpenCode CLI sessions. rorca forge '<brief>' --workspace <path> [--run] [--model <model>]: generates a spec, prints story list, and if --run is passed triggers the pipeline and streams story pass/fail to stdout. rorca run <spec-id> --workspace <path>: triggers an existing approved spec and streams progress. rorca status <run-id>: prints current run progress table.",
+      "acceptanceCriteria": [
+        "rorca forge '<brief>' --workspace <path> generates spec via POST /api/specs/generate and prints spec_id + numbered story titles to stdout",
+        "rorca forge ... --run triggers pipeline after generation and streams story events to stdout: '✓ US-001 Add payment model (2m 14s)' / '✗ US-003 Stripe webhook (failed, 3 retries)'",
+        "rorca run <spec-id> --workspace <path> triggers an approved spec and streams the same progress format",
+        "rorca status <run-id> prints a table: run ID, spec title, status, elapsed, passed/total stories",
+        "All commands call http://localhost:3030 by default; overridable via --api-url flag or RORCA_API_URL env var",
+        "Exit code 0 when all stories pass, exit code 1 when any story fails — enables use in shell scripts and CI pipelines",
+        "rorca forge --help prints usage with a concrete example showing the full brief → run workflow"
+      ],
+      "dependsOn": ["MC-001", "MC-002"],
+      "passes": false
+    }
+  ]
+}

@@ -929,7 +929,11 @@ router.post('/trigger', async (req: Request, res: Response) => {
     // 3. Resolve agent type and verify execution engine is available.
     //    Priority: execution-engine.ts (universal) → bash run-loop.sh (legacy fallback)
     const resolvedAgentType: AgentType = agentConfig.agentType;
-    const resolvedAgentModel: string | null = agentConfig.agentModel;
+    // Model priority: RORCA_MODEL env var > workspace L3 preferred_model > null (agent default)
+    const l3WorkspaceModel = workspaceId
+      ? (db.prepare(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`).get(workspaceId) as { preferred_model: string | null } | undefined)?.preferred_model ?? null
+      : null;
+    const resolvedAgentModel: string | null = agentConfig.agentModel ?? l3WorkspaceModel;
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedAgentType === 'claude') {
@@ -1116,23 +1120,14 @@ router.post('/trigger', async (req: Request, res: Response) => {
 
     const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
-    const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
     const hasExecutionEngine = fs.existsSync(executionEngineTs);
     const hasBashRunLoop = fs.existsSync(runLoopSh);
-    const hasTsRunLoop = fs.existsSync(runLoopTs);
-
-    // When agent is opencode/codex, execution-engine.ts is required (not the legacy loops)
-    if (resolvedAgentType !== 'claude' && !hasExecutionEngine) {
-      res.status(422).json({ error: `execution-engine.ts required for agent type '${resolvedAgentType}' but not found` });
-      return;
-    }
-    if (!hasExecutionEngine && !hasBashRunLoop && !hasTsRunLoop) {
-      res.status(422).json({ error: `No execution engine found` });
-      return;
-    }
-    // Use execution-engine.ts when available, fall back to legacy run-loop
     const useExecutionEngine = hasExecutionEngine;
-    const useLegacyTsRunLoop = !useExecutionEngine && !hasBashRunLoop && hasTsRunLoop;
+
+    if (!hasExecutionEngine && !hasBashRunLoop) {
+      res.status(422).json({ error: `No execution engine found — execution-engine.ts is missing` });
+      return;
+    }
 
     // 4. Conflict check — is there already an active run for this workspace?
     const activeRun = db.prepare(
@@ -1442,24 +1437,6 @@ router.post('/trigger', async (req: Request, res: Response) => {
         engineArgs.push('--attach', attachAddr);
       }
       child = spawn(tsxBin, engineArgs, {
-        cwd,
-        stdio: ['ignore', logFd, logFd],
-        detached: true,
-        env,
-      });
-    } else if (useLegacyTsRunLoop) {
-      // Legacy TypeScript run-loop (fallback when execution-engine.ts doesn't exist)
-      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
-      const backendPort = process.env.PORT || '3030';
-      const runLoopArgs = [
-        runLoopTs,
-        '--json', absSpecPath,
-        '--cwd', cwd,
-        '--run-id', String(runId),
-        '--port', backendPort,
-        '--parallelism', String(parallelism),
-      ];
-      child = spawn(tsxBin, runLoopArgs, {
         cwd,
         stdio: ['ignore', logFd, logFd],
         detached: true,
@@ -3773,6 +3750,17 @@ router.get('/runs/:runId/output', (req: Request, res: Response) => {
     return;
   }
 
+  // Validate workspace ownership if workspaceId is provided
+  const wsId = req.query.workspaceId as string | undefined;
+  if (wsId) {
+    const ownerCheck = db.prepare('SELECT workspace_id FROM pipeline_runs WHERE id = ?')
+      .get(runId) as { workspace_id: number } | undefined;
+    if (ownerCheck && String(ownerCheck.workspace_id) !== wsId) {
+      res.status(403).json({ error: 'Run does not belong to this workspace' });
+      return;
+    }
+  }
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -4511,24 +4499,52 @@ router.get('/stream', (req: Request, res: Response) => {
 
   // Also poll WAL for events (catch events from external processes like Ralph)
   const runId = req.query.runId as string;
+  const wsId = req.query.workspaceId as string | undefined;
+
+  // Resolve workspace_id from the run if not provided explicitly
+  let resolvedWsId = wsId ?? null;
+  if (!resolvedWsId && runId) {
+    const runRow = db.prepare('SELECT workspace_id FROM pipeline_runs WHERE id = ?').get(Number(runId)) as { workspace_id: number } | undefined;
+    if (runRow) resolvedWsId = String(runRow.workspace_id);
+  }
+
   let lastSeenId = 0;
   const pollInterval = setInterval(() => {
     try {
       let events;
-      if (runId) {
+      if (runId && resolvedWsId) {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND payload LIKE ?
+             AND workspace_id = ?
+           ORDER BY id ASC
+           LIMIT 50`
+        ).all(lastSeenId, `%"run_id":${runId}%`, resolvedWsId);
+      } else if (runId) {
+        events = db.prepare(
+          `SELECT * FROM wal_events
+           WHERE id > ?
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
              AND payload LIKE ?
            ORDER BY id ASC
            LIMIT 50`
         ).all(lastSeenId, `%"run_id":${runId}%`);
+      } else if (resolvedWsId) {
+        events = db.prepare(
+          `SELECT * FROM wal_events
+           WHERE id > ?
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND workspace_id = ?
+           ORDER BY id ASC
+           LIMIT 50`
+        ).all(lastSeenId, resolvedWsId);
       } else {
         events = db.prepare(
           `SELECT * FROM wal_events
            WHERE id > ?
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
            ORDER BY id ASC
            LIMIT 50`
         ).all(lastSeenId);

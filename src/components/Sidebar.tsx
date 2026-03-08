@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Activity, Archive, Settings,
-  Search, LayoutDashboard,
+  Search, LayoutDashboard, Store,
   GitBranch, ArrowLeftRight,
   Github, Rss, Users, Coins, DollarSign, Zap, TrendingUp,
   BarChart3, HeartPulse, ScrollText, Calculator, BookOpen,
@@ -10,6 +10,7 @@ import {
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
 import NotificationBell from './NotificationBell';
+import RorcaLogo from './RorcaLogo';
 import { UserMenu } from './Shell';
 import { PANEL_ROUTES } from '../routes';
 
@@ -31,10 +32,12 @@ interface NavSection {
 
 const SIDEBAR_ITEMS: NavItem[] = [
   { id: 'hub', label: 'Overview', icon: LayoutDashboard },
-  { id: 'forge', label: 'Forge', icon: Wand2 },
-  { id: 'pipeline', label: 'Runs', icon: Activity },
-  { id: 'archive', label: 'Archive', icon: Archive },
+  { id: 'forge', label: 'Spec', icon: Wand2 },
+  { id: 'archive', label: 'Wake', icon: Archive },
+  { id: 'pipeline', label: 'Dive', icon: Activity },
+  { id: 'marketplace', label: 'Skills', icon: Store },
   { id: 'stack', label: 'Direction', icon: Layers },
+  { id: 'usage', label: 'Analytics', icon: BarChart3 },
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
@@ -46,15 +49,16 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'specs',
     label: 'Specs',
     items: [
-      { id: 'forge', label: 'Forge', icon: Wand2 },
-      { id: 'archive', label: 'Archive', icon: Archive },
+      { id: 'forge', label: 'Spec', icon: Wand2 },
+      { id: 'archive', label: 'Wake', icon: Archive },
+      { id: 'marketplace', label: 'Skills', icon: Store },
     ],
   },
   {
     id: 'pipeline',
     label: 'Pipeline',
     items: [
-      { id: 'pipeline', label: 'Runs', icon: Activity },
+      { id: 'pipeline', label: 'Dive', icon: Activity },
       { id: 'worktrees', label: 'Worktrees', icon: GitBranch },
       { id: 'compare', label: 'Compare Runs', icon: ArrowLeftRight },
     ],
@@ -111,8 +115,12 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose }: Sideb
 
   const sidebarContent = (
     <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
-      {/* Top Section: Workspace & Search */}
+      {/* Top Section: Logo, Workspace & Search */}
       <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
+        <div className="flex items-center gap-2 px-1 mb-1">
+          <RorcaLogo size={22} variant="gradient" />
+          <span className="font-mono font-bold text-[var(--text)] text-sm tracking-tight">rorca</span>
+        </div>
         <WorkspaceSelector />
 
         <button

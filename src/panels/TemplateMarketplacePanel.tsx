@@ -28,7 +28,7 @@ import { useGlobalToast } from '../contexts/ToastContext';
 
 /* ─── Marketplace Tab Type ─────────────────────────────────────── */
 
-type MarketplaceTab = 'templates' | 'packs' | 'skills';
+type MarketplaceTab = 'skills' | 'starters';
 
 /* ─── Shared Types ─────────────────────────────────────────────── */
 
@@ -148,19 +148,19 @@ function relativeDate(ts: string): string {
 /* ─── Main Component ───────────────────────────────────────────── */
 
 export default function TemplateMarketplacePanel() {
-  const [activeTab, setActiveTab] = useState<MarketplaceTab>('packs');
+  const [activeTab, setActiveTab] = useState<MarketplaceTab>('skills');
 
   const TABS: { id: MarketplaceTab; label: string; icon: typeof Package }[] = [
-    { id: 'packs', label: 'Convention Packs', icon: Package },
-    { id: 'templates', label: 'Spec Templates', icon: FileText },
     { id: 'skills', label: 'Skills', icon: Wrench },
+    { id: 'starters', label: 'Starters', icon: Package },
   ];
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header with tabs */}
       <div className="px-5 py-4 border-b border-border shrink-0">
-        <h1 className="text-lg font-semibold text-[var(--text)] mb-3">Marketplace</h1>
+        <h1 className="text-lg font-semibold text-[var(--text)] mb-1">Skills</h1>
+        <p className="text-xs text-muted mb-3">Browse and install skills from the community to make your AI agents smarter.</p>
         <div className="flex items-center gap-1">
           {TABS.map(({ id, label, icon: Icon }) => (
             <button
@@ -181,9 +181,8 @@ export default function TemplateMarketplacePanel() {
 
       {/* Tab content */}
       <div className="flex-1 overflow-hidden">
-        {activeTab === 'templates' && <TemplatesTab />}
-        {activeTab === 'packs' && <PacksTab />}
         {activeTab === 'skills' && <SkillsTab />}
+        {activeTab === 'starters' && <PacksTab />}
       </div>
     </div>
   );
@@ -593,8 +592,8 @@ function PacksTab() {
           {catalogPacks.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-muted text-sm">
               <Package size={32} className="mb-2 opacity-50" />
-              <p>No convention packs found</p>
-              <p className="text-xs mt-1">Add packs to the packs/ directory in Rorca&apos;s repo</p>
+              <p>No starters found</p>
+              <p className="text-xs mt-1">Starters are project setup bundles with direction layers, skills, and scaffold files</p>
             </div>
           ) : (
             <div className="grid gap-3">

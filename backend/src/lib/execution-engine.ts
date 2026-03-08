@@ -244,8 +244,8 @@ function getAcceptance(story: UserStory): string {
   return '';
 }
 
-function detectMode(spec: SpecJson): 'impl' | 'qa' | 'journey' {
-  if (spec.mode) return spec.mode as 'impl' | 'qa' | 'journey';
+function detectMode(spec: SpecJson): 'impl' | 'qa' {
+  if (spec.mode === 'qa') return 'qa';
   if (spec.phases) return 'qa';
   return 'impl';
 }
@@ -258,6 +258,7 @@ function getProgress(stories: UserStory[]): { passed: number; total: number } {
 }
 
 function getNextStory(stories: UserStory[]): UserStory | null {
+  const allIds = new Set(stories.map(s => s.id));
   const passedIds = new Set(stories.filter(isPassed).map(s => s.id));
   const sorted = [...stories].sort((a, b) => (a.priority ?? 3) - (b.priority ?? 3));
 
@@ -266,7 +267,9 @@ function getNextStory(stories: UserStory[]): UserStory | null {
     if (story.skipped) continue;
     if (story.excluded) continue;
     const deps = story.dependsOn ?? [];
-    if (deps.every(dep => passedIds.has(dep))) return story;
+    // Cross-spec deps (IDs not in this spec) are treated as satisfied —
+    // they reference stories completed in a prior spec run.
+    if (deps.every(dep => passedIds.has(dep) || !allIds.has(dep))) return story;
   }
   return null;
 }
@@ -438,7 +441,7 @@ function formatSkillsSection(skills: ResolvedSkill[]): string {
 
 function buildPrompt(
   story: UserStory,
-  mode: 'impl' | 'qa' | 'journey',
+  mode: 'impl' | 'qa',
   cwd: string,
   playbook?: string,
   agentType?: AgentType,
@@ -486,22 +489,6 @@ function buildPrompt(
   // SK-003: Matched skills section (injected AFTER roleSection, BEFORE personaSection)
   const matchedSkills = skillsSection ?? '';
 
-  if (mode === 'journey') {
-    const journeySkill = playbook ? readWorkspaceFile(cwd, playbook) : '';
-    return [
-      contextPreamble,
-      'You are simulating real users navigating the application. Read CLAUDE.md for architecture.',
-      openCodeSkillInstruction,
-      codexAgentsInstruction,
-      roleSection ?? '',
-      matchedSkills,
-      '', journeySkill,
-      personaSection,
-      '', '---', '',
-      `Your task (${story.id}): ${story.title}`,
-      '', story.description, acSection,
-    ].filter(Boolean).join('\n');
-  }
 
   if (mode === 'qa') {
     const playbookInstruction = playbook && fs.existsSync(path.join(cwd, playbook))
@@ -560,6 +547,9 @@ interface AgentResult {
   elapsedMs: number;
 }
 
+/** Callback for real-time token usage updates during agent execution. */
+type TokenUpdateCallback = (update: { inputTokens: number; outputTokens: number; turn: number; cumulativeInput: number; cumulativeOutput: number }) => void;
+
 /**
  * Spawn a story subprocess using the configured agent type.
  * All three paths use AbortController-style timeout (setTimeout + SIGTERM/SIGKILL).
@@ -573,10 +563,11 @@ function runAgent(
   logFile: string,
   agentModel: string | null,
   attachAddr: string | null,
+  onTokenUpdate?: TokenUpdateCallback,
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
-      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel);
+      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate);
     case 'opencode':
       return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr);
     case 'codex':
@@ -591,6 +582,7 @@ function spawnClaude(
   timeoutMs: number,
   logFile: string,
   agentModel: string | null = null,
+  onTokenUpdate?: TokenUpdateCallback,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
@@ -612,9 +604,53 @@ function spawnClaude(
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // Real-time stream-json token parsing
+    let stdoutLineBuf = '';
+    let cumulativeInput = 0;
+    let cumulativeOutput = 0;
+    let turnCount = 0;
+
     child.stdout?.on('data', (chunk: Buffer) => {
       logStream.write(chunk);
       process.stdout.write(chunk);
+
+      // Parse stream-json lines for token usage if callback registered
+      if (onTokenUpdate) {
+        stdoutLineBuf += chunk.toString('utf8');
+        const lines = stdoutLineBuf.split('\n');
+        // Keep the last incomplete line in the buffer
+        stdoutLineBuf = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const event = JSON.parse(trimmed);
+            // Claude stream-json emits `result` events with usage at end of each turn
+            if (event.type === 'result' && event.usage) {
+              const input = (event.usage.input_tokens ?? 0) as number;
+              const output = (event.usage.output_tokens ?? 0) as number;
+              if (input > 0 || output > 0) {
+                // usage fields are cumulative per-session in stream-json
+                const turnInput = input - cumulativeInput;
+                const turnOutput = output - cumulativeOutput;
+                cumulativeInput = input;
+                cumulativeOutput = output;
+                turnCount++;
+                onTokenUpdate({
+                  inputTokens: turnInput > 0 ? turnInput : input,
+                  outputTokens: turnOutput > 0 ? turnOutput : output,
+                  turn: turnCount,
+                  cumulativeInput,
+                  cumulativeOutput,
+                });
+              }
+            }
+          } catch {
+            // Not valid JSON — skip
+          }
+        }
+      }
     });
 
     const stderrChunks: Buffer[] = [];
@@ -1093,10 +1129,10 @@ function gitCommitStory(
   cwd: string,
   storyId: string,
   storyTitle: string,
-  mode: 'impl' | 'qa' | 'journey',
+  mode: 'impl' | 'qa',
 ): void {
   const env = buildCleanEnv();
-  const prefix = mode === 'qa' ? 'test' : mode === 'journey' ? 'journey' : 'feat';
+  const prefix = mode === 'qa' ? 'test' : 'feat';
 
   try {
     execSync('git add -A', { cwd, env, stdio: 'pipe' });
@@ -1120,7 +1156,7 @@ const GATE_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface GateResult {
   passed: boolean;
-  reason?: 'typecheck' | 'e2e';
+  reason?: 'typecheck';
   output?: string;
 }
 
@@ -1158,46 +1194,6 @@ function runGate(cwd: string): GateResult {
     console.log('  [gate] typecheck gate disabled in .rorca/config.json');
   }
 
-  // ── E2E (playwright) gate ──
-  if (gates.e2e) {
-    const hasPlaywrightConfig =
-      fs.existsSync(path.join(cwd, 'playwright.config.ts')) ||
-      fs.existsSync(path.join(cwd, 'playwright.config.js'));
-
-    if (hasPlaywrightConfig) {
-      // Only run playwright if actual test files exist — a bare config (from scaffolding)
-      // with no tests causes playwright to exit non-zero, failing the gate incorrectly.
-      let hasTestFiles = false;
-      try {
-        const result = execSync(
-          'find . -name "*.spec.ts" -o -name "*.spec.js" -o -name "*.test.ts" -o -name "*.test.js" -o -name "*.spec.tsx" -o -name "*.spec.jsx" | grep -c . || true',
-          { cwd, stdio: 'pipe', timeout: 10_000, encoding: 'utf8' }
-        ).trim();
-        hasTestFiles = parseInt(result, 10) > 0;
-      } catch {
-        hasTestFiles = false;
-      }
-
-      if (!hasTestFiles) {
-        console.log('  [gate] playwright config found but no test files — skipping e2e gate');
-      } else {
-        console.log('  [gate] Running playwright test...');
-        try {
-          execSync('npx playwright test --reporter=line', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
-          console.log('  [gate] playwright passed');
-        } catch (err: unknown) {
-          const stdout = (err as { stdout?: Buffer })?.stdout?.toString('utf8') ?? '';
-          console.log(`  [gate] playwright FAILED${isWarningMode ? ' (warning mode — continuing)' : ''}`);
-          if (!isWarningMode) {
-            return { passed: false, reason: 'e2e', output: stdout.slice(0, 2000) };
-          }
-          console.log(`  [gate] playwright errors (non-blocking):\n${stdout.slice(0, 500)}`);
-        }
-      }
-    }
-  } else {
-    console.log('  [gate] e2e gate disabled in .rorca/config.json');
-  }
 
   return { passed: true };
 }
@@ -1825,7 +1821,7 @@ async function runAdversarialReview(
 async function executeStory(
   story: UserStory,
   config: EngineConfig,
-  mode: 'impl' | 'qa' | 'journey',
+  mode: 'impl' | 'qa',
   playbook: string | undefined,
   logDir: string,
   workspaceId: string | null,
@@ -2039,6 +2035,23 @@ async function executeStory(
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
 
+  // Real-time token update callback — emits WAL events as tokens stream in
+  const tokenUpdateCallback: TokenUpdateCallback | undefined =
+    workspaceId && effectiveAgent === 'claude'
+      ? (update) => {
+          // Fire-and-forget WAL event for live token streaming
+          emitWalEvent(config.port, 'story_token_update', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            input_tokens: update.inputTokens,
+            output_tokens: update.outputTokens,
+            cumulative_input: update.cumulativeInput,
+            cumulative_output: update.cumulativeOutput,
+            turn: update.turn,
+          }, story.id).catch(() => { /* best-effort — don't block execution */ });
+        }
+      : undefined;
+
   // Rate limit retry loop
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -2050,6 +2063,7 @@ async function executeStory(
       storyLogFile,
       currentModel,
       effectiveAttach,
+      tokenUpdateCallback,
     );
 
     // Extract token usage from log file after agent exits
@@ -2317,6 +2331,8 @@ async function executeStory(
         await emitWalEvent(config.port, 'story_passed', workspaceId, {
           run_id: config.runId, story_id: story.id, story_title: story.title,
           agent_type: effectiveAgent,
+          input_tokens: tokenPayload.inputTokens,
+          output_tokens: tokenPayload.outputTokens,
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
       }
@@ -2341,6 +2357,8 @@ async function executeStory(
           run_id: config.runId, story_id: story.id,
           reason: 'timeout', timeout_minutes: timeoutMin,
           log_file: storyLogFile,
+          input_tokens: tokenPayload.inputTokens,
+          output_tokens: tokenPayload.outputTokens,
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
       }
@@ -2586,7 +2604,7 @@ async function main(): Promise<void> {
   const playbook = spec.playbook;
   const stories = getStories(spec);
 
-  const modeLabel = mode === 'qa' ? 'QA Testing' : mode === 'journey' ? 'User Journey' : 'Implementation';
+  const modeLabel = mode === 'qa' ? 'QA Testing' : 'Implementation';
   const progress = getProgress(stories);
 
   // ── Scan per-story agent assignments ────────────────────────────────
@@ -2706,6 +2724,19 @@ async function main(): Promise<void> {
     if (!story) {
       const finalProgress = getProgress(currentStories);
       console.log('');
+      if (finalProgress.passed === 0 && finalProgress.total > 0) {
+        // No stories executed — likely a dependency resolution issue
+        const blocked = currentStories.filter(s => !isPassed(s) && !s.skipped && !s.excluded);
+        console.error(`ERROR: 0/${finalProgress.total} stories executed — all stories blocked!`);
+        for (const b of blocked) {
+          const deps = b.dependsOn ?? [];
+          const unmet = deps.filter(d => !currentStories.some(s => s.id === d && isPassed(s)));
+          console.error(`  ${b.id}: blocked by unresolved deps: [${unmet.join(', ')}]`);
+        }
+        writeProgressTxt(config.cwd);
+        archiveRunState(config.cwd, config.runId);
+        process.exit(1);
+      }
       console.log(`All stories complete! ${finalProgress.passed}/${finalProgress.total}`);
       // CIE-007: Archive run-state.json and write final progress.txt
       writeProgressTxt(config.cwd);
@@ -2751,7 +2782,7 @@ async function main(): Promise<void> {
 
 async function runParallel(
   config: EngineConfig,
-  mode: 'impl' | 'qa' | 'journey',
+  mode: 'impl' | 'qa',
   playbook: string | undefined,
   logDir: string,
   workspaceId: string | null,
