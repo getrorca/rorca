@@ -6,6 +6,8 @@ import {
 import { Calculator, Calendar, Loader2, Settings2, Check } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import { ProBadge } from '../components/UpgradePrompt';
+import { useAuth } from '../contexts/AuthContext';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -60,6 +62,8 @@ function dateRangeToISO(range: DateRange): { from: string; to: string } {
 
 export default function RoiCalculatorPanel() {
   const { workspaceId } = useWorkspace();
+  const { user } = useAuth();
+  const isFreePlan = !user?.plan || user.plan === 'free';
   const [data, setData] = useState<ROIResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [dateRange, setDateRange] = useState<DateRange>('30d');
@@ -122,6 +126,7 @@ export default function RoiCalculatorPanel() {
         <div className="flex items-center gap-2">
           <Calculator size={20} className="text-accent" aria-hidden="true" />
           <h2 className="text-lg font-semibold">ROI Calculator</h2>
+          {isFreePlan && <ProBadge />}
         </div>
 
         <div className="flex items-center gap-2">
