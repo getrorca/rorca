@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T12:18:54.306Z",
+  "lastUpdatedAt": "2026-03-08T12:25:43.150Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -233,6 +233,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 408985
+    },
+    {
+      "storyId": "PR-032",
+      "title": "Frontend Test Infrastructure (Vitest + helpers)",
+      "status": "passed",
+      "startedAt": "2026-03-08T12:19:04.347Z",
+      "finishedAt": "2026-03-08T12:25:43.150Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 398803
     }
   ],
   "failedStories": [],
