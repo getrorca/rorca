@@ -188,6 +188,80 @@ router.post('/install', (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/skills/preview:
+ *   get:
+ *     tags: [Skills]
+ *     summary: Preview a skill from skills.sh without installing
+ *     operationId: previewSkill
+ *     description: |
+ *       Searches skills.sh for the query and returns the SKILL.md content
+ *       fetched from GitHub. Does NOT install the skill — preview only.
+ *     parameters:
+ *       - in: query
+ *         name: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Skill name or search query (e.g. "react", "node")
+ *     responses:
+ *       200:
+ *         description: Skill content preview
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 name:
+ *                   type: string
+ *                 content:
+ *                   type: string
+ *                 description:
+ *                   type: string
+ *                 source:
+ *                   type: string
+ *                 skillId:
+ *                   type: string
+ *                 wordCount:
+ *                   type: number
+ *                 estimatedTokens:
+ *                   type: number
+ *       400:
+ *         description: Missing query
+ *       404:
+ *         description: Skill not found in registry
+ */
+router.get('/preview', async (req: Request, res: Response) => {
+  try {
+    const query = (req.query.query as string || '').trim().replace(/\.md$/i, '');
+    if (!query) {
+      res.status(400).json({ error: 'query is required' });
+      return;
+    }
+
+    const result = await fetchSkillFromRegistry(query);
+    if (!result) {
+      res.status(404).json({ error: `No skill found for "${query}" in skills.sh` });
+      return;
+    }
+
+    const wordCount = result.content.split(/\s+/).filter(Boolean).length;
+    res.json({
+      name: result.name,
+      content: result.content,
+      description: result.description,
+      source: result.source,
+      skillId: result.skillId,
+      wordCount,
+      estimatedTokens: Math.ceil(wordCount * 1.3),
+    });
+  } catch (error: any) {
+    console.error('[Skills] preview error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
  * /api/skills/{name}/content:
  *   get:
  *     tags: [Skills]
@@ -324,17 +398,108 @@ router.delete('/:name', (req: Request, res: Response) => {
   }
 });
 
-/** GitHub repos hosting SKILL.md files — tried in order. */
-const SKILL_GITHUB_SOURCES = [
-  'https://raw.githubusercontent.com/anthropics/skills/main/skills/{name}/SKILL.md',
-  'https://raw.githubusercontent.com/vercel-labs/skills/main/skills/{name}/SKILL.md',
-];
-
 /** Parse YAML frontmatter from markdown content. Returns null if no frontmatter. */
 function parseFrontmatter(content: string): { yaml: string; body: string } | null {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!match) return null;
   return { yaml: match[1], body: match[2] };
+}
+
+/**
+ * Search skills.sh for a query, then fetch the SKILL.md content from GitHub.
+ * Returns the content + metadata of the best matching skill, or null.
+ */
+async function fetchSkillFromRegistry(query: string): Promise<{
+  content: string;
+  name: string;
+  description: string;
+  source: string;
+  skillId: string;
+} | null> {
+  // 1. Search skills.sh
+  const searchUrl = `https://skills.sh/api/search?q=${encodeURIComponent(query)}&limit=5`;
+  let results: { skillId: string; source: string; name: string }[] = [];
+  try {
+    const resp = await fetch(searchUrl, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!resp.ok) return null;
+    const data: any = await resp.json();
+    results = Array.isArray(data?.skills) ? data.skills : Array.isArray(data?.results) ? data.results : [];
+  } catch {
+    return null;
+  }
+  if (results.length === 0) return null;
+
+  // 2. For each result, try to fetch SKILL.md from GitHub
+  for (const result of results) {
+    const { source, skillId } = result;
+    if (!source || !skillId) continue;
+
+    // Try common URL patterns
+    const candidates = [
+      `https://raw.githubusercontent.com/${source}/main/skills/${skillId}/SKILL.md`,
+      `https://raw.githubusercontent.com/${source}/main/${skillId}/SKILL.md`,
+      `https://raw.githubusercontent.com/${source}/refs/heads/main/skills/${skillId}/SKILL.md`,
+    ];
+
+    for (const url of candidates) {
+      try {
+        const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+        if (resp.ok) {
+          const content = await resp.text();
+          // Parse frontmatter for metadata
+          let description = '';
+          let resolvedName = skillId;
+          const parsed = parseFrontmatter(content);
+          if (parsed) {
+            try {
+              const meta = yaml.load(parsed.yaml) as Record<string, unknown> | null;
+              if (meta && typeof meta === 'object') {
+                if (typeof meta['name'] === 'string') resolvedName = meta['name'];
+                if (typeof meta['description'] === 'string') description = meta['description'];
+              }
+            } catch { /* use defaults */ }
+          }
+          return { content, name: resolvedName, description, source: `github:${source}`, skillId };
+        }
+      } catch { /* try next */ }
+    }
+
+    // Fallback: use GitHub tree API to find the right SKILL.md path
+    try {
+      const treeUrl = `https://api.github.com/repos/${source}/git/trees/HEAD?recursive=1`;
+      const treeResp = await fetch(treeUrl, { signal: AbortSignal.timeout(10_000) });
+      if (treeResp.ok) {
+        const tree: any = await treeResp.json();
+        const skillFiles: string[] = (tree.tree || [])
+          .filter((f: any) => f.type === 'blob' && f.path.endsWith('/SKILL.md'))
+          .map((f: any) => f.path);
+
+        for (const filePath of skillFiles) {
+          const url = `https://raw.githubusercontent.com/${source}/main/${filePath}`;
+          try {
+            const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+            if (!resp.ok) continue;
+            const content = await resp.text();
+            const parsed = parseFrontmatter(content);
+            if (parsed) {
+              try {
+                const meta = yaml.load(parsed.yaml) as Record<string, unknown> | null;
+                if (meta && typeof meta === 'object' && meta['name'] === skillId) {
+                  const description = typeof meta['description'] === 'string' ? meta['description'] : '';
+                  return { content, name: skillId, description, source: `github:${source}`, skillId };
+                }
+              } catch { /* skip */ }
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } catch { /* skip to next result */ }
+  }
+
+  return null;
 }
 
 /**
@@ -381,7 +546,8 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
       return;
     }
 
-    const skillName = name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    // Strip .md extension if present (suggestions pass "react.md")
+    const query = name.trim().replace(/\.md$/i, '').toLowerCase();
 
     // Resolve workspace path
     const wsPath = workspaceId
@@ -393,56 +559,14 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
       return;
     }
 
-    // Try each GitHub source in order
-    let content: string | null = null;
-    let sourceLabel = '';
-    let anyReachable = false;
-
-    for (const srcTemplate of SKILL_GITHUB_SOURCES) {
-      const url = srcTemplate.replace('{name}', skillName);
-      try {
-        const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-        if (response.ok) {
-          content = await response.text();
-          // Extract owner/repo for source label
-          const ownerRepo = url.match(/raw\.githubusercontent\.com\/([^/]+\/[^/]+)/)?.[1] ?? 'github';
-          sourceLabel = `github:${ownerRepo}`;
-          anyReachable = true;
-          break;
-        }
-        if (response.status === 404) {
-          anyReachable = true; // reachable but skill not found here — try next
-        }
-      } catch {
-        // Network error on this source — try next
-      }
-    }
-
-    if (!content) {
-      if (!anyReachable) {
-        res.status(502).json({ error: 'Network error fetching skill from GitHub' });
-        return;
-      }
-      res.status(404).json({ error: `Skill "${skillName}" not found in GitHub skill repositories` });
+    // Search skills.sh and fetch content from GitHub
+    const result = await fetchSkillFromRegistry(query);
+    if (!result) {
+      res.status(404).json({ error: `No skill found for "${query}" in skills.sh registry` });
       return;
     }
 
-    // Parse YAML frontmatter for metadata
-    let description = '';
-    let resolvedName = skillName;
-
-    const parsed = parseFrontmatter(content);
-    if (parsed) {
-      try {
-        const rawYaml = yaml.load(parsed.yaml) as Record<string, unknown> | null;
-        if (rawYaml && typeof rawYaml === 'object') {
-          if (typeof rawYaml['name'] === 'string') resolvedName = rawYaml['name'];
-          if (typeof rawYaml['description'] === 'string') description = rawYaml['description'];
-        }
-      } catch {
-        // use defaults
-      }
-    }
+    const skillName = query.replace(/[^a-z0-9-]/g, '-');
 
     // Save to both .rorca/skills/ and .claude/skills/
     const rorcaSkillsDir = path.join(wsPath, '.rorca', 'skills');
@@ -452,17 +576,18 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
 
     const rorcaPath = path.join(rorcaSkillsDir, `${skillName}.md`);
     const claudePath = path.join(claudeSkillsDir, `${skillName}.md`);
-    fs.writeFileSync(rorcaPath, content, 'utf-8');
-    fs.writeFileSync(claudePath, content, 'utf-8');
+    fs.writeFileSync(rorcaPath, result.content, 'utf-8');
+    fs.writeFileSync(claudePath, result.content, 'utf-8');
 
     // Register in DB
     const registry = new SkillRegistry();
-    registry.install(skillName, content, sourceLabel);
+    registry.install(skillName, result.content, result.source);
 
     res.status(201).json({
-      name: resolvedName,
-      description,
-      source: sourceLabel,
+      name: result.name,
+      description: result.description,
+      source: result.source,
+      skillId: result.skillId,
       filePath: rorcaPath,
     });
   } catch (error: any) {

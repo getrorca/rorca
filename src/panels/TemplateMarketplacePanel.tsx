@@ -1364,14 +1364,16 @@ function SkillRegistryCard({
   const handleToggle = () => {
     const next = !expanded;
     setExpanded(next);
-    if (next && installed && !contentCache && !contentLoading) {
+    if (next && !contentCache && !contentLoading) {
       setContentLoading(true);
       setContentError(null);
-      apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
-        `/api/skills/${encodeURIComponent(name)}/content`
-      )
+      // Installed: fetch from local content endpoint. Uninstalled: preview from skills.sh
+      const url = installed
+        ? `/api/skills/${encodeURIComponent(name)}/content`
+        : `/api/skills/preview?query=${encodeURIComponent(name)}`;
+      apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(url)
         .then(data => setContentCache({ content: data.content, wordCount: data.wordCount, estimatedTokens: data.estimatedTokens }))
-        .catch(err => setContentError(err instanceof Error ? err.message : 'Failed to load content'))
+        .catch(err => setContentError(err instanceof Error ? err.message : 'Failed to load preview'))
         .finally(() => setContentLoading(false));
     }
   };
@@ -1439,19 +1441,7 @@ function SkillRegistryCard({
 
       {expanded && (
         <div className="px-3 pb-3 pt-0">
-          {!installed ? (
-            <div className="flex items-center gap-3 p-3 rounded bg-bg text-xs text-muted">
-              <span className="flex-1">Install to preview content</span>
-              <button
-                onClick={onInstall}
-                disabled={installing}
-                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
-              >
-                {installing ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-                Install
-              </button>
-            </div>
-          ) : contentLoading ? (
+          {contentLoading ? (
             <div className="flex items-center justify-center py-6">
               <Loader2 size={16} className="animate-spin text-muted" />
             </div>
@@ -1461,9 +1451,14 @@ function SkillRegistryCard({
             </div>
           ) : contentCache ? (
             <div>
-              <p className="text-[11px] text-muted mb-1.5">
-                {contentCache.wordCount.toLocaleString()} words · ~{contentCache.estimatedTokens.toLocaleString()} tokens
-              </p>
+              <div className="flex items-center gap-2 mb-1.5">
+                <p className="text-[11px] text-muted">
+                  {contentCache.wordCount.toLocaleString()} words · ~{contentCache.estimatedTokens.toLocaleString()} tokens
+                </p>
+                {!installed && (
+                  <span className="text-[10px] text-accent/70 bg-accent/10 px-1.5 py-0.5 rounded">preview from skills.sh</span>
+                )}
+              </div>
               <div
                 className="prose prose-invert prose-sm max-h-64 overflow-y-auto rounded bg-bg p-3"
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(contentCache.content) }}

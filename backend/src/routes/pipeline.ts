@@ -856,7 +856,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  */
 router.post('/trigger', async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, dryRun, triggerType } = req.body;
+    const { specPath, workspaceId, autoWorktree, dryRun, triggerType, forceSequential } = req.body;
 
     if (!specPath || !workspaceId) {
       res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
@@ -1148,6 +1148,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
     const absSpecPath = path.join(workspace.path, specPath);
 
     // 4b. Auto-select orchestration mode (sequential vs wave-parallel)
+    // IMPORTANT: Respect waveParallelism from .rorca/config.json — if false, force sequential
     let parallelism = 1;
     let orchestration: ReturnType<typeof autoSelectOrchestration> | null = null;
     try {
@@ -1162,8 +1163,31 @@ router.post('/trigger', async (req: Request, res: Response) => {
         excluded: s.excluded,
       }));
       orchestration = autoSelectOrchestration(orchStories);
-      parallelism = orchestration.parallelism;
-      console.log(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
+
+      // Check forceSequential from trigger request (UI toggle) or .rorca/config.json
+      if (forceSequential) {
+        parallelism = 1;
+        console.log(`[orchestration] Forced sequential (user selected sequential in UI)`);
+      } else {
+        let waveParallelismEnabled = true;
+        try {
+          const rorcaConfigPath = path.join(workspace.path, '.rorca', 'config.json');
+          if (fs.existsSync(rorcaConfigPath)) {
+            const rorcaConfig = JSON.parse(fs.readFileSync(rorcaConfigPath, 'utf8'));
+            if (rorcaConfig?.execution?.waveParallelism === false) {
+              waveParallelismEnabled = false;
+            }
+          }
+        } catch { /* config parse error — use default */ }
+
+        if (!waveParallelismEnabled) {
+          parallelism = 1;
+          console.log(`[orchestration] Forced sequential (waveParallelism: false in .rorca/config.json)`);
+        } else {
+          parallelism = orchestration.parallelism;
+          console.log(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
+        }
+      }
     } catch {
       // Spec parse error — fall back to sequential
       console.log('[orchestration] Using sequential (spec parse error, fallback)');

@@ -37,6 +37,7 @@ import { ReadinessRing } from '../components/ReadinessRing';
 import { TagChipsReadonly, TagChips } from '../components/TagChips';
 import { SpecVersionHistory } from '../components/SpecVersionHistory';
 import AppHeader from '../components/AppHeader';
+import AgentBadge from '../components/AgentBadge';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -45,6 +46,26 @@ type StatusFilter = 'all' | SpecStatus;
 type PreviewTab = 'stories' | 'graph' | 'diagram' | 'json' | 'history';
 
 type ReviewStatus = 'draft' | 'review_requested' | 'approved' | 'changes_requested';
+
+interface RunTelemetry {
+  runId: number;
+  runStatus: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationSeconds: number | null;
+  totalInputTokens: number | null;
+  totalOutputTokens: number | null;
+  totalCostUsd: number | null;
+  agentType: string;
+  agentModel: string | null;
+  storyOutcomes: {
+    pass: number;
+    fail: number;
+    skip: number;
+    timeout: number;
+    excluded: number;
+  };
+}
 
 interface ArchiveSpec {
   id: string;
@@ -63,6 +84,7 @@ interface ArchiveSpec {
   forkedFrom?: string;
   reviewStatus?: ReviewStatus;
   source?: string;
+  runTelemetry?: RunTelemetry | null;
 }
 
 interface ArchiveResponse {
@@ -133,6 +155,52 @@ function formatDate(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function formatDurationShort(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function formatTokensCompact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function formatCostCompact(n: number): string {
+  if (n >= 1) return `$${n.toFixed(2)}`;
+  if (n >= 0.01) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(4)}`;
+}
+
+function StoryOutcomeBar({ outcomes, storyCount }: { outcomes: RunTelemetry['storyOutcomes']; storyCount: number }) {
+  if (storyCount === 0) return null;
+  const segments = [
+    { count: outcomes.pass, color: 'bg-emerald-500' },
+    { count: outcomes.fail, color: 'bg-red-500' },
+    { count: outcomes.skip + outcomes.timeout, color: 'bg-amber-500' },
+    { count: outcomes.excluded, color: 'bg-zinc-500' },
+  ].filter(s => s.count > 0);
+
+  return (
+    <div
+      className="flex h-1 rounded-full overflow-hidden bg-border"
+      title={`${outcomes.pass} passed, ${outcomes.fail} failed, ${outcomes.skip + outcomes.timeout} skipped`}
+    >
+      {segments.map((seg, i) => (
+        <div
+          key={i}
+          className={`${seg.color} transition-all`}
+          style={{ width: `${(seg.count / storyCount) * 100}%` }}
+        />
+      ))}
+    </div>
+  );
 }
 
 function extractDiagramText(spec: SpecDetail): { text: string; type: 'mermaid' | 'ascii' } | null {
@@ -439,108 +507,137 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                 <div>
                   {specs.map(spec => {
                     const cfg = STATUS_CONFIG[spec.status];
-                    const Icon = cfg.icon;
+                    const tel = spec.runTelemetry;
                     return (
                       <button
                         key={spec.id}
                         onClick={() => setSelectedId(spec.id === selectedId ? null : spec.id)}
-                        className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${spec.id === selectedId ? 'bg-accent/10' : 'hover:bg-panel'
-                          }`}
+                        className={`w-full text-left px-4 py-2.5 border-b border-border transition-colors ${
+                          spec.id === selectedId ? 'bg-accent/10' : 'hover:bg-panel'
+                        } ${spec.status === 'completed' ? 'opacity-80' : ''}`}
                       >
-                        {/* Row 1: status badge + date + story count + readiness */}
-                        <div className="flex items-center justify-between mb-1.5">
-                          <div className="flex items-center gap-2">
-                            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border ${cfg.className}`}>
-                              <Icon size={10} />
-                              {cfg.label}
-                            </span>
-                            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
-                              {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
-                            </span>
-                            {spec.reviewStatus && spec.reviewStatus !== 'draft' && (
-                              <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded border ${spec.reviewStatus === 'review_requested' ? 'bg-accent/15 text-accent border-accent/30' :
-                                spec.reviewStatus === 'approved' ? 'bg-success/15 text-success border-success/30' :
-                                  'bg-warning/15 text-warning border-warning/30'
-                                }`}>
-                                {spec.reviewStatus === 'review_requested' ? 'Needs Review' :
-                                  spec.reviewStatus === 'approved' ? 'Review OK' :
-                                    'Changes Req.'}
-                              </span>
-                            )}
-                            {spec.source === 'quick-run' && (
-                              <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400 border border-purple-500/30">
-                                Quick Run
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {spec.readinessPercent != null && (
-                              <ReadinessRing percent={spec.readinessPercent} size={28} />
-                            )}
-                            <span className="text-[10px] text-muted flex items-center gap-1">
-                              <Clock size={10} />
-                              {formatDate(spec.generatedAt)}
-                            </span>
-                            <ChevronRight
-                              size={14}
-                              className={`shrink-0 text-muted transition-transform ${spec.id === selectedId ? 'rotate-90' : ''
-                                }`}
-                            />
-                          </div>
-                        </div>
-
-                        {/* Row 2: spec name + repo badge + branch badge */}
-                        <div className="flex items-center gap-2 mb-1 min-w-0">
-                          <span className="text-sm font-mono font-semibold text-text truncate">
+                        {/* Row 1: Status dot + Spec name + Quick badge + Date + Chevron */}
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dotClass}`} />
+                          <span className="text-sm font-mono font-semibold text-text truncate flex-1">
                             {spec.specName}
                           </span>
+                          {spec.source === 'quick-run' && (
+                            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400">
+                              Quick
+                            </span>
+                          )}
+                          <span className="text-[10px] text-muted tabular-nums shrink-0">
+                            {formatDate(spec.generatedAt)}
+                          </span>
+                          <ChevronRight
+                            size={14}
+                            className={`shrink-0 text-muted transition-transform ${
+                              spec.id === selectedId ? 'rotate-90' : ''
+                            }`}
+                          />
+                        </div>
+
+                        {/* Row 2: Repo + Branch + Spacer + Outcome bar + Pass rate */}
+                        <div className="flex items-center gap-2 mb-1 ml-3.5 min-w-0">
                           {spec.repoName && (
-                            <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted font-mono">
+                            <span className="text-[10px] text-muted font-mono truncate">
                               {spec.repoName}
                             </span>
                           )}
                           {spec.branchName && (
-                            <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-panel border border-border text-muted font-mono">
+                            <span className="flex items-center gap-0.5 text-[10px] text-muted font-mono truncate">
                               <GitBranch className="w-2.5 h-2.5" />
                               {spec.branchName.replace('feat/', '')}
                             </span>
                           )}
                           {spec.forkedFrom && (
-                            <span className="shrink-0 flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent/10 border border-accent/20 text-accent font-mono">
+                            <span className="flex items-center gap-0.5 text-[10px] text-accent font-mono">
                               <GitFork className="w-2.5 h-2.5" />
                               {spec.forkedFrom}
                             </span>
                           )}
+                          <div className="flex-1" />
+                          {tel ? (
+                            <div className="flex items-center gap-2 shrink-0">
+                              <div className="w-16">
+                                <StoryOutcomeBar outcomes={tel.storyOutcomes} storyCount={spec.storyCount} />
+                              </div>
+                              <span className="text-[10px] font-mono tabular-nums text-muted">
+                                {tel.storyOutcomes.pass}/{spec.storyCount}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-muted tabular-nums shrink-0">
+                              {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
+                            </span>
+                          )}
                         </div>
 
-                        {/* Tags */}
-                        {spec.tags?.length > 0 && (
-                          <div className="mb-1">
-                            <TagChipsReadonly
-                              tags={spec.tags}
-                              onTagClick={tag => {
-                                if (!tagFilter.includes(tag)) {
-                                  setTagFilter(prev => [...prev, tag]);
-                                }
-                              }}
-                            />
+                        {/* Row 3: Telemetry (if run data) or Tags + Review status */}
+                        {tel ? (
+                          <div className="flex items-center gap-3 ml-3.5 text-[10px] text-muted">
+                            {tel.durationSeconds != null && (
+                              <span className="font-mono tabular-nums">
+                                {formatDurationShort(tel.durationSeconds)}
+                              </span>
+                            )}
+                            {(tel.totalInputTokens != null || tel.totalOutputTokens != null) && (
+                              <span className="font-mono tabular-nums">
+                                {formatTokensCompact((tel.totalInputTokens ?? 0) + (tel.totalOutputTokens ?? 0))} tok
+                              </span>
+                            )}
+                            {tel.totalCostUsd != null && tel.totalCostUsd > 0 && (
+                              <span className="font-mono tabular-nums">
+                                {formatCostCompact(tel.totalCostUsd)}
+                              </span>
+                            )}
+                            <AgentBadge agentType={tel.agentType} agentModel={tel.agentModel} size="sm" />
+                            {spec.tags?.length > 0 && (
+                              <div className="flex-1 min-w-0 overflow-hidden">
+                                <TagChipsReadonly
+                                  tags={spec.tags}
+                                  onTagClick={tag => {
+                                    if (!tagFilter.includes(tag)) {
+                                      setTagFilter(prev => [...prev, tag]);
+                                    }
+                                  }}
+                                />
+                              </div>
+                            )}
                           </div>
+                        ) : (
+                          <>
+                            {spec.tags?.length > 0 && (
+                              <div className="ml-3.5">
+                                <TagChipsReadonly
+                                  tags={spec.tags}
+                                  onTagClick={tag => {
+                                    if (!tagFilter.includes(tag)) {
+                                      setTagFilter(prev => [...prev, tag]);
+                                    }
+                                  }}
+                                />
+                              </div>
+                            )}
+                            {spec.reviewStatus && spec.reviewStatus !== 'draft' && (
+                              <div className="ml-3.5 mt-0.5">
+                                <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${
+                                  spec.reviewStatus === 'review_requested' ? 'bg-accent/15 text-accent' :
+                                  spec.reviewStatus === 'approved' ? 'bg-success/15 text-success' :
+                                  'bg-warning/15 text-warning'
+                                }`}>
+                                  {spec.reviewStatus === 'review_requested' ? 'Needs Review' :
+                                   spec.reviewStatus === 'approved' ? 'Review OK' : 'Changes Req.'}
+                                </span>
+                              </div>
+                            )}
+                          </>
                         )}
 
-                        {/* Row 3: first 2 story titles */}
-                        {spec.storyTitles.length > 0 && (
-                          <div className="space-y-0.5">
-                            {spec.storyTitles.slice(0, 2).map((title, i) => (
-                              <p key={i} className="text-xs text-muted truncate">
-                                {spec.storyTitles.length > 0 ? `US-${String(i + 1).padStart(3, '0')}: ` : ''}{title}
-                              </p>
-                            ))}
-                          </div>
-                        )}
-
-                        {/* Reject reason (if rejected) */}
+                        {/* Reject reason */}
                         {spec.status === 'rejected' && spec.rejectReason && (
-                          <p className="text-xs text-error/70 mt-1 truncate">
+                          <p className="text-xs text-error/70 mt-1 ml-3.5 truncate">
                             Reason: {spec.rejectReason}
                           </p>
                         )}
@@ -773,7 +870,7 @@ function SpecPreviewDrawer({
     }
   };
 
-  const handleRun = async (autoWorktree: boolean) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -788,6 +885,7 @@ function SpecPreviewDrawer({
             specPath: `forge/specs/approved/${summary.id}.json`,
             workspaceId,
             autoWorktree,
+            ...(options?.forceSequential ? { forceSequential: true } : {}),
           }),
         }
       );

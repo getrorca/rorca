@@ -176,7 +176,7 @@ router.get('/violations', (req: Request, res: Response) => {
   const maxResults = parseInt(limit as string, 10) || 50;
 
   let sql = `
-    SELECT id, event_type, payload, created_at
+    SELECT id, event_type, payload, ts
     FROM wal_events
     WHERE workspace_id = ? AND event_type = 'story_violation'
   `;
@@ -187,20 +187,20 @@ router.get('/violations', (req: Request, res: Response) => {
     params.push(parseInt(runId as string, 10));
   }
 
-  sql += ` ORDER BY created_at DESC LIMIT ?`;
+  sql += ` ORDER BY ts DESC LIMIT ?`;
   params.push(maxResults);
 
   const rows = db.prepare(sql).all(...params) as Array<{
     id: number;
     event_type: string;
     payload: string;
-    created_at: string;
+    ts: string;
   }>;
 
   const violations = rows.map(row => ({
     id: row.id,
     ...JSON.parse(row.payload),
-    created_at: row.created_at,
+    created_at: row.ts,
   }));
 
   res.json({ items: violations, total: violations.length });

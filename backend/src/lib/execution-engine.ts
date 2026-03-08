@@ -576,7 +576,7 @@ function runAgent(
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
-      return spawnClaude(prompt, cwd, timeoutMs, logFile);
+      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel);
     case 'opencode':
       return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr);
     case 'codex':
@@ -590,6 +590,7 @@ function spawnClaude(
   cwd: string,
   timeoutMs: number,
   logFile: string,
+  agentModel: string | null = null,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
@@ -600,6 +601,7 @@ function spawnClaude(
       '--print',
       '--verbose',
       '--output-format', 'stream-json',
+      ...(agentModel ? ['--model', agentModel] : []),
       prompt,
     ];
 
@@ -1124,31 +1126,77 @@ interface GateResult {
 
 function runGate(cwd: string): GateResult {
   const env = buildCleanEnv();
+  const rorcaConfig = loadRorcaConfig(cwd);
+  const gates = rorcaConfig.execution.gates;
 
-  console.log('  [gate] Running tsc --noEmit...');
-  try {
-    execSync('npx tsc --noEmit', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
-    console.log('  [gate] tsc passed');
-  } catch (err: unknown) {
-    const stderr = (err as { stderr?: Buffer })?.stderr?.toString('utf8') ?? '';
-    console.log(`  [gate] tsc FAILED`);
-    return { passed: false, reason: 'typecheck', output: stderr.slice(0, 2000) };
+  // Gate mode: 'warning' = failures are non-fatal (log + continue), 'blocking' = old behaviour
+  const isWarningMode = gates.mode === 'warning';
+
+  // ── Typecheck gate ──
+  if (gates.typecheck) {
+    // Only run tsc if a tsconfig.json exists — no tsconfig means the project
+    // either doesn't use TypeScript or hasn't been set up yet (scaffolding).
+    const hasTsConfig = fs.existsSync(path.join(cwd, 'tsconfig.json'));
+    if (!hasTsConfig) {
+      console.log('  [gate] no tsconfig.json found — skipping typecheck gate');
+    } else {
+      console.log('  [gate] Running tsc --noEmit...');
+      try {
+        execSync('npx tsc --noEmit', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
+        console.log('  [gate] tsc passed');
+      } catch (err: unknown) {
+        const stderr = (err as { stderr?: Buffer })?.stderr?.toString('utf8') ?? '';
+        console.log(`  [gate] tsc FAILED${isWarningMode ? ' (warning mode — continuing)' : ''}`);
+        if (!isWarningMode) {
+          return { passed: false, reason: 'typecheck', output: stderr.slice(0, 2000) };
+        }
+        // Warning mode — log the failure but don't block the story
+        console.log(`  [gate] tsc errors (non-blocking):\n${stderr.slice(0, 500)}`);
+      }
+    }
+  } else {
+    console.log('  [gate] typecheck gate disabled in .rorca/config.json');
   }
 
-  const hasPlaywrightConfig =
-    fs.existsSync(path.join(cwd, 'playwright.config.ts')) ||
-    fs.existsSync(path.join(cwd, 'playwright.config.js'));
+  // ── E2E (playwright) gate ──
+  if (gates.e2e) {
+    const hasPlaywrightConfig =
+      fs.existsSync(path.join(cwd, 'playwright.config.ts')) ||
+      fs.existsSync(path.join(cwd, 'playwright.config.js'));
 
-  if (hasPlaywrightConfig) {
-    console.log('  [gate] Running playwright test...');
-    try {
-      execSync('npx playwright test --reporter=line', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
-      console.log('  [gate] playwright passed');
-    } catch (err: unknown) {
-      const stdout = (err as { stdout?: Buffer })?.stdout?.toString('utf8') ?? '';
-      console.log(`  [gate] playwright FAILED`);
-      return { passed: false, reason: 'e2e', output: stdout.slice(0, 2000) };
+    if (hasPlaywrightConfig) {
+      // Only run playwright if actual test files exist — a bare config (from scaffolding)
+      // with no tests causes playwright to exit non-zero, failing the gate incorrectly.
+      let hasTestFiles = false;
+      try {
+        const result = execSync(
+          'find . -name "*.spec.ts" -o -name "*.spec.js" -o -name "*.test.ts" -o -name "*.test.js" -o -name "*.spec.tsx" -o -name "*.spec.jsx" | grep -c . || true',
+          { cwd, stdio: 'pipe', timeout: 10_000, encoding: 'utf8' }
+        ).trim();
+        hasTestFiles = parseInt(result, 10) > 0;
+      } catch {
+        hasTestFiles = false;
+      }
+
+      if (!hasTestFiles) {
+        console.log('  [gate] playwright config found but no test files — skipping e2e gate');
+      } else {
+        console.log('  [gate] Running playwright test...');
+        try {
+          execSync('npx playwright test --reporter=line', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
+          console.log('  [gate] playwright passed');
+        } catch (err: unknown) {
+          const stdout = (err as { stdout?: Buffer })?.stdout?.toString('utf8') ?? '';
+          console.log(`  [gate] playwright FAILED${isWarningMode ? ' (warning mode — continuing)' : ''}`);
+          if (!isWarningMode) {
+            return { passed: false, reason: 'e2e', output: stdout.slice(0, 2000) };
+          }
+          console.log(`  [gate] playwright errors (non-blocking):\n${stdout.slice(0, 500)}`);
+        }
+      }
     }
+  } else {
+    console.log('  [gate] e2e gate disabled in .rorca/config.json');
   }
 
   return { passed: true };
@@ -1177,6 +1225,23 @@ function createStoryWorktree(
       `git worktree add -b "${branchName}" "${worktreePath}" HEAD`,
       { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 },
     );
+
+    // Symlink node_modules from parent so agents can run `npx tsc`, `npm test`, etc.
+    // git worktree excludes node_modules (gitignored) — without this, every `npx` call
+    // downloads packages fresh, causing type-check failures and story cascade failures.
+    const dirsToLink = ['node_modules', 'backend/node_modules'];
+    for (const rel of dirsToLink) {
+      const src = path.join(workspaceCwd, rel);
+      const dst = path.join(worktreePath, rel);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
+        try {
+          fs.symlinkSync(src, dst, 'dir');
+        } catch {
+          // Non-fatal — agent can still run npm install if needed
+        }
+      }
+    }
+
     console.log(`  [worktree] Created ${worktreePath} (${branchName})`);
     return { storyId, worktreePath, branchName };
   } catch (err: unknown) {
@@ -2852,6 +2917,11 @@ async function runParallel(
               reason: 'merge_conflict', worktree_branch: wt.branchName,
             }, wt.storyId);
           }
+        } else {
+          // Force-update spec JSON in main workspace after merge.
+          // The merge may conflict on the spec JSON and lose the passes:true written
+          // in the worktree — writing it directly here ensures it is never lost.
+          try { markStoryPassed(config.jsonPath, wt.storyId); } catch { /* non-fatal */ }
         }
         removeStoryWorktree(config.cwd, wt);
       } else {
@@ -2866,6 +2936,11 @@ async function runParallel(
             });
           }
           console.log(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
+          // Force-update spec JSON for every story that passed — merge can conflict on
+          // this file and lose the passes:true that was written inside each worktree.
+          for (const wt of passedInWave) {
+            try { markStoryPassed(config.jsonPath, wt.storyId); } catch { /* non-fatal */ }
+          }
           for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt);
         } else {
           // Some merges failed — add only the specific failed stories to failedIds

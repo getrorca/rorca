@@ -431,7 +431,7 @@ router.get('/drift/:workspaceId', (req: Request, res: Response) => {
   } | undefined;
 
   if (!row) {
-    res.status(404).json({ error: 'No drift report found for this workspace' });
+    res.json({ report: null });
     return;
   }
 
