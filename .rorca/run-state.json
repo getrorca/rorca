@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T12:11:54.963Z",
+  "lastUpdatedAt": "2026-03-08T12:18:54.306Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -223,6 +223,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 146154
+    },
+    {
+      "storyId": "PR-031",
+      "title": "Error State Consistency + Error Boundaries",
+      "status": "passed",
+      "startedAt": "2026-03-08T12:12:05.321Z",
+      "finishedAt": "2026-03-08T12:18:54.306Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 408985
     }
   ],
   "failedStories": [],

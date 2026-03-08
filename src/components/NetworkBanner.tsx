@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { WifiOff } from 'lucide-react';
 
 const HEALTH_URL = 'http://localhost:3030/api/health';
-const POLL_INTERVAL = 10_000; // 10s
+const POLL_INTERVAL = 5_000; // 5s
 
 /**
  * Hook: polls /api/health + navigator.onLine.

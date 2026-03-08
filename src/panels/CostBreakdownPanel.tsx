@@ -7,6 +7,7 @@ import { DollarSign, Calendar, ArrowDownUp, Loader2, Settings, Plus, Trash2, Sav
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { HelpTooltip } from '../components/HelpTooltip';
+import ErrorBanner from '../components/ErrorBanner';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -90,6 +91,7 @@ export default function CostBreakdownPanel() {
   const [tab, setTab] = useState<Tab>('costs');
   const [data, setData] = useState<CostResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [groupBy, setGroupBy] = useState<GroupBy>('spec');
   const [dateRange, setDateRange] = useState<DateRange>('30d');
 
@@ -103,6 +105,7 @@ export default function CostBreakdownPanel() {
 
   const fetchCosts = useCallback(async () => {
     if (!workspaceId) return;
+    setError(null);
     try {
       const { from, to } = dateRangeToISO(dateRange);
       const params = new URLSearchParams({
@@ -113,8 +116,9 @@ export default function CostBreakdownPanel() {
       });
       const result = await apiFetch<CostResponse>(`/api/analytics/costs?${params}`);
       setData(result);
-    } catch (err) {
-      console.error('[CostBreakdown] fetch error:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load cost data';
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -277,6 +281,7 @@ export default function CostBreakdownPanel() {
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-5 space-y-6" aria-live="polite" aria-busy={loading}>
+        {error && tab === 'costs' && <ErrorBanner message={error} onRetry={fetchCosts} onDismiss={() => setError(null)} />}
         {tab === 'costs' ? (
           <CostsTab data={data} loading={loading} groupBy={groupBy} />
         ) : (

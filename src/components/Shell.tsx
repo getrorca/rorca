@@ -278,6 +278,14 @@ export default function Shell({ sidebar, header, children, onMenuToggle, showMen
         {/* If a custom header is provided, render it. Default global header is removed per Linear-style layout. */}
         {header && header}
 
+        {/* Network offline persistent banner */}
+        {offline && (
+          <div className="flex items-center justify-center gap-2 px-4 py-2 bg-warning/10 border-b border-warning/30 text-warning text-xs font-medium">
+            <NetworkIndicator offline={offline} />
+            <span>Connection lost — retrying…</span>
+          </div>
+        )}
+
         {/* Body Main Canvas */}
         <main id="main-content" className="flex-1 min-h-0 min-w-0 overflow-y-auto contain-layout bg-bg relative">
           {children}

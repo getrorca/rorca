@@ -6,6 +6,7 @@ import {
 import { TrendingUp, RefreshCw, Calendar, Loader2, Filter } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import ErrorBanner from '../components/ErrorBanner';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -121,12 +122,14 @@ export default function VelocityChartPanel() {
   const { workspaceId, workspaces } = useWorkspace();
   const [data, setData] = useState<VelocityResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<DateRange>('12w');
   const [filterSpec, setFilterSpec] = useState<string>('');
   const [filterWorkspace, setFilterWorkspace] = useState<string>('');
 
   const fetchVelocity = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const { from, to } = dateRangeToISO(dateRange);
       const params = new URLSearchParams({ from, to });
@@ -136,8 +139,9 @@ export default function VelocityChartPanel() {
 
       const res = await apiFetch<VelocityResponse>(`/api/analytics/velocity?${params}`);
       setData(res);
-    } catch (err) {
-      console.error('[Velocity] Fetch error:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load velocity data';
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -253,6 +257,9 @@ export default function VelocityChartPanel() {
             </p>
           </div>
         </div>
+
+        {/* Error banner */}
+        {error && <ErrorBanner message={error} onRetry={fetchVelocity} onDismiss={() => setError(null)} />}
 
         {/* Chart */}
         {loading ? (
