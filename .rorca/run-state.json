@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T14:58:49.763Z",
+  "lastUpdatedAt": "2026-03-08T15:02:35.804Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -313,6 +313,16 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 96490
+    },
+    {
+      "storyId": "PR-043",
+      "title": "Spec Sanitizer — PII Scrubbing",
+      "status": "passed",
+      "startedAt": "2026-03-08T14:58:59.843Z",
+      "finishedAt": "2026-03-08T15:02:35.804Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 215961
     }
   ],
   "failedStories": [],
