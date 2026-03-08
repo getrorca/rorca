@@ -3,9 +3,9 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T15:29:39.008Z
+Last Updated: 2026-03-08T15:39:42.793Z
 
-## Completed Stories (36)
+## Completed Stories (37)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
@@ -42,6 +42,7 @@ Last Updated: 2026-03-08T15:29:39.008Z
 - PR-046: Marketplace Panel Redesign — DONE (claude, claude-sonnet-4-6, 298s)
 - PR-047: Publish Flow from Archive Panel — DONE (claude, claude-sonnet-4-6, 235s)
 - PR-048: Frontend Bundle Audit + Lazy Panel Loading — DONE (claude, claude-sonnet-4-6, 301s)
+- PR-051: Plan Quotas Table + requirePlan Middleware — DONE (claude, claude-opus-4-6, 593s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined

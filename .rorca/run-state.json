@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T15:29:39.008Z",
+  "lastUpdatedAt": "2026-03-08T15:39:42.793Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -363,6 +363,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 301235
+    },
+    {
+      "storyId": "PR-051",
+      "title": "Plan Quotas Table + requirePlan Middleware",
+      "status": "passed",
+      "startedAt": "2026-03-08T15:29:49.313Z",
+      "finishedAt": "2026-03-08T15:39:42.792Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 593479
     }
   ],
   "failedStories": [],
