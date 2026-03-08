@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T09:38:41.785Z",
+  "lastUpdatedAt": "2026-03-08T09:42:36.911Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -33,11 +33,37 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 328090
+    },
+    {
+      "storyId": "PR-005",
+      "title": "Privacy-First Telemetry — Opt-In Only",
+      "status": "passed",
+      "startedAt": "2026-03-08T09:39:00.000Z",
+      "finishedAt": "2026-03-08T10:15:32.000Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 2212000
+    },
+    {
+      "storyId": "PR-005",
+      "title": "Telemetry Opt-In & Privacy",
+      "status": "passed",
+      "startedAt": "2026-03-08T09:38:46.350Z",
+      "finishedAt": "2026-03-08T09:42:36.911Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 230561
     }
   ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
-  "decisions": [],
+  "decisions": [
+    {
+      "storyId": "PR-005",
+      "title": "Privacy-first telemetry — opt-in only",
+      "decision": "Created comprehensive privacy-first telemetry system: RORCA_TELEMETRY env var (default OFF), isTelemetryEnabled() config module, anonymous metrics collector (event type, agent type, story count, duration ONLY), /api/telemetry/status endpoint, Settings UI toggle in Account tab, comprehensive PRIVACY.md documentation (195 lines)"
+    }
+  ],
   "resumedFromStory": null
 }
