@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T10:04:44.801Z",
+  "lastUpdatedAt": "2026-03-08T10:14:09.362Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -83,6 +83,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 633948
+    },
+    {
+      "storyId": "PR-009",
+      "title": "Auth Middleware Conditional Enforcement",
+      "status": "passed",
+      "startedAt": "2026-03-08T10:04:54.514Z",
+      "finishedAt": "2026-03-08T10:14:09.362Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 554848
     }
   ],
   "failedStories": [],
