@@ -6,6 +6,7 @@ import {
 import { Coins, Cpu, ArrowDownUp, RefreshCw, Calendar, Loader2 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import ErrorBanner from '../components/ErrorBanner';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -75,11 +76,13 @@ export default function UsageDashboardPanel() {
   const { workspaceId } = useWorkspace();
   const [data, setData] = useState<UsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [groupBy, setGroupBy] = useState<GroupBy>('model');
   const [dateRange, setDateRange] = useState<DateRange>('30d');
 
   const fetchUsage = useCallback(async () => {
     if (!workspaceId) return;
+    setError(null);
     try {
       const { from, to } = dateRangeToISO(dateRange);
       const params = new URLSearchParams({
@@ -90,8 +93,9 @@ export default function UsageDashboardPanel() {
       });
       const result = await apiFetch<UsageResponse>(`/api/analytics/usage?${params}`);
       setData(result);
-    } catch (err) {
-      console.error('[UsageDashboard] fetch error:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load usage data';
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -172,6 +176,7 @@ export default function UsageDashboardPanel() {
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-5 space-y-6" aria-live="polite" aria-busy={loading}>
+        {error && <ErrorBanner message={error} onRetry={fetchUsage} onDismiss={() => setError(null)} />}
         {loading ? (
           <div className="flex items-center justify-center h-64">
             <Loader2 className="animate-spin text-muted" size={28} />

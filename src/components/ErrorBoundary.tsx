@@ -41,9 +41,11 @@ export default class ErrorBoundary extends Component<Props, State> {
             {this.props.label && (
               <p className="text-xs text-muted mb-2">in {this.props.label}</p>
             )}
-            <p className="text-sm text-secondary mb-4 font-mono break-all">
-              {this.state.error?.message || 'An unexpected error occurred'}
-            </p>
+            {import.meta.env.DEV && (
+              <p className="text-sm text-secondary mb-4 font-mono break-all">
+                {this.state.error?.message || 'An unexpected error occurred'}
+              </p>
+            )}
             <button
               onClick={this.handleRetry}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 transition-colors"
