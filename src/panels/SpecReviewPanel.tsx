@@ -32,6 +32,8 @@ interface Story {
   complexity?: number;
   passes?: boolean;
   excluded?: boolean;
+  /** Per-story execution model override (e.g. 'claude-opus-4-6'). */
+  model?: string;
 }
 
 interface SpecDetail {
@@ -248,6 +250,13 @@ function StoryFilterBar({
 
 /* ─── Story Review Card ───────────────────────────────────────────── */
 
+const STORY_MODEL_OPTIONS = [
+  { value: '', label: 'Default (run-level)' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 — fast' },
+  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — balanced' },
+  { value: 'claude-opus-4-6', label: 'Opus 4.6 — powerful' },
+];
+
 function StoryReviewCard({
   story,
   allStoryIds,
@@ -256,6 +265,7 @@ function StoryReviewCard({
   highlighted,
   onToggle,
   onScrollToStory,
+  onModelChange,
 }: {
   story: Story;
   allStoryIds: Set<string>;
@@ -264,6 +274,7 @@ function StoryReviewCard({
   highlighted: boolean;
   onToggle: () => void;
   onScrollToStory: (id: string) => void;
+  onModelChange: (storyId: string, model: string) => void;
 }) {
   const deps = story.dependsOn ?? story.dependencies ?? [];
   const ac = story.acceptanceCriteria ?? [];
@@ -386,6 +397,32 @@ function StoryReviewCard({
               {story.description}
             </p>
           )}
+
+          {/* Per-story model override */}
+          <div className="mt-3 flex items-center gap-2">
+            <label className="text-xs font-semibold text-muted uppercase tracking-wide shrink-0">
+              Model
+            </label>
+            <select
+              value={story.model ?? ''}
+              onChange={(e) => {
+                e.stopPropagation();
+                onModelChange(story.id, e.target.value);
+              }}
+              onClick={(e) => e.stopPropagation()}
+              className="flex-1 text-xs rounded bg-panel border border-border text-text px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
+            >
+              {STORY_MODEL_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+              {/* Show current model as option if it's not in the preset list */}
+              {story.model && !STORY_MODEL_OPTIONS.some((o) => o.value === story.model) && (
+                <option value={story.model}>{story.model}</option>
+              )}
+            </select>
+          </div>
 
           {/* Acceptance Criteria as checklist */}
           {ac.length > 0 && (
@@ -681,6 +718,28 @@ export default function SpecReviewPanel({
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [focusedIndex, filteredStories]);
 
+  // Per-story model change — save to spec JSON via API, update local state
+  const handleStoryModelChange = useCallback(async (storyId: string, model: string) => {
+    if (!workspaceId || !spec) return;
+    try {
+      await apiFetch(`/api/specs/${specId}/stories/${storyId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, model: model || null }),
+      });
+      // Update local spec state
+      setSpec((prev) => {
+        if (!prev) return prev;
+        const stories = (prev.userStories ?? prev.stories ?? []).map((s: Story) =>
+          s.id === storyId ? { ...s, model: model || undefined } : s,
+        );
+        return { ...prev, userStories: stories };
+      });
+    } catch {
+      // Silently fail — model selector will revert on next render
+    }
+  }, [workspaceId, spec, specId]);
+
   // Actions — called from confirmation dialog
   const handleConfirmApprove = async () => {
     if (!workspaceId) return;
@@ -886,6 +945,7 @@ export default function SpecReviewPanel({
                   setFocusedIndex(i);
                 }}
                 onScrollToStory={scrollToStory}
+                onModelChange={handleStoryModelChange}
               />
             ))
           )}
