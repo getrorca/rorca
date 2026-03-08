@@ -28,7 +28,8 @@ export interface CapabilityWarning {
 export type TriggerResponse =
   | { ok: true; runId: number; worktreePath?: string; branchName?: string; capabilityWarnings?: CapabilityWarning[]; capabilityMismatchMode?: string }
   | { dryRun: true; estimate: unknown }
-  | { conflict: true; activeRunId: number };
+  | { conflict: true; activeRunId: number }
+  | { queued: true; runId: number; position: number };
 
 export function triggerPipeline(p: TriggerParams): Promise<TriggerResponse> {
   return apiFetch('/api/pipeline/trigger', {
@@ -138,6 +139,16 @@ export function cancelRun(
 ): Promise<{ ok: true; runId: number; status: 'cancelled' }> {
   return apiFetch(`/api/pipeline/runs/${runId}/cancel`, {
     method: 'POST',
+    signal: opts?.signal,
+  });
+}
+
+export function deleteRun(
+  runId: number,
+  opts?: ApiOptions,
+): Promise<{ ok: true; runId: number }> {
+  return apiFetch(`/api/pipeline/runs/${runId}`, {
+    method: 'DELETE',
     signal: opts?.signal,
   });
 }

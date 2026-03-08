@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle, DollarSign, GitCommitHorizontal, RefreshCw, Loader2, Info } from 'lucide-react';
+import { Play, Pause, Terminal, ChevronDown, ChevronRight, Copy, Check, List, GripVertical, GitBranch, AlertTriangle, BarChart3, RotateCcw, Download, XCircle, DollarSign, GitCommitHorizontal, RefreshCw, Loader2, Info, Clock } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE, WalEvent } from '../hooks/usePipelineSSE';
+import { useWalSSE } from '../hooks/useWalSSE';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import RunTerminal from '../components/RunTerminal';
 import MultiPaneTerminal from '../components/MultiPaneTerminal';
@@ -23,7 +25,7 @@ interface PipelineRun {
   id: number;
   spec_path: string;
   workspace_id: string;
-  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled';
+  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled' | 'queued';
   pid: number | null;
   started_at: string;
   finished_at: string | null;
@@ -33,6 +35,8 @@ interface PipelineRun {
   parallelism?: number;
   branch_name?: string | null;
   worktree_path?: string | null;
+  queue_position?: number | null;
+  queued_at?: string | null;
 }
 
 interface CommitEntry {
@@ -106,6 +110,7 @@ const STATUS_DOTS: Record<string, string> = {
   partial_failure: 'bg-orange-500',
   paused: 'bg-yellow-500',
   cancelled: 'bg-gray-500',
+  queued: 'bg-amber-500',
 };
 
 const STORY_ICONS: Record<StoryStatus, string> = {
@@ -323,6 +328,9 @@ export default function PipelineMonitorPanel() {
   const dragSrcId = useRef<string | null>(null);
   const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
   const [specPickerOpen, setSpecPickerOpen] = useState(false);
+  const [cancellingRunId, setCancellingRunId] = useState<number | null>(null);
+
+  const { show: showGlobalToast } = useGlobalToast();
 
   // SSE for live updates — scoped to workspace
   const sseEvents = usePipelineSSE(selectedRunId ? String(selectedRunId) : null, workspaceId);
@@ -387,6 +395,28 @@ export default function PipelineMonitorPanel() {
       fetchQueue();
     }
   }, [sseEvents, fetchQueue]);
+
+  // Global WAL SSE — handle run_queued_promoted to show toast + refresh runs list
+  const fetchRunsRef = useRef(fetchRuns);
+  fetchRunsRef.current = fetchRuns;
+  const fetchQueueRef = useRef(fetchQueue);
+  fetchQueueRef.current = fetchQueue;
+  const showGlobalToastRef = useRef(showGlobalToast);
+  showGlobalToastRef.current = showGlobalToast;
+
+  useWalSSE((event) => {
+    if (event.event_type === 'run_queued_promoted') {
+      const payload = event.payload ? JSON.parse(event.payload) : {};
+      const label = payload.spec_name
+        ? String(payload.spec_name).replace(/-/g, ' ')
+        : payload.spec_id
+          ? String(payload.spec_id).replace(/-/g, ' ')
+          : 'queued run';
+      showGlobalToastRef.current(`Queued run started — ${label}`, 'success');
+      fetchRunsRef.current();
+      fetchQueueRef.current();
+    }
+  });
 
   const handleSpecPicked = useCallback(async (spec: { id: string; specName: string }) => {
     if (!workspaceId) return;
@@ -935,34 +965,74 @@ export default function PipelineMonitorPanel() {
           )}
 
           <div className="flex-1 overflow-y-auto min-h-0">
-            {runs.map((run) => (
-              <button
-                key={run.id}
-                onClick={() => setSelectedRunId(run.id)}
-                aria-pressed={selectedRunId === run.id}
-                aria-label={`Run #${run.id} - ${specName(run.spec_path)} - ${run.status}`}
-                className={`w-full text-left px-3 py-2.5 border-b border-[var(--border)] transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50 ${selectedRunId === run.id
-                  ? 'bg-[var(--accent)]/10'
-                  : 'hover:bg-[var(--surface)]'
-                  }`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS_DOTS[run.status] || 'bg-zinc-500'}`} />
-                  <span className="text-sm truncate capitalize">{specName(run.spec_path)}</span>
-                  {run.retried_from_run_id != null && (
-                    <span className="px-1 py-0.5 text-[9px] font-medium rounded bg-purple-500/20 text-purple-400 flex-shrink-0">
-                      retry
-                    </span>
+            {runs.map((run) => {
+              const isQueued = run.status === 'queued';
+              return (
+                <div
+                  key={run.id}
+                  className={`border-b border-[var(--border)] transition-colors ${selectedRunId === run.id ? 'bg-[var(--accent)]/10' : 'hover:bg-[var(--surface)]'}`}
+                >
+                  <button
+                    onClick={() => setSelectedRunId(run.id)}
+                    aria-pressed={selectedRunId === run.id}
+                    aria-label={`Run #${run.id} - ${specName(run.spec_path)} - ${run.status}`}
+                    className="w-full text-left px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS_DOTS[run.status] || 'bg-zinc-500'}`} />
+                      <span className="text-sm truncate capitalize flex-1">{specName(run.spec_path)}</span>
+                      {isQueued && (
+                        <span className="inline-flex items-center gap-0.5 px-1 py-0.5 text-[9px] font-medium rounded bg-amber-500/20 text-amber-400 border border-amber-500/30 flex-shrink-0">
+                          <Clock className="w-2.5 h-2.5" />
+                          Queued
+                        </span>
+                      )}
+                      {!isQueued && run.retried_from_run_id != null && (
+                        <span className="px-1 py-0.5 text-[9px] font-medium rounded bg-purple-500/20 text-purple-400 flex-shrink-0">
+                          retry
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 flex items-center gap-2 pl-4">
+                      {isQueued ? (
+                        <span className="text-xs text-[var(--text-muted)]">
+                          #{run.queue_position ?? '?'} in queue
+                        </span>
+                      ) : (
+                        <span className="text-xs text-[var(--text-muted)]">
+                          {elapsedTime(run.started_at, run.finished_at)}
+                        </span>
+                      )}
+                      {!isQueued && <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />}
+                    </div>
+                  </button>
+                  {isQueued && (
+                    <div className="px-3 pb-2 flex justify-end">
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          setCancellingRunId(run.id);
+                          try {
+                            await apiFetch(`/api/pipeline/runs/${run.id}`, { method: 'DELETE' });
+                            setRuns((prev) => prev.filter((r) => r.id !== run.id));
+                            if (selectedRunId === run.id) setSelectedRunId(null);
+                          } catch (err) {
+                            console.error('[Queue] Cancel failed:', err);
+                          } finally {
+                            setCancellingRunId(null);
+                          }
+                        }}
+                        disabled={cancellingRunId === run.id}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                      >
+                        <XCircle className="w-3 h-3" />
+                        {cancellingRunId === run.id ? 'Cancelling…' : 'Cancel'}
+                      </button>
+                    </div>
                   )}
                 </div>
-                <div className="mt-1 flex items-center gap-2 pl-4">
-                  <span className="text-xs text-[var(--text-muted)]">
-                    {elapsedTime(run.started_at, run.finished_at)}
-                  </span>
-                  <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
-                </div>
-              </button>
-            ))}
+              );
+            })}
           </div>
 
           {/* Queue section */}
@@ -1010,6 +1080,36 @@ export default function PipelineMonitorPanel() {
           {!liveRun ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
               Select a run to view details
+            </div>
+          ) : liveRun.status === 'queued' ? (
+            <div className="flex flex-col items-center justify-center h-full gap-4 px-6 text-center">
+              <Clock className="w-10 h-10 text-amber-400" />
+              <div>
+                <p className="text-base font-medium text-[var(--text)] capitalize mb-1">{specName(liveRun.spec_path)}</p>
+                <p className="text-sm text-muted">
+                  Queued — position #{liveRun.queue_position ?? '?'} in line
+                </p>
+                <p className="text-xs text-muted mt-1">Will start automatically when the current run finishes.</p>
+              </div>
+              <button
+                onClick={async () => {
+                  setCancellingRunId(liveRun.id);
+                  try {
+                    await apiFetch(`/api/pipeline/runs/${liveRun.id}`, { method: 'DELETE' });
+                    setRuns((prev) => prev.filter((r) => r.id !== liveRun.id));
+                    setSelectedRunId(null);
+                  } catch (err) {
+                    console.error('[Queue] Cancel failed:', err);
+                  } finally {
+                    setCancellingRunId(null);
+                  }
+                }}
+                disabled={cancellingRunId === liveRun.id}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                {cancellingRunId === liveRun.id ? 'Cancelling…' : 'Cancel Queued Run'}
+              </button>
             </div>
           ) : (
             <>
