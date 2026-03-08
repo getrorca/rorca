@@ -210,21 +210,23 @@ export default function CompletionRatePanel() {
   }));
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden" role="main" aria-label="Completion Rates analytics panel">
       {/* Header */}
       <div className="px-5 py-4 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <BarChart3 size={20} strokeWidth={1.5} className="text-accent" />
+          <BarChart3 size={20} strokeWidth={1.5} className="text-accent" aria-hidden="true" />
           <h2 className="text-lg font-semibold">Completion Rates</h2>
         </div>
         <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 text-xs">
-            <Calendar size={14} className="text-muted" />
+          <div className="flex items-center gap-1 text-xs" role="group" aria-label="Date range filter">
+            <Calendar size={14} className="text-muted" aria-hidden="true" />
             {(['7d', '30d', '90d', '180d'] as DateRange[]).map(r => (
               <button
                 key={r}
                 onClick={() => setDateRange(r)}
-                className={`px-2 py-1 rounded transition-colors ${
+                aria-pressed={dateRange === r}
+                aria-label={`Filter by last ${r}`}
+                className={`px-2 py-1 rounded transition-colors ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                   dateRange === r
                     ? 'bg-accent text-white'
                     : 'text-muted hover:text-[var(--text)] hover:bg-bg'
@@ -237,22 +239,24 @@ export default function CompletionRatePanel() {
           <button
             onClick={fetchData}
             disabled={loading}
-            className="p-1.5 text-muted hover:text-[var(--text)] transition-colors"
-            title="Refresh"
+            className="p-1.5 text-muted hover:text-[var(--text)] transition-colors ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
+            aria-label="Refresh completion rate data"
           >
-            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} aria-hidden="true" />
           </button>
         </div>
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto p-5 space-y-5">
+      <div className="flex-1 overflow-y-auto p-5 space-y-5" aria-live="polite" aria-busy={loading}>
         {/* Filters */}
         <div className="flex items-center gap-3">
+          <label htmlFor="completion-workspace-filter" className="sr-only">Filter by workspace</label>
           <select
+            id="completion-workspace-filter"
             value={filterWorkspace}
             onChange={e => setFilterWorkspace(e.target.value)}
-            className="text-xs bg-bg border border-border rounded px-2 py-1.5 text-[var(--text)]"
+            className="text-xs bg-bg border border-border rounded px-2 py-1.5 text-[var(--text)] ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50"
           >
             <option value="">All workspaces</option>
             {workspaces.map(ws => (
@@ -261,12 +265,13 @@ export default function CompletionRatePanel() {
           </select>
 
           {/* View tab toggle */}
-          <div className="flex items-center gap-1 text-xs ml-auto">
+          <div className="flex items-center gap-1 text-xs ml-auto" role="group" aria-label="View breakdown by" aria-live="polite">
             {(['complexity', 'tags'] as ViewTab[]).map(tab => (
               <button
                 key={tab}
                 onClick={() => setViewTab(tab)}
-                className={`px-3 py-1.5 rounded transition-colors capitalize ${
+                aria-pressed={viewTab === tab}
+                className={`px-3 py-1.5 rounded transition-colors capitalize ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                   viewTab === tab
                     ? 'bg-accent text-white'
                     : 'text-muted hover:text-[var(--text)] hover:bg-bg'
@@ -281,29 +286,29 @@ export default function CompletionRatePanel() {
         {/* Summary cards */}
         {data && (
           <div className="grid grid-cols-5 gap-3">
-            <div className="bg-bg rounded-lg p-3 border border-border">
+            <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Total stories: ${data.summary.total}`}>
               <p className="text-xs text-muted mb-1">Total Stories</p>
-              <p className="text-xl font-bold">{data.summary.total}</p>
+              <p className="text-xl font-bold" aria-hidden="true">{data.summary.total}</p>
             </div>
-            <div className="bg-bg rounded-lg p-3 border border-border">
+            <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Passed stories: ${data.summary.passed}`}>
               <p className="text-xs text-muted mb-1">Passed</p>
-              <p className="text-xl font-bold text-green-500">{data.summary.passed}</p>
+              <p className="text-xl font-bold text-green-500" aria-hidden="true">{data.summary.passed}</p>
             </div>
-            <div className="bg-bg rounded-lg p-3 border border-border">
+            <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Failed stories: ${data.summary.failed}`}>
               <p className="text-xs text-muted mb-1">Failed</p>
-              <p className="text-xl font-bold text-red-500">{data.summary.failed}</p>
+              <p className="text-xl font-bold text-red-500" aria-hidden="true">{data.summary.failed}</p>
             </div>
-            <div className="bg-bg rounded-lg p-3 border border-border">
+            <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Overall pass rate: ${data.summary.overallPassRate}%`}>
               <p className="text-xs text-muted mb-1">Overall Pass Rate</p>
               <p className={`text-xl font-bold ${
                 data.summary.overallPassRate < THRESHOLD ? 'text-red-500' : 'text-green-500'
-              }`}>
+              }`} aria-hidden="true">
                 {data.summary.overallPassRate}%
               </p>
             </div>
-            <div className="bg-bg rounded-lg p-3 border border-border">
+            <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Groups needing attention: ${warnCount}`}>
               <p className="text-xs text-muted mb-1">Needs Attention</p>
-              <p className={`text-xl font-bold ${warnCount > 0 ? 'text-red-500' : 'text-green-500'}`}>
+              <p className={`text-xl font-bold ${warnCount > 0 ? 'text-red-500' : 'text-green-500'}`} aria-hidden="true">
                 {warnCount} {warnCount === 1 ? 'group' : 'groups'}
               </p>
             </div>
@@ -313,7 +318,7 @@ export default function CompletionRatePanel() {
         {/* Chart */}
         {loading ? (
           <div className="flex items-center justify-center h-64 text-muted">
-            <Loader2 size={24} className="animate-spin" />
+            <Loader2 size={24} className="animate-spin" aria-label="Loading completion rate data" />
           </div>
         ) : chartData.length === 0 ? (
           <div className="flex items-center justify-center h-64 text-muted text-sm">
@@ -321,36 +326,61 @@ export default function CompletionRatePanel() {
           </div>
         ) : (
           <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={chartData}
-                layout="vertical"
-                margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
-                <XAxis
-                  type="number"
-                  domain={[0, 100]}
-                  tick={{ fontSize: 12, fill: 'var(--muted)' }}
-                  tickFormatter={v => `${v}%`}
-                />
-                <YAxis
-                  type="category"
-                  dataKey="name"
-                  width={100}
-                  tick={{ fontSize: 12, fill: 'var(--muted)' }}
-                />
-                <Tooltip content={<RateTooltip />} cursor={{ fill: 'var(--border)', opacity: 0.3 }} />
-                <Bar dataKey="passRate" name="Pass Rate" radius={[0, 4, 4, 0]}>
-                  {chartData.map((entry, idx) => (
-                    <Cell
-                      key={idx}
-                      fill={entry.passRate < THRESHOLD ? COLOR_WARN : COLOR_PASS}
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+            <div role="img" aria-label={`Horizontal bar chart showing pass rate by ${viewTab === 'complexity' ? 'complexity' : 'tag'}`}>
+              <ResponsiveContainer width="100%" height={288}>
+                <BarChart
+                  data={chartData}
+                  layout="vertical"
+                  margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+                  <XAxis
+                    type="number"
+                    domain={[0, 100]}
+                    tick={{ fontSize: 12, fill: 'var(--muted)' }}
+                    tickFormatter={v => `${v}%`}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    width={100}
+                    tick={{ fontSize: 12, fill: 'var(--muted)' }}
+                  />
+                  <Tooltip content={<RateTooltip />} cursor={{ fill: 'var(--border)', opacity: 0.3 }} />
+                  <Bar dataKey="passRate" name="Pass Rate" radius={[0, 4, 4, 0]}>
+                    {chartData.map((entry, idx) => (
+                      <Cell
+                        key={idx}
+                        fill={entry.passRate < THRESHOLD ? COLOR_WARN : COLOR_PASS}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            {/* Screen-reader table alternative */}
+            <table className="sr-only" aria-label={`Pass rate by ${viewTab} data table`}>
+              <thead>
+                <tr>
+                  <th scope="col" role="columnheader">{viewTab === 'complexity' ? 'Complexity' : 'Tag'}</th>
+                  <th scope="col" role="columnheader">Pass Rate</th>
+                  <th scope="col" role="columnheader">Passed</th>
+                  <th scope="col" role="columnheader">Failed</th>
+                  <th scope="col" role="columnheader">Skipped</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chartData.map((entry) => (
+                  <tr key={entry.label}>
+                    <td>{entry.label}</td>
+                    <td>{entry.passRate}%</td>
+                    <td>{entry.passed}</td>
+                    <td>{entry.failed}</td>
+                    <td>{entry.skipped}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
 

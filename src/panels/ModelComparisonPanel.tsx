@@ -144,25 +144,27 @@ export default function ModelComparisonPanel() {
   /* ─── Render ───────────────────────────────────────────── */
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div className="h-full flex flex-col overflow-hidden" role="main" aria-label="Model Comparison analytics panel">
       {/* Header */}
       <div className="p-4 border-b border-border flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
-          <Zap size={18} className="text-accent" />
+          <Zap size={18} className="text-accent" aria-hidden="true" />
           <h2 className="text-base font-semibold">Model Comparison</h2>
           {data && (
-            <span className="text-xs text-muted ml-2">
+            <span className="text-xs text-muted ml-2" aria-live="polite">
               {data.models.length} model{data.models.length !== 1 ? 's' : ''}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <Calendar size={14} className="text-muted" />
+        <div className="flex items-center gap-2" role="group" aria-label="Date range filter">
+          <Calendar size={14} className="text-muted" aria-hidden="true" />
           {(['7d', '30d', '90d', 'all'] as DateRange[]).map(r => (
             <button
               key={r}
               onClick={() => setDateRange(r)}
-              className={`px-2 py-0.5 text-xs rounded transition-colors ${
+              aria-pressed={dateRange === r}
+              aria-label={`Filter by ${r === 'all' ? 'all time' : `last ${r}`}`}
+              className={`px-2 py-0.5 text-xs rounded transition-colors ring-offset-1 focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                 dateRange === r
                   ? 'bg-accent text-white'
                   : 'text-muted hover:text-[var(--text)] hover:bg-[var(--bg-hover)]'
@@ -175,10 +177,10 @@ export default function ModelComparisonPanel() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto p-4">
+      <div className="flex-1 overflow-auto p-4" aria-live="polite" aria-busy={loading}>
         {loading ? (
           <div className="flex items-center justify-center h-40 text-muted gap-2">
-            <Loader2 size={16} className="animate-spin" />
+            <Loader2 size={16} className="animate-spin" aria-label="Loading model metrics" />
             Loading model metrics...
           </div>
         ) : !data?.models.length ? (
@@ -189,7 +191,7 @@ export default function ModelComparisonPanel() {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-sm" role="table" aria-label="Model comparison metrics">
               <thead>
                 <tr className="border-b border-border text-left">
                   <SortHeader label="Model" sortKey="model" currentKey={sortKey} dir={sortDir} onSort={toggleSort} />
@@ -197,8 +199,8 @@ export default function ModelComparisonPanel() {
                   <SortHeader label="Pass Rate" sortKey="passRate" currentKey={sortKey} dir={sortDir} onSort={toggleSort} />
                   <SortHeader label="Avg Cost" sortKey="avgCostUsd" currentKey={sortKey} dir={sortDir} onSort={toggleSort} />
                   <SortHeader label="Avg Time" sortKey="avgElapsedSeconds" currentKey={sortKey} dir={sortDir} onSort={toggleSort} />
-                  <th className="py-2 px-3 text-xs font-medium text-muted">Avg Tokens</th>
-                  <th className="py-2 px-3 text-xs font-medium text-muted text-right">Action</th>
+                  <th className="py-2 px-3 text-xs font-medium text-muted" role="columnheader">Avg Tokens</th>
+                  <th className="py-2 px-3 text-xs font-medium text-muted text-right" role="columnheader">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -315,13 +317,19 @@ function SortHeader({
   const isActive = currentKey === sortKey;
   return (
     <th
+      role="columnheader"
+      scope="col"
       className="py-2 px-3 text-xs font-medium text-muted cursor-pointer hover:text-[var(--text)] select-none"
       onClick={() => onSort(sortKey)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSort(sortKey); } }}
+      tabIndex={0}
+      aria-sort={isActive ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+      aria-label={`Sort by ${label}${isActive ? `, currently ${dir === 'asc' ? 'ascending' : 'descending'}` : ''}`}
     >
       <span className="inline-flex items-center gap-1">
         {label}
-        <ArrowUpDown size={10} className={isActive ? 'text-accent' : 'opacity-30'} />
-        {isActive && <span className="text-[9px] text-accent">{dir === 'asc' ? '\u25B2' : '\u25BC'}</span>}
+        <ArrowUpDown size={10} className={isActive ? 'text-accent' : 'opacity-30'} aria-hidden="true" />
+        {isActive && <span className="text-[9px] text-accent" aria-hidden="true">{dir === 'asc' ? '\u25B2' : '\u25BC'}</span>}
       </span>
     </th>
   );
@@ -337,11 +345,12 @@ function SummaryCard({
   metric: (m: ModelMetrics) => string;
 }) {
   if (!model) return null;
+  const metricValue = metric(model);
   return (
-    <div className="p-3 rounded border border-border bg-panel">
+    <div className="p-3 rounded border border-border bg-panel" aria-label={`${label}: ${model.model}, ${metricValue}`}>
       <p className="text-xs text-muted mb-1">{label}</p>
       <code className="text-sm font-mono">{model.model}</code>
-      <p className="text-lg font-semibold mt-1">{metric(model)}</p>
+      <p className="text-lg font-semibold mt-1" aria-hidden="true">{metricValue}</p>
     </div>
   );
 }
