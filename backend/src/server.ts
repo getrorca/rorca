@@ -1,4 +1,5 @@
 import express from 'express';
+import helmet from 'helmet';
 import cors from 'cors';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -74,6 +75,30 @@ if (agentType === 'opencode') {
 
 const app = express();
 const PORT = process.env.PORT || 3030;
+
+// PR-006: HTTP security headers via helmet
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"], // required for Tailwind inline styles
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", 'ws:', 'wss:'],   // allow SSE and WebSocket connections
+    },
+  },
+  frameguard: { action: 'deny' },               // X-Frame-Options: DENY
+  noSniff: true,                                 // X-Content-Type-Options: nosniff
+  hsts: { maxAge: 31536000 },                   // Strict-Transport-Security
+  xssFilter: false,                              // X-XSS-Protection: 0 (CSP is the real protection)
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  permittedCrossDomainPolicies: false,
+}));
+// Permissions-Policy: restrict camera, microphone, geolocation
+app.use((_req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 
 // When serving static frontend (rorca start), allow same-origin; otherwise allow Vite dev server
 const corsOrigin = process.env.RORCA_SERVE_STATIC === '1'
