@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T12:46:52.164Z",
+  "lastUpdatedAt": "2026-03-08T13:09:06.889Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -253,6 +253,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1258798
+    },
+    {
+      "storyId": "PR-034",
+      "title": "Frontend Component Tests — Analytics + System Panels",
+      "status": "passed",
+      "startedAt": "2026-03-08T12:47:02.484Z",
+      "finishedAt": "2026-03-08T13:09:06.889Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 1324405
     }
   ],
   "failedStories": [],

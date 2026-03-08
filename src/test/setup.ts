@@ -47,21 +47,31 @@ Object.defineProperty(window, 'matchMedia', {
 });
 
 // ─── ResizeObserver ──────────────────────────────────────────────────────────
-window.ResizeObserver = vi.fn().mockImplementation(() => ({
-  observe: vi.fn(),
-  unobserve: vi.fn(),
-  disconnect: vi.fn(),
-})) as unknown as typeof ResizeObserver;
+// Use a plain class with no-op functions (not vi.fn()) so vi.clearAllMocks()
+// doesn't break the constructor. Recharts calls `new ResizeObserver()` in
+// effects after each test's beforeEach clearAllMocks().
+class MockResizeObserver {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  observe(_el: Element): void { /* no-op */ }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  unobserve(_el: Element): void { /* no-op */ }
+  disconnect(): void { /* no-op */ }
+}
+window.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
 
 // ─── IntersectionObserver ────────────────────────────────────────────────────
-window.IntersectionObserver = vi.fn().mockImplementation(() => ({
-  observe: vi.fn(),
-  unobserve: vi.fn(),
-  disconnect: vi.fn(),
-  root: null,
-  rootMargin: '',
-  thresholds: [],
-})) as unknown as typeof IntersectionObserver;
+class MockIntersectionObserver {
+  root: Element | null = null;
+  rootMargin = '';
+  thresholds: ReadonlyArray<number> = [];
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  observe(_el: Element): void { /* no-op */ }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  unobserve(_el: Element): void { /* no-op */ }
+  disconnect(): void { /* no-op */ }
+  takeRecords(): IntersectionObserverEntry[] { return []; }
+}
+window.IntersectionObserver = MockIntersectionObserver as unknown as typeof IntersectionObserver;
 
 // ─── EventSource (SSE) ───────────────────────────────────────────────────────
 // jsdom does not implement EventSource — mock it globally so hooks using
