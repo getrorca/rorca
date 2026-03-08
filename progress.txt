@@ -3,9 +3,9 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T12:09:18.418Z
+Last Updated: 2026-03-08T12:11:54.963Z
 
-## Completed Stories (21)
+## Completed Stories (22)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
@@ -27,6 +27,7 @@ Last Updated: 2026-03-08T12:09:18.418Z
 - PR-027: Empty State Consistency Sweep — DONE (claude, claude-sonnet-4-6, 306s)
 - PR-028: Animation System — Framer Motion Unification — DONE (claude, claude-haiku-4-5-20251001, 376s)
 - PR-029: SettingsPanel Decomposition (3257 → 5 sub-components) — DONE (claude, claude-opus-4-6, 728s)
+- PR-030: Command Palette Completeness — DONE (claude, claude-sonnet-4-6, 146s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined

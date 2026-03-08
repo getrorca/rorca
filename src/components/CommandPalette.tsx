@@ -12,6 +12,7 @@ interface CommandItem {
   label: string;
   category: 'panel' | 'spec' | 'run' | 'action';
   description?: string;
+  shortcut?: string;
   action: () => void;
 }
 
@@ -103,7 +104,7 @@ function addRecent(id: string) {
 /* ─── Category labels ─────────────────────────────────────────────── */
 
 const CATEGORY_LABELS: Record<CommandItem['category'], string> = {
-  panel: 'Navigate',
+  panel: 'Navigation',
   spec: 'Specs',
   run: 'Runs',
   action: 'Actions',
@@ -118,7 +119,7 @@ const FORGE_FALLBACK_THRESHOLD = 80;
 const CONTEXT_BOOSTS: Record<string, string[]> = {
   // Run View: run commands first
   'run-view': [
-    'panel:pipeline', 'action:worktrees', 'panel:compare', 'panel:worktrees',
+    'panel:pipeline', 'action:view-active-run', 'action:trigger-pipeline', 'action:worktrees', 'panel:compare', 'panel:worktrees',
   ],
   // Forge: template/brief commands first
   forge: [
@@ -126,7 +127,15 @@ const CONTEXT_BOOSTS: Record<string, string[]> = {
   ],
   // Hub: pending review actions first
   hub: [
-    'action:review', 'panel:forge', 'action:new-spec',
+    'action:review', 'panel:forge', 'action:new-spec', 'action:trigger-pipeline',
+  ],
+  // Archive: search first
+  archive: [
+    'action:search-archive',
+  ],
+  // Pipeline: trigger + active run first
+  pipeline: [
+    'action:trigger-pipeline', 'action:view-active-run', 'action:worktrees',
   ],
 };
 
@@ -252,7 +261,8 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       id: 'action:toggle-drawer',
       label: 'Toggle navigation drawer',
       category: 'action',
-      description: 'Show all 22 panels  ⌘\\',
+      description: 'Show all panels',
+      shortcut: '⌘\\',
       action: () => { window.dispatchEvent(new Event('rorca:toggle-drawer')); onClose(); },
     });
     items.push({
@@ -260,7 +270,38 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       label: 'New Spec',
       category: 'action',
       description: 'Create a new spec in Spec Forge',
+      shortcut: '⌘N',
       action: () => { onSendToForge?.(''); onNavigate('forge'); onClose(); },
+    });
+    items.push({
+      id: 'action:trigger-pipeline',
+      label: 'Trigger Pipeline Run',
+      category: 'action',
+      description: 'Open pipeline to start a new run',
+      shortcut: '⌘⇧R',
+      action: () => { onNavigate('pipeline'); onClose(); },
+    });
+    items.push({
+      id: 'action:view-active-run',
+      label: 'View Active Run',
+      category: 'action',
+      description: runs.find((r) => r.status === 'running') ? `Run #${runs.find((r) => r.status === 'running')!.id} in progress` : 'Navigate to Pipeline Monitor',
+      action: () => { onNavigate('pipeline'); onClose(); },
+    });
+    items.push({
+      id: 'action:search-archive',
+      label: 'Search Archive',
+      category: 'action',
+      description: 'Find completed specs and stories',
+      action: () => {
+        onNavigate('archive');
+        onClose();
+        // Signal archive panel to focus search input
+        setTimeout(() => {
+          const searchInput = document.querySelector<HTMLInputElement>('[data-archive-search]');
+          searchInput?.focus();
+        }, 100);
+      },
     });
     items.push({
       id: 'action:direction',
@@ -282,6 +323,13 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       category: 'action',
       description: 'View and merge git worktrees',
       action: () => { onNavigate('worktrees'); onClose(); },
+    });
+    items.push({
+      id: 'action:workspace-settings',
+      label: 'Workspace Settings',
+      category: 'action',
+      description: 'Configure workspace, environment variables, and hooks',
+      action: () => { onNavigate('workspace-settings'); onClose(); },
     });
 
     return items;
@@ -565,11 +613,18 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
                         </div>
                       )}
                     </div>
-                    {isSelected && (
-                      <kbd className="text-[10px] text-muted bg-bg border border-border rounded px-1.5 py-0.5 font-mono shrink-0">
-                        Enter
-                      </kbd>
-                    )}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {item.shortcut && !isSelected && (
+                        <kbd className="text-[10px] text-muted bg-bg border border-border rounded px-1.5 py-0.5 font-mono">
+                          {item.shortcut}
+                        </kbd>
+                      )}
+                      {isSelected && (
+                        <kbd className="text-[10px] text-muted bg-bg border border-border rounded px-1.5 py-0.5 font-mono">
+                          Enter
+                        </kbd>
+                      )}
+                    </div>
                   </button>
                 );
               })}
