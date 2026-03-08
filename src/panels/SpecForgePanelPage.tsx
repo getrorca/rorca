@@ -676,7 +676,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const hasPending = pendingSpecs.length > 0;
 
   return (
-    <div className="flex flex-col h-full bg-bg">
+    <div role="main" aria-label="Spec forge panel - create and review specs" className="flex flex-col h-full bg-bg">
       <AppHeader
         breadcrumbs={
           <div className="flex items-center gap-2">
@@ -841,7 +841,8 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                             setCreateExpanded(false);
                           }
                         }}
-                        className="absolute top-2 right-2 z-10 p-1 text-muted hover:text-text rounded transition-colors"
+                        aria-label={generatedSpec ? 'Collapse brief' : 'Close create area'}
+                        className="absolute top-2 right-2 z-10 p-1 text-muted hover:text-text rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
                         title={generatedSpec ? 'Collapse brief' : 'Close'}
                       >
                         <ChevronDown size={14} />
@@ -853,7 +854,8 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                       value={specBrief}
                       onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
                       placeholder="What do you want to build?"
-                      className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors resize-none leading-relaxed"
+                      aria-label="Spec brief - describe what you want to build"
+                      className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors resize-none leading-relaxed"
                     />
                   </div>
                 )}
@@ -1230,7 +1232,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
             {/* ─── Pending Specs Section ──────────────────────────────── */}
             {hasPending && !generatedSpec && !isGenerating && (
-              <section className="space-y-3">
+              <section aria-live="polite" className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
                     Pending Review
@@ -1247,7 +1249,8 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                         <button
                           key={f.id}
                           onClick={() => setReviewFilter(f.id)}
-                          className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${reviewFilter === f.id
+                          aria-pressed={reviewFilter === f.id}
+                          className={`px-2 py-1 text-[10px] font-medium rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${reviewFilter === f.id
                               ? 'bg-accent/15 text-accent border border-accent/30'
                               : 'text-muted border border-transparent hover:text-text hover:border-border'
                             }`}
@@ -1276,7 +1279,8 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                           }
                           setSelectedSpecId(spec.id);
                         }}
-                        className="w-full text-left px-4 py-3 bg-panel border border-border rounded-lg hover:border-accent/30 transition-colors group"
+                        aria-label={`Review spec: ${spec.id} - ${spec.storyCount} ${spec.storyCount === 1 ? 'story' : 'stories'}`}
+                        className="w-full text-left px-4 py-3 bg-panel border border-border rounded-lg hover:border-accent/30 transition-colors group focus:outline-none focus:ring-2 focus:ring-accent/50"
                       >
                         <div className="flex items-center justify-between mb-1">
                           <div className="flex items-center gap-2">

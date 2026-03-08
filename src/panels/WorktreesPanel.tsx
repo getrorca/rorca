@@ -260,8 +260,9 @@ export default function WorktreesPanel() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-        <Loader2 className="w-5 h-5 animate-spin mr-2" />
+      <div aria-live="polite" className="flex items-center justify-center h-full text-[var(--text-muted)]">
+        <span className="sr-only">Loading...</span>
+        <Loader2 className="w-5 h-5 animate-spin mr-2" aria-hidden="true" />
         Loading worktrees...
       </div>
     );
@@ -270,7 +271,7 @@ export default function WorktreesPanel() {
   // ─── Main Layout ──────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full">
+    <div role="main" aria-label="Worktrees panel - manage git worktrees" className="flex h-full">
       {/* ── Left column: Worktree list ── */}
       <div className="w-72 border-r border-[var(--border)] flex flex-col">
         <div className="p-3 border-b border-[var(--border)] flex items-center justify-between">
@@ -279,7 +280,9 @@ export default function WorktreesPanel() {
           </span>
           <button
             onClick={() => setShowForm(!showForm)}
-            className="p-1 rounded hover:bg-[var(--border)] transition-colors"
+            aria-label={showForm ? 'Cancel new worktree' : 'New worktree'}
+            aria-expanded={showForm}
+            className="p-1 rounded hover:bg-[var(--border)] transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
             title="New Worktree"
           >
             {showForm ? (
@@ -363,7 +366,9 @@ export default function WorktreesPanel() {
               <button
                 key={wt.path}
                 onClick={() => setSelectedPath(wt.path)}
-                className={`w-full text-left px-3 py-2.5 border-b border-[var(--border)] transition-colors ${
+                aria-pressed={selectedPath === wt.path}
+                aria-label={`Worktree: ${wt.branch || '(detached)'}`}
+                className={`w-full text-left px-3 py-2.5 border-b border-[var(--border)] transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50 ${
                   selectedPath === wt.path
                     ? 'bg-[var(--accent)]/10'
                     : 'hover:bg-[var(--surface)]'
@@ -384,7 +389,7 @@ export default function WorktreesPanel() {
       </div>
 
       {/* ── Right column: Worktree detail ── */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div aria-live="polite" className="flex-1 flex flex-col min-w-0">
         {!selectedWorktree ? (
           <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
             <GitBranch className="w-5 h-5 mr-2 opacity-50" />
@@ -466,7 +471,8 @@ export default function WorktreesPanel() {
               {/* Copy Path */}
               <button
                 onClick={() => copyToClipboard(selectedWorktree.path, setCopiedPath)}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs rounded border border-[var(--border)] hover:bg-[var(--surface)] transition-colors"
+                aria-label="Copy worktree path to clipboard"
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs rounded border border-[var(--border)] hover:bg-[var(--surface)] transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
               >
                 {copiedPath ? (
                   <Check className="w-3.5 h-3.5 text-emerald-500" />
@@ -479,7 +485,8 @@ export default function WorktreesPanel() {
               {/* Open in Terminal */}
               <button
                 onClick={() => copyToClipboard(`cd ${selectedWorktree.path}`, setCopiedTerminal)}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs rounded border border-[var(--border)] hover:bg-[var(--surface)] transition-colors"
+                aria-label="Copy terminal cd command to clipboard"
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs rounded border border-[var(--border)] hover:bg-[var(--surface)] transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
               >
                 {copiedTerminal ? (
                   <Check className="w-3.5 h-3.5 text-emerald-500" />

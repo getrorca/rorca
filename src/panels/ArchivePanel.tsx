@@ -382,7 +382,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
   const allTags = Array.from(new Set(specs.flatMap(s => s.tags || []))).sort();
 
   return (
-    <div className="flex flex-col h-full bg-bg overflow-hidden">
+    <div role="main" aria-label="Archive panel - search and browse archived specs" className="flex flex-col h-full bg-bg overflow-hidden">
       <AppHeader
         breadcrumbs={
           <div className="flex items-center gap-2">
@@ -403,7 +403,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                 value={searchText}
                 onChange={(e) => setSearchText(e.target.value)}
                 placeholder="Search archive..."
-                className="w-full h-8 pl-8 pr-8 bg-panel border gap-3 border-border rounded text-sm text-text placeholder-muted/60 focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/40 transition-shadow transition-colors"
+                className="w-full h-8 pl-8 pr-8 bg-panel border gap-3 border-border rounded text-sm text-text placeholder-muted/60 focus:outline-none focus:border-accent/40 focus:ring-2 focus:ring-accent/50 transition-shadow transition-colors"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
@@ -414,8 +414,8 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
               {searchText && (
                 <button
                   onClick={() => setSearchText('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text transition-colors"
-                  title="Clear search"
+                  aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 rounded"
                 >
                   <X size={14} />
                 </button>
@@ -475,11 +475,12 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
             {/* Results */}
             <div className="flex-1 overflow-y-auto">
               {loading ? (
-                <div className="flex items-center justify-center h-full text-muted text-sm">
+                <div aria-live="polite" className="flex items-center justify-center h-full text-muted text-sm">
+                  <span className="sr-only">Loading...</span>
                   Loading specs...
                 </div>
               ) : specs.length === 0 ? (
-                <div className="flex items-center justify-center h-full">
+                <div aria-live="polite" className="flex items-center justify-center h-full">
                   <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
                     <Archive size={64} className="text-muted/40" strokeWidth={1.2} />
                     <div>
@@ -512,7 +513,9 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                       <button
                         key={spec.id}
                         onClick={() => setSelectedId(spec.id === selectedId ? null : spec.id)}
-                        className={`w-full text-left px-4 py-2.5 border-b border-border transition-colors ${
+                        aria-expanded={spec.id === selectedId}
+                        aria-label={`${spec.specName} - ${spec.status}`}
+                        className={`w-full text-left px-4 py-2.5 border-b border-border transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50 ${
                           spec.id === selectedId ? 'bg-accent/10' : 'hover:bg-panel'
                         } ${spec.status === 'completed' ? 'opacity-80' : ''}`}
                       >
@@ -998,7 +1001,8 @@ function SpecPreviewDrawer({
             </div>
             <button
               onClick={onClose}
-              className="p-1 rounded text-muted hover:text-text hover:bg-panel transition-colors shrink-0"
+              aria-label="Close spec preview"
+              className="p-1 rounded text-muted hover:text-text hover:bg-panel transition-colors shrink-0 focus:outline-none focus:ring-2 focus:ring-accent/50"
             >
               <X size={16} />
             </button>
@@ -1039,7 +1043,8 @@ function SpecPreviewDrawer({
             </div>
           </div>
         ) : detailLoading ? (
-          <div className="flex-1 flex items-center justify-center text-muted text-sm">
+          <div aria-live="polite" className="flex-1 flex items-center justify-center text-muted text-sm">
+            <span className="sr-only">Loading...</span>
             Loading spec...
           </div>
         ) : !detail ? (
@@ -1049,12 +1054,14 @@ function SpecPreviewDrawer({
         ) : (
           <>
             {/* Tab strip */}
-            <div className="flex border-b border-border shrink-0">
+            <div role="tablist" className="flex border-b border-border shrink-0">
               {tabs.map(tab => (
                 <button
                   key={tab.id}
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 ${activeTab === tab.id
+                  className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 focus:outline-none focus:ring-2 focus:ring-accent/50 ${activeTab === tab.id
                     ? 'text-text border-accent'
                     : 'text-muted hover:text-text border-transparent'
                     }`}
@@ -1071,7 +1078,7 @@ function SpecPreviewDrawer({
             </div>
 
             {/* Tab content */}
-            <div className="flex-1 overflow-y-auto">
+            <div role="tabpanel" aria-live="polite" className="flex-1 overflow-y-auto">
               {activeTab === 'stories' && (
                 <StoriesTab
                   stories={stories}
