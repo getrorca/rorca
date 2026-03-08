@@ -103,9 +103,9 @@ function SpecCard({ pub, selected, onSelect, onFork }: SpecCardProps) {
       )}
 
       {/* Tags */}
-      {pub.tags.length > 0 && (
+      {(pub.tags ?? []).length > 0 && (
         <div className="flex flex-wrap gap-1">
-          {pub.tags.slice(0, 4).map((tag) => (
+          {(pub.tags ?? []).slice(0, 4).map((tag) => (
             <span
               key={tag}
               className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] bg-bg text-muted border border-border"
@@ -114,8 +114,8 @@ function SpecCard({ pub, selected, onSelect, onFork }: SpecCardProps) {
               {tag}
             </span>
           ))}
-          {pub.tags.length > 4 && (
-            <span className="text-[10px] text-muted">+{pub.tags.length - 4}</span>
+          {(pub.tags ?? []).length > 4 && (
+            <span className="text-[10px] text-muted">+{(pub.tags ?? []).length - 4}</span>
           )}
         </div>
       )}

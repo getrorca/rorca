@@ -28,6 +28,7 @@ import { readRunState, type RunState } from '../lib/run-state';
 import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
+import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 import { logger } from '../lib/logger';
@@ -731,6 +732,8 @@ interface PipelineRunRow {
   total_input_tokens: number | null;
   total_output_tokens: number | null;
   total_cost_usd: number | null;
+  queued_at: string | null;
+  queue_position: number | null;
 }
 
 interface StoryResultRow {
@@ -867,11 +870,12 @@ const PipelineTriggerSchema = z.object({
   agentOverride: z.enum(['claude', 'opencode', 'codex']).optional(),
   modelOverride: z.string().optional(),
   storyId: z.string().optional(),
+  queuedRunId: z.number().optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, dryRun, triggerType, forceSequential } = req.body;
+    const { specPath, workspaceId, autoWorktree, dryRun, triggerType, forceSequential, queuedRunId } = req.body;
 
     // 1. Look up workspace path
     const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
@@ -1140,12 +1144,25 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 4. Conflict check — is there already an active run for this workspace?
-    const activeRun = db.prepare(
+    //    If queuedRunId is set, this is an internal promotion call — skip conflict check
+    const activeRun = queuedRunId ? undefined : db.prepare(
       `SELECT * FROM pipeline_runs WHERE workspace_id = ? AND status IN ('running', 'paused') LIMIT 1`
     ).get(workspaceId) as PipelineRunRow | undefined;
 
     if (activeRun && !autoWorktree) {
-      res.json({ conflict: true, activeRunId: activeRun.id });
+      // Queue the run instead of blocking — insert with status='queued'
+      const queueCount = (db.prepare(
+        `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = ? AND status = 'queued'`
+      ).get(workspaceId) as { count: number }).count;
+      const position = queueCount + 1;
+
+      const queueResult = db.prepare(
+        `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position)
+         VALUES (?, ?, 'queued', ?, datetime('now'), ?)`
+      ).run(specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position);
+      const queuedId = queueResult.lastInsertRowid as number;
+
+      res.status(202).json({ queued: true, runId: queuedId, position });
       return;
     }
 
@@ -1228,11 +1245,23 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 6. Create pipeline_runs record (with agent_type and agent_model)
+    //    If queuedRunId is provided, promote the existing queued row instead of inserting
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
-    const runResult = db.prepare(
-      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model) VALUES (?, ?, 'running', ?, ?, ?, ?, ?)`
-    ).run(specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel);
-    const runId = runResult.lastInsertRowid as number;
+    let runId: number;
+
+    if (queuedRunId) {
+      // Promote queued run to running
+      db.prepare(
+        `UPDATE pipeline_runs SET status = 'running', started_at = datetime('now'), queued_at = NULL, queue_position = NULL,
+         parallelism = ?, agent = ?, agent_type = ?, agent_model = ? WHERE id = ? AND status = 'queued'`
+      ).run(parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, queuedRunId);
+      runId = queuedRunId;
+    } else {
+      const runResult = db.prepare(
+        `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model) VALUES (?, ?, 'running', ?, ?, ?, ?, ?)`
+      ).run(specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel);
+      runId = runResult.lastInsertRowid as number;
+    }
 
     // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
     const env: Record<string, string> = {};
@@ -1322,6 +1351,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         ) as WalEvent;
         broadcastAll(walEvent);
 
+        // PR-RQ-1: Advance run queue even on pre-run hook failure
+        advanceQueue(workspaceId);
+
         // Set up output buffer so terminal can display hook output
         const failBuf: OutputBuffer = { chunks: [hookOutput], done: true, subscribers: new Set() };
         outputBuffers.set(runId, failBuf);
@@ -1379,6 +1411,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }));
         const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
         broadcastAll(walEvent);
+        // PR-RQ-1: Advance run queue even on OpenCode server failure
+        advanceQueue(workspaceId);
         res.status(422).json({ error: `Failed to start OpenCode server: ${serverErr.message}`, runId });
         return;
       }
@@ -1712,6 +1746,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         walResult.lastInsertRowid
       ) as WalEvent;
       broadcastAll(walEvent);
+
+      // PR-RQ-1: Advance run queue — promote next queued run if any
+      advanceQueue(workspaceId);
 
       // Notify terminal that the process exited
       const exitMsg = `\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`;
@@ -2385,6 +2422,9 @@ router.post('/quick-run', async (req: Request, res: Response) => {
         walFinishResult.lastInsertRowid
       ) as WalEvent;
       broadcastAll(walFinishEvent);
+
+      // PR-RQ-1: Advance run queue — promote next queued run if any
+      advanceQueue(workspaceId);
 
       buf.done = true;
       buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
@@ -3283,6 +3323,9 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       ) as WalEvent;
       broadcastAll(walEvent);
 
+      // PR-RQ-1: Advance run queue — promote next queued run if any
+      advanceQueue(originalRun.workspace_id);
+
       // Notify terminal that the retry process exited
       const retryExitMsg = `\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`;
       buf.chunks.push(retryExitMsg);
@@ -3724,6 +3767,66 @@ router.post('/runs/:runId/cancel', (req: Request, res: Response) => {
     res.json({ ok: true, runId, status: 'cancelled' });
   } catch (error: any) {
     logger.error('[Pipeline] Cancel error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── DELETE /api/pipeline/runs/:runId — Cancel a queued run ──────────────────
+// Only works for runs with status='queued'. Returns 409 if the run is active/done.
+// Recalculates queue_position for remaining queued runs after cancellation.
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}:
+ *   delete:
+ *     tags: [Pipeline]
+ *     summary: Cancel a queued pipeline run
+ *     operationId: cancelQueuedRun
+ *     description: Cancels a queued run by marking it as failed with finished_at set. Only works for runs with status='queued'. Returns 409 if the run is already active or completed.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: "Queued run cancelled", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer } } } } } }
+ *       404: { description: "Run not found" }
+ *       409: { description: "Run is not in queued state" }
+ */
+router.delete('/runs/:runId', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    if (run.status !== 'queued') {
+      res.status(409).json({ error: `Cannot cancel run with status '${run.status}' — only queued runs can be cancelled via DELETE` });
+      return;
+    }
+
+    // Mark as failed
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'failed', finished_at = datetime('now'), queued_at = NULL, queue_position = NULL WHERE id = ?`
+    ).run(runId);
+
+    // Recalculate positions for remaining queued runs
+    const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
+    recalculateQueuePositions(run.workspace_id);
+
+    res.json({ ok: true, runId });
+  } catch (error: any) {
+    logger.error('[Pipeline] Delete queued run error:', error);
     res.status(500).json({ error: error.message });
   }
 });
