@@ -498,16 +498,22 @@ function ReadyToRunCard({ spec, workspaceId, workspaceBusy, workspaceName, onTri
 
   const handleTrigger = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (workspaceBusy || triggerState === 'triggering') return;
+    if (triggerState === 'triggering') return;
     setTriggerState('triggering');
     try {
-      const result = await apiFetch<{ conflict?: boolean; runId?: number }>('/api/pipeline/trigger', {
+      const result = await apiFetch<{ conflict?: boolean; queued?: boolean; runId?: number; position?: number }>('/api/pipeline/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ specPath, workspaceId }),
       });
       if (result.conflict) {
         setTriggerState('error');
+        return;
+      }
+      if (result.queued) {
+        setTriggerState('idle');
+        showToast(`Run queued — position #${result.position} in line. Will start automatically when the current run finishes.`, 'success');
+        onQueueRefresh?.();
         return;
       }
       setTriggerState('success');
@@ -576,19 +582,16 @@ function ReadyToRunCard({ spec, workspaceId, workspaceBusy, workspaceName, onTri
       ) : (
         <button
           onClick={handleTrigger}
-          disabled={workspaceBusy || triggerState === 'triggering'}
-          title={workspaceBusy ? 'A run is already active for this workspace' : specPath}
-          className={`flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium transition-opacity ${workspaceBusy
-            ? 'bg-yellow-500/10 text-yellow-600 border border-yellow-500/30 cursor-not-allowed'
-            : 'bg-accent text-white hover:opacity-90 disabled:opacity-60'
-            }`}
+          disabled={triggerState === 'triggering'}
+          title={workspaceBusy ? 'Will be queued — a run is already active' : specPath}
+          className="flex items-center justify-center gap-1.5 w-full min-h-[44px] py-2 rounded text-xs font-medium transition-opacity bg-accent text-white hover:opacity-90 disabled:opacity-60"
         >
-          {workspaceBusy ? (
-            <><AlertCircle size={14} /> Workspace busy</>
-          ) : triggerState === 'triggering' ? (
-            <><Loader2 size={14} className="animate-spin" /> Starting...</>
+          {triggerState === 'triggering' ? (
+            <><Loader2 size={14} className="animate-spin" /> {workspaceBusy ? 'Queuing...' : 'Starting...'}</>
           ) : triggerState === 'error' ? (
             <><XCircle size={14} /> Failed — retry</>
+          ) : workspaceBusy ? (
+            <><Clock size={14} /> Queue Run</>
           ) : (
             <>Trigger <ArrowRight size={14} /></>
           )}
@@ -1187,12 +1190,15 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   fetchRef.current = fetchData;
   const queueRef = useRef(fetchQueueStatus);
   queueRef.current = fetchQueueStatus;
+  const { show: showGlobalToast } = useGlobalToast();
+  const showGlobalToastRef = useRef(showGlobalToast);
+  showGlobalToastRef.current = showGlobalToast;
   const RUN_TERMINAL_EVENTS = new Set([
     'run_finished', 'run_failed', 'run_cancelled',
     'run_started', 'run_paused', 'run_resumed',
   ]);
   const QUEUE_EVENTS = new Set([
-    'run_queued_trigger', 'run_finished',
+    'run_queued_trigger', 'run_finished', 'run_queued_promoted',
   ]);
   useWalSSE((event) => {
     if (RUN_TERMINAL_EVENTS.has(event.event_type)) {
@@ -1200,6 +1206,16 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     }
     if (QUEUE_EVENTS.has(event.event_type)) {
       queueRef.current();
+    }
+    if (event.event_type === 'run_queued_promoted') {
+      const payload = event.payload ? JSON.parse(event.payload) : {};
+      const specLabel = payload.spec_name
+        ? String(payload.spec_name).replace(/-/g, ' ')
+        : payload.spec_id
+          ? String(payload.spec_id).replace(/-/g, ' ')
+          : 'queued run';
+      showGlobalToastRef.current(`Queued run started — ${specLabel}`, 'success');
+      fetchRef.current();
     }
   });
 
@@ -1400,7 +1416,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
           {!loaded ? <HubSkeleton /> : <>
 
           {/* Active Run */}
-          {hasActiveRun && (
+          {hasActiveRun ? (
             <section>
               <SectionHeader icon={Play} label="Active Run" />
               <ActiveRunCard
@@ -1412,8 +1428,26 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                   setJustCompletedRunIds(prev => new Set(prev).add(activeRun.id));
                 }}
               />
+              {queueLength > 0 && (
+                <p className="text-xs text-muted mt-2 px-4">
+                  {queueLength} {queueLength === 1 ? 'run' : 'runs'} queued
+                  {nextQueueSpecName && (
+                    <> &mdash; next: <span className="text-[var(--text)] font-medium capitalize">{nextQueueSpecName}</span></>
+                  )}
+                </p>
+              )}
             </section>
-          )}
+          ) : queueLength > 0 ? (
+            <section>
+              <SectionHeader icon={Clock} label="Active Run" />
+              <div className="px-4 py-3 border border-dashed border-border rounded-lg text-sm text-muted">
+                No active run — {queueLength} {queueLength === 1 ? 'run' : 'runs'} queued
+                {nextQueueSpecName && (
+                  <>, starting: <span className="text-[var(--text)] font-medium capitalize">{nextQueueSpecName}</span></>
+                )}
+              </div>
+            </section>
+          ) : null}
 
           {/* Agent Violations */}
           {violations.length > 0 && (
@@ -1442,8 +1476,8 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
             </section>
           )}
 
-          {/* Queue Status */}
-          {queueLength > 0 && (
+          {/* Queue Status — only shown when no active run (otherwise shown inline with Active Run) */}
+          {queueLength > 0 && !hasActiveRun && (
             <section>
               <div className="flex items-center justify-between">
                 <SectionHeader icon={ListPlus} label="Queue" badge={queueLength} noMargin />
@@ -1454,12 +1488,6 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                   View Queue <ArrowRight size={12} />
                 </button>
               </div>
-              <p className="text-sm text-muted mt-2">
-                {queueLength} {queueLength === 1 ? 'spec' : 'specs'} queued
-                {nextQueueSpecName && (
-                  <> &mdash; next: <span className="text-[var(--text)] font-medium capitalize">{nextQueueSpecName}</span></>
-                )}
-              </p>
             </section>
           )}
 
