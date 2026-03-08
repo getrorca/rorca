@@ -21,6 +21,7 @@ import {
   ExternalLink,
   History,
   Trash2,
+  Globe,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -40,6 +41,7 @@ import { TagChipsReadonly, TagChips } from '../components/TagChips';
 import { SpecVersionHistory } from '../components/SpecVersionHistory';
 import AppHeader from '../components/AppHeader';
 import AgentBadge from '../components/AgentBadge';
+import PublishModal from '../components/PublishModal';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -758,10 +760,32 @@ function SpecPreviewDrawer({
   const [importGithubMilestone, setImportGithubMilestone] = useState('');
   const [localStories, setLocalStories] = useState<Story[]>([]);
 
+  // Publish state
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [publicationId, setPublicationId] = useState<string | null>(null);
+  const [publicationCheckDone, setPublicationCheckDone] = useState(false);
+
   // Sync localStories when spec detail loads or changes
   useEffect(() => {
     setLocalStories(detail?.userStories ?? detail?.stories ?? []);
   }, [detail]);
+
+  // Check if spec is already published whenever spec changes
+  useEffect(() => {
+    if (!specId || !workspaceId) return;
+    setPublicationCheckDone(false);
+    setPublicationId(null);
+    apiFetch<{ published: boolean; publication: { id: string } | null }>(
+      `/api/marketplace?spec_id=${encodeURIComponent(specId)}`
+    )
+      .then(res => {
+        setPublicationId(res.published && res.publication ? res.publication.id : null);
+        setPublicationCheckDone(true);
+      })
+      .catch(() => {
+        setPublicationCheckDone(true);
+      });
+  }, [specId, workspaceId]);
 
   const handleToggleExclude = async (storyId: string) => {
     if (!workspaceId) return;
@@ -1414,6 +1438,41 @@ function SpecPreviewDrawer({
               Export JSON
             </button>
 
+            {/* Publish to Community — approved or completed specs only */}
+            {(summary?.status === 'approved' || summary?.status === 'completed') && publicationCheckDone && (
+              publicationId ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30">
+                    <Globe size={14} />
+                    Published to Community
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await apiFetch(`/api/marketplace/${publicationId}`, { method: 'DELETE' });
+                        setPublicationId(null);
+                        toast.show('Spec unpublished from community', 'success');
+                      } catch {
+                        toast.show('Failed to unpublish spec', 'error');
+                      }
+                    }}
+                    className="px-3 py-2 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text hover:border-error/50 hover:text-error transition-colors"
+                    title="Unpublish from community"
+                  >
+                    Unpublish
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowPublishModal(true)}
+                  className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors"
+                >
+                  <Globe size={14} />
+                  Publish to Community
+                </button>
+              )
+            )}
+
             {/* Fork Spec */}
             {forkState === 'done' ? (
               <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30">
@@ -1473,6 +1532,25 @@ function SpecPreviewDrawer({
           </div>
         )}
       {showPricing && <PricingModal onClose={() => setShowPricing(false)} />}
+      {showPublishModal && detail && workspaceId && (
+        <PublishModal
+          specId={specId}
+          specName={summary?.specName ?? specId}
+          workspaceId={workspaceId}
+          specDetail={detail}
+          onClose={() => setShowPublishModal(false)}
+          onPublished={() => {
+            // Re-fetch publication status after publishing
+            apiFetch<{ published: boolean; publication: { id: string } | null }>(
+              `/api/marketplace?spec_id=${encodeURIComponent(specId)}`
+            )
+              .then(res => {
+                setPublicationId(res.published && res.publication ? res.publication.id : null);
+              })
+              .catch(() => {});
+          }}
+        />
+      )}
     </div>
   );
 }

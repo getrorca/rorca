@@ -3,9 +3,9 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T15:20:22.692Z
+Last Updated: 2026-03-08T15:24:27.752Z
 
-## Completed Stories (34)
+## Completed Stories (35)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
@@ -40,6 +40,7 @@ Last Updated: 2026-03-08T15:20:22.692Z
 - PR-043: Spec Sanitizer — PII Scrubbing — DONE (claude, claude-sonnet-4-6, 216s)
 - PR-044: Marketplace Publish & Fork Routes — DONE (claude, claude-opus-4-6, 749s)
 - PR-046: Marketplace Panel Redesign — DONE (claude, claude-sonnet-4-6, 298s)
+- PR-047: Publish Flow from Archive Panel — DONE (claude, claude-sonnet-4-6, 235s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined
