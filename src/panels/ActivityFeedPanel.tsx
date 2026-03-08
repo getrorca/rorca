@@ -17,6 +17,7 @@ import {
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import AppHeader from '../components/AppHeader';
+import ErrorBanner from '../components/ErrorBanner';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -131,10 +132,11 @@ export default function ActivityFeedPanel() {
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<ActivityTypeFilter>('all');
 
   const fetchActivity = useCallback(async (offset = 0, append = false) => {
-    if (offset === 0) setLoading(true);
+    if (offset === 0) { setLoading(true); setError(null); }
     else setLoadingMore(true);
 
     try {
@@ -149,8 +151,9 @@ export default function ActivityFeedPanel() {
       setItems(prev => append ? [...prev, ...data.items] : data.items);
       setTotal(data.total);
       setHasMore(data.hasMore);
-    } catch (err) {
-      console.error('Failed to fetch activity:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load activity feed';
+      if (!append) setError(msg);
     } finally {
       setLoading(false);
       setLoadingMore(false);
@@ -213,6 +216,7 @@ export default function ActivityFeedPanel() {
 
       {/* Timeline */}
       <div className="flex-1 overflow-y-auto px-5 py-4" aria-live="polite" aria-busy={loading}>
+        {error && <ErrorBanner message={error} onRetry={() => fetchActivity(0)} onDismiss={() => setError(null)} />}
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <Loader2 size={24} className="animate-spin text-muted" aria-label="Loading activity feed" />

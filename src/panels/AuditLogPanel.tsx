@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
+import ErrorBanner from '../components/ErrorBanner';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -97,6 +98,7 @@ export default function AuditLogPanel() {
   const [total, setTotal] = useState(0);
   const [eventTypes, setEventTypes] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -117,6 +119,7 @@ export default function AuditLogPanel() {
 
   const fetchAuditLog = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const params = new URLSearchParams({
         limit: String(PAGE_SIZE),
@@ -135,8 +138,9 @@ export default function AuditLogPanel() {
       setEvents(data.items);
       setTotal(data.total);
       setEventTypes(data.eventTypes);
-    } catch (err) {
-      console.error('Failed to fetch audit log:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load audit log';
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -247,6 +251,7 @@ export default function AuditLogPanel() {
 
       {/* Table */}
       <div className="flex-1 overflow-auto" aria-label="Audit log events" role="region">
+        {error && <ErrorBanner message={error} onRetry={fetchAuditLog} onDismiss={() => setError(null)} />}
         <div className="overflow-x-auto min-w-full">
         {loading ? (
           <div className="flex items-center justify-center h-32">
