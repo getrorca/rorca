@@ -384,6 +384,51 @@ router.delete('/:id', (req: Request, res: Response) => {
   res.json({ deleted: true });
 });
 
+// ─── GET /api/marketplace/my ─────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/marketplace/my:
+ *   get:
+ *     tags: [Marketplace]
+ *     summary: Get all specs published by the current user
+ *     operationId: myPublications
+ *     responses:
+ *       200:
+ *         description: List of user's published specs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Publication'
+ *                 total:
+ *                   type: integer
+ */
+router.get('/my', (req: Request, res: Response) => {
+  ensureTable();
+  const user = getEffectiveUser(req);
+
+  const rows = db
+    .prepare(
+      `SELECT id, spec_id, title, description, tags, download_count, source, created_at
+       FROM spec_publications
+       WHERE deleted_at IS NULL AND (publisher_id = ? OR publisher_id IS NULL)
+       ORDER BY created_at DESC`,
+    )
+    .all(user?.id || null) as PublicationRow[];
+
+  const items = rows.map((r) => ({
+    ...r,
+    tags: JSON.parse(r.tags),
+  }));
+
+  res.json({ items, total: items.length });
+});
+
 // ─── GET /api/marketplace/popular ────────────────────────────────────────────
 
 /**
