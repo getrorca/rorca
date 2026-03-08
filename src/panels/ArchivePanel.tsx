@@ -403,6 +403,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                 value={searchText}
                 onChange={(e) => setSearchText(e.target.value)}
                 placeholder="Search archive..."
+                data-archive-search
                 className="w-full h-8 pl-8 pr-8 bg-panel border gap-3 border-border rounded text-sm text-text placeholder-muted/60 focus:outline-none focus:border-accent/40 focus:ring-2 focus:ring-accent/50 transition-shadow transition-colors"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
