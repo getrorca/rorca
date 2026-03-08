@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BookOpen, Plus, Trash2, Pencil, Search, Filter, Save, X, Archive, RotateCcw } from 'lucide-react';
+import { BookOpen, Plus, Trash2, Pencil, Search, Filter, Save, X, Archive, RotateCcw, Bot } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import AppHeader from '../components/AppHeader';
@@ -38,11 +38,17 @@ function EntryCard({ entry, onEdit, onDelete }: {
     <div className="group p-4 border border-border rounded-lg hover:bg-surface-200 transition-colors">
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
-          {/* Header: category badge + date */}
+          {/* Header: category badge + date + auto badge */}
           <div className="flex items-center gap-2 mb-1.5">
             <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${CATEGORY_COLORS[entry.category] ?? 'bg-gray-500/10 text-gray-500'}`}>
               {entry.category}
             </span>
+            {entry.source?.startsWith('auto-generated') && (
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/10 text-cyan-500" title="Auto-generated from pipeline run">
+                <Bot size={10} />
+                Auto
+              </span>
+            )}
             <span className="text-[10px] text-muted tabular-nums">{entry.date}</span>
             {entry.source && (
               <span className="text-[10px] text-muted font-mono">{entry.source}</span>
