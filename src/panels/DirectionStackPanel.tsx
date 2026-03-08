@@ -197,7 +197,7 @@ export default function DirectionStackPanel() {
   }
 
   return (
-    <div className="flex h-full gap-px bg-border">
+    <div role="main" aria-label="Direction stack panel - configure direction layers" className="flex h-full gap-px bg-border">
       {/* Column 1: Layer editor */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         {/* Header: View mode toggle + action buttons */}
@@ -207,7 +207,8 @@ export default function DirectionStackPanel() {
             <div className="flex bg-border/50 rounded p-0.5">
               <button
                 onClick={() => handleToggleViewMode('simple')}
-                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                aria-pressed={isSimple}
+                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                   isSimple ? 'bg-bg text-text shadow-sm' : 'text-muted hover:text-text'
                 }`}
               >
@@ -215,7 +216,8 @@ export default function DirectionStackPanel() {
               </button>
               <button
                 onClick={() => handleToggleViewMode('advanced')}
-                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                aria-pressed={!isSimple}
+                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                   !isSimple ? 'bg-bg text-text shadow-sm' : 'text-muted hover:text-text'
                 }`}
               >
@@ -226,12 +228,14 @@ export default function DirectionStackPanel() {
 
           {/* Advanced mode: L1/L2/L3 tabs */}
           {!isSimple && (
-            <div className="flex flex-1">
+            <div role="tablist" className="flex flex-1">
               {([1, 2, 3] as const).map((n) => (
                 <button
                   key={n}
+                  role="tab"
+                  aria-selected={activeTab === n}
                   onClick={() => setActiveTab(n)}
-                  className={`flex-1 px-3 py-2 text-xs font-medium transition-colors relative flex items-center justify-center gap-1 ${
+                  className={`flex-1 px-3 py-2 text-xs font-medium transition-colors relative flex items-center justify-center gap-1 focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                     activeTab === n
                       ? 'text-text border-b-2 border-accent'
                       : 'text-muted hover:text-text'
@@ -261,7 +265,7 @@ export default function DirectionStackPanel() {
             <button
               onClick={handleScanRepo}
               disabled={isScanning}
-              className="px-2 py-1.5 text-[11px] font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap disabled:opacity-50"
+              className="px-2 py-1.5 text-[11px] font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-accent/50 rounded"
               title="Scan repository to detect direction"
             >
               {isScanning ? 'Scanning...' : 'Scan'}
@@ -447,14 +451,16 @@ export default function DirectionStackPanel() {
           </span>
           <button
             onClick={handleCopy}
-            className="px-2 py-1 text-xs text-muted hover:text-text transition-colors"
+            aria-label="Copy synthesized output"
+            className="px-2 py-1 text-xs text-muted hover:text-text transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 rounded"
           >
             Copy
           </button>
         </div>
-        <div className="flex-1 overflow-auto p-3">
+        <div aria-live="polite" className="flex-1 overflow-auto p-3">
           {isSynthesizing ? (
             <div className="flex items-center gap-2 text-muted text-sm">
+              <span className="sr-only">Loading...</span>
               <svg
                 className="w-4 h-4 animate-spin"
                 viewBox="0 0 24 24"
