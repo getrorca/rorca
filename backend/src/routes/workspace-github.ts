@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
 import { db } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
+import { logger } from '../lib/logger';
 
 const router = Router({ mergeParams: true });
 
@@ -87,7 +88,7 @@ router.get('/', (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error('[GitHub] Status error:', error);
+    logger.error('[GitHub] Status error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -196,7 +197,7 @@ router.post('/connect', async (req: Request, res: Response) => {
 
     if (!ghRes.ok) {
       const ghBody = await ghRes.text();
-      console.error('[GitHub] Webhook creation failed:', ghRes.status, ghBody);
+      logger.error({ status: ghRes.status, body: ghBody }, '[GitHub] Webhook creation failed');
       res.status(ghRes.status === 404 ? 404 : 502).json({
         error: `GitHub API error (${ghRes.status}): ${ghBody}`,
       });
@@ -222,7 +223,7 @@ router.post('/connect', async (req: Request, res: Response) => {
       webhookId: ghData.id,
     });
   } catch (error: any) {
-    console.error('[GitHub] Connect error:', error);
+    logger.error('[GitHub] Connect error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -303,7 +304,7 @@ router.post('/disconnect', async (req: Request, res: Response) => {
       // 404 = webhook already deleted on GitHub side — that's fine
       if (!ghRes.ok && ghRes.status !== 404) {
         const ghBody = await ghRes.text();
-        console.error('[GitHub] Webhook deletion failed:', ghRes.status, ghBody);
+        logger.error({ status: ghRes.status, body: ghBody }, '[GitHub] Webhook deletion failed');
         res.status(502).json({
           error: `GitHub API error (${ghRes.status}): ${ghBody}`,
         });
@@ -320,7 +321,7 @@ router.post('/disconnect', async (req: Request, res: Response) => {
 
     res.json({ connected: false });
   } catch (error: any) {
-    console.error('[GitHub] Disconnect error:', error);
+    logger.error('[GitHub] Disconnect error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -376,7 +377,7 @@ router.get('/account', (req: Request, res: Response) => {
       scopes,
     });
   } catch (error: any) {
-    console.error('[GitHub] Account error:', error);
+    logger.error('[GitHub] Account error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -436,7 +437,7 @@ router.post('/test-connection', async (req: Request, res: Response) => {
       res.json({ valid: false, error: `GitHub API returned ${ghRes.status}` });
     }
   } catch (error: any) {
-    console.error('[GitHub] Test connection error:', error);
+    logger.error('[GitHub] Test connection error:', error);
     res.json({ valid: false, error: error.message });
   }
 });
@@ -499,7 +500,7 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
           body: JSON.stringify({ access_token: token }),
         });
       } catch (revokeErr) {
-        console.warn('[GitHub] Token revocation failed (proceeding with local disconnect):', revokeErr);
+        logger.warn({ err: revokeErr }, '[GitHub] Token revocation failed (proceeding with local disconnect)');
       }
     }
 
@@ -514,7 +515,7 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
 
     res.json({ disconnected: true });
   } catch (error: any) {
-    console.error('[GitHub] Disconnect OAuth error:', error);
+    logger.error('[GitHub] Disconnect OAuth error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -599,7 +600,7 @@ router.put('/auto-pr', (req: Request, res: Response) => {
       reviewers: Array.isArray(reviewers) ? reviewers : [],
     });
   } catch (error: any) {
-    console.error('[GitHub] Auto-PR update error:', error);
+    logger.error('[GitHub] Auto-PR update error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -652,7 +653,7 @@ router.get('/actions-yaml', (req: Request, res: Response) => {
     res.setHeader('Content-Disposition', `attachment; filename="rorca-pipeline.yml"`);
     res.send(yaml);
   } catch (error: any) {
-    console.error('[GitHub] Actions YAML generation error:', error);
+    logger.error('[GitHub] Actions YAML generation error:', error);
     res.status(500).json({ error: error.message });
   }
 });

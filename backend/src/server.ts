@@ -65,6 +65,8 @@ import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 import { createMcpRequestHandler } from './lib/mcp-http';
 import telemetryRouter from './routes/telemetry';
+import { logger } from './lib/logger';
+import pinoHttp from 'pino-http';
 
 dotenv.config();
 
@@ -75,6 +77,9 @@ if (agentType === 'opencode') {
 
 const app = express();
 const PORT = process.env.PORT || 3030;
+
+// PR-008: Structured request/response logging — method, url, statusCode, responseTime
+app.use(pinoHttp({ logger }));
 
 // PR-006: HTTP security headers via helmet
 app.use(helmet({
@@ -226,7 +231,7 @@ startMemorySynthesis();
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
-    console.log(`Rorca backend listening on port ${PORT}`);
+    logger.info(`Rorca backend listening on port ${PORT}`);
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
     cleanupOrphanRuns();
     startScheduler();

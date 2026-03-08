@@ -12,6 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { logger } from './logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -138,9 +139,9 @@ export function initRunState(cwd: string, specId: string, runId: number): RunSta
 
   atomicWriteJson(getRunStatePath(cwd), state);
   if (resumedFromStory) {
-    console.log(`[run-state] Resumed from story ${resumedFromStory} (${state.completedStories.length} stories carried forward)`);
+    logger.info(`[run-state] Resumed from story ${resumedFromStory} (${state.completedStories.length} stories carried forward)`);
   } else {
-    console.log(`[run-state] Initialized for spec ${specId}, run ${runId}`);
+    logger.info(`[run-state] Initialized for spec ${specId}, run ${runId}`);
   }
   return state;
 }
@@ -248,7 +249,7 @@ export function archiveRunState(cwd: string, runId: number): string | null {
 
   const archivePath = path.join(archiveDir, `${runId}.json`);
   atomicWriteJson(archivePath, state);
-  console.log(`[run-state] Archived to ${archivePath}`);
+  logger.info(`[run-state] Archived to ${archivePath}`);
 
   // Reset run-state.json to empty scaffold
   const empty: RunState = {
@@ -370,7 +371,7 @@ export function migrateProgressTxt(cwd: string, specId: string, runId: number): 
     };
 
     atomicWriteJson(getRunStatePath(cwd), state);
-    console.log(`[run-state] Migrated ${completedStories.length} stories from progress.txt`);
+    logger.info(`[run-state] Migrated ${completedStories.length} stories from progress.txt`);
     return state;
   } catch {
     return null;

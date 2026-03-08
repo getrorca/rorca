@@ -4,6 +4,7 @@ import { db } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
+import { logger } from '../lib/logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -149,23 +150,23 @@ export function handlePullRequestMerge(
 
   const storyIds = extractStoryIds(prTitle, branchName);
   if (storyIds.length === 0) {
-    console.log(`[Webhook] PR merged but no story IDs found in title="${prTitle}" branch="${branchName}"`);
+    logger.info(`[Webhook] PR merged but no story IDs found in title="${prTitle}" branch="${branchName}"`);
     return;
   }
 
-  console.log(`[Webhook] PR merged: ${prUrl} — stories: ${storyIds.join(', ')}`);
+  logger.info(`[Webhook] PR merged: ${prUrl} — stories: ${storyIds.join(', ')}`);
 
   // Look up workspace path
   const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
   if (!workspace) {
-    console.error(`[Webhook] Workspace ${workspaceId} not found`);
+    logger.error(`[Webhook] Workspace ${workspaceId} not found`);
     return;
   }
 
   // Find specs containing these story IDs
   const specMatches = findSpecsWithStories(workspace.path, storyIds);
   if (specMatches.length === 0) {
-    console.log(`[Webhook] No specs found containing stories: ${storyIds.join(', ')}`);
+    logger.info(`[Webhook] No specs found containing stories: ${storyIds.join(', ')}`);
     return;
   }
 
@@ -189,9 +190,9 @@ export function handlePullRequestMerge(
 
       allUpdatedStoryIds.push(...matchedStoryIds);
 
-      console.log(`[Webhook] Updated spec ${specId}: marked ${matchedStoryIds.join(', ')} as passed via PR merge`);
+      logger.info(`[Webhook] Updated spec ${specId}: marked ${matchedStoryIds.join(', ')} as passed via PR merge`);
     } catch (err) {
-      console.error(`[Webhook] Failed to update spec at ${specPath}:`, err);
+      logger.error({ err }, `[Webhook] Failed to update spec at ${specPath}`);
     }
   }
 
@@ -273,7 +274,7 @@ export function handlePush(
 
   const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
   if (!workspace) {
-    console.error(`[Webhook] Workspace ${workspaceId} not found`);
+    logger.error(`[Webhook] Workspace ${workspaceId} not found`);
     return;
   }
 
@@ -302,7 +303,7 @@ export function handlePush(
   }
 
   if (totalLinked > 0) {
-    console.log(`[Webhook] Push: linked ${totalLinked} commit-story mappings for workspace ${workspaceId}`);
+    logger.info(`[Webhook] Push: linked ${totalLinked} commit-story mappings for workspace ${workspaceId}`);
 
     const walResult = db.prepare(
       `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_push_commits', ?, 'github', ?)`
@@ -353,7 +354,7 @@ export function handlePullRequestCheck(
   // Fire and forget — the check is posted asynchronously
   evaluatePrAndPostCheck(owner, repo, prNumber, headSha, prTitle, branchName, workspaceId)
     .catch(err => {
-      console.error(`[Webhook] Check evaluation failed for PR #${prNumber}:`, err);
+      logger.error(`[Webhook] Check evaluation failed for PR #${prNumber}:`, err);
     });
 }
 
@@ -363,7 +364,7 @@ export function registerWebhookHandlers(): void {
   onGithubEvent('pull_request', handlePullRequestMerge);
   onGithubEvent('pull_request', handlePullRequestCheck);
   onGithubEvent('push', handlePush);
-  console.log('[Webhook] Registered pull_request merge handler');
-  console.log('[Webhook] Registered pull_request spec-compliance check handler');
-  console.log('[Webhook] Registered push commit-linking handler');
+  logger.info('[Webhook] Registered pull_request merge handler');
+  logger.info('[Webhook] Registered pull_request spec-compliance check handler');
+  logger.info('[Webhook] Registered push commit-linking handler');
 }

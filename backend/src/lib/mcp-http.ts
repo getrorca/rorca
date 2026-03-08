@@ -15,6 +15,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
+import { logger } from './logger';
 
 const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
 
@@ -326,7 +327,7 @@ export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
     }
   }
 
-  console.log(`[MCP-HTTP] Registered ${toolCount} tools from OpenAPI spec`);
+  logger.info(`[MCP-HTTP] Registered ${toolCount} tools from OpenAPI spec`);
   return server;
 }
 

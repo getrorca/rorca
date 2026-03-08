@@ -3,6 +3,7 @@ import simpleGit from 'simple-git';
 import path from 'path';
 import { db } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -163,7 +164,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     res.json({ worktrees });
   } catch (error: any) {
-    console.error('[Worktrees] List error:', error);
+    logger.error('[Worktrees] List error:', error);
     // Xcode license not accepted (common after macOS/Xcode updates) — return empty list
     if (error.message?.includes('Xcode') || error.message?.includes('xcodebuild')) {
       res.json({ worktrees: [], warning: 'Git unavailable: run `sudo xcodebuild -license accept` in your terminal to fix.' });
@@ -209,7 +210,7 @@ router.post('/', async (req: Request, res: Response) => {
       res.status(409).json({ error: error.message });
       return;
     }
-    console.error('[Worktrees] Create error:', error);
+    logger.error('[Worktrees] Create error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -273,7 +274,7 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
       res.status(409).json({ error: error.message });
       return;
     }
-    console.error('[Worktrees] Remove error:', error);
+    logger.error('[Worktrees] Remove error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -433,7 +434,7 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
       }
     }
   } catch (error: any) {
-    console.error('[Worktrees] Merge preview error:', error);
+    logger.error('[Worktrees] Merge preview error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -558,7 +559,7 @@ router.post('/merge', async (req: Request, res: Response) => {
 
     res.json({ ok: true, mergeCommitSha, stashedAndRestored: stashed });
   } catch (error: any) {
-    console.error('[Worktrees] Merge error:', error);
+    logger.error('[Worktrees] Merge error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -622,7 +623,7 @@ router.get('/status', async (req: Request, res: Response) => {
       modifiedFiles: status.modified,
     });
   } catch (error: any) {
-    console.error('[Worktrees] Status error:', error);
+    logger.error('[Worktrees] Status error:', error);
     res.status(500).json({ error: error.message });
   }
 });

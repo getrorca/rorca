@@ -6,6 +6,7 @@ import Stripe from 'stripe';
 import { z } from 'zod';
 import { db } from '../db';
 import { validateBody } from '../lib/validate';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -133,7 +134,7 @@ function generateAndStoreVerificationToken(userId: string, email: string): strin
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
   const verifyLink = `http://localhost:3030/api/auth/verify-email?token=${rawToken}`;
 
-  console.log(`[auth] Email verification link for ${email}: ${verifyLink}`);
+  logger.info(`[auth] Email verification link for ${email}: ${verifyLink}`);
 
   return rawToken;
 }
@@ -816,7 +817,7 @@ router.post('/forgot-password', (req: Request, res: Response) => {
   const resetLink = `${frontendUrl}/reset-password?token=${rawToken}`;
 
   // Log the reset link for local development (Rorca is a local-first tool)
-  console.log(`[auth] Password reset link for ${trimmedEmail}: ${resetLink}`);
+  logger.info(`[auth] Password reset link for ${trimmedEmail}: ${resetLink}`);
 
   res.json({
     message: successMessage,
@@ -983,7 +984,7 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
         const stripe = new Stripe(stripeKey);
         await stripe.subscriptions.cancel(subscription.stripe_subscription_id);
       } catch (err) {
-        console.error(`[auth] Failed to cancel Stripe subscription ${subscription.stripe_subscription_id} for user ${user.id}:`, err);
+        logger.error({ err }, `[auth] Failed to cancel Stripe subscription ${subscription.stripe_subscription_id} for user ${user.id}`);
         // Proceed with deletion even if Stripe cancel fails — the webhook will eventually reconcile
       }
     }
@@ -1002,7 +1003,7 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
 
   // Log final confirmation (Rorca is local-first; email would go here in production)
-  console.log(`[auth] Account deleted: ${user.email} (id: ${user.id}). All data permanently removed.`);
+  logger.info(`[auth] Account deleted: ${user.email} (id: ${user.id}). All data permanently removed.`);
 
   res.json({ message: 'Your account and all associated data have been permanently deleted.' });
 });

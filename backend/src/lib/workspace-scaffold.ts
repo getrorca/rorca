@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { chatComplete } from './llm-client';
 import type { EcholocationReport } from './workspace-echolocation';
+import { logger } from './logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -471,7 +472,7 @@ export function writeScaffoldFiles(
       fs.writeFileSync(fullPath, file.content, 'utf-8');
       filesWritten.push(file.relativePath);
     } catch (err: any) {
-      console.error(`[scaffold] Failed to write ${file.relativePath}: ${err.message}`);
+      logger.error(`[scaffold] Failed to write ${file.relativePath}: ${err.message}`);
       filesSkipped.push(file.relativePath);
     }
   }

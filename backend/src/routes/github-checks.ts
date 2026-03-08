@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { postCommitStatus, CHECK_NAME, type CheckState } from '../lib/github-checks';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -125,7 +126,7 @@ router.post('/:sha', async (req: Request, res: Response) => {
       description: desc,
     });
   } catch (error: any) {
-    console.error('[Checks] Manual update error:', error);
+    logger.error('[Checks] Manual update error:', error);
     res.status(500).json({ error: error.message });
   }
 });

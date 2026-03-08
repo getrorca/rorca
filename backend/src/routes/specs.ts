@@ -64,6 +64,7 @@ function resolveVaultCreds(userId: string, model: string): { apiKey?: string; ba
 }
 import { createNotification } from './notifications';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -210,7 +211,7 @@ function validateSuggestedSkills(
       if (typeof sk.name !== 'string') return false;
       const valid = validSkillNames.has(sk.name.toLowerCase());
       if (!valid) {
-        console.warn(`[Specs] Stripped unknown suggestedSkill "${sk.name}" from story ${s.id}`);
+        logger.warn(`[Specs] Stripped unknown suggestedSkill "${sk.name}" from story ${s.id}`);
       }
       return valid;
     });
@@ -780,7 +781,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     if (multiPass) {
       // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
-      console.log(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
+      logger.info(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
 
       const pmPromptText = loadDefaultPersonaPrompt('pm');
       const specWriterPromptText = loadDefaultPersonaPrompt('spec-writer');
@@ -869,7 +870,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       snapshotVersion(slug, JSON.stringify(pass1Spec), 'pending');
       emitPassEvent(slug, 1, 'completed', workspaceId);
 
-      console.log(`[Specs] Pass 1 complete: ${pass1Result.stories.length} coarse stories`);
+      logger.info(`[Specs] Pass 1 complete: ${pass1Result.stories.length} coarse stories`);
 
       // ── Pass 2: Spec Writer Agent — decompose into micro-stories ──
       emitPassEvent(slug, 2, 'started', workspaceId);
@@ -972,14 +973,14 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       snapshotVersion(slug, JSON.stringify(pass2Spec), 'pending');
       emitPassEvent(slug, 2, 'completed', workspaceId);
 
-      console.log(`[Specs] Pass 2 complete: ${parsed.stories.length} micro-stories (decomposed from ${pass1Result.stories.length} coarse stories)`);
+      logger.info(`[Specs] Pass 2 complete: ${parsed.stories.length} micro-stories (decomposed from ${pass1Result.stories.length} coarse stories)`);
 
       // ── Pass 3: UX Designer Agent — add visual descriptions ──
       emitPassEvent(slug, 3, 'started', workspaceId);
 
       const uxDesignerPromptText = loadDefaultPersonaPrompt('ux-designer');
       if (!uxDesignerPromptText) {
-        console.warn('[Specs] UX Designer persona not found — skipping Pass 3');
+        logger.warn('[Specs] UX Designer persona not found — skipping Pass 3');
         emitPassEvent(slug, 3, 'completed', workspaceId);
       }
 
@@ -1055,10 +1056,10 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
             // Preserve mermaidDiagram and diagrams from Pass 2
             parsed = { ...parsed, stories: pass3Parsed.stories };
           } else {
-            console.warn('[Specs] Pass 3 returned invalid stories array — keeping Pass 2 output');
+            logger.warn('[Specs] Pass 3 returned invalid stories array — keeping Pass 2 output');
           }
         } catch {
-          console.warn('[Specs] Pass 3 returned non-JSON — keeping Pass 2 output');
+          logger.warn('[Specs] Pass 3 returned non-JSON — keeping Pass 2 output');
         }
 
         // Snapshot Pass 3 result as spec version
@@ -1072,7 +1073,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         snapshotVersion(slug, JSON.stringify(pass3Spec), 'pending');
         emitPassEvent(slug, 3, 'completed', workspaceId);
 
-        console.log(`[Specs] Pass 3 complete: ${parsed.stories.length} stories enriched with visual descriptions`);
+        logger.info(`[Specs] Pass 3 complete: ${parsed.stories.length} stories enriched with visual descriptions`);
       }
 
       // ── Pass 4: Best Practices Agent — library convention annotations ──
@@ -1080,7 +1081,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
       const bestPracticesPromptText = loadDefaultPersonaPrompt('best-practices');
       if (!bestPracticesPromptText) {
-        console.warn('[Specs] Best Practices persona not found — skipping Pass 4');
+        logger.warn('[Specs] Best Practices persona not found — skipping Pass 4');
         emitPassEvent(slug, 4, 'completed', workspaceId);
       }
 
@@ -1185,10 +1186,10 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           if (Array.isArray(pass4Parsed.stories) && pass4Parsed.stories.length > 0) {
             parsed = { ...parsed, stories: pass4Parsed.stories };
           } else {
-            console.warn('[Specs] Pass 4 returned invalid stories array — keeping Pass 3 output');
+            logger.warn('[Specs] Pass 4 returned invalid stories array — keeping Pass 3 output');
           }
         } catch {
-          console.warn('[Specs] Pass 4 returned non-JSON — keeping Pass 3 output');
+          logger.warn('[Specs] Pass 4 returned non-JSON — keeping Pass 3 output');
         }
 
         // Snapshot Pass 4 result as spec version
@@ -1202,7 +1203,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         snapshotVersion(slug, JSON.stringify(pass4Spec), 'pending');
         emitPassEvent(slug, 4, 'completed', workspaceId);
 
-        console.log(`[Specs] Pass 4 complete: ${parsed.stories.length} stories annotated with convention guidance`);
+        logger.info(`[Specs] Pass 4 complete: ${parsed.stories.length} stories annotated with convention guidance`);
       }
 
       // ── Pass 5: Adversarial Review — Assumption Buster + Devil's Advocate ──
@@ -1214,7 +1215,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       let pass5Usage = { inputTokens: 0, outputTokens: 0 };
 
       if (!assumptionBusterPrompt && !devilsAdvocatePrompt) {
-        console.warn('[Specs] Adversarial personas not found — skipping Pass 5');
+        logger.warn('[Specs] Adversarial personas not found — skipping Pass 5');
         emitPassEvent(slug, 5, 'completed', workspaceId);
       } else {
         const pass4StoriesJson = JSON.stringify(parsed.stories, null, 2);
@@ -1278,13 +1279,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
             if (Array.isArray(pass5aParsed.stories) && pass5aParsed.stories.length > 0) {
               parsed = { ...parsed, stories: pass5aParsed.stories };
             } else {
-              console.warn('[Specs] Pass 5a (Assumption Buster) returned invalid stories — keeping Pass 4 output');
+              logger.warn('[Specs] Pass 5a (Assumption Buster) returned invalid stories — keeping Pass 4 output');
             }
           } catch {
-            console.warn('[Specs] Pass 5a (Assumption Buster) returned non-JSON — keeping Pass 4 output');
+            logger.warn('[Specs] Pass 5a (Assumption Buster) returned non-JSON — keeping Pass 4 output');
           }
 
-          console.log(`[Specs] Pass 5a (Assumption Buster) complete: ${parsed.stories.length} stories`);
+          logger.info(`[Specs] Pass 5a (Assumption Buster) complete: ${parsed.stories.length} stories`);
         }
 
         // Sub-pass 5b: Devil's Advocate reviews the spec
@@ -1347,13 +1348,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
             if (Array.isArray(pass5bParsed.stories) && pass5bParsed.stories.length > 0) {
               parsed = { ...parsed, stories: pass5bParsed.stories };
             } else {
-              console.warn('[Specs] Pass 5b (Devil\'s Advocate) returned invalid stories — keeping previous output');
+              logger.warn('[Specs] Pass 5b (Devil\'s Advocate) returned invalid stories — keeping previous output');
             }
           } catch {
-            console.warn('[Specs] Pass 5b (Devil\'s Advocate) returned non-JSON — keeping previous output');
+            logger.warn('[Specs] Pass 5b (Devil\'s Advocate) returned non-JSON — keeping previous output');
           }
 
-          console.log(`[Specs] Pass 5b (Devil's Advocate) complete: ${parsed.stories.length} stories`);
+          logger.info(`[Specs] Pass 5b (Devil's Advocate) complete: ${parsed.stories.length} stories`);
         }
 
         // Snapshot Pass 5 result as spec version
@@ -1367,7 +1368,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         snapshotVersion(slug, JSON.stringify(pass5Spec), 'pending');
         emitPassEvent(slug, 5, 'completed', workspaceId);
 
-        console.log(`[Specs] Pass 5 complete: ${parsed.stories.length} stories after adversarial review`);
+        logger.info(`[Specs] Pass 5 complete: ${parsed.stories.length} stories after adversarial review`);
       }
 
       // ── Pass 6: Spec Verifier — final consistency check + verification report ──
@@ -1377,7 +1378,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       let pass6Usage = { inputTokens: 0, outputTokens: 0 };
 
       if (!specVerifierPrompt) {
-        console.warn('[Specs] Spec Verifier persona not found — skipping Pass 6');
+        logger.warn('[Specs] Spec Verifier persona not found — skipping Pass 6');
         emitPassEvent(slug, 6, 'completed', workspaceId);
       } else {
         const pass5StoriesJson = JSON.stringify(parsed.stories, null, 2);
@@ -1465,10 +1466,10 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           if (Array.isArray(pass6Parsed.stories) && pass6Parsed.stories.length > 0) {
             parsed = { ...parsed, stories: pass6Parsed.stories };
           } else {
-            console.warn('[Specs] Pass 6 returned invalid stories — keeping Pass 5 output');
+            logger.warn('[Specs] Pass 6 returned invalid stories — keeping Pass 5 output');
           }
         } catch {
-          console.warn('[Specs] Pass 6 returned non-JSON — keeping Pass 5 output');
+          logger.warn('[Specs] Pass 6 returned non-JSON — keeping Pass 5 output');
         }
 
         // Snapshot Pass 6 result as spec version (final)
@@ -1488,7 +1489,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           (parsed as Record<string, unknown>).verificationReport = verificationReport;
         }
 
-        console.log(`[Specs] Pass 6 complete: ${parsed.stories.length} stories verified (valid: ${verificationReport?.valid ?? 'unknown'})`);
+        logger.info(`[Specs] Pass 6 complete: ${parsed.stories.length} stories verified (valid: ${verificationReport?.valid ?? 'unknown'})`);
       }
 
       // Aggregate token usage from all passes
@@ -1499,7 +1500,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     } else if (configuredAgentType === 'opencode') {
       // ── OpenCode path: spawn `opencode run` with codebase exploration ──
-      console.log(`[Specs] Generating via OpenCode (model: ${resolvedModel})`);
+      logger.info(`[Specs] Generating via OpenCode (model: ${resolvedModel})`);
       usedProvider = 'opencode';
 
       const ocResult = await generateSpecViaOpenCode({
@@ -1516,7 +1517,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
       if (isSpecError(ocResult)) {
         // Fallback to SDK path on OpenCode failure
-        console.warn(`[Specs] OpenCode spec gen failed (${ocResult.error}), falling back to SDK path`);
+        logger.warn(`[Specs] OpenCode spec gen failed (${ocResult.error}), falling back to SDK path`);
 
         const user = getEffectiveUser(req);
         if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
@@ -1665,7 +1666,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       } : {}),
     });
   } catch (error: any) {
-    console.error('[Specs] Generate error:', error);
+    logger.error('[Specs] Generate error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2033,7 +2034,7 @@ router.post('/generate/batch', (req: Request, res: Response) => {
 
     // Start processing asynchronously — don't await
     processBatch(batch).catch(err => {
-      console.error('[Specs] Batch processing error:', err);
+      logger.error('[Specs] Batch processing error:', err);
     });
 
     // Emit WAL event for batch start
@@ -2047,7 +2048,7 @@ router.post('/generate/batch', (req: Request, res: Response) => {
 
     res.status(201).json({ batchId, briefCount: briefs.length });
   } catch (error: any) {
-    console.error('[Specs] Batch create error:', error);
+    logger.error('[Specs] Batch create error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2123,7 +2124,7 @@ router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
       items,
     });
   } catch (error: any) {
-    console.error('[Specs] Batch status error:', error);
+    logger.error('[Specs] Batch status error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2348,7 +2349,7 @@ router.get('/', (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(filtered, pagination, { cursorKey: (s) => s.id }));
   } catch (error: any) {
-    console.error('[Specs] List error:', error);
+    logger.error('[Specs] List error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2901,7 +2902,7 @@ router.get('/archive', (req: Request, res: Response) => {
     // Paginate
     res.json(paginateArray(filtered, pagination, { cursorKey: (s) => s.id }));
   } catch (error: any) {
-    console.error('[Specs] Archive error:', error);
+    logger.error('[Specs] Archive error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3007,7 +3008,7 @@ router.get('/search/stories', (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(results, pagination));
   } catch (error: any) {
-    console.error('[Specs] Story search error:', error);
+    logger.error('[Specs] Story search error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3164,7 +3165,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
     res.json({ ok: true, addedCount: newStories.length, stories: newStories });
   } catch (error: any) {
-    console.error('[Specs] Add stories error:', error);
+    logger.error('[Specs] Add stories error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3231,7 +3232,7 @@ router.get('/:specId/versions', (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(versions, pagination));
   } catch (error: any) {
-    console.error('[Specs] Versions error:', error);
+    logger.error('[Specs] Versions error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3329,7 +3330,7 @@ router.get('/:specId/diff', (req: Request, res: Response) => {
       diff,
     });
   } catch (error: any) {
-    console.error('[Specs] Diff error:', error);
+    logger.error('[Specs] Diff error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3451,7 +3452,7 @@ router.post('/:specId/versions/:version/restore', (req: Request, res: Response) 
 
     res.json({ ok: true, newVersion, restoredFromVersion: versionNum });
   } catch (error: any) {
-    console.error('[Specs] Restore version error:', error);
+    logger.error('[Specs] Restore version error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3623,7 +3624,7 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
     res.json({ ok: true, story });
   } catch (error: any) {
-    console.error('[Specs] Toggle exclude error:', error);
+    logger.error('[Specs] Toggle exclude error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3769,7 +3770,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
     res.json({ ok: true, story: stories[storyIndex], version });
   } catch (error: any) {
-    console.error('[Specs] Story update error:', error);
+    logger.error('[Specs] Story update error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3897,7 +3898,7 @@ router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
     res.json({ ok: true, deletedStory, version, remainingCount: reindexed.length });
   } catch (error: any) {
-    console.error('[Specs] Story delete error:', error);
+    logger.error('[Specs] Story delete error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4045,7 +4046,7 @@ Rewrite the story following the user instructions. Keep the same scope unless to
       usage: llmResult.usage,
     });
   } catch (error: any) {
-    console.error('[Specs] Story rewrite error:', error);
+    logger.error('[Specs] Story rewrite error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4113,7 +4114,7 @@ router.get('/tags/autocomplete', (req: Request, res: Response) => {
 
     res.json({ tags: rows.map(r => ({ name: r.tag_name, count: r.count })) });
   } catch (error: any) {
-    console.error('[Specs] Tag autocomplete error:', error);
+    logger.error('[Specs] Tag autocomplete error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4173,7 +4174,7 @@ router.get('/:specId', (req: Request, res: Response) => {
     const stories: any[] = content.userStories ?? content.stories ?? [];
     res.json({ ...content, readinessPercent: computeReadiness(stories) });
   } catch (error: any) {
-    console.error('[Specs] Get error:', error);
+    logger.error('[Specs] Get error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4320,7 +4321,7 @@ router.post('/:specId/fork', (req: Request, res: Response) => {
       path: forkFile,
     });
   } catch (error: any) {
-    console.error('[Specs] Fork error:', error);
+    logger.error('[Specs] Fork error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4395,7 +4396,7 @@ router.post('/:specId/approve', (req: Request, res: Response) => {
 
     res.json({ ok: true, approvedPath: approvedFile });
   } catch (error: any) {
-    console.error('[Specs] Approve error:', error);
+    logger.error('[Specs] Approve error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4464,7 +4465,7 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
 
     res.json({ ok: true });
   } catch (error: any) {
-    console.error('[Specs] Reject error:', error);
+    logger.error('[Specs] Reject error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4540,7 +4541,7 @@ router.delete('/:specId', (req: Request, res: Response) => {
 
     res.json({ ok: true });
   } catch (error: any) {
-    console.error('[Specs] Delete error:', error);
+    logger.error('[Specs] Delete error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4636,7 +4637,7 @@ router.post('/:specId/request-review', (req: Request, res: Response) => {
 
     res.json({ ok: true, reviewStatus: 'review_requested' });
   } catch (error: any) {
-    console.error('[Specs] Request review error:', error);
+    logger.error('[Specs] Request review error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4751,7 +4752,7 @@ router.post('/:specId/review', (req: Request, res: Response) => {
 
     res.json({ ok: true, reviewStatus: newStatus });
   } catch (error: any) {
-    console.error('[Specs] Review error:', error);
+    logger.error('[Specs] Review error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5039,7 +5040,7 @@ router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
       stories: content.userStories,
     });
   } catch (error: any) {
-    console.error('[Specs] Bulk story action error:', error);
+    logger.error('[Specs] Bulk story action error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5195,7 +5196,7 @@ router.get('/:specId/graph', (req: Request, res: Response) => {
 
     res.json({ nodes, edges, parallelGroups } as GraphResponse);
   } catch (error: any) {
-    console.error('[Specs] Graph error:', error);
+    logger.error('[Specs] Graph error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5411,7 +5412,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
       tokenUsage: llmResult.usage,
     });
   } catch (error: any) {
-    console.error('[Specs] Detect dependencies error:', error);
+    logger.error('[Specs] Detect dependencies error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5549,7 +5550,7 @@ router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
 
     res.json({ ok: true, appliedCount });
   } catch (error: any) {
-    console.error('[Specs] Apply dependencies error:', error);
+    logger.error('[Specs] Apply dependencies error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5635,7 +5636,7 @@ router.post('/:specId/tags', (req: Request, res: Response) => {
 
     res.json({ tags: getSpecTags(specId, workspaceId) });
   } catch (error: any) {
-    console.error('[Specs] Add tags error:', error);
+    logger.error('[Specs] Add tags error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5707,7 +5708,7 @@ router.delete('/:specId/tags/:tag', (req: Request, res: Response) => {
 
     res.json({ tags: getSpecTags(specId, workspaceId) });
   } catch (error: any) {
-    console.error('[Specs] Remove tag error:', error);
+    logger.error('[Specs] Remove tag error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5786,7 +5787,7 @@ router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) =>
 
     res.json({ commits });
   } catch (error: any) {
-    console.error('[Specs] Story commits error:', error);
+    logger.error('[Specs] Story commits error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -5890,7 +5891,7 @@ router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Respon
       checkoutCommand: `git checkout ${branchName}`,
     });
   } catch (error: any) {
-    console.error('[Specs] Create story branch error:', error);
+    logger.error('[Specs] Create story branch error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -6044,7 +6045,7 @@ router.post('/:specId/stories/:storyId/pr-body', (req: Request, res: Response) =
 
     res.json({ body });
   } catch (error: any) {
-    console.error('[Specs] PR body generation error:', error);
+    logger.error('[Specs] PR body generation error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -6338,7 +6339,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
       errors,
     });
   } catch (error: any) {
-    console.error('[Specs] GitHub issues import error:', error);
+    logger.error('[Specs] GitHub issues import error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -6710,7 +6711,7 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
       errors: importErrors,
     });
   } catch (error: any) {
-    console.error('[Specs] Issue import error:', error);
+    logger.error('[Specs] Issue import error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -6787,7 +6788,7 @@ router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) =
 
     res.json({ comments });
   } catch (error: any) {
-    console.error('[StoryComments] List error:', error);
+    logger.error('[StoryComments] List error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -6906,7 +6907,7 @@ router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) 
 
     res.status(201).json(comment);
   } catch (error: any) {
-    console.error('[StoryComments] Create error:', error);
+    logger.error('[StoryComments] Create error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -6993,7 +6994,7 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Reque
 
     res.json(comment);
   } catch (error: any) {
-    console.error('[StoryComments] Resolve error:', error);
+    logger.error('[StoryComments] Resolve error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -7042,7 +7043,7 @@ router.get('/:specId/comments/counts', (req: Request, res: Response) => {
 
     res.json({ counts });
   } catch (error: any) {
-    console.error('[StoryComments] Counts error:', error);
+    logger.error('[StoryComments] Counts error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -7192,7 +7193,7 @@ router.put('/:specId/assign', (req: Request, res: Response) => {
 
     res.json({ ok: true, assignee: { id: assignee.id, displayName: assignee.display_name, email: assignee.email, avatarUrl: assignee.avatar_url } });
   } catch (error: any) {
-    console.error('[Specs] Assign spec error:', error);
+    logger.error('[Specs] Assign spec error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -7350,7 +7351,7 @@ router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => 
 
     res.json({ ok: true, assignee: { id: assignee.id, displayName: assignee.display_name, email: assignee.email, avatarUrl: assignee.avatar_url } });
   } catch (error: any) {
-    console.error('[Specs] Assign story error:', error);
+    logger.error('[Specs] Assign story error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -7439,7 +7440,7 @@ router.get('/:specId/assignments', (req: Request, res: Response) => {
 
     res.json({ assignments });
   } catch (error: any) {
-    console.error('[Specs] Get assignments error:', error);
+    logger.error('[Specs] Get assignments error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -7611,7 +7612,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
       suggestions: parsed.suggestions,
     });
   } catch (error: any) {
-    console.error('[Specs] Enhance criteria error:', error);
+    logger.error('[Specs] Enhance criteria error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -7719,7 +7720,7 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
       totalCriteria: targetStory.acceptanceCriteria.length,
     });
   } catch (error: any) {
-    console.error('[Specs] Accept criteria error:', error);
+    logger.error('[Specs] Accept criteria error:', error);
     res.status(500).json({ error: error.message });
   }
 });
