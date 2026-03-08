@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -208,7 +209,7 @@ router.get('/search', (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 200 });
     res.json(paginateArray(allResults, pagination));
   } catch (error: any) {
-    console.error('[Stories] Search error:', error);
+    logger.error('[Stories] Search error:', error);
     res.status(500).json({ error: error.message });
   }
 });

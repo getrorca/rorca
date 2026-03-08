@@ -56,6 +56,7 @@ import { loadRorcaConfig } from './rorca-config';
 import { PersonaRegistry } from './agent-personas';
 import { loadMonorepoApps, type MonorepoPackage } from './workspace-echolocation';
 import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
+import { logger } from './logger';
 import {
   initRunState,
   readRunState,
@@ -484,7 +485,7 @@ function buildPrompt(
     if (persona) {
       personaSection = `\n## Agent Persona: ${persona.metadata.name}\n${persona.promptText}\n`;
     } else {
-      console.warn(`  [persona] Persona "${story.persona}" not found in registry — proceeding without injection`);
+      logger.warn(`  [persona] Persona "${story.persona}" not found in registry — proceeding without injection`);
     }
   }
 
@@ -683,7 +684,7 @@ function spawnClaude(
     child.on('error', (err) => {
       clearTimeout(timer);
       logStream.end();
-      console.error(`[engine] Failed to spawn claude: ${err.message}`);
+      logger.error(`[engine] Failed to spawn claude: ${err.message}`);
       resolve({ exitCode: 1, stderrTail: err.message, elapsedMs: Date.now() - startTime });
     });
 
@@ -779,7 +780,7 @@ function spawnOpenCode(
     child.on('error', (err) => {
       clearTimeout(timer);
       logStream.end();
-      console.error(`[engine] Failed to spawn opencode: ${err.message}`);
+      logger.error(`[engine] Failed to spawn opencode: ${err.message}`);
       resolve({ exitCode: 1, stderrTail: err.message, elapsedMs: Date.now() - startTime });
     });
 
@@ -860,7 +861,7 @@ function spawnCodex(
     child.on('error', (err) => {
       clearTimeout(timer);
       logStream.end();
-      console.error(`[engine] Failed to spawn codex: ${err.message}`);
+      logger.error(`[engine] Failed to spawn codex: ${err.message}`);
       resolve({ exitCode: 1, stderrTail: err.message, elapsedMs: Date.now() - startTime });
     });
 
@@ -1086,7 +1087,7 @@ function markStoryPassed(jsonPath: string, storyId: string): void {
   }
 
   fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-  console.log(`Marked ${storyId} as passed`);
+  logger.info(`Marked ${storyId} as passed`);
 }
 
 function markStorySkipped(jsonPath: string, storyId: string): void {
@@ -1103,7 +1104,7 @@ function markStorySkipped(jsonPath: string, storyId: string): void {
   }
 
   fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-  console.log(`Marked ${storyId} as skipped`);
+  logger.info(`Marked ${storyId} as skipped`);
 }
 
 /** CA-011: Revert a story's passed status to needs_revision (adversarial review blocked it). */
@@ -1122,7 +1123,7 @@ function markStoryNeedsRevision(jsonPath: string, storyId: string): void {
   }
 
   fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-  console.log(`Marked ${storyId} as needs_revision`);
+  logger.info(`Marked ${storyId} as needs_revision`);
 }
 
 // ─── Git Commit ─────────────────────────────────────────────────────────────
@@ -1145,7 +1146,7 @@ function gitCommitStory(
     try {
       execSync('git push origin HEAD', { cwd, env, stdio: 'pipe', timeout: 60_000 });
     } catch {
-      console.log('  Push failed (will retry next iteration)');
+      logger.info('  Push failed (will retry next iteration)');
     }
   } catch {
     // git commit may fail if nothing to commit — that's OK
@@ -1176,24 +1177,24 @@ function runGate(cwd: string): GateResult {
     // either doesn't use TypeScript or hasn't been set up yet (scaffolding).
     const hasTsConfig = fs.existsSync(path.join(cwd, 'tsconfig.json'));
     if (!hasTsConfig) {
-      console.log('  [gate] no tsconfig.json found — skipping typecheck gate');
+      logger.info('  [gate] no tsconfig.json found — skipping typecheck gate');
     } else {
-      console.log('  [gate] Running tsc --noEmit...');
+      logger.info('  [gate] Running tsc --noEmit...');
       try {
         execSync('npx tsc --noEmit', { cwd, env, stdio: 'pipe', timeout: GATE_TIMEOUT_MS });
-        console.log('  [gate] tsc passed');
+        logger.info('  [gate] tsc passed');
       } catch (err: unknown) {
         const stderr = (err as { stderr?: Buffer })?.stderr?.toString('utf8') ?? '';
-        console.log(`  [gate] tsc FAILED${isWarningMode ? ' (warning mode — continuing)' : ''}`);
+        logger.info(`  [gate] tsc FAILED${isWarningMode ? ' (warning mode — continuing)' : ''}`);
         if (!isWarningMode) {
           return { passed: false, reason: 'typecheck', output: stderr.slice(0, 2000) };
         }
         // Warning mode — log the failure but don't block the story
-        console.log(`  [gate] tsc errors (non-blocking):\n${stderr.slice(0, 500)}`);
+        logger.info(`  [gate] tsc errors (non-blocking):\n${stderr.slice(0, 500)}`);
       }
     }
   } else {
-    console.log('  [gate] typecheck gate disabled in .rorca/config.json');
+    logger.info('  [gate] typecheck gate disabled in .rorca/config.json');
   }
 
 
@@ -1240,11 +1241,11 @@ function createStoryWorktree(
       }
     }
 
-    console.log(`  [worktree] Created ${worktreePath} (${branchName})`);
+    logger.info(`  [worktree] Created ${worktreePath} (${branchName})`);
     return { storyId, worktreePath, branchName };
   } catch (err: unknown) {
     const msg = (err as Error).message ?? String(err);
-    console.error(`  [worktree] FAILED to create worktree for ${storyId}: ${msg}`);
+    logger.error(`  [worktree] FAILED to create worktree for ${storyId}: ${msg}`);
     return null;
   }
 }
@@ -1259,10 +1260,10 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
     if (status.length > 0) {
       execSync('git add -A', { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 10_000 });
       execSync('git commit -m "chore: commit runtime files before merge" --allow-empty', { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 15_000 });
-      console.log(`  [worktree] Committed dirty working tree before merge`);
+      logger.info(`  [worktree] Committed dirty working tree before merge`);
     }
   } catch (err: unknown) {
-    console.warn(`  [worktree] Could not pre-commit working tree (proceeding anyway): ${(err as Error).message}`);
+    logger.warn(`  [worktree] Could not pre-commit working tree (proceeding anyway): ${(err as Error).message}`);
   }
 
   try {
@@ -1270,11 +1271,11 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
       `git merge --no-ff "${wt.branchName}" -m "merge: ${wt.storyId} from worktree"`,
       { cwd: workspaceCwd, env, stdio: 'pipe', timeout: 120_000 },
     );
-    console.log(`  [worktree] Merged ${wt.branchName} into workspace`);
+    logger.info(`  [worktree] Merged ${wt.branchName} into workspace`);
     return true;
   } catch (err: unknown) {
     const msg = (err as Error).message ?? String(err);
-    console.error(`  [worktree] MERGE FAILED for ${wt.branchName}: ${msg}`);
+    logger.error(`  [worktree] MERGE FAILED for ${wt.branchName}: ${msg}`);
     try { execSync('git merge --abort', { cwd: workspaceCwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
     return false;
   }
@@ -1311,7 +1312,7 @@ async function autoResolveConflicts(
     return { resolved: true, resolvedFiles: [] };
   }
 
-  console.log(`  [merge] ${conflictingFiles.length} conflicting file(s): ${conflictingFiles.join(', ')}`);
+  logger.info(`  [merge] ${conflictingFiles.length} conflicting file(s): ${conflictingFiles.join(', ')}`);
 
   // Fast-path: tracking files (run-state, progress) are always safe to resolve with --theirs.
   // These are written by the engine at runtime — they carry no meaningful source changes.
@@ -1326,9 +1327,9 @@ async function autoResolveConflicts(
       execSync(`git checkout --theirs "${file}"`, { cwd, env, stdio: 'pipe' });
       execSync(`git add "${file}"`, { cwd, env, stdio: 'pipe' });
       resolvedFiles.push(file);
-      console.log(`  [merge] Resolved tracking file ${file} (--theirs, no LLM needed)`);
+      logger.info(`  [merge] Resolved tracking file ${file} (--theirs, no LLM needed)`);
     } catch (err: unknown) {
-      console.error(`  [merge] Failed to resolve tracking file ${file}: ${(err as Error).message}`);
+      logger.error(`  [merge] Failed to resolve tracking file ${file}: ${(err as Error).message}`);
       return { resolved: false, resolvedFiles };
     }
   }
@@ -1347,7 +1348,7 @@ async function autoResolveConflicts(
     try {
       conflictContent = fs.readFileSync(absFile, 'utf8');
     } catch {
-      console.error(`  [merge] Cannot read conflicting file: ${file}`);
+      logger.error(`  [merge] Cannot read conflicting file: ${file}`);
       return { resolved: false, resolvedFiles };
     }
 
@@ -1385,7 +1386,7 @@ async function autoResolveConflicts(
     });
 
     if (resolvedContent === null) {
-      console.error(`  [merge] Auto-resolution FAILED for ${file}`);
+      logger.error(`  [merge] Auto-resolution FAILED for ${file}`);
       return { resolved: false, resolvedFiles };
     }
 
@@ -1393,9 +1394,9 @@ async function autoResolveConflicts(
       fs.writeFileSync(absFile, resolvedContent);
       execSync(`git add "${file}"`, { cwd, env, stdio: 'pipe' });
       resolvedFiles.push(file);
-      console.log(`  [merge] Resolved ${file}`);
+      logger.info(`  [merge] Resolved ${file}`);
     } catch (err: unknown) {
-      console.error(`  [merge] Failed to write/stage resolved ${file}: ${(err as Error).message}`);
+      logger.error(`  [merge] Failed to write/stage resolved ${file}: ${(err as Error).message}`);
       return { resolved: false, resolvedFiles };
     }
   }
@@ -1424,14 +1425,14 @@ async function mergeWave(
     if (status.length > 0) {
       execSync('git add -A', { cwd, env, stdio: 'pipe', timeout: 10_000 });
       execSync('git commit -m "chore: commit runtime files before wave merge" --allow-empty', { cwd, env, stdio: 'pipe', timeout: 15_000 });
-      console.log(`  [merge] Committed dirty working tree before wave ${waveIndex} merge`);
+      logger.info(`  [merge] Committed dirty working tree before wave ${waveIndex} merge`);
     }
   } catch (err: unknown) {
-    console.warn(`  [merge] Could not pre-commit working tree (proceeding anyway): ${(err as Error).message}`);
+    logger.warn(`  [merge] Could not pre-commit working tree (proceeding anyway): ${(err as Error).message}`);
   }
 
   for (const wt of sorted) {
-    console.log(`  [merge] Merging ${wt.branchName} (${wt.storyId})...`);
+    logger.info(`  [merge] Merging ${wt.branchName} (${wt.storyId})...`);
 
     let mergeClean: boolean;
     try {
@@ -1447,14 +1448,14 @@ async function mergeWave(
     if (mergeClean) {
       try {
         execSync(`git commit -m "merge: ${wt.storyId}"`, { cwd, env, stdio: 'pipe', timeout: 30_000 });
-        console.log(`  [merge] ${wt.storyId} merged cleanly`);
+        logger.info(`  [merge] ${wt.storyId} merged cleanly`);
       } catch {
-        console.log(`  [merge] ${wt.storyId} merged (no changes to commit)`);
+        logger.info(`  [merge] ${wt.storyId} merged (no changes to commit)`);
       }
       continue;
     }
 
-    console.log(`  [merge] Conflict detected for ${wt.storyId}, attempting auto-resolution...`);
+    logger.info(`  [merge] Conflict detected for ${wt.storyId}, attempting auto-resolution...`);
     const resolution = await autoResolveConflicts(cwd, wt.storyId, logDir);
 
     if (resolution.resolved) {
@@ -1470,16 +1471,16 @@ async function mergeWave(
           { cwd, env, stdio: 'pipe', timeout: 30_000 },
         );
         totalConflictsResolved += resolution.resolvedFiles.length;
-        console.log(`  [merge] ${wt.storyId} merged with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+        logger.info(`  [merge] ${wt.storyId} merged with ${resolution.resolvedFiles.length} conflict(s) resolved`);
       } catch (commitErr: unknown) {
         // Fallback: try git merge --continue
-        console.warn(`  [merge] git commit failed, trying merge --continue: ${(commitErr as Error).message}`);
+        logger.warn(`  [merge] git commit failed, trying merge --continue: ${(commitErr as Error).message}`);
         try {
           execSync('git -c core.editor=true merge --continue', { cwd, env, stdio: 'pipe', timeout: 30_000 });
           totalConflictsResolved += resolution.resolvedFiles.length;
-          console.log(`  [merge] ${wt.storyId} merged via --continue with ${resolution.resolvedFiles.length} conflict(s) resolved`);
+          logger.info(`  [merge] ${wt.storyId} merged via --continue with ${resolution.resolvedFiles.length} conflict(s) resolved`);
         } catch (contErr: unknown) {
-          console.error(`  [merge] Commit after resolution failed for ${wt.storyId}: ${(contErr as Error).message}`);
+          logger.error(`  [merge] Commit after resolution failed for ${wt.storyId}: ${(contErr as Error).message}`);
           try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
 
           let conflictingFiles: string[] = [];
@@ -1494,7 +1495,7 @@ async function mergeWave(
         }
       }
     } else {
-      console.error(`  [merge] Auto-resolution failed for ${wt.storyId} — continuing with other stories`);
+      logger.error(`  [merge] Auto-resolution failed for ${wt.storyId} — continuing with other stories`);
       try { execSync('git merge --abort', { cwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
 
       let conflictingFiles: string[] = [];
@@ -1531,7 +1532,7 @@ function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
   try {
     execSync(`git branch -D "${wt.branchName}"`, { cwd: workspaceCwd, stdio: 'pipe', timeout: 10_000 });
   } catch { /* branch may already be gone */ }
-  console.log(`  [worktree] Removed ${wt.worktreePath}`);
+  logger.info(`  [worktree] Removed ${wt.worktreePath}`);
 }
 
 // ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
@@ -1747,7 +1748,7 @@ async function runAdversarialReview(
 
   const diff = getLastCommitDiff(effectiveCwd);
   if (!diff.trim()) {
-    console.log(`  [review] No diff found for ${story.id} — skipping review passes`);
+    logger.info(`  [review] No diff found for ${story.id} — skipping review passes`);
     return [];
   }
 
@@ -1756,11 +1757,11 @@ async function runAdversarialReview(
   for (const reviewerName of reviewers) {
     const persona = personaRegistry.getPersona(reviewerName);
     if (!persona) {
-      console.warn(`  [review] Reviewer persona "${reviewerName}" not found — skipping`);
+      logger.warn(`  [review] Reviewer persona "${reviewerName}" not found — skipping`);
       continue;
     }
 
-    console.log(`  [review] Running ${reviewerName} review for ${story.id}...`);
+    logger.info(`  [review] Running ${reviewerName} review for ${story.id}...`);
 
     const reviewPrompt = buildReviewPrompt(story.id, story.title, diff, persona);
     const reviewLogFile = path.join(logDir, `${story.id}_review_${reviewerName}.log`);
@@ -1783,7 +1784,7 @@ async function runAdversarialReview(
       } catch { /* empty output */ }
 
       if (agentResult.exitCode !== 0) {
-        console.warn(`  [review] ${reviewerName} exited with code ${agentResult.exitCode} — treating as no blockers`);
+        logger.warn(`  [review] ${reviewerName} exited with code ${agentResult.exitCode} — treating as no blockers`);
         results.push({
           reviewerName,
           issues: [],
@@ -1802,9 +1803,9 @@ async function runAdversarialReview(
 
       const blockerCount = review.blockers.length;
       const issueCount = review.issues.length;
-      console.log(`  [review] ${reviewerName}: ${blockerCount} blocker(s), ${issueCount} issue(s), ${review.suggestions.length} suggestion(s)`);
+      logger.info(`  [review] ${reviewerName}: ${blockerCount} blocker(s), ${issueCount} issue(s), ${review.suggestions.length} suggestion(s)`);
     } catch (err: any) {
-      console.warn(`  [review] ${reviewerName} review failed: ${err.message}`);
+      logger.warn(`  [review] ${reviewerName} review failed: ${err.message}`);
       results.push({
         reviewerName,
         issues: [],
@@ -1859,7 +1860,7 @@ async function executeStory(
       const requiredTools = detectRequiredTools(capStory);
       const betterEngine = findCapableEngine(requiredTools, effectiveAgent);
       if (betterEngine) {
-        console.log(`  [capability] Rerouting ${story.id} from ${effectiveAgent} → ${betterEngine} (missing: ${capResult.missingTools.join(', ')})`);
+        logger.info(`  [capability] Rerouting ${story.id} from ${effectiveAgent} → ${betterEngine} (missing: ${capResult.missingTools.join(', ')})`);
         recordDecision(effectiveCwd, {
           storyId: story.id, timestamp: new Date().toISOString(),
           type: 'capability_reroute', description: `Rerouted ${effectiveAgent} → ${betterEngine} (missing: ${capResult.missingTools.join(', ')})`,
@@ -1929,15 +1930,15 @@ async function executeStory(
       // Resolve model from tier
       const provider = extractProvider(config.agentModel);
       currentModel = `${provider}/${resolveModelId(escState.currentTier, provider, config.cwd)}`;
-      console.log(`  [escalation] Tier: ${escState.currentTier} → model: ${currentModel}`);
+      logger.info(`  [escalation] Tier: ${escState.currentTier} → model: ${currentModel}`);
     }
   }
 
-  console.log(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
-  if (worktreeInfo) console.log(`  Worktree: ${worktreeInfo.worktreePath}`);
-  if (story.persona) console.log(`  Persona: ${story.persona}`);
-  if (story.reviewers?.length) console.log(`  Reviewers: ${story.reviewers.join(', ')}`);
-  console.log(`  Timeout: ${timeoutMin}m`);
+  logger.info(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
+  if (worktreeInfo) logger.info(`  Worktree: ${worktreeInfo.worktreePath}`);
+  if (story.persona) logger.info(`  Persona: ${story.persona}`);
+  if (story.reviewers?.length) logger.info(`  Reviewers: ${story.reviewers.join(', ')}`);
+  logger.info(`  Timeout: ${timeoutMin}m`);
 
   // CIE-004: Route context for this story
   // CIE-017: Load monorepo apps for cross-app story detection
@@ -1965,11 +1966,11 @@ async function executeStory(
       contextFilePath = writeContextFile(contextPayload, effectiveCwd);
       injectedContextFiles = contextPayload.injectedFiles;
       const appCount = monorepoApps?.length ?? 0;
-      console.log(`  [context] Routed ${contextPayload.totalTokens} tokens (${contextPayload.globals.length}g/${contextPayload.scoped.length}s/${contextPayload.tagged.length}t)${appCount > 0 ? ` [monorepo: ${appCount} apps]` : ''}`);
+      logger.info(`  [context] Routed ${contextPayload.totalTokens} tokens (${contextPayload.globals.length}g/${contextPayload.scoped.length}s/${contextPayload.tagged.length}t)${appCount > 0 ? ` [monorepo: ${appCount} apps]` : ''}`);
     }
   } catch (err: any) {
     // Non-fatal — proceed without routed context
-    console.warn(`  [context] Router failed: ${err.message}`);
+    logger.warn(`  [context] Router failed: ${err.message}`);
   }
 
   // CIE-006: Load AGENTS.md roles and match to this story
@@ -1982,12 +1983,12 @@ async function executeStory(
       if (matches.length > 0) {
         assignedRole = matches[0];
         roleSection = buildRolePromptSection(assignedRole.role);
-        console.log(`  [agents] Assigned role: ${assignedRole.role.name} (score: ${assignedRole.score})`);
+        logger.info(`  [agents] Assigned role: ${assignedRole.role.name} (score: ${assignedRole.score})`);
       }
     }
   } catch (err: any) {
     // Non-fatal — proceed without role constraints
-    console.warn(`  [agents] Role matching failed: ${err.message}`);
+    logger.warn(`  [agents] Role matching failed: ${err.message}`);
   }
 
   // SK-003: Load matched skills from .rorca/skills/ based on story.suggestedSkills
@@ -1999,7 +2000,7 @@ async function executeStory(
     skillsSection = formatSkillsSection(resolvedSkills);
     if (resolvedSkills.length > 0) {
       const totalSkillTokens = resolvedSkills.reduce((sum, s) => sum + s.tokens, 0);
-      console.log(`  [skills] Injected ${resolvedSkills.length} skill(s): ${resolvedSkills.map(s => `${s.name}(${s.relevance})`).join(', ')} (${totalSkillTokens} tokens)`);
+      logger.info(`  [skills] Injected ${resolvedSkills.length} skill(s): ${resolvedSkills.map(s => `${s.name}(${s.relevance})`).join(', ')} (${totalSkillTokens} tokens)`);
     }
   }
   const activeSkillNames = resolvedSkills.map(s => s.name);
@@ -2090,7 +2091,7 @@ async function executeStory(
         const orchConfig = loadOrchestrationConfig(config.cwd);
         const fallback = orchConfig.fallbackEngine;
         if (fallback && fallback !== effectiveAgent && !reroutedStories.has(story.id)) {
-          console.log(`${story.id} rate limited ${rateLimitAttempts} times on ${effectiveAgent} — rerouting to ${fallback}`);
+          logger.info(`${story.id} rate limited ${rateLimitAttempts} times on ${effectiveAgent} — rerouting to ${fallback}`);
 
           reroutedStories.set(story.id, {
             storyId: story.id,
@@ -2121,7 +2122,7 @@ async function executeStory(
           );
         }
 
-        console.log(`${story.id} rate limited ${rateLimitAttempts} times — exhausted. Marking failed.`);
+        logger.info(`${story.id} rate limited ${rateLimitAttempts} times — exhausted. Marking failed.`);
         markStorySkipped(config.jsonPath, story.id);
         rsMarkStoryFailed(effectiveCwd, {
           storyId: story.id, title: story.title, status: 'failed',
@@ -2143,7 +2144,7 @@ async function executeStory(
       }
 
       const backoffMs = RATE_LIMIT_BACKOFF_MS[rateLimitAttempts - 1] ?? RATE_LIMIT_BACKOFF_MS[RATE_LIMIT_BACKOFF_MS.length - 1];
-      console.log(`${story.id} rate limited (attempt ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES}). Retrying in ${backoffMs / 1000}s...`);
+      logger.info(`${story.id} rate limited (attempt ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES}). Retrying in ${backoffMs / 1000}s...`);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_rate_limited', workspaceId, {
@@ -2166,13 +2167,13 @@ async function executeStory(
 
     // ── Exit code 0: success ──────────────────────────────────────────
     if (result.exitCode === 0) {
-      console.log(`${story.id} completed (exit 0)`);
+      logger.info(`${story.id} completed (exit 0)`);
 
       const skipGate = config.dryRun || process.env.RORCA_SKIP_GATE === '1';
       const gate = skipGate ? { passed: true } as GateResult : runGate(effectiveCwd);
 
       if (!gate.passed) {
-        console.log(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
+        logger.info(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
 
         // Gate failure counts toward escalation retries too
         const escState = escalationStates?.get(story.id);
@@ -2194,7 +2195,7 @@ async function executeStory(
 
               const provider = extractProvider(config.agentModel);
               currentModel = `${provider}/${resolveModelId(nextTier, provider, config.cwd)}`;
-              console.log(`${story.id} gate failed — escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
+              logger.info(`${story.id} gate failed — escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
               recordDecision(effectiveCwd, {
                 storyId: story.id, timestamp: new Date().toISOString(),
                 type: 'escalation', description: `Gate ${gate.reason} failed — escalated ${fromTier} → ${nextTier}`,
@@ -2239,7 +2240,7 @@ async function executeStory(
         }
 
         if (currentRetries >= MAX_RETRIES) {
-          console.log(`${story.id} failed gate after ${MAX_RETRIES} attempts. Skipping.`);
+          logger.info(`${story.id} failed gate after ${MAX_RETRIES} attempts. Skipping.`);
         }
         return 'failed';
       }
@@ -2262,7 +2263,7 @@ async function executeStory(
       });
       writeProgressTxt(effectiveCwd);
 
-      console.log(`Committing ${story.id}...`);
+      logger.info(`Committing ${story.id}...`);
       gitCommitStory(effectiveCwd, story.id, story.title, mode);
 
       // CIE-006: Post-commit violation detection
@@ -2271,9 +2272,9 @@ async function executeStory(
           const changedFiles = getLastCommitFiles(effectiveCwd);
           const report = detectViolations(changedFiles, assignedRole.role, story.id);
           if (report.violations.length > 0) {
-            console.warn(`  [agents] ${report.violations.length} violation(s) for ${story.id} (role: ${report.roleName}):`);
+            logger.warn(`  [agents] ${report.violations.length} violation(s) for ${story.id} (role: ${report.roleName}):`);
             for (const v of report.violations) {
-              console.warn(`    - ${v.file} matched avoids pattern: ${v.pattern}`);
+              logger.warn(`    - ${v.file} matched avoids pattern: ${v.pattern}`);
             }
             // Emit violation WAL event (warning, not blocking)
             if (workspaceId) {
@@ -2286,7 +2287,7 @@ async function executeStory(
             }
           }
         } catch (err: any) {
-          console.warn(`  [agents] Violation check failed: ${err.message}`);
+          logger.warn(`  [agents] Violation check failed: ${err.message}`);
         }
       }
 
@@ -2301,7 +2302,7 @@ async function executeStory(
           const totalBlockers = reviewResults.reduce((sum, r) => sum + r.blockers.length, 0);
 
           if (totalBlockers > 0) {
-            console.log(`  [review] ${totalBlockers} blocker(s) found — marking ${story.id} as needs_revision`);
+            logger.info(`  [review] ${totalBlockers} blocker(s) found — marking ${story.id} as needs_revision`);
 
             // Revert the passed status — story needs revision
             markStoryNeedsRevision(config.jsonPath, story.id);
@@ -2326,7 +2327,7 @@ async function executeStory(
             return 'failed';
           }
         } catch (err: any) {
-          console.warn(`  [review] Adversarial review failed: ${err.message} — proceeding with pass`);
+          logger.warn(`  [review] Adversarial review failed: ${err.message} — proceeding with pass`);
         }
       }
 
@@ -2344,8 +2345,8 @@ async function executeStory(
 
     // ── Exit code 124: timeout ────────────────────────────────────────
     if (result.exitCode === 124) {
-      console.log(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
-      console.log(`   Log: ${storyLogFile}`);
+      logger.info(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
+      logger.info(`   Log: ${storyLogFile}`);
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -2375,8 +2376,8 @@ async function executeStory(
 
     // Non-retryable errors (wrong API key, model not found, not installed) — fail immediately
     if (!classified.retryable) {
-      console.log(`${story.id} failed (non-retryable): ${classified.category} — ${classified.message}`);
-      console.log(`   Log: ${storyLogFile}`);
+      logger.info(`${story.id} failed (non-retryable): ${classified.category} — ${classified.message}`);
+      logger.info(`   Log: ${storyLogFile}`);
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -2422,7 +2423,7 @@ async function executeStory(
           const provider = extractProvider(config.agentModel);
           currentModel = `${provider}/${resolveModelId(nextTier, provider, config.cwd)}`;
 
-          console.log(`${story.id} escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
+          logger.info(`${story.id} escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
           recordDecision(effectiveCwd, {
             storyId: story.id, timestamp: new Date().toISOString(),
             type: 'escalation', description: `${classified.category} — escalated ${fromTier} → ${nextTier}`,
@@ -2449,10 +2450,10 @@ async function executeStory(
         }
 
         // At opus (top tier) and still failing — give up
-        console.log(`${story.id} failed at top tier (${escState.currentTier}) after ${escState.retriesOnCurrentTier} attempts. Skipping.`);
-        console.log(`   Escalation history: ${escState.escalationHistory.map(h => `${h.fromTier}→${h.toTier}`).join(', ') || 'none'}`);
-        console.log(`   Log: ${storyLogFile}`);
-        console.log(`   Error: ${classified.message}`);
+        logger.info(`${story.id} failed at top tier (${escState.currentTier}) after ${escState.retriesOnCurrentTier} attempts. Skipping.`);
+        logger.info(`   Escalation history: ${escState.escalationHistory.map(h => `${h.fromTier}→${h.toTier}`).join(', ') || 'none'}`);
+        logger.info(`   Log: ${storyLogFile}`);
+        logger.info(`   Error: ${classified.message}`);
         markStorySkipped(config.jsonPath, story.id);
         rsMarkStoryFailed(effectiveCwd, {
           storyId: story.id, title: story.title, status: 'failed',
@@ -2480,9 +2481,9 @@ async function executeStory(
       }
 
       // Still have retries on current tier
-      console.log(`${story.id} failed on ${escState.currentTier} (attempt ${escState.retriesOnCurrentTier}/${maxOnTier}): ${classified.category}`);
-      console.log(`   Log: ${storyLogFile}`);
-      console.log(`   Error: ${classified.message}`);
+      logger.info(`${story.id} failed on ${escState.currentTier} (attempt ${escState.retriesOnCurrentTier}/${maxOnTier}): ${classified.category}`);
+      logger.info(`   Log: ${storyLogFile}`);
+      logger.info(`   Error: ${classified.message}`);
       return 'failed';
     }
 
@@ -2491,9 +2492,9 @@ async function executeStory(
     retryCounts.set(story.id, currentRetries);
 
     if (currentRetries >= MAX_RETRIES) {
-      console.log(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
-      console.log(`   Log: ${storyLogFile}`);
-      console.log(`   Error: ${classified.message}`);
+      logger.info(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
+      logger.info(`   Log: ${storyLogFile}`);
+      logger.info(`   Error: ${classified.message}`);
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -2517,9 +2518,9 @@ async function executeStory(
       return 'failed';
     }
 
-    console.log(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES}): ${classified.category}`);
-    console.log(`   Log: ${storyLogFile}`);
-    console.log(`   Error: ${classified.message}`);
+    logger.info(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES}): ${classified.category}`);
+    logger.info(`   Log: ${storyLogFile}`);
+    logger.info(`   Error: ${classified.message}`);
     return 'failed';
   }
 }
@@ -2591,11 +2592,11 @@ function computeBlockedStories(
 async function main(): Promise<void> {
   const config = parseArgs();
 
-  console.log(`[engine] Agent: ${config.agentType}${config.agentModel ? ` (model: ${config.agentModel})` : ''}`);
-  if (config.attachAddr) console.log(`[engine] OpenCode attach: ${config.attachAddr}`);
+  logger.info(`[engine] Agent: ${config.agentType}${config.agentModel ? ` (model: ${config.agentModel})` : ''}`);
+  if (config.attachAddr) logger.info(`[engine] OpenCode attach: ${config.attachAddr}`);
 
   if (!fs.existsSync(config.jsonPath)) {
-    console.error(`Error: JSON file not found: ${config.jsonPath}`);
+    logger.error(`Error: JSON file not found: ${config.jsonPath}`);
     process.exit(1);
   }
 
@@ -2614,24 +2615,24 @@ async function main(): Promise<void> {
   const requiredEngines = scanRequiredEngines(stories, config.agentType);
   const engineCounts = countStoriesByEngine(stories, config.agentType);
 
-  console.log('========================================');
-  console.log(`  Rorca Engine — ${modeLabel}`);
-  console.log('========================================');
-  console.log('');
-  console.log(`Progress: ${progress.passed}/${progress.total}`);
-  console.log(`Agent: ${config.agentType}`);
-  console.log(`Parallelism: ${config.parallelism}`);
-  console.log(`JSON: ${config.jsonPath}`);
-  if (playbook) console.log(`Playbook: ${playbook}`);
+  logger.info('========================================');
+  logger.info(`  Rorca Engine — ${modeLabel}`);
+  logger.info('========================================');
+  logger.info('');
+  logger.info(`Progress: ${progress.passed}/${progress.total}`);
+  logger.info(`Agent: ${config.agentType}`);
+  logger.info(`Parallelism: ${config.parallelism}`);
+  logger.info(`JSON: ${config.jsonPath}`);
+  if (playbook) logger.info(`Playbook: ${playbook}`);
   if (requiredEngines.size > 1) {
     const breakdown = [...engineCounts.entries()].map(([e, n]) => `${e}:${n}`).join(', ');
-    console.log(`Engines: ${breakdown} (multi-engine run)`);
+    logger.info(`Engines: ${breakdown} (multi-engine run)`);
   }
   const orchConfig = loadOrchestrationConfig(config.cwd);
   if (orchConfig.fallbackEngine) {
-    console.log(`Fallback engine: ${orchConfig.fallbackEngine} (rate limit overflow)`);
+    logger.info(`Fallback engine: ${orchConfig.fallbackEngine} (rate limit overflow)`);
   }
-  console.log('');
+  logger.info('');
 
   const workspaceId = await resolveWorkspaceId(config.port, config.cwd);
   const retryCounts = new Map<string, number>();
@@ -2658,7 +2659,7 @@ async function main(): Promise<void> {
     }
     if (staleFlags > 0) {
       fs.writeFileSync(config.jsonPath, JSON.stringify(freshSpec, null, 2) + '\n');
-      console.log(`[engine] Cleared stale skipped/blocked flags from ${staleFlags} stor${staleFlags === 1 ? 'y' : 'ies'}`);
+      logger.info(`[engine] Cleared stale skipped/blocked flags from ${staleFlags} stor${staleFlags === 1 ? 'y' : 'ies'}`);
     }
   }
 
@@ -2669,8 +2670,8 @@ async function main(): Promise<void> {
   const resumeCtx = getResumeContext(config.cwd, specId);
 
   process.on('SIGINT', () => {
-    console.log('');
-    console.log('Engine stopped by user.');
+    logger.info('');
+    logger.info('Engine stopped by user.');
     process.exit(0);
   });
 
@@ -2683,14 +2684,14 @@ async function main(): Promise<void> {
     const rorcaConfig = loadRorcaConfig(config.cwd);
     if (rorcaConfig.personas.disabled.length > 0) {
       personaRegistry.setDisabled(rorcaConfig.personas.disabled);
-      console.log(`[persona] ${rorcaConfig.personas.disabled.length} persona(s) disabled`);
+      logger.info(`[persona] ${rorcaConfig.personas.disabled.length} persona(s) disabled`);
     }
     const personaCount = personaRegistry.getAll().length;
     if (personaCount > 0) {
-      console.log(`[persona] Discovered ${personaCount} active persona(s)`);
+      logger.info(`[persona] Discovered ${personaCount} active persona(s)`);
     }
     for (const w of personaRegistry.getWarnings()) {
-      console.warn(`[persona] Warning: ${w.filePath}: ${w.reason}`);
+      logger.warn(`[persona] Warning: ${w.filePath}: ${w.reason}`);
     }
   }
 
@@ -2702,7 +2703,7 @@ async function main(): Promise<void> {
 
   // ─── Sequential execution path (N = 1) ────────────────────────────
   if (resumeCtx.isResume) {
-    console.log(`[engine] Resuming from story ${resumeCtx.resumedFromStory} (${resumeCtx.passedStoryIds.size} stories already passed)`);
+    logger.info(`[engine] Resuming from story ${resumeCtx.resumedFromStory} (${resumeCtx.passedStoryIds.size} stories already passed)`);
   }
   let iteration = 0;
 
@@ -2717,7 +2718,7 @@ async function main(): Promise<void> {
     if (config.specificStory) {
       story = currentStories.find(s => s.id === config.specificStory) ?? null;
       if (!story) {
-        console.error(`Story ${config.specificStory} not found!`);
+        logger.error(`Story ${config.specificStory} not found!`);
         process.exit(1);
       }
     } else {
@@ -2726,21 +2727,21 @@ async function main(): Promise<void> {
 
     if (!story) {
       const finalProgress = getProgress(currentStories);
-      console.log('');
+      logger.info('');
       if (finalProgress.passed === 0 && finalProgress.total > 0) {
         // No stories executed — likely a dependency resolution issue
         const blocked = currentStories.filter(s => !isPassed(s) && !s.skipped && !s.excluded);
-        console.error(`ERROR: 0/${finalProgress.total} stories executed — all stories blocked!`);
+        logger.error(`ERROR: 0/${finalProgress.total} stories executed — all stories blocked!`);
         for (const b of blocked) {
           const deps = b.dependsOn ?? [];
           const unmet = deps.filter(d => !currentStories.some(s => s.id === d && isPassed(s)));
-          console.error(`  ${b.id}: blocked by unresolved deps: [${unmet.join(', ')}]`);
+          logger.error(`  ${b.id}: blocked by unresolved deps: [${unmet.join(', ')}]`);
         }
         writeProgressTxt(config.cwd);
         archiveRunState(config.cwd, config.runId);
         process.exit(1);
       }
-      console.log(`All stories complete! ${finalProgress.passed}/${finalProgress.total}`);
+      logger.info(`All stories complete! ${finalProgress.passed}/${finalProgress.total}`);
       // CIE-007: Archive run-state.json and write final progress.txt
       writeProgressTxt(config.cwd);
       archiveRunState(config.cwd, config.runId);
@@ -2751,17 +2752,17 @@ async function main(): Promise<void> {
     const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
     const storyAgent = resolveStoryAgent(story, config.agentType);
-    console.log('------------------------------------------');
-    console.log(`[${mode}] Iteration ${iteration} | ${story.id}: ${story.title} (agent: ${storyAgent})`);
-    console.log(`  Progress: ${currentProgress.passed}/${currentProgress.total}`);
-    console.log('------------------------------------------');
+    logger.info('------------------------------------------');
+    logger.info(`[${mode}] Iteration ${iteration} | ${story.id}: ${story.title} (agent: ${storyAgent})`);
+    logger.info(`  Progress: ${currentProgress.passed}/${currentProgress.total}`);
+    logger.info('------------------------------------------');
 
     if (config.dryRun) {
-      console.log(`  [DRY RUN] Would execute: ${story.id}`);
-      console.log(`  Description: ${story.description}`);
+      logger.info(`  [DRY RUN] Would execute: ${story.id}`);
+      logger.info(`  Description: ${story.description}`);
       const ac = getAcceptance(story);
-      if (ac) console.log(`  Acceptance: ${ac}`);
-      console.log('');
+      if (ac) logger.info(`  Acceptance: ${ac}`);
+      logger.info('');
       process.exit(0);
     }
 
@@ -2776,7 +2777,7 @@ async function main(): Promise<void> {
       process.exit(seqResult === 'passed' ? 0 : 1);
     }
 
-    console.log('');
+    logger.info('');
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
 }
@@ -2809,18 +2810,18 @@ async function runParallel(
   const waveResult = compileWaves(waveStories);
 
   if (isCycleError(waveResult)) {
-    console.error(`[engine] Dependency cycle detected among stories: ${waveResult.involvedIds.join(', ')}`);
-    console.error(`[engine] Cannot run in parallel mode. Fix dependsOn fields or use --parallelism 1`);
+    logger.error(`[engine] Dependency cycle detected among stories: ${waveResult.involvedIds.join(', ')}`);
+    logger.error(`[engine] Cannot run in parallel mode. Fix dependsOn fields or use --parallelism 1`);
     process.exit(1);
   }
 
   const waves: Wave[] = waveResult;
 
-  console.log(`Compiled ${stories.length} stories into ${waves.length} waves`);
+  logger.info(`Compiled ${stories.length} stories into ${waves.length} waves`);
   for (const wave of waves) {
-    console.log(`  Wave ${wave.index}: ${wave.stories.map(s => s.id).join(', ')}`);
+    logger.info(`  Wave ${wave.index}: ${wave.stories.map(s => s.id).join(', ')}`);
   }
-  console.log('');
+  logger.info('');
 
   if (workspaceId) {
     await emitWalEvent(config.port, 'run_started', workspaceId, {
@@ -2836,9 +2837,9 @@ async function runParallel(
   const processedIds = new Set<string>();
 
   for (const wave of waves) {
-    console.log('==========================================');
-    console.log(`  Wave ${wave.index} — ${wave.stories.length} stories (parallelism=${config.parallelism})`);
-    console.log('==========================================');
+    logger.info('==========================================');
+    logger.info(`  Wave ${wave.index} — ${wave.stories.length} stories (parallelism=${config.parallelism})`);
+    logger.info('==========================================');
 
     const executableStories: UserStory[] = [];
     for (const waveStory of wave.stories) {
@@ -2853,7 +2854,7 @@ async function runParallel(
       const deps = original.dependsOn ?? [];
       const blockers = deps.filter(dep => failedIds.has(dep));
       if (blockers.length > 0) {
-        console.log(`  ${original.id} BLOCKED by: ${blockers.join(', ')}`);
+        logger.info(`  ${original.id} BLOCKED by: ${blockers.join(', ')}`);
         failedIds.add(original.id);
         processedIds.add(original.id);
         markStorySkipped(config.jsonPath, original.id);
@@ -2877,7 +2878,7 @@ async function runParallel(
     }
 
     if (executableStories.length === 0) {
-      console.log('  No executable stories in this wave — skipping');
+      logger.info('  No executable stories in this wave — skipping');
       continue;
     }
 
@@ -2932,18 +2933,18 @@ async function runParallel(
           passedInWave.push(wt);
         }
       } else {
-        console.error(`[engine] Unexpected rejection in wave ${wave.index}:`, settled.reason);
+        logger.error(`[engine] Unexpected rejection in wave ${wave.index}:`, settled.reason);
       }
     }
 
     // Post-wave: merge passed worktrees
     if (passedInWave.length > 0) {
       if (passedInWave.length === 1) {
-        console.log(`  [worktree] Single-story wave — direct merge`);
+        logger.info(`  [worktree] Single-story wave — direct merge`);
         const wt = passedInWave[0];
         const merged = mergeStoryWorktree(config.cwd, wt);
         if (!merged) {
-          console.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
+          logger.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
           failedIds.add(wt.storyId);
           if (workspaceId) {
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -2959,7 +2960,7 @@ async function runParallel(
         }
         removeStoryWorktree(config.cwd, wt);
       } else {
-        console.log(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
+        logger.info(`  [worktree] Merging ${passedInWave.length} passed worktree(s) via wave merge orchestrator...`);
         const mergeResult = await mergeWave(passedInWave, wave.index, config.cwd, logDir);
 
         if (mergeResult.success) {
@@ -2969,7 +2970,7 @@ async function runParallel(
               storiesCount: passedInWave.length, conflictsResolved: mergeResult.conflictsResolved,
             });
           }
-          console.log(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
+          logger.info(`  [merge] Wave ${wave.index} merged successfully (${mergeResult.conflictsResolved} conflict(s) resolved)`);
           // Force-update spec JSON for every story that passed — merge can conflict on
           // this file and lose the passes:true that was written inside each worktree.
           for (const wt of passedInWave) {
@@ -2982,7 +2983,7 @@ async function runParallel(
           const failedStoryIds = new Set(failures.map(f => f.storyId));
 
           for (const failure of failures) {
-            console.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
+            logger.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
             failedIds.add(failure.storyId);
 
             if (workspaceId) {
@@ -3001,8 +3002,8 @@ async function runParallel(
             }
           }
 
-          console.log(`  [merge] ${failures.length} merge failure(s) in wave ${wave.index}. Continuing run — remaining waves unaffected.`);
-          console.log(`  [merge] Failed worktree branches preserved for inspection.`);
+          logger.info(`  [merge] ${failures.length} merge failure(s) in wave ${wave.index}. Continuing run — remaining waves unaffected.`);
+          logger.info(`  [merge] Failed worktree branches preserved for inspection.`);
         }
       }
     }
@@ -3014,7 +3015,7 @@ async function runParallel(
 
     for (const [blockedId, blockers] of newlyBlocked) {
       if (!processedIds.has(blockedId)) {
-        console.log(`  ${blockedId} transitively BLOCKED by: ${blockers.join(', ')}`);
+        logger.info(`  ${blockedId} transitively BLOCKED by: ${blockers.join(', ')}`);
         failedIds.add(blockedId);
         processedIds.add(blockedId);
         markStorySkipped(config.jsonPath, blockedId);
@@ -3034,17 +3035,17 @@ async function runParallel(
       }
     }
 
-    console.log('');
+    logger.info('');
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
 
   const finalSpec: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
   const finalStories = getStories(finalSpec);
   const finalProgress = getProgress(finalStories);
-  console.log('');
-  console.log(`All waves complete! ${finalProgress.passed}/${finalProgress.total} stories passed`);
+  logger.info('');
+  logger.info(`All waves complete! ${finalProgress.passed}/${finalProgress.total} stories passed`);
   if (failedIds.size > 0) {
-    console.log(`Failed/blocked: ${[...failedIds].join(', ')}`);
+    logger.info(`Failed/blocked: ${[...failedIds].join(', ')}`);
   }
   // CIE-007: Archive run-state.json and write final progress.txt
   writeProgressTxt(config.cwd);
@@ -3063,14 +3064,14 @@ async function resolveWorkspaceId(port: number, cwd: string): Promise<string | n
     const list = data.items ?? data.workspaces ?? [];
     const ws = list.find(w => w.path === cwd || cwd.startsWith(w.path));
     if (ws) {
-      console.log(`[engine] Resolved workspace: ${ws.id} (${ws.path})`);
+      logger.info(`[engine] Resolved workspace: ${ws.id} (${ws.path})`);
     } else {
-      console.warn(`[engine] Could not resolve workspace for cwd: ${cwd}`);
-      console.warn(`[engine] Available workspaces: ${list.map(w => w.path).join(', ')}`);
+      logger.warn(`[engine] Could not resolve workspace for cwd: ${cwd}`);
+      logger.warn(`[engine] Available workspaces: ${list.map(w => w.path).join(', ')}`);
     }
     return ws?.id ?? null;
   } catch (err: unknown) {
-    console.error(`[engine] Failed to resolve workspace: ${(err as Error).message}`);
+    logger.error(`[engine] Failed to resolve workspace: ${(err as Error).message}`);
     return null;
   }
 }
@@ -3123,13 +3124,13 @@ function parseArgs(): EngineConfig {
         attachAddr = args[++i];
         break;
       default:
-        console.error(`Unknown arg: ${args[i]}`);
+        logger.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
     }
   }
 
   if (!jsonPath || !cwd || !runId) {
-    console.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>]');
     process.exit(1);
   }
 
@@ -3147,7 +3148,7 @@ function parseArgs(): EngineConfig {
 const _isDirectRun = require.main === module || process.argv[1]?.endsWith('execution-engine.ts');
 if (_isDirectRun) {
   main().catch((err) => {
-    console.error('[engine] Fatal error:', err);
+    logger.error('[engine] Fatal error:', err);
     process.exit(1);
   });
 }

@@ -8,6 +8,7 @@ import { DEFAULT_MODEL, ALL_MODELS, getModelsForProviders, fetchOpenRouterModels
 import type { ProviderType, ModelInfo } from '../lib/llm-client';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 import { getVaultKey } from './vault';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -323,7 +324,7 @@ router.get('/models', async (req: Request, res: Response) => {
         models = models.filter(m => m.providerType !== 'openrouter');
         models.push(...catalogModels);
       } catch (err: any) {
-        console.warn('[direction/models] Failed to fetch OpenRouter catalog:', err.message);
+        logger.warn('[direction/models] Failed to fetch OpenRouter catalog:', err.message);
         // Keep hardcoded openrouter models as fallback
       }
     }
@@ -765,7 +766,7 @@ Generate thoughtful, specific content for each layer based on the user's answers
       usage: result.usage,
     });
   } catch (err: any) {
-    console.error('[direction/wizard] error:', err.message);
+    logger.error('[direction/wizard] error:', err.message);
     res.status(500).json({ error: err.message || 'Wizard generation failed' });
   }
 });

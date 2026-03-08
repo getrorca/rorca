@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
 import { db } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -65,7 +66,7 @@ router.get('/', (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(schedules, pagination));
   } catch (error: any) {
-    console.error('[Schedules] List error:', error);
+    logger.error('[Schedules] List error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -142,7 +143,7 @@ router.post('/', (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error('[Schedules] Create error:', error);
+    logger.error('[Schedules] Create error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -223,7 +224,7 @@ router.patch('/:id', (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error('[Schedules] Update error:', error);
+    logger.error('[Schedules] Update error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -272,7 +273,7 @@ router.delete('/:id', (req: Request, res: Response) => {
     db.prepare('DELETE FROM pipeline_schedules WHERE id = ?').run(id);
     res.json({ ok: true });
   } catch (error: any) {
-    console.error('[Schedules] Delete error:', error);
+    logger.error('[Schedules] Delete error:', error);
     res.status(500).json({ error: error.message });
   }
 });

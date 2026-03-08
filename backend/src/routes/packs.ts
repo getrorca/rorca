@@ -14,6 +14,7 @@ import { db } from '../db/index';
 import { installPack, forkPack } from '../lib/pack-installer';
 import { PackRegistry, PackJsonSchema } from '../lib/pack-registry';
 import { broadcastAll } from '../lib/sse-hub';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -152,7 +153,7 @@ router.post('/install', (req: Request, res: Response) => {
       res.status(422).json({ error: err.message, details: err.details });
       return;
     }
-    console.error('[Packs] Install error:', err);
+    logger.error('[Packs] Install error:', err);
     res.status(500).json({ error: 'Pack installation failed', details: err.message });
   }
 });
@@ -269,7 +270,7 @@ router.post('/fork', (req: Request, res: Response) => {
       res.status(409).json({ error: err.message });
       return;
     }
-    console.error('[Packs] Fork error:', err);
+    logger.error('[Packs] Fork error:', err);
     res.status(500).json({ error: 'Pack fork failed', details: err.message });
   }
 });
@@ -558,7 +559,7 @@ router.get('/detail', (req: Request, res: Response) => {
       agentsMdPreview,
     });
   } catch (err: any) {
-    console.error('[Packs] Detail error:', err);
+    logger.error('[Packs] Detail error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -655,7 +656,7 @@ router.delete('/:name', (req: Request, res: Response) => {
       res.status(404).json({ error: err.message });
       return;
     }
-    console.error('[Packs] Uninstall error:', err);
+    logger.error('[Packs] Uninstall error:', err);
     res.status(500).json({ error: err.message });
   }
 });

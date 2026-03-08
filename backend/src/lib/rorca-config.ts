@@ -13,6 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
+import { logger } from './logger';
 
 // ─── Zod Schemas ─────────────────────────────────────────────────────────────
 
@@ -221,13 +222,13 @@ export function loadRorcaConfig(workspacePath: string): RorcaConfig {
     return result;
   } catch (err) {
     if (err instanceof SyntaxError) {
-      console.error(`[rorca-config] Invalid JSON in ${cfgPath}: ${err.message}`);
+      logger.error(`[rorca-config] Invalid JSON in ${cfgPath}: ${err.message}`);
       throw err; // Don't silently swallow parse errors
     }
     if (err instanceof z.ZodError) {
-      console.warn(`[rorca-config] Schema validation warnings for ${cfgPath}:`);
+      logger.warn(`[rorca-config] Schema validation warnings for ${cfgPath}:`);
       for (const issue of err.issues) {
-        console.warn(`  - ${issue.path.join('.')}: ${issue.message}`);
+        logger.warn(`  - ${issue.path.join('.')}: ${issue.message}`);
       }
     }
     // Return defaults on validation errors
