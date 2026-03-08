@@ -152,7 +152,11 @@ export default function AuditLogPanel() {
   }, [fetchAuditLog]);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div
+      role="main"
+      aria-label="Audit Log"
+      className="flex flex-col h-full overflow-hidden"
+    >
       {/* Header */}
       <div className="px-5 py-4 border-b border-border shrink-0">
         <div className="flex items-center justify-between mb-3">
@@ -170,6 +174,7 @@ export default function AuditLogPanel() {
               placeholder="Search events..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
+              aria-label="Search audit log events"
               className="w-full h-8 pl-8 pr-3 text-xs bg-bg border border-border rounded text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent"
             />
           </div>
@@ -178,6 +183,7 @@ export default function AuditLogPanel() {
           <select
             value={eventTypeFilter}
             onChange={(e) => setEventTypeFilter(e.target.value)}
+            aria-label="Filter by event type"
             className="h-8 px-2 text-xs bg-bg border border-border rounded text-[var(--text)] focus:outline-none focus:border-accent"
           >
             <option value="">All types</option>
@@ -190,6 +196,7 @@ export default function AuditLogPanel() {
           <select
             value={wsFilter}
             onChange={(e) => setWsFilter(e.target.value)}
+            aria-label="Filter by workspace"
             className="h-8 px-2 text-xs bg-bg border border-border rounded text-[var(--text)] focus:outline-none focus:border-accent"
           >
             <option value="">All workspaces</option>
@@ -204,6 +211,7 @@ export default function AuditLogPanel() {
             placeholder="Actor..."
             value={actorFilter}
             onChange={(e) => setActorFilter(e.target.value)}
+            aria-label="Filter by actor"
             className="h-8 w-28 px-2 text-xs bg-bg border border-border rounded text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent"
           />
 
@@ -212,6 +220,7 @@ export default function AuditLogPanel() {
             type="date"
             value={dateFrom}
             onChange={(e) => setDateFrom(e.target.value)}
+            aria-label="Filter from date"
             className="h-8 px-2 text-xs bg-bg border border-border rounded text-[var(--text)] focus:outline-none focus:border-accent"
           />
 
@@ -220,6 +229,7 @@ export default function AuditLogPanel() {
             type="date"
             value={dateTo}
             onChange={(e) => setDateTo(e.target.value)}
+            aria-label="Filter to date"
             className="h-8 px-2 text-xs bg-bg border border-border rounded text-[var(--text)] focus:outline-none focus:border-accent"
           />
 
@@ -227,7 +237,7 @@ export default function AuditLogPanel() {
           <button
             onClick={() => setSortOrder(s => s === 'newest' ? 'oldest' : 'newest')}
             className="h-8 px-2.5 flex items-center gap-1 text-xs bg-bg border border-border rounded text-muted hover:text-[var(--text)] transition-colors"
-            title={sortOrder === 'newest' ? 'Showing newest first' : 'Showing oldest first'}
+            aria-label={sortOrder === 'newest' ? 'Sort order: newest first. Click for oldest first' : 'Sort order: oldest first. Click for newest first'}
           >
             <ArrowUpDown size={12} />
             {sortOrder === 'newest' ? 'Newest' : 'Oldest'}
@@ -236,7 +246,7 @@ export default function AuditLogPanel() {
       </div>
 
       {/* Table */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto" aria-label="Audit log events" role="region">
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <Loader2 size={24} className="animate-spin text-muted" />
@@ -320,9 +330,14 @@ function TableRow({
     <>
       <tr
         onClick={onToggle}
-        className="border-b border-border/50 hover:bg-bg/50 cursor-pointer transition-colors"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
+        tabIndex={0}
+        role="button"
+        aria-expanded={isExpanded}
+        aria-label={`Event: ${event.event_type}, actor: ${event.actor}. Press Enter to ${isExpanded ? 'collapse' : 'expand'} details.`}
+        className="border-b border-border/50 hover:bg-bg/50 cursor-pointer transition-colors focus:outline-none focus:bg-bg/50"
       >
-        <td className="px-4 py-2.5 text-muted">
+        <td className="px-4 py-2.5 text-muted" aria-hidden="true">
           {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
         </td>
         <td className="px-4 py-2.5 text-[var(--text)] whitespace-nowrap font-mono">

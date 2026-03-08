@@ -70,7 +70,11 @@ export default function WorkspaceSettingsPanel() {
   }
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div
+      role="main"
+      aria-label="Workspace Settings"
+      className="h-full flex flex-col overflow-hidden"
+    >
       <div className="p-4 sm:p-6 border-b border-border shrink-0">
         <h1 className="text-lg font-semibold text-[var(--text)]">Workspace Settings</h1>
         <p className="text-xs text-muted mt-1">Manage direction, connections, environment, and pipeline configuration</p>
@@ -78,10 +82,19 @@ export default function WorkspaceSettingsPanel() {
 
       <div className="flex flex-1 min-h-0">
         {/* Tab sidebar (desktop) */}
-        <nav className="w-48 shrink-0 border-r border-border bg-panel p-2 hidden sm:block">
+        <nav
+          role="tablist"
+          aria-label="Workspace settings sections"
+          aria-orientation="vertical"
+          className="w-48 shrink-0 border-r border-border bg-panel p-2 hidden sm:block"
+        >
           {TABS.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
+              role="tab"
+              aria-selected={activeTab === id}
+              aria-controls={`ws-tab-panel-${id}`}
+              id={`ws-tab-${id}`}
               onClick={() => setActiveTab(id)}
               className={`w-full flex items-center gap-2 px-3 py-2 rounded text-sm transition-colors ${
                 activeTab === id
@@ -96,10 +109,18 @@ export default function WorkspaceSettingsPanel() {
         </nav>
 
         {/* Mobile tab bar */}
-        <div className="sm:hidden flex border-b border-border bg-panel shrink-0 overflow-x-auto">
+        <div
+          role="tablist"
+          aria-label="Workspace settings sections"
+          className="sm:hidden flex border-b border-border bg-panel shrink-0 overflow-x-auto"
+        >
           {TABS.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
+              role="tab"
+              aria-selected={activeTab === id}
+              aria-controls={`ws-tab-panel-${id}`}
+              id={`ws-tab-mobile-${id}`}
               onClick={() => setActiveTab(id)}
               className={`flex items-center justify-center gap-1 py-2 px-3 text-xs whitespace-nowrap transition-colors ${
                 activeTab === id
@@ -114,7 +135,12 @@ export default function WorkspaceSettingsPanel() {
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+        <div
+          id={`ws-tab-panel-${activeTab}`}
+          role="tabpanel"
+          aria-labelledby={`ws-tab-${activeTab}`}
+          className="flex-1 overflow-y-auto p-4 sm:p-6"
+        >
           {activeTab === 'general'   && <WsGeneralSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'direction' && <WsDirectionSection workspaceId={workspaceId} showToast={showToast} />}
           {activeTab === 'context'   && <WsContextSection workspaceId={workspaceId} showToast={showToast} />}
@@ -146,8 +172,14 @@ export function WsContextSection({ workspaceId, showToast }: WsSectionProps) {
   return (
     <div className="space-y-4">
       {/* Sub-tab bar */}
-      <div className="flex gap-1 border-b border-border -mt-2 mb-4">
+      <div
+        role="tablist"
+        aria-label="Workspace context sections"
+        className="flex gap-1 border-b border-border -mt-2 mb-4"
+      >
         <button
+          role="tab"
+          aria-selected={subTab === 'skills'}
           onClick={() => setSubTab('skills')}
           className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
             subTab === 'skills'
@@ -159,6 +191,8 @@ export function WsContextSection({ workspaceId, showToast }: WsSectionProps) {
           Skills
         </button>
         <button
+          role="tab"
+          aria-selected={subTab === 'routing'}
           onClick={() => setSubTab('routing')}
           className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
             subTab === 'routing'
@@ -170,6 +204,8 @@ export function WsContextSection({ workspaceId, showToast }: WsSectionProps) {
           Routing
         </button>
         <button
+          role="tab"
+          aria-selected={subTab === 'files'}
           onClick={() => setSubTab('files')}
           className={`flex items-center gap-1.5 px-3 py-2 text-sm transition-colors border-b-2 ${
             subTab === 'files'
@@ -285,8 +321,9 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
         <h2 className="text-sm font-semibold text-[var(--text)] mb-4">General</h2>
         <div className="space-y-4">
           <div>
-            <label className="block text-xs text-muted mb-1">Label</label>
+            <label htmlFor="ws-label" className="block text-xs text-muted mb-1">Label</label>
             <input
+              id="ws-label"
               type="text"
               value={label}
               onChange={e => setLabel(e.target.value)}
@@ -295,9 +332,10 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
           </div>
 
           <div>
-            <label className="block text-xs text-muted mb-1">Path</label>
+            <label htmlFor="ws-path" className="block text-xs text-muted mb-1">Path</label>
             <div className="flex gap-2">
               <input
+                id="ws-path"
                 type="text"
                 value={wsPath}
                 onChange={e => setWsPath(e.target.value)}
@@ -316,8 +354,9 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
           </div>
 
           <div>
-            <label className="block text-xs text-muted mb-1">Project Type</label>
+            <label htmlFor="ws-domains" className="block text-xs text-muted mb-1">Project Type</label>
             <input
+              id="ws-domains"
               type="text"
               value={domains}
               onChange={e => setDomains(e.target.value)}
@@ -328,8 +367,9 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
           </div>
 
           <div>
-            <label className="block text-xs text-muted mb-1">Default Model</label>
+            <label htmlFor="ws-default-model" className="block text-xs text-muted mb-1">Default Model</label>
             <select
+              id="ws-default-model"
               value={defaultModel}
               onChange={e => setDefaultModel(e.target.value)}
               className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
@@ -679,8 +719,9 @@ export function WsEnvVarsSection({ workspaceId, showToast }: WsSectionProps) {
       {/* Add form */}
       <div className="flex gap-2 items-end">
         <div className="flex-1">
-          <label className="block text-xs text-muted mb-1">Key</label>
+          <label htmlFor="env-var-key" className="block text-xs text-muted mb-1">Key</label>
           <input
+            id="env-var-key"
             type="text"
             value={newKey}
             onChange={e => setNewKey(e.target.value.toUpperCase())}
@@ -690,8 +731,9 @@ export function WsEnvVarsSection({ workspaceId, showToast }: WsSectionProps) {
           />
         </div>
         <div className="flex-1">
-          <label className="block text-xs text-muted mb-1">Value</label>
+          <label htmlFor="env-var-value" className="block text-xs text-muted mb-1">Value</label>
           <input
+            id="env-var-value"
             type="text"
             value={newValue}
             onChange={e => setNewValue(e.target.value)}
@@ -794,12 +836,13 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
               <p className="text-sm text-[var(--text)]">Auto-create worktree</p>
               <p className="text-xs text-muted mt-0.5">Run each pipeline in an isolated git worktree branch</p>
             </div>
-            <ToggleSwitch checked={autoWorktree} onChange={() => setAutoWorktree(!autoWorktree)} />
+            <ToggleSwitch checked={autoWorktree} onChange={() => setAutoWorktree(!autoWorktree)} label="Auto-create worktree" />
           </div>
 
           <div className="border-t border-border pt-5">
-            <label className="block text-xs text-muted mb-1">Story Timeout (minutes)</label>
+            <label htmlFor="pipeline-story-timeout" className="block text-xs text-muted mb-1">Story Timeout (minutes)</label>
             <input
+              id="pipeline-story-timeout"
               type="number"
               min={1}
               max={120}
@@ -811,8 +854,9 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
           </div>
 
           <div className="border-t border-border pt-5">
-            <label className="block text-xs text-muted mb-1">Max Retries per Story</label>
+            <label htmlFor="pipeline-max-retries" className="block text-xs text-muted mb-1">Max Retries per Story</label>
             <input
+              id="pipeline-max-retries"
               type="number"
               min={0}
               max={5}
@@ -951,8 +995,9 @@ export function WsHooksSection({ workspaceId, showToast }: WsSectionProps) {
       {showAdd && (
         <div className="border border-border rounded p-4 space-y-3 bg-bg">
           <div>
-            <label className="block text-xs text-muted mb-1">Event</label>
+            <label htmlFor="hook-event" className="block text-xs text-muted mb-1">Event</label>
             <select
+              id="hook-event"
               value={newEvent}
               onChange={e => setNewEvent(e.target.value)}
               className="w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
@@ -963,8 +1008,9 @@ export function WsHooksSection({ workspaceId, showToast }: WsSectionProps) {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-muted mb-1">Shell Command</label>
+            <label htmlFor="hook-command" className="block text-xs text-muted mb-1">Shell Command</label>
             <input
+              id="hook-command"
               type="text"
               value={newCommand}
               onChange={e => setNewCommand(e.target.value)}
@@ -1008,7 +1054,7 @@ export function WsHooksSection({ workspaceId, showToast }: WsSectionProps) {
                   <p className="text-sm font-mono text-[var(--text)] mt-1 truncate">{h.command}</p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0 ml-3">
-                  <ToggleSwitch checked={!!h.enabled} onChange={() => toggleHook(h)} />
+                  <ToggleSwitch checked={!!h.enabled} onChange={() => toggleHook(h)} label={`Toggle hook: ${h.event_type}`} />
                   <button
                     onClick={() => removeHook(h.id)}
                     className="p-1.5 text-muted hover:text-red-500 transition-colors"
@@ -1028,11 +1074,16 @@ export function WsHooksSection({ workspaceId, showToast }: WsSectionProps) {
 
 // ─── Toggle Switch ───────────────────────────────────────────────────────────
 
-function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () => void }) {
+function ToggleSwitch({ checked, onChange, label }: { checked: boolean; onChange: () => void; label?: string }) {
   return (
     <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
       onClick={onChange}
-      className={`relative w-9 h-5 rounded-full transition-colors ${
+      onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); onChange(); } }}
+      className={`relative w-9 h-5 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 ${
         checked ? 'bg-accent' : 'bg-border'
       }`}
     >

@@ -115,7 +115,11 @@ export default function SettingsPanel() {
   const activeTab = useActiveSettingsTab();
 
   return (
-    <div className="h-full flex flex-col overflow-y-auto">
+    <div
+      role="main"
+      aria-label="Settings"
+      className="h-full flex flex-col overflow-y-auto"
+    >
       <div className="p-4 sm:p-6 mx-auto w-full max-w-4xl">
         {/* Workspace-scoped tabs */}
         {activeTab === 'general' && <WsGeneralSection />}
@@ -160,10 +164,18 @@ function AnalyticsSection() {
   return (
     <div>
       {/* Sub-tab pills */}
-      <div className="flex flex-wrap gap-1 mb-4">
+      <div
+        role="tablist"
+        aria-label="Analytics sections"
+        className="flex flex-wrap gap-1 mb-4"
+      >
         {ANALYTICS_SUBTABS.map((tab) => (
           <button
             key={tab.id}
+            role="tab"
+            aria-selected={activeSubTab === tab.id}
+            aria-controls={`analytics-panel-${tab.id}`}
+            id={`analytics-tab-${tab.id}`}
             onClick={() => setActiveSubTab(tab.id)}
             className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
               activeSubTab === tab.id
@@ -177,14 +189,28 @@ function AnalyticsSection() {
       </div>
 
       {/* Sub-tab content */}
-      {activeSubTab === 'usage' && <UsageDashboardPanel />}
-      {activeSubTab === 'costs' && <CostBreakdownPanel />}
-      {activeSubTab === 'models' && <ModelComparisonPanel />}
-      {activeSubTab === 'velocity' && <VelocityChartPanel />}
-      {activeSubTab === 'completion' && <CompletionRatePanel />}
-      {activeSubTab === 'roi' && <RoiCalculatorPanel />}
-      {activeSubTab === 'finops' && <FinOpsDashboardPanel />}
-      {activeSubTab === 'health' && <HealthDashboardPanel />}
+      {ANALYTICS_SUBTABS.map((tab) => (
+        <div
+          key={tab.id}
+          id={`analytics-panel-${tab.id}`}
+          role="tabpanel"
+          aria-labelledby={`analytics-tab-${tab.id}`}
+          hidden={activeSubTab !== tab.id}
+        >
+          {activeSubTab === tab.id && (
+            <>
+              {tab.id === 'usage' && <UsageDashboardPanel />}
+              {tab.id === 'costs' && <CostBreakdownPanel />}
+              {tab.id === 'models' && <ModelComparisonPanel />}
+              {tab.id === 'velocity' && <VelocityChartPanel />}
+              {tab.id === 'completion' && <CompletionRatePanel />}
+              {tab.id === 'roi' && <RoiCalculatorPanel />}
+              {tab.id === 'finops' && <FinOpsDashboardPanel />}
+              {tab.id === 'health' && <HealthDashboardPanel />}
+            </>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -204,12 +230,20 @@ function SystemSection() {
   return (
     <div>
       {/* Sub-tab pills */}
-      <div className="flex flex-wrap gap-1 mb-4">
+      <div
+        role="tablist"
+        aria-label="System sections"
+        className="flex flex-wrap gap-1 mb-4"
+      >
         {SYSTEM_SUBTABS.map((tab) => {
           const Icon = tab.icon;
           return (
             <button
               key={tab.id}
+              role="tab"
+              aria-selected={activeSubTab === tab.id}
+              aria-controls={`system-panel-${tab.id}`}
+              id={`system-tab-${tab.id}`}
               onClick={() => setActiveSubTab(tab.id)}
               className={`flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-full transition-colors ${
                 activeSubTab === tab.id
@@ -225,8 +259,22 @@ function SystemSection() {
       </div>
 
       {/* Sub-tab content */}
-      {activeSubTab === 'audit-log' && <AuditLogPanel />}
-      {activeSubTab === 'activity' && <ActivityFeedPanel />}
+      {SYSTEM_SUBTABS.map((tab) => (
+        <div
+          key={tab.id}
+          id={`system-panel-${tab.id}`}
+          role="tabpanel"
+          aria-labelledby={`system-tab-${tab.id}`}
+          hidden={activeSubTab !== tab.id}
+        >
+          {activeSubTab === tab.id && (
+            <>
+              {tab.id === 'audit-log' && <AuditLogPanel />}
+              {tab.id === 'activity' && <ActivityFeedPanel />}
+            </>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
