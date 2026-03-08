@@ -3,9 +3,9 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T15:54:31.747Z
+Last Updated: 2026-03-08T16:00:43.305Z
 
-## Completed Stories (40)
+## Completed Stories (41)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
@@ -46,6 +46,7 @@ Last Updated: 2026-03-08T15:54:31.747Z
 - PR-052: Frontend Upgrade Prompts + Feature Badges — DONE (claude, claude-sonnet-4-6, 374s)
 - PR-NEW-1: Rate Limiter Production Config Audit — DONE (claude, claude-haiku-4-5-20251001, 425s)
 - PR-NEW-2: CORS Hardening for Production — DONE (claude, claude-sonnet-4-6, 61s)
+- PR-QUEUE-1: Spec Review Queue Panel — DONE (claude, claude-sonnet-4-6, 362s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined
