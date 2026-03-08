@@ -42,7 +42,7 @@ const CommandPalette = lazy(() => import('./components/CommandPalette'));
 
 // — Lazy-loaded panel components (each gets its own chunk) —
 const HubPanel = lazy(() => import('./panels/HubPanel'));
-// ReviewQueuePanel removed — pending specs are now inline in Forge (UX-007)
+const QueuePanel = lazy(() => import('./panels/QueuePanel'));
 const SpecForgePanelPage = lazy(() => import('./panels/SpecForgePanelPage'));
 const ArchivePanel = lazy(() => import('./panels/ArchivePanel'));
 const TemplateMarketplacePanel = lazy(() => import('./panels/TemplateMarketplacePanel'));
@@ -208,7 +208,7 @@ function AppRoutes() {
         <Route index element={<PanelRoute panel="hub" />} />
         {/* Specs */}
         <Route path="forge" element={<PanelRoute panel="forge" />} />
-        <Route path="queue" element={<Navigate to="/forge" replace />} />
+        <Route path="queue" element={<PanelRoute panel="queue" />} />
         <Route path="archive" element={<PanelRoute panel="archive" />} />
         <Route path="marketplace" element={<PanelRoute panel="marketplace" />} />
         {/* Pipeline */}
@@ -250,7 +250,8 @@ function AppRoutes() {
 function getPanelSkeleton(panel: PanelId) {
   switch (panel) {
     case 'hub': return <HubSkeleton />;
-    case 'forge': case 'queue': return <ForgeSkeleton />;
+    case 'forge': return <ForgeSkeleton />;
+    case 'queue': return <GenericPanelSkeleton />;
     case 'archive': return <ArchiveSkeleton />;
     case 'marketplace': return <MarketplaceSkeleton />;
     case 'pipeline': return <PipelineSkeleton />;
@@ -307,7 +308,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'stack': return <DirectionTabbedPanel />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'memory': return <MemoryPanel />;
-    case 'queue': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} showPending {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
+    case 'queue': return <QueuePanel onNavigate={onNavigate} onNavigateToSpecReview={onNavigateToSpecReview} />;
     // Runs tabbed panel — embeds Pipeline Monitor, Worktrees, Compare
     case 'pipeline': return <RunsTabbedPanel onNavigate={onNavigate} />;
     case 'worktrees': return <WorktreesPanel />;
@@ -363,6 +364,7 @@ function AppLayout() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [queueCount, setQueueCount] = useState(0);
+  const [pendingSpecsCount, setPendingSpecsCount] = useState(0);
 
   // Derive activeRunId from URL path /runs/:runId
   const runMatch = location.pathname.match(/^\/runs\/(\d+)/);
@@ -385,6 +387,19 @@ function AppLayout() {
     };
     fetchCount();
     const interval = setInterval(fetchCount, 10_000);
+    return () => clearInterval(interval);
+  }, [workspaceId]);
+
+  // Poll pending specs count every 10s for Review Queue badge
+  useEffect(() => {
+    if (!workspaceId) { setPendingSpecsCount(0); return; }
+    const fetchPendingCount = () => {
+      apiFetch<{ items: unknown[]; total: number }>(`/api/specs?workspaceId=${workspaceId}&status=pending`)
+        .then((data) => setPendingSpecsCount(data.total))
+        .catch(() => setPendingSpecsCount(0));
+    };
+    fetchPendingCount();
+    const interval = setInterval(fetchPendingCount, 10_000);
     return () => clearInterval(interval);
   }, [workspaceId]);
 
@@ -462,7 +477,7 @@ function AppLayout() {
                 onNavigate={handleNavigate}
                 mobileOpen={mobileNavOpen}
                 onMobileClose={() => setMobileNavOpen(false)}
-                queueCount={queueCount}
+                queueCount={pendingSpecsCount}
               />
             )}
           </ResizableSidebar>
