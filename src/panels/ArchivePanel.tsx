@@ -396,7 +396,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
         actions={
           <div className="flex items-center gap-2 flex-wrap flex-1 max-w-full justify-end pb-1 pt-1 pr-2">
             {/* Search bar */}
-            <div className="relative w-48 shrink-0">
+            <div className="relative w-full sm:w-48 shrink-0">
               <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
               <input
                 type="text"
@@ -465,11 +465,11 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
         }
       />
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative">
         {/* ─── Left: Split List ────────────────────────────────────────── */}
         <div
-          className="flex-col border-r border-border flex-shrink-0"
-          style={{ width: selectedId ? leftWidth : '100%' }}
+          className={`flex-col border-r border-border flex-shrink-0 ${selectedId ? 'hidden md:flex' : 'flex w-full'}`}
+          style={{ width: selectedId ? leftWidth : undefined }}
         >
           <div className="flex flex-col h-full bg-panel">
             {/* Results */}
@@ -669,11 +669,11 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
           </div>
         </div>
 
-        {/* ─── Draggable divider ───────────────────────────────────────── */}
+        {/* ─── Draggable divider (desktop only) ───────────────────────── */}
         {selectedId && (
           <div
             onMouseDown={handleDividerMouseDown}
-            className="w-1 shrink-0 bg-border hover:bg-accent/60 cursor-col-resize transition-colors active:bg-accent"
+            className="hidden md:block w-1 shrink-0 bg-border hover:bg-accent/60 cursor-col-resize transition-colors active:bg-accent"
           />
         )}
 
@@ -1054,7 +1054,7 @@ function SpecPreviewDrawer({
         ) : (
           <>
             {/* Tab strip */}
-            <div role="tablist" className="flex border-b border-border shrink-0">
+            <div role="tablist" className="flex border-b border-border shrink-0 overflow-x-auto">
               {tabs.map(tab => (
                 <button
                   key={tab.id}

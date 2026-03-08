@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T11:05:40.885Z",
+  "lastUpdatedAt": "2026-03-08T11:35:00.000Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -153,6 +153,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 537954
+    },
+    {
+      "storyId": "PR-025",
+      "title": "Responsive Layout — Core Panels (8 panels)",
+      "status": "passed",
+      "startedAt": "2026-03-08T11:06:00.000Z",
+      "finishedAt": "2026-03-08T11:35:00.000Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 1740000
     }
   ],
   "failedStories": [],

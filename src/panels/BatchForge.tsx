@@ -206,11 +206,11 @@ export default function BatchForge() {
   }
 
   return (
-    <div role="main" aria-label="Batch forge panel - generate multiple specs at once" className="flex h-full gap-px bg-border">
+    <div role="main" aria-label="Batch forge panel - generate multiple specs at once" className="flex flex-col md:flex-row h-full gap-px bg-border overflow-auto md:overflow-hidden">
       {/* Left pane: Brief entry form */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-xl mx-auto px-6 py-6 space-y-6">
+          <div className="max-w-xl mx-auto px-4 sm:px-6 py-6 space-y-6">
 
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
@@ -338,7 +338,7 @@ export default function BatchForge() {
       </div>
 
       {/* Right pane: Progress */}
-      <div aria-live="polite" className="flex-1 flex flex-col bg-bg min-w-0">
+      <div aria-live="polite" className="flex-1 flex flex-col bg-bg min-w-0 border-t md:border-t-0">
         <BatchProgress items={items} summary={summary} entries={entries} />
       </div>
     </div>

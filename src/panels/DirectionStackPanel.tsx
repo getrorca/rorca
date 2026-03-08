@@ -197,9 +197,9 @@ export default function DirectionStackPanel() {
   }
 
   return (
-    <div role="main" aria-label="Direction stack panel - configure direction layers" className="flex h-full gap-px bg-border">
+    <div role="main" aria-label="Direction stack panel - configure direction layers" className="flex flex-col md:flex-row h-full gap-px bg-border overflow-auto md:overflow-hidden">
       {/* Column 1: Layer editor */}
-      <div className="flex-1 flex flex-col bg-bg min-w-0">
+      <div className="flex-1 flex flex-col bg-bg min-w-0 min-h-[50vh] md:min-h-0">
         {/* Header: View mode toggle + action buttons */}
         <div className="flex items-center border-b border-border min-w-0 overflow-x-auto">
           {/* Simple/Advanced toggle */}
@@ -440,7 +440,7 @@ export default function DirectionStackPanel() {
       </div>
 
       {/* Column 2: Synthesized preview (read-only) */}
-      <div className="flex-1 flex flex-col bg-bg min-w-0">
+      <div className="flex-1 flex flex-col bg-bg min-w-0 min-h-[30vh] md:min-h-0">
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
           <span className="text-xs font-medium text-muted inline-flex items-center gap-1">
             Synthesized Output
