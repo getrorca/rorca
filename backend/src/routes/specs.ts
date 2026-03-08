@@ -152,6 +152,7 @@ interface UserStory {
   complexity?: number;
   priority?: number;  // 1=urgent, 2=high, 3=normal (default), 4=low
   timeoutMinutes?: number;  // 5-120, default 45
+  model?: string;           // Per-story execution model override
   suggestedSkills?: SuggestedSkillRaw[];
   suggestedPersona?: string;
   suggestedReviewers?: string[];
@@ -3664,7 +3665,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
-    const { workspaceId, title, description, acceptanceCriteria, complexity, priority, timeoutMinutes } = req.body;
+    const { workspaceId, title, description, acceptanceCriteria, complexity, priority, timeoutMinutes, model } = req.body;
 
     if (!workspaceId) {
       res.status(400).json({ error: 'Missing required field: workspaceId' });
@@ -3727,6 +3728,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
     if (complexity !== undefined) stories[storyIndex].complexity = complexity;
     if (priority !== undefined) stories[storyIndex].priority = priority;
     if (timeoutMinutes !== undefined) stories[storyIndex].timeoutMinutes = timeoutMinutes;
+    if (model !== undefined) stories[storyIndex].model = model || undefined; // null/'' clears override
 
     content.userStories = stories;
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
