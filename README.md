@@ -58,6 +58,30 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 
 ---
 
+## Quickstart with Docker
+
+No Node.js required. Run Rorca in under 5 minutes:
+
+```bash
+git clone https://github.com/your-org/rorca.git
+cd rorca
+docker compose up
+```
+
+- **Dashboard**: http://localhost:5210
+- **API**: http://localhost:3030/api/health
+
+SQLite data persists in the `rorca-data` Docker volume across restarts.
+
+To pass your API key or configure the execution engine:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... docker compose up
+# or create a .env file at the repo root — docker compose picks it up automatically
+```
+
+---
+
 ## Installation
 
 ```bash

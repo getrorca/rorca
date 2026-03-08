@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T09:30:40.099Z",
+  "lastUpdatedAt": "2026-03-08T09:33:09.044Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 46255
+    },
+    {
+      "storyId": "PR-003",
+      "title": "Docker Image & docker-compose (Production Config)",
+      "status": "passed",
+      "startedAt": "2026-03-08T09:30:44.808Z",
+      "finishedAt": "2026-03-08T09:33:09.044Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 144236
     }
   ],
   "failedStories": [],

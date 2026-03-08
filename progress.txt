@@ -3,7 +3,8 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T09:30:40.099Z
+Last Updated: 2026-03-08T09:33:09.044Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
+- PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
