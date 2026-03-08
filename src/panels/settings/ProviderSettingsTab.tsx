@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal } from 'lucide-react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search } from 'lucide-react';
+import { ProBadge } from '../../components/UpgradePrompt';
+import { useAuth } from '../../contexts/AuthContext';
 import AgentPicker from '../../components/AgentPicker';
 import type { ModelOption } from '../../components/ModelSearchSelect';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
@@ -1304,6 +1306,45 @@ function ProvidersSection() {
             </div>
           );
         })}
+      </div>
+
+      {/* Exa Search — Pro feature */}
+      <ExaSearchSection />
+    </div>
+  );
+}
+
+// ─── Exa Search Provider Section ─────────────────────────────────────────────
+
+function ExaSearchSection() {
+  const { user } = useAuth();
+  const isFreePlan = !user?.plan || user.plan === 'free';
+
+  return (
+    <div className="border border-border rounded p-4 bg-bg">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Search size={18} className="text-muted" />
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-medium text-[var(--text)]">Exa Search</span>
+              <ProBadge />
+            </div>
+            <p className="text-xs text-muted mt-0.5">
+              Neural search for spec generation — finds semantically relevant code patterns and library docs.
+            </p>
+          </div>
+        </div>
+        {isFreePlan ? (
+          <a
+            href="#billing"
+            className="shrink-0 flex items-center gap-1 px-3 py-1.5 text-xs bg-accent/10 text-accent border border-accent/30 rounded hover:bg-accent/20 transition-colors"
+          >
+            Upgrade to unlock
+          </a>
+        ) : (
+          <span className="shrink-0 text-xs text-muted italic">Coming soon</span>
+        )}
       </div>
     </div>
   );
