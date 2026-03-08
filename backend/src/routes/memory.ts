@@ -17,6 +17,8 @@ import {
   logRejected,
   readRejected,
   getContextSnippet,
+  rotateMemory,
+  countArchiveEntries,
   MEMORY_CATEGORIES,
   type MemoryEntry,
   type MemoryCategory,
@@ -444,6 +446,68 @@ router.get('/context', (req: Request, res: Response) => {
  */
 router.get('/categories', (_req: Request, res: Response) => {
   res.json({ categories: MEMORY_CATEGORIES });
+});
+
+/**
+ * @swagger
+ * /api/memory/archive/count:
+ *   get:
+ *     summary: Get archived entry count for a workspace
+ *     operationId: getMemoryArchiveCount
+ *     description: Returns the number of entries in the MEMORY_ARCHIVE.md file for the given workspace.
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: true
+ */
+router.get('/archive/count', (req: Request, res: Response) => {
+  const { workspaceId } = req.query;
+  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+
+  const wsPath = getWorkspacePath(workspaceId as string);
+  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+
+  const count = countArchiveEntries(wsPath);
+  res.json({ count });
+});
+
+/**
+ * @swagger
+ * /api/memory/rotate:
+ *   post:
+ *     summary: Rotate old memory entries to archive
+ *     operationId: rotateMemoryEntries
+ *     description: |
+ *       Moves old or excess entries from MEMORY.md to .rorca/memory/MEMORY_ARCHIVE.md.
+ *       Architecture and Convention entries are never rotated (permanent project knowledge).
+ *       Rotation triggers based on: entry age (MEMORY_RETENTION_DAYS, default 30),
+ *       max entry count (MEMORY_MAX_ENTRIES, default 200), or token budget (8000 tokens).
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               workspaceId: { type: string }
+ *               retentionDays: { type: number, description: "Days before entries are eligible for rotation" }
+ *               maxEntries: { type: number, description: "Max active entries cap" }
+ *               tokenBudget: { type: number, description: "Target token budget (default 8000)" }
+ */
+router.post('/rotate', (req: Request, res: Response) => {
+  const { workspaceId, retentionDays, maxEntries, tokenBudget } = req.body;
+  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+
+  const wsPath = getWorkspacePath(workspaceId);
+  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+
+  const result = rotateMemory(wsPath, {
+    retentionDays: retentionDays !== undefined ? Number(retentionDays) : undefined,
+    maxEntries: maxEntries !== undefined ? Number(maxEntries) : undefined,
+    tokenBudget: tokenBudget !== undefined ? Number(tokenBudget) : undefined,
+  });
+
+  res.json(result);
 });
 
 export default router;

@@ -397,6 +397,129 @@ If no new entries are warranted, respond with an empty array: \`[]\`
 Only include entries that provide genuine value. Quality over quantity.`;
 }
 
+// ─── Memory Rotation ────────────────────────────────────────────────────────
+
+/** Categories that are never rotated — they represent permanent project knowledge */
+const PERMANENT_CATEGORIES: readonly MemoryCategory[] = ['Architecture', 'Convention'];
+
+export interface RotationConfig {
+  /** Entries older than this many days are eligible for rotation (default: 30) */
+  retentionDays?: number;
+  /** Max number of active entries before oldest eligible entries rotate (default: 200) */
+  maxEntries?: number;
+  /** Target token budget for active MEMORY.md (default: 8000 tokens ≈ 32000 chars) */
+  tokenBudget?: number;
+}
+
+export interface RotationResult {
+  /** Number of entries moved to archive */
+  archived: number;
+  /** Number of entries remaining in active ledger */
+  remaining: number;
+  /** Estimated token count of active ledger after rotation */
+  tokens: number;
+}
+
+/** Resolve the absolute path to the archive file for a workspace */
+function resolveArchivePath(workspacePath: string): string {
+  return path.join(workspacePath, '.rorca/memory/MEMORY_ARCHIVE.md');
+}
+
+/** Append entries to the archive file, creating it if needed */
+function appendToArchive(workspacePath: string, entries: MemoryEntry[]): void {
+  if (entries.length === 0) return;
+  const archivePath = resolveArchivePath(workspacePath);
+  const dir = path.dirname(archivePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  let existing = '# Memory Archive\n\n';
+  try {
+    existing = fs.readFileSync(archivePath, 'utf-8');
+    // Ensure trailing newline before appending
+    if (!existing.endsWith('\n')) existing += '\n';
+  } catch {
+    // file doesn't exist yet
+  }
+
+  const newContent = existing + entries.map(serializeEntry).join('\n\n') + '\n';
+  fs.writeFileSync(archivePath, newContent, 'utf-8');
+}
+
+/** Count entries in the archive file */
+export function countArchiveEntries(workspacePath: string): number {
+  const archivePath = resolveArchivePath(workspacePath);
+  try {
+    const content = fs.readFileSync(archivePath, 'utf-8');
+    return parseMemoryFile(content).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Rotate old or excess entries from the active MEMORY.md into the archive.
+ *
+ * Rules:
+ * - Entries tagged Architecture or Convention are NEVER rotated.
+ * - Entries older than `retentionDays` days are rotated first.
+ * - If active count still exceeds `maxEntries`, oldest eligible entries rotate next.
+ * - If estimated tokens still exceed `tokenBudget`, oldest eligible entries rotate until under budget.
+ */
+export function rotateMemory(workspacePath: string, config: RotationConfig = {}): RotationResult {
+  const retentionDays = config.retentionDays ?? parseInt(process.env.MEMORY_RETENTION_DAYS ?? '30', 10);
+  const maxEntries = config.maxEntries ?? parseInt(process.env.MEMORY_MAX_ENTRIES ?? '200', 10);
+  const tokenBudget = config.tokenBudget ?? 8000;
+  const charBudget = tokenBudget * 4; // 1 token ≈ 4 chars
+
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+  const cutoffStr = cutoffDate.toISOString().slice(0, 10); // YYYY-MM-DD
+
+  const entries = readMemory(workspacePath);
+  const toArchive: MemoryEntry[] = [];
+  let active: MemoryEntry[] = [...entries];
+
+  const isPermanent = (e: MemoryEntry) => (PERMANENT_CATEGORIES as readonly string[]).includes(e.category);
+
+  // Pass 1: rotate entries older than retentionDays (non-permanent only)
+  const afterAgeFilter = active.filter(e => {
+    if (!isPermanent(e) && e.date < cutoffStr) {
+      toArchive.push(e);
+      return false;
+    }
+    return true;
+  });
+  active = afterAgeFilter;
+
+  // Pass 2: if still over maxEntries, rotate oldest eligible
+  if (active.length > maxEntries) {
+    const eligible = active.filter(e => !isPermanent(e));
+    const permanent = active.filter(isPermanent);
+    const excess = active.length - maxEntries;
+    const rotate = eligible.slice(0, excess);
+    toArchive.push(...rotate);
+    active = [...permanent, ...eligible.slice(excess)];
+  }
+
+  // Pass 3: if over token budget, rotate oldest eligible until under budget
+  const estimateTokens = (es: MemoryEntry[]) => serializeMemoryFile(es).length / 4;
+  while (estimateTokens(active) * 4 > charBudget) {
+    const eligibleIdx = active.findIndex(e => !isPermanent(e));
+    if (eligibleIdx === -1) break; // only permanent entries remain
+    toArchive.push(active.splice(eligibleIdx, 1)[0]);
+  }
+
+  if (toArchive.length > 0) {
+    appendToArchive(workspacePath, toArchive);
+    writeMemory(workspacePath, active);
+  }
+
+  const tokens = Math.ceil(serializeMemoryFile(active).length / 4);
+  return { archived: toArchive.length, remaining: active.length, tokens };
+}
+
 /**
  * Parse the LLM synthesis response into proposed entries.
  */
