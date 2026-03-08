@@ -19,6 +19,7 @@ import type { RorcaConfig } from '../lib/rorca-config';
 import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-scaffold';
 import type { ScaffoldFile } from '../lib/workspace-scaffold';
 import { logger } from '../lib/logger';
+import { requirePlan } from '../lib/require-plan';
 
 const router = Router();
 
@@ -108,7 +109,7 @@ const CreateWorkspaceSchema = z.object({
   domains: z.array(z.string()),
 });
 
-router.post('/', validateBody(CreateWorkspaceSchema), (req, res) => {
+router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'), (req, res) => {
   const { id, label, path, domains } = req.body;
 
   if (!fs.existsSync(path)) {

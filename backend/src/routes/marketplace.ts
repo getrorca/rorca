@@ -6,6 +6,7 @@ import { db } from '../db/index';
 import { sanitizeSpec } from '../lib/spec-sanitizer';
 import { getEffectiveUser } from '../lib/get-user';
 import { ValidationError, NotFoundError, ForbiddenError } from '../lib/errors';
+import { requirePlan } from '../lib/require-plan';
 
 const router = Router();
 
@@ -165,7 +166,7 @@ router.post('/preview-sanitize', (req: Request, res: Response) => {
  *       404:
  *         description: Spec or workspace not found
  */
-router.post('/publish', (req: Request, res: Response) => {
+router.post('/publish', requirePlan('marketplace_publish'), (req: Request, res: Response) => {
   ensureTable();
   const user = getEffectiveUser(req);
   const { spec_id, workspace_id, title, description, tags } = req.body as {
