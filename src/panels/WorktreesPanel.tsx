@@ -7,6 +7,7 @@ import {
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { apiFetch } from '../lib/apiFetch';
+import ErrorBanner from '../components/ErrorBanner';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ export default function WorktreesPanel() {
   // List state
   const [worktrees, setWorktrees] = useState<GitWorktree[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
   // Detail state
@@ -102,13 +104,15 @@ export default function WorktreesPanel() {
 
   const fetchWorktrees = useCallback(async () => {
     if (!workspaceId) return;
+    setError(null);
     try {
       const data = await apiFetch<{ items?: GitWorktree[]; worktrees?: GitWorktree[] }>(
         `/api/worktrees?workspaceId=${workspaceId}`,
       );
       setWorktrees(data.items ?? data.worktrees ?? []);
-    } catch (err) {
-      console.error('[WorktreesPanel] fetch error:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load worktrees';
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -266,6 +270,10 @@ export default function WorktreesPanel() {
         Loading worktrees...
       </div>
     );
+  }
+
+  if (error) {
+    return <ErrorBanner message={error} onRetry={fetchWorktrees} variant="fullscreen" />;
   }
 
   // ─── Main Layout ──────────────────────────────────────────────────────
