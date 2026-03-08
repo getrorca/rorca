@@ -37,7 +37,7 @@ COPY backend/src/db/migrations/ dist/db/migrations/
 
 # Data directory for SQLite
 RUN mkdir -p /data
-ENV DB_PATH=/data/rorcha.db
+ENV DB_PATH=/data/rorca.db
 ENV NODE_ENV=production
 ENV PORT=3030
 
