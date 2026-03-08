@@ -41,7 +41,8 @@ import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
-import { subscribe } from './lib/sse-hub';
+import { subscribe, type WalEvent } from './lib/sse-hub';
+import { rotateMemory } from './lib/memory-ledger';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
 import { rateLimiter } from './lib/rate-limiter';
@@ -230,6 +231,18 @@ startQueueConsumer();
 
 // CIE-005: Subscribe memory synthesis to generate ledger entries after successful runs
 startMemorySynthesis();
+
+// PR-019: Auto-rotate memory after each pipeline run completion
+subscribe((event: WalEvent) => {
+  if (event.event_type !== 'run_finished' || !event.workspace_id) return;
+  const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(event.workspace_id) as { path: string } | undefined;
+  if (!ws) return;
+  try {
+    rotateMemory(ws.path);
+  } catch {
+    // Non-fatal — rotation failure must not affect the run result
+  }
+});
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
