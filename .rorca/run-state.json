@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T15:39:42.793Z",
+  "lastUpdatedAt": "2026-03-08T15:46:06.408Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -373,6 +373,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 593479
+    },
+    {
+      "storyId": "PR-052",
+      "title": "Frontend Upgrade Prompts + Feature Badges",
+      "status": "passed",
+      "startedAt": "2026-03-08T15:39:52.757Z",
+      "finishedAt": "2026-03-08T15:46:06.408Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 373651
     }
   ],
   "failedStories": [],
