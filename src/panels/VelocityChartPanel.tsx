@@ -201,7 +201,7 @@ export default function VelocityChartPanel() {
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-5 space-y-5" aria-live="polite" aria-busy={loading}>
         {/* Filters */}
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Filter size={14} className="text-muted" aria-hidden="true" />
           {/* Workspace filter */}
           <label htmlFor="velocity-workspace-filter" className="sr-only">Filter by workspace</label>
@@ -232,7 +232,7 @@ export default function VelocityChartPanel() {
         </div>
 
         {/* Summary cards */}
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Total stories: ${totalStories}`}>
             <p className="text-xs text-muted mb-1">Total Stories</p>
             <p className="text-xl font-bold" aria-hidden="true">{totalStories}</p>
@@ -264,8 +264,8 @@ export default function VelocityChartPanel() {
             No story data for this period. Run some pipelines to see velocity.
           </div>
         ) : (
-          <div className="h-80">
-            <div role="img" aria-label="Stacked bar chart showing weekly story velocity with passed, failed, and skipped counts and a 4-week rolling average trend line">
+          <div className="min-h-[200px] h-80">
+            <div className="w-full" role="img" aria-label="Stacked bar chart showing weekly story velocity with passed, failed, and skipped counts and a 4-week rolling average trend line">
               <ResponsiveContainer width="100%" height={320}>
                 <BarChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
@@ -330,7 +330,7 @@ export default function VelocityChartPanel() {
 
         {/* Weekly breakdown table */}
         {chartData.length > 0 && (
-          <div className="border border-border rounded-lg overflow-hidden">
+          <div className="border border-border rounded-lg overflow-hidden overflow-x-auto">
             <table className="w-full text-sm" role="table" aria-label="Weekly story breakdown table">
               <thead>
                 <tr className="bg-bg border-b border-border text-left text-xs text-muted">

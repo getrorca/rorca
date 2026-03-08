@@ -346,7 +346,7 @@ function CostsTab({ data, loading, groupBy }: { data: CostResponse | null; loadi
     <>
       {/* Summary Cards */}
       {totals && (
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <SummaryCard label="Total Cost" value={formatCost(totals.total_cost_usd)} sub={`${totals.total_stories} stories`} helpKey="cost-breakdown" />
           <SummaryCard label="Input Cost" value={formatCost(totals.total_input_cost_usd)} sub={formatTokens(totals.total_input_tokens) + ' tokens'} helpKey="cost-input-tokens" />
           <SummaryCard label="Output Cost" value={formatCost(totals.total_output_cost_usd)} sub={formatTokens(totals.total_output_tokens) + ' tokens'} helpKey="cost-output-tokens" />
@@ -363,7 +363,7 @@ function CostsTab({ data, loading, groupBy }: { data: CostResponse | null; loadi
         <h3 className="text-sm font-medium text-muted mb-3 capitalize">
           Cost by {groupBy}
         </h3>
-        <div aria-label={`Bar chart showing cost breakdown by ${groupBy}`} role="img">
+        <div className="w-full min-h-[200px]" aria-label={`Bar chart showing cost breakdown by ${groupBy}`} role="img">
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={breakdown.slice(0, 15)} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
@@ -427,6 +427,7 @@ function CostsTab({ data, loading, groupBy }: { data: CostResponse | null; loadi
         <h3 className="text-sm font-medium text-muted mb-3 capitalize">
           Detailed Cost Breakdown by {groupBy}
         </h3>
+        <div className="overflow-x-auto">
         <table className="w-full text-sm" role="table" aria-label={`Detailed cost breakdown by ${groupBy}`}>
           <thead>
             <tr className="text-left text-muted border-b border-border">
@@ -457,6 +458,7 @@ function CostsTab({ data, loading, groupBy }: { data: CostResponse | null; loadi
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </>
   );
@@ -470,7 +472,7 @@ function PeriodView({ periods }: { periods: PeriodCostRow[] }) {
 
   return (
     <>
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <SummaryCard label="Total Cost" value={formatCost(totalCost)} sub={`${periods.length} periods`} />
         <SummaryCard label="Total Stories" value={String(totalStories)} sub="across all periods" />
         <SummaryCard
@@ -539,6 +541,7 @@ function PeriodView({ periods }: { periods: PeriodCostRow[] }) {
 
       <div className="bg-panel-alt rounded-lg p-4">
         <h3 className="text-sm font-medium text-muted mb-3">Period Breakdown</h3>
+        <div className="overflow-x-auto">
         <table className="w-full text-sm" role="table" aria-label="Period cost breakdown table">
           <thead>
             <tr className="text-left text-muted border-b border-border">
@@ -561,6 +564,7 @@ function PeriodView({ periods }: { periods: PeriodCostRow[] }) {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </>
   );
@@ -620,7 +624,7 @@ function PricingTab({
       {showAddForm && (
         <div className="bg-panel-alt rounded-lg p-4 border border-accent/30">
           <h4 className="text-sm font-medium mb-3">Add New Model Pricing</h4>
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div>
               <label className="text-xs text-muted block mb-1">Model ID</label>
               <input
@@ -686,6 +690,7 @@ function PricingTab({
 
       {/* Pricing table */}
       <div className="bg-panel-alt rounded-lg p-4">
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-muted border-b border-border">
@@ -796,6 +801,7 @@ function PricingTab({
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );
