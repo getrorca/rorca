@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import { db } from '../db/index';
+import { validateBody } from '../lib/validate';
 import { synthesize } from '../lib/direction-stack';
 import { chatComplete } from '../lib/llm-client';
 import { DEFAULT_MODEL, ALL_MODELS, getModelsForProviders, fetchOpenRouterModels } from '../lib/llm-client';
@@ -117,18 +119,17 @@ router.get('/', (req: Request, res: Response) => {
 });
 
 // PUT /api/direction — upsert a direction layer
-router.put('/', (req: Request, res: Response) => {
+const DirectionUpsertSchema = z.object({
+  layer: z.number().int().refine(v => [1, 2, 3].includes(v), { message: 'layer must be 1, 2, or 3' }),
+  contentYaml: z.string().min(1),
+  workspaceId: z.union([z.string(), z.number()]).optional(),
+  domain: z.string().optional(),
+  preferredModel: z.string().nullable().optional(),
+  skipValidation: z.boolean().optional(),
+});
+
+router.put('/', validateBody(DirectionUpsertSchema), (req: Request, res: Response) => {
   const { layer, workspaceId, domain, contentYaml, preferredModel, skipValidation } = req.body;
-
-  if (!layer || !contentYaml) {
-    res.status(400).json({ error: 'Missing required fields: layer, contentYaml' });
-    return;
-  }
-
-  if (![1, 2, 3].includes(layer)) {
-    res.status(400).json({ error: 'layer must be 1, 2, or 3' });
-    return;
-  }
 
   // Validate preferredModel if provided (only valid for L3)
   if (preferredModel !== undefined && preferredModel !== null) {

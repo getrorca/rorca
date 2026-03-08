@@ -3,15 +3,16 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T09:43:43.157Z
+Last Updated: 2026-03-08T09:54:06.191Z
 
-## Completed Stories (6)
+## Completed Stories (7)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
 - PR-005: Privacy-First Telemetry — Opt-In Only — DONE (claude, claude-haiku-4-5-20251001, 2212s)
 - PR-005: Telemetry Opt-In & Privacy — DONE (claude, claude-haiku-4-5-20251001, 231s)
 - PR-006: Helmet + Security Headers — DONE (claude, claude-sonnet-4-6, 62s)
+- PR-007: Zod Input Validation Middleware — DONE (claude, claude-opus-4-6, 619s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined

@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import { z } from 'zod';
 import { db } from '../db/index';
+import { validateBody } from '../lib/validate';
 import { hydrateSchema } from '../lib/schema-hydrator';
 import {
   gitMapStep,
@@ -98,13 +100,15 @@ function parseWorkspace(row: WorkspaceRow) {
  *                   type: array
  *                   items: { $ref: '#/components/schemas/Workspace' }
  */
-router.post('/', (req, res) => {
-  const { id, label, path, domains } = req.body;
+const CreateWorkspaceSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  path: z.string().min(1),
+  domains: z.array(z.string()),
+});
 
-  if (!id || !label || !path || !domains) {
-    res.status(400).json({ error: 'Missing required fields: id, label, path, domains' });
-    return;
-  }
+router.post('/', validateBody(CreateWorkspaceSchema), (req, res) => {
+  const { id, label, path, domains } = req.body;
 
   if (!fs.existsSync(path)) {
     res.status(400).json({ error: `Path does not exist on filesystem: ${path}` });

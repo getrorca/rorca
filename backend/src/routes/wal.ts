@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import { db } from '../db/index';
+import { validateBody } from '../lib/validate';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
@@ -180,13 +182,17 @@ router.get('/', (req, res) => {
  *       400:
  *         description: Missing event_type
  */
-router.post('/', (req: Request, res: Response) => {
+const WalEventSchema = z.object({
+  event_type: z.string().min(1),
+  workspace_id: z.string().optional(),
+  spec_id: z.string().optional(),
+  story_id: z.string().optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
+});
+
+router.post('/', validateBody(WalEventSchema), (req: Request, res: Response) => {
   try {
     const { event_type, workspace_id, story_id, spec_id, payload } = req.body;
-    if (!event_type) {
-      res.status(400).json({ error: 'event_type is required' });
-      return;
-    }
 
     const result = db.prepare(
       `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload)
