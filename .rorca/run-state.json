@@ -1,17 +1,18 @@
 {
-  "specId": "rorca-convention-agents",
-  "runId": 914,
-  "startedAt": "2026-03-08T08:28:07.956Z",
-  "lastUpdatedAt": "2026-03-08T08:36:37.998Z",
+  "specId": "rorca-production-ready",
+  "runId": 936,
+  "startedAt": "2026-03-08T09:29:52.787Z",
+  "lastUpdatedAt": "2026-03-08T09:30:40.099Z",
   "completedStories": [
     {
-      "storyId": "TK-001",
-      "title": "Real-Time Token Streaming in Pipeline Monitor",
+      "storyId": "PR-002",
+      "title": "GitHub Actions CI Pipeline",
       "status": "passed",
-      "startedAt": "2026-03-08T08:28:13.563Z",
-      "finishedAt": "2026-03-08T08:36:37.998Z",
+      "startedAt": "2026-03-08T09:29:53.844Z",
+      "finishedAt": "2026-03-08T09:30:40.099Z",
       "agentType": "claude",
-      "elapsedMs": 504434
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 46255
     }
   ],
   "failedStories": [],

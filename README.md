@@ -2,7 +2,7 @@
 
 **AI spec orchestration for autonomous development.** Rorca is a standalone dashboard that turns a plain-English brief into a validated, structured spec — then tracks it through approval, execution, and archival. It works with any git repository and integrates with Claude Code via MCP.
 
-![Status](https://img.shields.io/badge/status-beta-orange) ![Node](https://img.shields.io/badge/node-%3E%3D18-green) ![License](https://img.shields.io/badge/license-MIT-blue)
+[![CI](https://github.com/sysgazer/rorcha/actions/workflows/ci.yml/badge.svg)](https://github.com/sysgazer/rorcha/actions/workflows/ci.yml) ![Status](https://img.shields.io/badge/status-beta-orange) ![Node](https://img.shields.io/badge/node-%3E%3D18-green) ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
