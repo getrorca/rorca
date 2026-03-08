@@ -17,6 +17,7 @@ export interface RunTerminalHandle {
 
 interface RunTerminalProps {
   runId: number;
+  workspaceId?: string | null;
 }
 
 // ─── Semantic step type (mirrors backend SemanticStep) ────────────────────────
@@ -443,7 +444,7 @@ function ClaudeStepRow({
  *
  * When agent_type=claude (default), the existing xterm-parsing semantic view is unchanged.
  */
-const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId }, ref) {
+const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -539,8 +540,11 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    // Connect to live output stream
-    const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/output`);
+    // Connect to live output stream — scoped to workspace
+    const outputParams = new URLSearchParams();
+    if (workspaceId) outputParams.set('workspaceId', workspaceId);
+    const outputUrl = `${BASE_URL}/api/pipeline/runs/${runId}/output${outputParams.toString() ? '?' + outputParams : ''}`;
+    const es = new EventSource(outputUrl);
     esRef.current = es;
     let lineBuffer = '';
 
@@ -607,8 +611,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     });
 
     es.onerror = () => {
-      setStreamDone(true);
-      es.close();
+      // Don't close — EventSource auto-reconnects on transient errors.
+      // The server's 'done' event is the proper signal that the stream ended.
+      // Only mark done if the connection is permanently dead (readyState === CLOSED).
+      if (es.readyState === EventSource.CLOSED) {
+        setStreamDone(true);
+      }
     };
 
     const ro = new ResizeObserver(() => fitAddon.fit());

@@ -1,5 +1,6 @@
 import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { apiFetch, BASE_URL } from '../lib/apiFetch';
+import { apiFetch } from '../lib/apiFetch';
+import { useWalSSE } from '../hooks/useWalSSE';
 
 export interface Notification {
   id: string;
@@ -50,7 +51,6 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const sseRef = useRef<EventSource | null>(null);
   const lastSseRefreshRef = useRef<number>(0); // timestamp of last SSE-triggered refresh
 
   const refreshUnreadCount = useCallback(async () => {
@@ -107,36 +107,16 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // SSE: subscribe to WAL events to detect new notifications in real-time
-  useEffect(() => {
-    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
-    sseRef.current = es;
-
-    es.addEventListener('wal_event', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        // Notification-triggering events — refresh count when these arrive
-        const triggerTypes = new Set([
-          'spec_approved', 'spec_rejected', 'run_finished',
-          'run_failed', 'run_cancelled', 'review_requested', 'budget_alert',
-        ]);
-        if (triggerTypes.has(data.event_type)) {
-          refreshUnreadCountThrottled();
-        }
-      } catch {
-        // ignore parse errors
-      }
-    });
-
-    es.onerror = () => {
-      // SSE disconnected — polling fallback still active
-    };
-
-    return () => {
-      es.close();
-      sseRef.current = null;
-    };
-  }, [refreshUnreadCountThrottled]);
+  // SSE: subscribe to WAL events via shared singleton to detect new notifications
+  const triggerTypes = new Set([
+    'spec_approved', 'spec_rejected', 'run_finished',
+    'run_failed', 'run_cancelled', 'review_requested', 'budget_alert',
+  ]);
+  useWalSSE((event) => {
+    if (triggerTypes.has(event.event_type)) {
+      refreshUnreadCountThrottled();
+    }
+  });
 
   // Fallback polling for unread count
   useEffect(() => {

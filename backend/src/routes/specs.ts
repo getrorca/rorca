@@ -4452,6 +4452,82 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
   }
 });
 
+// ─── DELETE /:specId — Hard-delete a spec (any status) ──────────────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}:
+ *   delete:
+ *     tags: [Specs]
+ *     summary: Delete a spec
+ *     operationId: deleteSpec
+ *     description: Permanently deletes a spec file from pending or approved directory and emits a spec_deleted WAL event.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deleted
+ *       404:
+ *         description: Spec not found
+ */
+router.delete('/:specId', (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let deleted = false;
+    if (fs.existsSync(pendingFile)) {
+      fs.unlinkSync(pendingFile);
+      deleted = true;
+    }
+    if (fs.existsSync(approvedFile)) {
+      fs.unlinkSync(approvedFile);
+      deleted = true;
+    }
+
+    if (!deleted) {
+      res.status(404).json({ error: `Spec '${specId}' not found` });
+      return;
+    }
+
+    db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_deleted', ?, 'user', ?)`
+    ).run(specId, JSON.stringify({ workspaceId }));
+
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('[Specs] Delete error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── V2-037: POST /:specId/request-review — Transition to review_requested ───
 
 const VALID_REVIEW_STATUSES: ReviewStatus[] = ['draft', 'review_requested', 'approved', 'changes_requested'];

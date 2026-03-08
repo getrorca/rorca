@@ -107,6 +107,37 @@ function parseErrorBody(status: number, text: string): ApiError {
   }
 }
 
+// ─── Network retry helper ─────────────────────────────────────────────────────
+
+function isNetworkError(err: unknown): boolean {
+  return err instanceof TypeError && (
+    err.message.includes('Failed to fetch') ||
+    err.message.includes('NetworkError') ||
+    err.message.includes('Network request failed') ||
+    err.message.includes('ERR_NETWORK_CHANGED') ||
+    err.message.includes('Load failed')
+  );
+}
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  retries = 2,
+  delayMs = 500,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      if (attempt < retries && isNetworkError(err)) {
+        await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // ─── Core fetch ───────────────────────────────────────────────────────────────
 
 export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: boolean }): Promise<T> {
@@ -119,7 +150,7 @@ export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: 
     headers['Authorization'] = `Bearer ${at}`;
   }
 
-  const res = await fetch(`${BASE_URL}${path}`, { ...opts, headers });
+  const res = await fetchWithRetry(`${BASE_URL}${path}`, { ...opts, headers });
 
   // On 401 with expired token, attempt silent refresh and retry once
   if (res.status === 401) {

@@ -20,10 +20,12 @@ import {
   Upload,
   ExternalLink,
   History,
+  Trash2,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { apiFetch } from '../lib/apiFetch';
+import { useGlobalToast } from '../contexts/ToastContext';
 import TriggerPopover from '../components/TriggerPopover';
 import PricingModal from '../components/PricingModal';
 import { StoryCard } from '../components/StoryCard';
@@ -109,10 +111,10 @@ interface SpecDetail {
 const PAGE_SIZE = 20;
 
 const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'completed', label: 'Completed' },
+  { id: 'all', label: 'All Specs' },
+  { id: 'pending', label: 'Pending Review' },
   { id: 'approved', label: 'Approved' },
-  { id: 'pending', label: 'Pending' },
+  { id: 'completed', label: 'Completed' },
   { id: 'rejected', label: 'Rejected' },
 ];
 
@@ -388,7 +390,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
               {workspaceId ? 'Workspace' : 'Global'}
             </span>
             <ChevronRight size={14} className="text-muted" />
-            <span className="text-sm text-muted">Archive</span>
+            <span className="text-sm text-muted">Wake</span>
           </div>
         }
         actions={
@@ -434,9 +436,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                 }}
               >
                 {STATUS_FILTERS.map(f => (
-                  <option key={f.id} value={f.id}>
-                    {f.id === 'all' ? 'Any Status' : f.label}
-                  </option>
+                  <option key={f.id} value={f.id}>{f.label}</option>
                 ))}
               </select>
 
@@ -686,6 +686,11 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
             onTagsChange={(newTags) => {
               setSpecs(prev => prev.map(s => s.id === selectedId ? { ...s, tags: newTags } : s));
             }}
+            onDeleted={(deletedId) => {
+              setSelectedId(null);
+              setSpecDetail(null);
+              setSpecs(prev => prev.filter(s => s.id !== deletedId));
+            }}
           />
         )}
       </div>
@@ -705,6 +710,7 @@ function SpecPreviewDrawer({
   onClose,
   onNavigate,
   onTagsChange,
+  onDeleted,
 }: {
   specId: string;
   summary: ArchiveSpec | null;
@@ -713,6 +719,7 @@ function SpecPreviewDrawer({
   onClose: () => void;
   onNavigate: (panel: PanelId) => void;
   onTagsChange: (tags: string[]) => void;
+  onDeleted: (specId: string) => void;
 }) {
   const { workspaceId } = useWorkspace();
   const { user } = useAuth();
@@ -729,6 +736,8 @@ function SpecPreviewDrawer({
   const [forkState, setForkState] = useState<'idle' | 'forking' | 'done' | 'error'>('idle');
   const [forkError, setForkError] = useState('');
   const [forkId, setForkId] = useState('');
+  const [deleteState, setDeleteState] = useState<'idle' | 'confirm' | 'deleting'>('idle');
+  const toast = useGlobalToast();
   // Import stories state
   const [importState, setImportState] = useState<'idle' | 'form' | 'loading' | 'preview' | 'importing' | 'done' | 'error'>('idle');
   const [importSource, setImportSource] = useState<'linear' | 'github'>('linear');
@@ -929,6 +938,23 @@ function SpecPreviewDrawer({
     URL.revokeObjectURL(url);
   };
 
+  const handleDelete = async () => {
+    if (!summary) return;
+    setDeleteState('deleting');
+    try {
+      await apiFetch(`/api/specs/${summary.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      toast.show(`Spec "${summary.specName}" deleted`, 'success');
+      onDeleted(summary.id);
+    } catch {
+      setDeleteState('idle');
+      toast.show('Failed to delete spec', 'error');
+    }
+  };
+
   const handleFork = async () => {
     if (!workspaceId || !summary) return;
     setForkState('forking');
@@ -1068,7 +1094,7 @@ function SpecPreviewDrawer({
         )}
 
         {/* Footer actions */}
-        {detail && summary?.status !== 'rejected' && (
+        {detail && (
           <div className="px-4 py-3 border-t border-border shrink-0 bg-bg space-y-2">
             {/* Run in Pipeline button — approved or completed specs */}
             {(summary?.status === 'approved' || summary?.status === 'completed') && (
@@ -1401,6 +1427,40 @@ function SpecPreviewDrawer({
             )}
             {forkState === 'error' && (
               <p className="text-xs text-error">{forkError}</p>
+            )}
+
+            {/* Delete Spec */}
+            {deleteState === 'confirm' ? (
+              <div className="rounded border border-error/30 bg-error/10 p-3 space-y-2">
+                <p className="text-xs text-error font-medium">Delete this spec? This cannot be undone.</p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleDelete}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-error text-white hover:opacity-90 transition-opacity"
+                  >
+                    <Trash2 size={12} />
+                    Yes, delete
+                  </button>
+                  <button
+                    onClick={() => setDeleteState('idle')}
+                    className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setDeleteState('confirm')}
+                disabled={deleteState === 'deleting'}
+                className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-error/30 text-error hover:bg-error/10 transition-colors disabled:opacity-60"
+              >
+                {deleteState === 'deleting' ? (
+                  <><Loader2 size={14} className="animate-spin" /> Deleting...</>
+                ) : (
+                  <><Trash2 size={14} /> Delete Spec</>
+                )}
+              </button>
             )}
           </div>
         )}

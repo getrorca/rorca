@@ -7,30 +7,33 @@ export function Nav() {
                 <Link href="/" className="flex items-center gap-[4px] group">
                     {/* Faceted Gem Mark — Precision grid-aligned, φ geometry */}
                     <div className="flex items-center justify-center w-8 h-8">
-                        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg"
-                            className="transition-all duration-700 group-hover:drop-shadow-[0_0_12px_rgba(0,245,255,0.5)]">
-
-                            {/* Outer rounded rhombus */}
-                            <path d="M14 2 C17.5 2 26 10.5 26 14 C26 17.5 17.5 26 14 26 C10.5 26 2 17.5 2 14 C2 10.5 10.5 2 14 2 Z"
-                                stroke="white" strokeWidth="1.1" fill="rgba(255,255,255,0.04)" />
-
-                            {/* Left face — fill the left half of the diamond */}
-                            <path d="M2 14 C2 10.5 10.5 2 14 2 L14 26 C10.5 26 2 17.5 2 14 Z"
-                                fill="rgba(255,255,255,0.12)" />
-
-                            {/* Center partition — exact vertical from top vertex (14,2) to bottom vertex (14,26) */}
-                            <line x1="14" y1="2" x2="14" y2="26"
-                                stroke="white" strokeWidth="0.9" strokeOpacity="0.5" />
-
-                            {/* Right face — very faint, recessive */}
-                            <path d="M14 2 C17.5 2 26 10.5 26 14 C26 17.5 17.5 26 14 26 L14 2 Z"
-                                fill="rgba(255,255,255,0.02)" />
-
-                            {/* Eye — snapped to 4px grid, anchored 4px right of center line */}
-                            {/* Left edge at x=18 (14+4), center at (20,9), 4×4 diamond */}
-                            <path d="M20 7 L22 9 L20 11 L18 9 Z"
-                                fill="#00F5FF" fillOpacity="0.95"
-                                className="transition-all duration-500 group-hover:drop-shadow-[0_0_6px_rgba(0,245,255,1)]" />
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="116 60 280 392" width="28" height="28"
+                            aria-label="Rorca logo" role="img"
+                            className="transition-all duration-700 group-hover:drop-shadow-[0_0_12px_rgba(0,229,255,0.5)]">
+                            <defs>
+                                <linearGradient id="nav-lg" x1="0%" y1="0%" x2="100%" y2="100%">
+                                    <stop offset="0%" stopColor="#1A1D24" />
+                                    <stop offset="100%" stopColor="#050505" />
+                                </linearGradient>
+                                <linearGradient id="nav-rg" x1="0%" y1="0%" x2="0%" y2="100%">
+                                    <stop offset="0%" stopColor="#515B6B" />
+                                    <stop offset="100%" stopColor="#232934" />
+                                </linearGradient>
+                                <clipPath id="nav-cd">
+                                    <rect x="132" y="132" width="248" height="248" rx="36" transform="rotate(45 256 256)" />
+                                </clipPath>
+                            </defs>
+                            <rect x="116" y="116" width="280" height="280" rx="44" transform="rotate(45 256 256)" fill="currentColor" opacity="0.12" />
+                            <rect x="120" y="120" width="272" height="272" rx="40" transform="rotate(45 256 256)" fill="#FFFFFF" stroke="currentColor" strokeWidth="2" strokeOpacity="0.15" />
+                            <g clipPath="url(#nav-cd)">
+                                <rect x="0" y="0" width="256" height="512" fill="url(#nav-lg)" />
+                                <rect x="256" y="0" width="256" height="512" fill="url(#nav-rg)" />
+                                <line x1="256" y1="0" x2="256" y2="512" stroke="#E5E7EB" strokeWidth="12" />
+                                <g transform="rotate(45 256 256)">
+                                    <rect x="224" y="156" width="124" height="60" rx="16" fill="#00E5FF" />
+                                    <rect x="232" y="164" width="108" height="44" rx="8" fill="none" stroke="#000000" strokeWidth="5" opacity="0.9" />
+                                </g>
+                            </g>
                         </svg>
                     </div>
                     <span className="font-medium text-base tracking-tight text-white transition-colors duration-300 group-hover:text-zinc-300" style={{ fontFamily: 'var(--font-space-grotesk)' }}>rorca</span>

@@ -139,28 +139,32 @@ Spec files live in the **project workspace** (not Rorca):
 ```
 ⚠️ Key field is `userStories` (NOT `stories`). `id` is always the slug (filename without `.json`), NOT the human-readable title.
 
-### The Ralph Loop (`backend/src/lib/run-loop.ts` → `execution-engine.ts`)
-The current primary engine is `backend/src/lib/run-loop.ts` — TypeScript, cross-platform, spawned by `pipeline.ts` via `npx tsx`. The legacy `forge/run-loop.sh` (in each project workspace) is a fallback — `pipeline.ts` checks for `run-loop.sh` first; if absent, uses the TS version. **The `rorca-opencode-integration` spec (OC-004) replaces both with `backend/src/lib/execution-engine.ts`**, which adds multi-agent switching (claude / opencode / codex). After that spec runs, edit `execution-engine.ts` for all execution behavior — `run-loop.ts` becomes dead code.
+### The Ralph Loop (`backend/src/lib/execution-engine.ts`)
+The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by `pipeline.ts` via `npx tsx`. The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — `pipeline.ts` uses it only if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
 
-**Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030)
+**Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex>`, `--model <model>`
 
 **Modes** (auto-detected from JSON structure):
 - Implementation (`impl`): `{ userStories: [...] }` — injects `.claude/skills/rorca.md`, `feat:` commits
 - QA (`qa`): `{ phases: [{ stories: [...] }] }` — test-writing prompt, `test:` commits
 - Journey (`journey`): `{ mode: "journey", ... }` — user simulation prompt, `journey:` commits
 
-**What `run-loop.ts` does per story**:
+**What `execution-engine.ts` does per story**:
 1. `emitWalEvent('story_started')` via `fetch` to `/api/wal`
-2. Spawns `claude --dangerously-skip-permissions --print --verbose --output-format stream-json` with clean env (4 Claude vars stripped)
-3. Timeout via SIGTERM → SIGKILL after 10s (replaces `gtimeout`)
+2. Spawns agent subprocess (`claude --print`, `opencode run`, or `codex`) with clean env
+3. Timeout via SIGTERM → SIGKILL after 10s
 4. On exit 0: `markStoryPassed()` (writes spec JSON), `gitCommitStory()`, `emitWalEvent('story_passed')`, POST to `/api/pipeline/story-result`
 5. On exit 124 (timeout): `markStorySkipped()`, `emitWalEvent('story_failed', { reason: 'timeout' })`
-6. On non-zero: retry up to `MAX_RETRIES=3`, then skip with `emitWalEvent('story_failed', { reason: 'max_retries' })`
+6. On non-zero: retry up to `MAX_RETRIES=3` with optional model escalation (Haiku→Sonnet→Opus for OpenCode), then skip with `emitWalEvent('story_failed', { reason: 'max_retries' })`
 
 **Context injected** by `buildPrompt()` from the workspace `cwd`:
 - `.claude/skills/rorca.md` — workflow skill (falls back to `dimitri.md`)
-- `spec.playbook` field — optional playbook file path read into QA/journey prompts
-- `CLAUDE.md` is injected automatically by `claude --print` (not manually by run-loop.ts)
+- `.rorca/personas/` — persona files matched to story via PersonaRegistry
+- `.rorca/config.json` — context routing rules (micromatch path scoping)
+- `MEMORY.md` — episodic ledger injected per story
+- `AGENTS.md` — file governance rules
+- LLM-matched skill files from SkillRegistry
+- `CLAUDE.md` is injected automatically by `claude --print` (not manually by execution-engine.ts)
 
 ## Directory Structure
 
@@ -265,7 +269,7 @@ Key routes (see `backend/src/server.ts` for full mount list):
 **Pipeline**
 | Route | Purpose |
 |-------|---------|
-| `POST /api/pipeline/trigger` | Spawn run-loop.sh |
+| `POST /api/pipeline/trigger` | Spawn execution-engine.ts (bash run-loop.sh as fallback) |
 | `GET /api/pipeline/runs/:id/output` | SSE: raw terminal (xterm.js) |
 | `GET /api/pipeline/stream` | SSE: WAL events (story progress) |
 | `GET /api/pipeline/hooks` | Pipeline lifecycle webhooks |
@@ -359,7 +363,7 @@ When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the buil
 1. **`chatComplete` returns `ChatResult { text, usage }`** — always use `.text` accessor. Never treat result as a string.
 2. **better-sqlite3 is synchronous** — never use async in DB calls. `db.prepare(sql).get()` returns T|undefined, `.all()` returns T[], `.run()` returns RunResult.
 3. **spec `id` ≠ spec `specName`** — `id` is the filename slug (`rorca-feature-enhancements`), `specName` is the human title. Use `spec.id` to construct file paths.
-4. **run-loop.sh lives in the PROJECT workspace** — Rorca finds it at `workspace.path/forge/run-loop.sh`, not in Rorca's own repo.
+4. **run-loop.sh is a bash fallback only** — lives at `workspace.path/forge/run-loop.sh`. Only used if `execution-engine.ts` is missing. Claude-only, no multi-agent support. Do not rely on it.
 5. **Backend requires restart** — `tsx` has no hot-reload. Always `lsof -ti:3030 | xargs kill -9 && npm run dev` after any backend changes.
 
 ### Auth Middleware — Intentionally Bypassed
@@ -400,7 +404,7 @@ UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE stat
 ```
 
 ### WAL Events Drive UI
-The Pipeline Monitor (`/api/pipeline/stream` SSE) polls `wal_events` every 3s. Story progress only appears after `run-loop.sh` writes `story_started`/`story_passed` events to the WAL (via its own Python scripts). The Terminal tab shows raw output independently of WAL events.
+The Pipeline Monitor (`/api/pipeline/stream` SSE) polls `wal_events` every 3s. Story progress only appears after `execution-engine.ts` writes `story_started`/`story_passed` events to the WAL via `fetch` to `/api/wal`. The Terminal tab shows raw output independently of WAL events.
 
 ### WAL Events Table — Column Is `ts`, Not `created_at`
 The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Queries against this table must use `ORDER BY ts DESC` and `SELECT ts`. The route handler can alias it (`ts AS created_at`) for API consumers, but the SQL itself must use `ts`. Using `created_at` produces `SqliteError: no such column: created_at`.
@@ -463,7 +467,7 @@ Setup (stdio, legacy): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/
 
 ### Multi-Workspace Support
 `workspaces.path` stores the absolute filesystem path of each project. Backend uses this to:
-- Find `forge/run-loop.sh` for pipeline trigger
+- Find `forge/run-loop.sh` for pipeline trigger (bash fallback only)
 - Resolve spec JSON absolute paths
 - Create git worktrees in the correct repo
 

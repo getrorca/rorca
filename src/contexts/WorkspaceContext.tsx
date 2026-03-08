@@ -49,11 +49,13 @@ interface WorkspaceContextValue {
 const WorkspaceCtx = createContext<WorkspaceContextValue | null>(null);
 
 const LS_KEY = 'rorca_workspaceId';
+const SS_KEY = 'rorca_workspaceId'; // sessionStorage key (per-tab isolation)
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  // Per-tab workspace: sessionStorage (tab-scoped) first, localStorage (cross-tab) as fallback for new tabs
   const [workspaceId, setWorkspaceIdRaw] = useState<string | null>(
-    () => localStorage.getItem(LS_KEY),
+    () => sessionStorage.getItem(SS_KEY) ?? localStorage.getItem(LS_KEY),
   );
   const [activeRuns, setActiveRuns] = useState<ActiveRun[]>([]);
   const [settings, setSettings] = useState<WorkspaceSettings>({});
@@ -65,6 +67,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   const setWorkspaceId = (id: string) => {
+    // sessionStorage = per-tab (primary), localStorage = fallback for brand-new tabs
+    sessionStorage.setItem(SS_KEY, id);
     localStorage.setItem(LS_KEY, id);
     setWorkspaceIdRaw(id);
   };
@@ -146,6 +150,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (activeRunsInterval.current) clearInterval(activeRunsInterval.current);
     };
   }, [workspaceId, refreshActiveRuns]);
+
+  // Re-fetch data when network comes back online
+  useEffect(() => {
+    const handleOnline = () => {
+      refreshWorkspaces();
+      refreshActiveRuns();
+      fetchSettings();
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [refreshWorkspaces, refreshActiveRuns, fetchSettings]);
 
   return (
     <WorkspaceCtx.Provider value={{
