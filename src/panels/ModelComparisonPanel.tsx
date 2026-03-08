@@ -274,7 +274,7 @@ export default function ModelComparisonPanel() {
 
             {/* Summary cards */}
             {sorted.filter(m => !m.insufficientData).length > 1 && (
-              <div className="mt-6 grid grid-cols-3 gap-3">
+              <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <SummaryCard
                   label="Best Pass Rate"
                   model={sorted.filter(m => !m.insufficientData).sort((a, b) => b.passRate - a.passRate)[0]}
