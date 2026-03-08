@@ -6,12 +6,76 @@
       "CLAUDE.md",
       "AGENTS.md"
     ],
-    "scopes": [],
-    "tags": [],
+    "scopes": [
+      {
+        "path": "src/panels/**",
+        "inject": ["react.md", "tailwind.md"],
+        "priority": 50,
+        "managed": "manual"
+      },
+      {
+        "path": "src/components/**",
+        "inject": ["react.md", "tailwind.md"],
+        "priority": 50,
+        "managed": "manual"
+      },
+      {
+        "path": "src/contexts/**",
+        "inject": ["react.md"],
+        "priority": 40,
+        "managed": "manual"
+      },
+      {
+        "path": "src/hooks/**",
+        "inject": ["react.md"],
+        "priority": 40,
+        "managed": "manual"
+      },
+      {
+        "path": "backend/src/routes/**",
+        "inject": [],
+        "priority": 60,
+        "managed": "manual"
+      },
+      {
+        "path": "backend/src/lib/**",
+        "inject": [],
+        "priority": 70,
+        "managed": "manual"
+      },
+      {
+        "path": "backend/src/db/**",
+        "inject": [],
+        "priority": 60,
+        "managed": "manual"
+      },
+      {
+        "path": "forge/**",
+        "inject": [],
+        "priority": 30,
+        "managed": "manual"
+      }
+    ],
+    "tags": [
+      {
+        "tag": "frontend",
+        "inject": ["react.md", "tailwind.md"]
+      },
+      {
+        "tag": "ui",
+        "inject": ["react.md", "tailwind.md"]
+      }
+    ],
     "tokenBudget": 32000
   },
   "context": {
-    "fileRegistry": [],
+    "fileRegistry": [
+      { "path": "CLAUDE.md", "role": "context" },
+      { "path": "AGENTS.md", "role": "governance" },
+      { "path": "MEMORY.md", "role": "memory" },
+      { "path": ".rorca/skills/react.md", "role": "skill" },
+      { "path": ".rorca/skills/tailwind.md", "role": "skill" }
+    ],
     "memory": {
       "ledgerPath": ".rorca/memory/MEMORY.md",
       "maxEntries": 500,

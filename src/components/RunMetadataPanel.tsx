@@ -251,14 +251,6 @@ export default function RunMetadataPanel({
         })()}
       </MetaRow>
 
-      {/* Model */}
-      {specModel && (
-        <MetaRow icon={Cpu} label="Model">
-          <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/10 text-accent">
-            {modelShortName(specModel)}
-          </span>
-        </MetaRow>
-      )}
 
       {/* CIE-016: Context — predicted vs actual */}
       {contextComparison && (() => {

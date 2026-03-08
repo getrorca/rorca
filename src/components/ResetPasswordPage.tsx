@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import RorcaLogo from './RorcaLogo';
 
 interface ResetPasswordPageProps {
   token: string;
@@ -56,8 +57,9 @@ export default function ResetPasswordPage({ token, onSwitchToLogin }: ResetPassw
     <div className="min-h-screen flex items-center justify-center bg-bg px-4">
       <div className="w-full max-w-sm">
         {/* Logo */}
-        <div className="text-center mb-8">
-          <h1 className="font-mono font-bold text-accent text-2xl tracking-tight">rorca</h1>
+        <div className="flex flex-col items-center mb-8">
+          <RorcaLogo size={48} variant="gradient" className="mb-3" />
+          <h1 className="font-mono font-bold text-[var(--text)] text-2xl tracking-tight">rorca</h1>
           <p className="text-muted text-sm mt-1">AI spec orchestration</p>
         </div>
 

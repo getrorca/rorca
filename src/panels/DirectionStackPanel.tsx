@@ -201,7 +201,7 @@ export default function DirectionStackPanel() {
       {/* Column 1: Layer editor */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         {/* Header: View mode toggle + action buttons */}
-        <div className="flex items-center border-b border-border">
+        <div className="flex items-center border-b border-border min-w-0 overflow-x-auto">
           {/* Simple/Advanced toggle */}
           <div className="flex items-center px-3 py-1.5 gap-1">
             <div className="flex bg-border/50 rounded p-0.5">
@@ -257,25 +257,28 @@ export default function DirectionStackPanel() {
           <DirectionHealthIndicator l1={l1} l2={l2} l3={l3} />
 
           {/* Action buttons */}
-          <div className="flex items-center gap-1 ml-1">
+          <div className="flex items-center gap-0.5 ml-1 shrink-0 pr-2">
             <button
               onClick={handleScanRepo}
               disabled={isScanning}
-              className="px-2.5 py-1.5 text-xs font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap disabled:opacity-50"
+              className="px-2 py-1.5 text-[11px] font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap disabled:opacity-50"
+              title="Scan repository to detect direction"
             >
-              {isScanning ? 'Scanning...' : 'Scan Repo'}
+              {isScanning ? 'Scanning...' : 'Scan'}
             </button>
-            <span className="text-border">|</span>
+            <span className="text-border text-[10px]">|</span>
             <button
               onClick={() => setShowAISetup(true)}
-              className="px-2.5 py-1.5 text-xs font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap"
+              className="px-2 py-1.5 text-[11px] font-medium text-accent hover:text-[var(--accent-hover)] transition-colors whitespace-nowrap"
+              title="Setup direction with AI wizard"
             >
-              Setup with AI &#10022;
+              AI Setup &#10022;
             </button>
-            <span className="text-border">|</span>
+            <span className="text-border text-[10px]">|</span>
             <button
               onClick={() => setShowBootstrap(true)}
-              className="px-2.5 py-1.5 text-xs text-muted hover:text-text transition-colors whitespace-nowrap"
+              className="px-2 py-1.5 text-[11px] text-muted hover:text-text transition-colors whitespace-nowrap"
+              title="Bootstrap context files"
             >
               Bootstrap
             </button>
