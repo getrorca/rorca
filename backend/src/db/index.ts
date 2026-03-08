@@ -594,6 +594,15 @@ export function runMigrations() {
     `);
     db.pragma('foreign_keys = ON');
   }
+
+  // PR-010: Add webhook_url and encrypted_webhook_secret columns to pipeline_hooks (idempotent)
+  const hookCols = db.pragma('table_info(pipeline_hooks)') as { name: string }[];
+  if (hookCols.length > 0 && !hookCols.some(c => c.name === 'webhook_url')) {
+    db.exec('ALTER TABLE pipeline_hooks ADD COLUMN webhook_url TEXT');
+  }
+  if (hookCols.length > 0 && !hookCols.some(c => c.name === 'encrypted_webhook_secret')) {
+    db.exec('ALTER TABLE pipeline_hooks ADD COLUMN encrypted_webhook_secret TEXT');
+  }
 }
 
 runMigrations();
