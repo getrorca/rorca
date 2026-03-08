@@ -137,6 +137,12 @@ router.post('/github', (req: Request, res: Response) => {
     return;
   }
 
+  // Reject if no webhook secret is configured (defensive — should always be set on connect)
+  if (!row.encrypted_webhook_secret) {
+    res.status(403).json({ error: 'Webhook secret not configured' });
+    return;
+  }
+
   // Verify webhook signature using the raw body
   const secret = decryptToken(row.encrypted_webhook_secret);
   if (!verifyWebhookSignature(rawBody.toString('utf8'), signature, secret)) {
