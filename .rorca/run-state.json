@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T11:50:33.417Z",
+  "lastUpdatedAt": "2026-03-08T11:56:59.733Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -193,6 +193,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 305914
+    },
+    {
+      "storyId": "PR-028",
+      "title": "Animation System — Framer Motion Unification",
+      "status": "passed",
+      "startedAt": "2026-03-08T11:50:44.019Z",
+      "finishedAt": "2026-03-08T11:56:59.733Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 375714
     }
   ],
   "failedStories": [],
