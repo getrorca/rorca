@@ -57,6 +57,7 @@ function checkDbConnected(): boolean {
  *                 active_runs: { type: integer }
  *                 mcpTransport: { type: string }
  *                 telemetryEnabled: { type: boolean }
+ *                 authRequired: { type: boolean, description: "Whether AUTH_REQUIRED=true is set" }
  *                 opencodeInstalled: { type: boolean }
  *                 opencodeVersion: { type: string }
  *                 codexInstalled: { type: boolean }
@@ -97,6 +98,8 @@ router.get('/', (_req: Request, res: Response) => {
     mcpTransport: 'http',
     // PR-005: Report telemetry status
     telemetryEnabled: isTelemetryEnabled(),
+    // PR-009: Report auth enforcement status
+    authRequired: process.env.AUTH_REQUIRED === 'true',
     ...(agentType === 'opencode' && opencode ? {
       opencodeInstalled: opencode.opencodeInstalled,
       opencodeVersion: opencode.opencodeVersion,

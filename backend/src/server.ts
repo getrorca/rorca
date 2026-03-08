@@ -153,8 +153,11 @@ app.get('/mcp', mcpHandlers.handleGet);
 app.delete('/mcp', mcpHandlers.handleDelete);
 
 // ─── Auth middleware (all routes below require authentication) ───
-// Auth gate bypassed — Rorca is a local single-user tool (see CLAUDE.md)
-// app.use(authRequired);
+// PR-009: Conditional auth — AUTH_REQUIRED=true enforces JWT on all protected routes.
+// Default (false/absent) = no-op, preserving local single-user behavior.
+if (process.env.AUTH_REQUIRED === 'true') {
+  app.use(authRequired);
+}
 
 // ─── Rate limiting (after auth so req.user is available) ───
 app.use(rateLimiter);

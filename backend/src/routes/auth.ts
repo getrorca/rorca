@@ -1243,13 +1243,21 @@ export function authRequired(req: Request, res: Response, next: NextFunction): v
     return;
   }
 
+  // PR-009: Support JWT via query param for SSE endpoints (EventSource cannot send headers)
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  const queryToken = typeof req.query.token === 'string' ? req.query.token : null;
+
+  let token: string | null = null;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice(7);
+  } else if (queryToken) {
+    token = queryToken;
+  }
+
+  if (!token) {
     res.status(401).json({ error: 'Authentication required' });
     return;
   }
-
-  const token = authHeader.slice(7);
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as { sub: string; email: string };

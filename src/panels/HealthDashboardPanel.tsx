@@ -10,6 +10,7 @@ interface HealthBasic {
   uptime: number;
   db_connected: boolean;
   active_runs: number;
+  authRequired?: boolean;
 }
 
 interface HealthDetailed extends HealthBasic {
@@ -240,6 +241,12 @@ export default function HealthDashboardPanel() {
                 {health.status.charAt(0).toUpperCase() + health.status.slice(1)}
               </span>
               <span className="text-muted text-sm ml-3">v{health.version}</span>
+              {health.authRequired && (
+                <span className="inline-flex items-center gap-1 ml-3 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                  <ShieldCheck size={12} />
+                  Auth Enforced
+                </span>
+              )}
             </div>
           </div>
 
