@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Activity, Archive, Settings,
-  Search, LayoutDashboard, Store,
+  Search, LayoutDashboard, Store, Inbox,
   GitBranch, ArrowLeftRight,
   Github, Rss, Users, Coins, DollarSign, Zap, TrendingUp,
   BarChart3, HeartPulse, ScrollText, Calculator, BookOpen,
@@ -33,6 +33,7 @@ interface NavSection {
 const SIDEBAR_ITEMS: NavItem[] = [
   { id: 'hub', label: 'Overview', icon: LayoutDashboard },
   { id: 'forge', label: 'Spec', icon: Wand2 },
+  { id: 'queue', label: 'Review Queue', icon: Inbox },
   { id: 'archive', label: 'Wake', icon: Archive },
   { id: 'pipeline', label: 'Dive', icon: Activity },
   { id: 'marketplace', label: 'Skills', icon: Store },
@@ -103,7 +104,7 @@ interface SidebarProps {
   queueCount?: number;
 }
 
-export default function Sidebar({ onNavigate, mobileOpen, onMobileClose }: SidebarProps) {
+export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0 }: SidebarProps) {
   // Map toggle drawer event to Command Palette trigger for backwards compat
   useEffect(() => {
     const handler = () => {
@@ -156,7 +157,12 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose }: Sideb
                 {({ isActive }) => (
                   <>
                     <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
-                    <span className="truncate">{item.label}</span>
+                    <span className="truncate flex-1">{item.label}</span>
+                    {item.id === 'queue' && queueCount > 0 && (
+                      <span className="ml-auto shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-accent text-white text-[10px] font-bold px-1">
+                        {queueCount > 99 ? '99+' : queueCount}
+                      </span>
+                    )}
                   </>
                 )}
               </NavLink>
