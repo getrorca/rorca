@@ -384,6 +384,84 @@ router.delete('/:id', (req: Request, res: Response) => {
   res.json({ deleted: true });
 });
 
+// ─── GET /api/marketplace?spec_id={id} ───────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/marketplace:
+ *   get:
+ *     tags: [Marketplace]
+ *     summary: Check if a spec is published to the community marketplace
+ *     operationId: checkSpecPublication
+ *     parameters:
+ *       - in: query
+ *         name: spec_id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug to check for publication
+ *     responses:
+ *       200:
+ *         description: Publication status for the spec
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 published:
+ *                   type: boolean
+ *                 publication:
+ *                   type: object
+ *                   nullable: true
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     title:
+ *                       type: string
+ *                     created_at:
+ *                       type: string
+ *       400:
+ *         description: Missing spec_id query parameter
+ */
+router.get('/', (req: Request, res: Response) => {
+  ensureTable();
+  const spec_id = String(req.query.spec_id || '').trim();
+
+  if (!spec_id) {
+    res.status(400).json({ error: 'Missing required query param: spec_id' });
+    return;
+  }
+
+  const pub = db
+    .prepare(
+      `SELECT id, spec_id, title, description, tags, download_count, source, created_at
+       FROM spec_publications
+       WHERE spec_id = ? AND deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .get(spec_id) as PublicationRow | undefined;
+
+  if (!pub) {
+    res.json({ published: false, publication: null });
+    return;
+  }
+
+  res.json({
+    published: true,
+    publication: {
+      id: pub.id,
+      spec_id: pub.spec_id,
+      title: pub.title,
+      description: pub.description,
+      tags: JSON.parse(pub.tags),
+      download_count: pub.download_count,
+      source: pub.source,
+      created_at: pub.created_at,
+    },
+  });
+});
+
 // ─── GET /api/marketplace/my ─────────────────────────────────────────────────
 
 /**
