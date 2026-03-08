@@ -42,6 +42,7 @@ import { SpecVersionHistory } from '../components/SpecVersionHistory';
 import AppHeader from '../components/AppHeader';
 import AgentBadge from '../components/AgentBadge';
 import PublishModal from '../components/PublishModal';
+import { ProBadge, UpgradePromptModal } from '../components/UpgradePrompt';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -762,6 +763,7 @@ function SpecPreviewDrawer({
 
   // Publish state
   const [showPublishModal, setShowPublishModal] = useState(false);
+  const [showPublishUpgrade, setShowPublishUpgrade] = useState(false);
   const [publicationId, setPublicationId] = useState<string | null>(null);
   const [publicationCheckDone, setPublicationCheckDone] = useState(false);
 
@@ -1464,11 +1466,18 @@ function SpecPreviewDrawer({
                 </div>
               ) : (
                 <button
-                  onClick={() => setShowPublishModal(true)}
+                  onClick={() => {
+                    if (isFreePlan) {
+                      setShowPublishUpgrade(true);
+                    } else {
+                      setShowPublishModal(true);
+                    }
+                  }}
                   className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors"
                 >
                   <Globe size={14} />
                   Publish to Community
+                  {isFreePlan && <ProBadge />}
                 </button>
               )
             )}
@@ -1532,6 +1541,14 @@ function SpecPreviewDrawer({
           </div>
         )}
       {showPricing && <PricingModal onClose={() => setShowPricing(false)} />}
+      <UpgradePromptModal
+        feature="marketplace_publish"
+        featureName="Publish to Community"
+        description="Share your specs with the community and discover specs from other teams. Available on Pro and Team plans."
+        open={showPublishUpgrade}
+        onClose={() => setShowPublishUpgrade(false)}
+        onUpgrade={() => { setShowPublishUpgrade(false); window.location.hash = '#billing'; }}
+      />
       {showPublishModal && detail && workspaceId && (
         <PublishModal
           specId={specId}

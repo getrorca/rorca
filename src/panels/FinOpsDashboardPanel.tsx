@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Download, TrendingDown, Info, Calendar, DollarSign } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
+import { ProBadge } from '../components/UpgradePrompt';
+import { useAuth } from '../contexts/AuthContext';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, BarChart, Bar, Legend,
@@ -102,6 +104,8 @@ type DateRange = '30d' | '90d' | '180d' | '365d';
 
 export default function FinOpsDashboardPanel() {
   const { workspaceId } = useWorkspace();
+  const { user } = useAuth();
+  const isFreePlan = !user?.plan || user.plan === 'free';
   const [data, setData] = useState<HistoricalData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -183,6 +187,7 @@ export default function FinOpsDashboardPanel() {
             <h1 className="text-lg font-semibold flex items-center gap-2">
               <DollarSign size={20} className="text-[var(--accent)]" />
               FinOps Dashboard
+              {isFreePlan && <ProBadge />}
             </h1>
             <p className="text-xs text-[var(--text-muted)] mt-0.5">
               Cost observability across all runs and workspaces
