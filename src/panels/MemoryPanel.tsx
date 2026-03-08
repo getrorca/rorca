@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BookOpen, Plus, Trash2, Pencil, Tag, Search, Filter, Save, X, ChevronRight } from 'lucide-react';
+import { BookOpen, Plus, Trash2, Pencil, Search, Filter, Save, X, Archive, RotateCcw } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import AppHeader from '../components/AppHeader';
@@ -173,6 +173,8 @@ export default function MemoryPanel() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingEntry, setEditingEntry] = useState<MemoryEntry | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [archiveCount, setArchiveCount] = useState(0);
+  const [rotating, setRotating] = useState(false);
 
   const fetchEntries = useCallback(async () => {
     if (!workspaceId) return;
@@ -185,7 +187,30 @@ export default function MemoryPanel() {
     setLoaded(true);
   }, [workspaceId, filteredCategory]);
 
+  const fetchArchiveCount = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const data = await apiFetch<{ count: number }>(`/api/memory/archive/count?workspaceId=${workspaceId}`);
+      setArchiveCount(data.count);
+    } catch { /* ignore */ }
+  }, [workspaceId]);
+
   useEffect(() => { fetchEntries(); }, [fetchEntries]);
+  useEffect(() => { fetchArchiveCount(); }, [fetchArchiveCount]);
+
+  const handleRotate = async () => {
+    if (!workspaceId || rotating) return;
+    setRotating(true);
+    try {
+      await apiFetch('/api/memory/rotate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      await Promise.all([fetchEntries(), fetchArchiveCount()]);
+    } catch { /* ignore */ }
+    setRotating(false);
+  };
 
   const handleAdd = async (entry: Omit<MemoryEntry, 'date' | 'lineNumber'>) => {
     if (!workspaceId) return;
@@ -316,7 +341,7 @@ export default function MemoryPanel() {
           </div>
 
           {/* Category pills summary */}
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap gap-1.5 items-center">
             {CATEGORIES.map(c => {
               const count = categoryCounts[c] ?? 0;
               if (count === 0) return null;
@@ -338,6 +363,23 @@ export default function MemoryPanel() {
             <span className="px-2 py-0.5 text-[10px] text-muted">
               {entries.length} total
             </span>
+          </div>
+
+          {/* Archive info + rotate */}
+          <div className="flex items-center gap-3 text-[11px] text-muted">
+            <div className="flex items-center gap-1.5">
+              <Archive size={11} />
+              <span>{archiveCount} archived</span>
+            </div>
+            <button
+              onClick={handleRotate}
+              disabled={rotating}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border hover:bg-surface-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Move old entries to archive (keeps Architecture & Convention entries)"
+            >
+              <RotateCcw size={10} className={rotating ? 'animate-spin' : ''} />
+              {rotating ? 'Rotating…' : 'Rotate now'}
+            </button>
           </div>
 
           {/* Add form */}
