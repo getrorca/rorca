@@ -20,6 +20,7 @@ import { db } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { loadRorcaConfig } from './rorca-config';
 import { computeHealthReport } from './workspace-echolocation';
+import { logger } from './logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -206,10 +207,10 @@ function handleFileChange(
         ) as WalEvent;
         broadcastAll(healthWal);
       } catch (healthErr) {
-        console.error('[file-watcher] Health recalc failed:', healthErr);
+        logger.error({ err: healthErr }, '[file-watcher] Health recalc failed');
       }
     } catch (err) {
-      console.error('[file-watcher] Failed to emit WAL event:', err);
+      logger.error({ err }, '[file-watcher] Failed to emit WAL event');
     }
   }, 300);
 
@@ -243,7 +244,7 @@ function createWatcher(workspaceId: string, workspacePath: string): WatcherEntry
 
   watcher.on('ready', () => {
     watcherReady.set(workspaceId, true);
-    console.log(
+    logger.info(
       `[file-watcher] Watching ${watchPaths.length} paths for workspace "${workspaceId}"`,
     );
   });
@@ -262,7 +263,7 @@ function createWatcher(workspaceId: string, workspacePath: string): WatcherEntry
 
   watcher.on('error', (err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[file-watcher] Error for workspace "${workspaceId}":`, message);
+    logger.error({ message }, `[file-watcher] Error for workspace "${workspaceId}"`);
   });
 
   return entry;
@@ -285,7 +286,7 @@ export function startFileWatcher(): void {
   for (const ws of workspaces) {
     if (watchers.has(ws.id)) continue; // Already watching
     if (!fs.existsSync(ws.path)) {
-      console.warn(`[file-watcher] Workspace "${ws.id}" path does not exist: ${ws.path}`);
+      logger.warn(`[file-watcher] Workspace "${ws.id}" path does not exist: ${ws.path}`);
       continue;
     }
 
@@ -295,7 +296,7 @@ export function startFileWatcher(): void {
     }
   }
 
-  console.log(`[file-watcher] Started watchers for ${watchers.size} workspaces`);
+  logger.info(`[file-watcher] Started watchers for ${watchers.size} workspaces`);
 }
 
 /**
@@ -353,7 +354,7 @@ export function stopFileWatcher(): void {
   }
   debounceTimers.clear();
 
-  console.log('[file-watcher] All watchers stopped');
+  logger.info('[file-watcher] All watchers stopped');
 }
 
 /**

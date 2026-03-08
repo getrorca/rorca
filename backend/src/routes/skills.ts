@@ -16,6 +16,7 @@ import * as yaml from 'js-yaml';
 import { db } from '../db/index';
 import { SkillRegistry } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -123,7 +124,7 @@ router.get('/', (req: Request, res: Response) => {
       catalog: registry.getCatalogForPrompt(),
     });
   } catch (error: any) {
-    console.error('[Skills] List error:', error);
+    logger.error('[Skills] List error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -181,7 +182,7 @@ router.post('/install', (req: Request, res: Response) => {
       source: skill.source,
     });
   } catch (error: any) {
-    console.error('[Skills] Install error:', error);
+    logger.error('[Skills] Install error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -255,7 +256,7 @@ router.get('/preview', async (req: Request, res: Response) => {
       estimatedTokens: Math.ceil(wordCount * 1.3),
     });
   } catch (error: any) {
-    console.error('[Skills] preview error:', error);
+    logger.error('[Skills] preview error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -354,7 +355,7 @@ router.get('/:name/content', (req: Request, res: Response) => {
     // 3) Not found
     res.status(404).json({ error: `Skill "${name}" not found` });
   } catch (error: any) {
-    console.error('[Skills] Content error:', error);
+    logger.error('[Skills] Content error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -393,7 +394,7 @@ router.delete('/:name', (req: Request, res: Response) => {
 
     res.json({ removed: true, name });
   } catch (error: any) {
-    console.error('[Skills] Remove error:', error);
+    logger.error('[Skills] Remove error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -591,7 +592,7 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
       filePath: rorcaPath,
     });
   } catch (error: any) {
-    console.error('[Skills] install-from-sh error:', error);
+    logger.error('[Skills] install-from-sh error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -719,7 +720,7 @@ router.get('/suggestions', (req: Request, res: Response) => {
       monorepoApps,
     });
   } catch (error: any) {
-    console.error('[Skills] suggestions error:', error);
+    logger.error('[Skills] suggestions error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -839,7 +840,7 @@ router.post('/search', async (req: Request, res: Response) => {
       total: data?.total ?? results.length,
     });
   } catch (error: any) {
-    console.error('[Skills] search error:', error);
+    logger.error('[Skills] search error:', error);
     res.status(500).json({ error: error.message });
   }
 });

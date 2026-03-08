@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { logger } from './logger';
 
 const SLOW_QUERY_THRESHOLD_MS = 100;
 
@@ -17,7 +18,7 @@ export function queryTimerMiddleware(req: Request, res: Response, next: NextFunc
   res.json = function (body?: any) {
     const elapsed = performance.now() - start;
     if (elapsed > SLOW_QUERY_THRESHOLD_MS) {
-      console.warn(
+      logger.warn(
         `[QueryTimer] SLOW ${req.method} ${req.originalUrl} — ${elapsed.toFixed(1)}ms (threshold: ${SLOW_QUERY_THRESHOLD_MS}ms)`
       );
     }
@@ -29,7 +30,7 @@ export function queryTimerMiddleware(req: Request, res: Response, next: NextFunc
     const elapsed = performance.now() - start;
     // Only log for non-SSE endpoints (SSE connections are long-lived)
     if (elapsed > SLOW_QUERY_THRESHOLD_MS && !res.getHeader('Content-Type')?.toString().includes('text/event-stream')) {
-      console.warn(
+      logger.warn(
         `[QueryTimer] SLOW ${req.method} ${req.originalUrl} — ${elapsed.toFixed(1)}ms (threshold: ${SLOW_QUERY_THRESHOLD_MS}ms)`
       );
     }
@@ -118,7 +119,7 @@ export function runQueryPlanAudit(db: import('better-sqlite3').Database): {
       const hasScan = plan.includes('SCAN TABLE') || plan.includes('SCAN wal_events') || plan.includes('SCAN pipeline_runs') || plan.includes('SCAN story_results');
 
       if (hasScan) {
-        console.warn(`[QueryAudit] ⚠ FULL TABLE SCAN detected: ${label}\n  Plan: ${plan}`);
+        logger.warn(`[QueryAudit] ⚠ FULL TABLE SCAN detected: ${label}\n  Plan: ${plan}`);
       }
 
       results.push({ query: label, plan, hasScan });
@@ -129,7 +130,7 @@ export function runQueryPlanAudit(db: import('better-sqlite3').Database): {
 
   const scanCount = results.filter(r => r.hasScan).length;
   const totalCount = results.length;
-  console.log(`[QueryAudit] Audit complete: ${totalCount - scanCount}/${totalCount} queries use indexes`);
+  logger.info(`[QueryAudit] Audit complete: ${totalCount - scanCount}/${totalCount} queries use indexes`);
 
   return results;
 }

@@ -9,6 +9,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { AppError } from './errors';
+import { logger } from './logger';
 
 export function errorHandler(
   err: Error,
@@ -36,7 +37,7 @@ export function errorHandler(
   }
 
   // Unhandled / unexpected errors — 500
-  console.error('[ErrorHandler] Unhandled error:', err);
+  logger.error({ err, stack: err.stack }, '[ErrorHandler] Unhandled error');
   const body: Record<string, unknown> = {
     error: 'Internal server error',
     code: 'INTERNAL_ERROR',

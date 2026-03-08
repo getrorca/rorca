@@ -3,6 +3,7 @@
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
 import { execSync } from 'child_process';
+import { logger } from './logger';
 
 export interface CodexStatus {
   codexInstalled: boolean;
@@ -66,17 +67,17 @@ export function requireCodex(): CodexStatus {
   const status = detectCodex();
 
   if (!status.codexInstalled) {
-    console.error(
+    logger.error(
       '\x1b[31m[FATAL] Codex CLI not installed. Run: npm i -g @openai/codex\x1b[0m'
     );
-    console.error(
+    logger.error(
       'Set RORCA_AGENT=claude to use Claude subscription instead, ' +
       'or set CODEX_BIN=/path/to/codex if installed in a non-standard location.'
     );
     process.exit(1);
   }
 
-  console.log(
+  logger.info(
     `[codex] Detected codex ${status.codexVersion ?? '(unknown version)'} at ${status.codexBinPath}`
   );
 

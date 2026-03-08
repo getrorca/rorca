@@ -16,6 +16,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import { logger } from '../lib/logger';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
@@ -941,5 +942,5 @@ async function main() {
 }
 
 if (process.env.NODE_ENV !== 'test') {
-  main().catch(console.error);
+  main().catch((err) => logger.error({ err }, 'MCP server error'));
 }

@@ -7,6 +7,7 @@ import { requireRole } from './auth';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { synthesize } from '../lib/direction-stack';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -148,7 +149,7 @@ router.get('/', (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(rows, pagination, { cursorKey: (t) => t.id }));
   } catch (error: unknown) {
-    console.error('[Teams] list error:', error);
+    logger.error({ error }, '[Teams] list error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -204,7 +205,7 @@ router.post('/', (req: Request, res: Response) => {
       createdAt: new Date().toISOString(),
     });
   } catch (error: unknown) {
-    console.error('[Teams] create error:', error);
+    logger.error({ error }, '[Teams] create error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -322,7 +323,7 @@ router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) 
       teamName: team.name,
     });
   } catch (error: unknown) {
-    console.error('[Teams] invite error:', error);
+    logger.error({ error }, '[Teams] invite error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -390,7 +391,7 @@ router.get('/:id/members', requireRole('viewer'), (req: Request, res: Response) 
 
     res.json({ teamId, teamName: team.name, members });
   } catch (error: unknown) {
-    console.error('[Teams] members error:', error);
+    logger.error({ error }, '[Teams] members error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -465,7 +466,7 @@ router.patch('/:id/members/:userId', requireRole('admin'), (req: Request, res: R
 
     res.json({ teamId, userId: targetUserId, role });
   } catch (error: unknown) {
-    console.error('[Teams] update member error:', error);
+    logger.error({ error }, '[Teams] update member error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -528,7 +529,7 @@ router.delete('/:id/members/:userId', requireRole('admin'), (req: Request, res: 
 
     res.json({ ok: true });
   } catch (error: unknown) {
-    console.error('[Teams] remove member error:', error);
+    logger.error({ error }, '[Teams] remove member error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -594,7 +595,7 @@ router.patch('/:id/settings', requireRole('admin'), (req: Request, res: Response
 
     res.json({ id: teamId, name: trimmedName, slug: team.slug });
   } catch (error: unknown) {
-    console.error('[Teams] settings error:', error);
+    logger.error({ error }, '[Teams] settings error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -653,7 +654,7 @@ router.get('/:id/direction', requireRole('viewer'), (req: Request, res: Response
       l2: l2Row?.content_yaml ?? '',
     });
   } catch (error: unknown) {
-    console.error('[Teams] get direction error:', error);
+    logger.error({ error }, '[Teams] get direction error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -742,7 +743,7 @@ router.put('/:id/direction', requireRole('admin'), (req: Request, res: Response)
 
     res.json({ ok: true });
   } catch (error: unknown) {
-    console.error('[Teams] update direction error:', error);
+    logger.error({ error }, '[Teams] update direction error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
@@ -831,7 +832,7 @@ router.post('/:id/direction/preview', requireRole('viewer'), (req: Request, res:
 
     res.json({ synthesized });
   } catch (error: unknown) {
-    console.error('[Teams] direction preview error:', error);
+    logger.error({ error }, '[Teams] direction preview error');
     res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });

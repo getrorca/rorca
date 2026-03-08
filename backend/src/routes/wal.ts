@@ -4,6 +4,7 @@ import { db } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -212,7 +213,7 @@ router.post('/', validateBody(WalEventSchema), (req: Request, res: Response) => 
 
     res.status(201).json({ ok: true, id: result.lastInsertRowid });
   } catch (error: any) {
-    console.error('[WAL] POST error:', error);
+    logger.error('[WAL] POST error:', error);
     res.status(500).json({ error: error.message });
   }
 });

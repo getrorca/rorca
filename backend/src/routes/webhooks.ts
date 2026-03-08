@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { decryptToken } from './auth';
 import { verifyWebhookSignature } from './workspace-github';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -45,7 +46,7 @@ async function dispatchEvent(
     try {
       await handler(payload, event, workspaceId);
     } catch (err) {
-      console.error(`[Webhook] Handler error for '${event}':`, err);
+      logger.error({ err }, `[Webhook] Handler error for '${event}'`);
     }
   }
 }
@@ -166,12 +167,12 @@ router.post('/github', (req: Request, res: Response) => {
         sender: payload.sender?.login || null,
       }));
 
-      console.log(`[Webhook] GitHub ${event} from ${repoFullName} for workspace ${row.workspace_id}`);
+      logger.info(`[Webhook] GitHub ${event} from ${repoFullName} for workspace ${row.workspace_id}`);
 
       // Dispatch to event-specific handlers
       await dispatchEvent(event, payload, row.workspace_id);
     } catch (err) {
-      console.error('[Webhook] Async processing error:', err);
+      logger.error({ err }, '[Webhook] Async processing error');
     }
   });
 });

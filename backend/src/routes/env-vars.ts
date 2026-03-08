@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
+import { logger } from '../lib/logger';
 
 const router = Router({ mergeParams: true });
 
@@ -77,7 +78,7 @@ router.get('/', (req: Request, res: Response) => {
 
     res.json({ envVars });
   } catch (error: any) {
-    console.error('[EnvVars] List error:', error);
+    logger.error('[EnvVars] List error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -181,7 +182,7 @@ router.post('/', (req: Request, res: Response) => {
       });
     }
   } catch (error: any) {
-    console.error('[EnvVars] Create/update error:', error);
+    logger.error('[EnvVars] Create/update error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -225,7 +226,7 @@ router.delete('/:key', (req: Request, res: Response) => {
 
     res.status(204).send();
   } catch (error: any) {
-    console.error('[EnvVars] Delete error:', error);
+    logger.error('[EnvVars] Delete error:', error);
     res.status(500).json({ error: error.message });
   }
 });

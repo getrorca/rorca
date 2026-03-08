@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { createBackup, listBackups, pruneOldBackups } from '../lib/backup';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -33,7 +34,7 @@ router.post('/backup', async (_req: Request, res: Response) => {
     const result = await createBackup();
     const pruned = pruneOldBackups();
 
-    console.log(`[Backup] Created ${result.filename} (${result.size} bytes), pruned ${pruned} old backups`);
+    logger.info(`[Backup] Created ${result.filename} (${result.size} bytes), pruned ${pruned} old backups`);
     res.status(201).json({
       backup: {
         filename: result.filename,
@@ -42,7 +43,7 @@ router.post('/backup', async (_req: Request, res: Response) => {
       pruned,
     });
   } catch (error: any) {
-    console.error('[Backup] Create error:', error);
+    logger.error('[Backup] Create error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -79,7 +80,7 @@ router.get('/backups', (_req: Request, res: Response) => {
     const backups = listBackups();
     res.json({ backups });
   } catch (error: any) {
-    console.error('[Backup] List error:', error);
+    logger.error('[Backup] List error:', error);
     res.status(500).json({ error: error.message });
   }
 });

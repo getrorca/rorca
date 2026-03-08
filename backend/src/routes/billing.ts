@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import Stripe from 'stripe';
 import { db } from '../db/index';
 import type { AuthUser } from './auth';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -198,7 +199,7 @@ router.get('/invoices', async (req: Request, res: Response) => {
       })),
     });
   } catch (err) {
-    console.error('Failed to fetch invoices:', err);
+    logger.error({ err }, 'Failed to fetch invoices');
     res.status(500).json({ error: 'Failed to fetch invoice history' });
   }
 });
@@ -288,7 +289,7 @@ router.post('/checkout', async (req: Request, res: Response) => {
 
     res.json({ url: session.url });
   } catch (err) {
-    console.error('Stripe checkout error:', err);
+    logger.error({ err }, 'Stripe checkout error');
     res.status(500).json({ error: 'Failed to create checkout session' });
   }
 });
@@ -338,7 +339,7 @@ router.post('/portal', async (req: Request, res: Response) => {
     });
     res.json({ url: session.url });
   } catch (err) {
-    console.error('Stripe portal error:', err);
+    logger.error({ err }, 'Stripe portal error');
     res.status(500).json({ error: 'Failed to create billing portal session' });
   }
 });
@@ -365,7 +366,7 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
   try {
     event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err) {
-    console.error('Webhook signature verification failed:', err);
+    logger.error({ err }, 'Webhook signature verification failed');
     res.status(400).json({ error: 'Invalid signature' });
     return;
   }
@@ -454,7 +455,7 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
 
     res.json({ received: true });
   } catch (err) {
-    console.error('Webhook processing error:', err);
+    logger.error({ err }, 'Webhook processing error');
     res.status(500).json({ error: 'Webhook processing failed' });
   }
 });

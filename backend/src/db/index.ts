@@ -1,6 +1,7 @@
 import Database, { Database as DatabaseType } from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
+import { logger } from '../lib/logger';
 
 const DB_PATH = process.env.DB_PATH || './rorca.db';
 export const db: DatabaseType = new Database(DB_PATH);
@@ -609,7 +610,7 @@ runMigrations();
       `INSERT INTO users (id, email, display_name, password_hash, role, plan, email_verified_at)
        VALUES ('local-admin', 'admin@rorca.local', 'Admin', ?, 'admin', 'pro', datetime('now'))`
     ).run(defaultHash);
-    console.log('[db] Seeded default admin user (admin@rorca.local)');
+    logger.info('[db] Seeded default admin user (admin@rorca.local)');
   } else {
     // Ensure plan is never 'free' — billing gate should never appear on self-hosted
     db.prepare("UPDATE users SET plan = 'pro' WHERE email = 'admin@rorca.local' AND plan = 'free'").run();

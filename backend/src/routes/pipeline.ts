@@ -30,6 +30,7 @@ import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/com
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
+import { logger } from '../lib/logger';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -179,13 +180,13 @@ function syncFallbackResults(cwd: string, workspaceId: string): number {
         synced++;
       }
     } catch (err: any) {
-      console.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
+      logger.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
     }
   }
 
   if (synced > 0) {
     deleteFallbackFile(cwd);
-    console.log(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
+    logger.info(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
   }
   return synced;
 }
@@ -810,7 +811,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
       })),
     });
   } catch (error: any) {
-    console.error('[Pipeline] Preflight error:', error);
+    logger.error('[Pipeline] Preflight error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1123,7 +1124,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }
       } catch (driftErr: any) {
         // Drift check failure is non-fatal — log and continue
-        console.warn('[drift-check] Pre-execution drift check failed:', driftErr.message);
+        logger.warn('[drift-check] Pre-execution drift check failed:', driftErr.message);
       }
     }
 
@@ -1171,7 +1172,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       // Check forceSequential from trigger request (UI toggle) or .rorca/config.json
       if (forceSequential) {
         parallelism = 1;
-        console.log(`[orchestration] Forced sequential (user selected sequential in UI)`);
+        logger.info(`[orchestration] Forced sequential (user selected sequential in UI)`);
       } else {
         let waveParallelismEnabled = true;
         try {
@@ -1186,15 +1187,15 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
         if (!waveParallelismEnabled) {
           parallelism = 1;
-          console.log(`[orchestration] Forced sequential (waveParallelism: false in .rorca/config.json)`);
+          logger.info(`[orchestration] Forced sequential (waveParallelism: false in .rorca/config.json)`);
         } else {
           parallelism = orchestration.parallelism;
-          console.log(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
+          logger.info(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
         }
       }
     } catch {
       // Spec parse error — fall back to sequential
-      console.log('[orchestration] Using sequential (spec parse error, fallback)');
+      logger.info('[orchestration] Using sequential (spec parse error, fallback)');
     }
 
     // 5. Determine CWD — main workspace or new worktree
@@ -1394,11 +1395,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const specBrief = specJson.title || path.basename(specPath, '.json');
         openCodeSkillPath = writeOpenCodeSkillFile(cwd, workspaceId, `Running spec: ${specBrief}`);
         if (openCodeSkillPath) {
-          console.log(`[Pipeline] Wrote OpenCode skill file: ${openCodeSkillPath}`);
+          logger.info(`[Pipeline] Wrote OpenCode skill file: ${openCodeSkillPath}`);
         }
       } catch (err: any) {
         // Non-fatal — run can proceed without the skill file
-        console.warn(`[Pipeline] Failed to write OpenCode skill file: ${err.message}`);
+        logger.warn(`[Pipeline] Failed to write OpenCode skill file: ${err.message}`);
       }
     }
 
@@ -1413,11 +1414,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const specBrief3 = specJson3.title || path.basename(specPath, '.json');
         codexAgentsMdState = writeCodexAgentsMd(cwd, workspaceId, `Running spec: ${specBrief3}`);
         if (codexAgentsMdState) {
-          console.log(`[Pipeline] Wrote Codex AGENTS.md: ${codexAgentsMdState.agentsMdPath}`);
+          logger.info(`[Pipeline] Wrote Codex AGENTS.md: ${codexAgentsMdState.agentsMdPath}`);
         }
       } catch (err: any) {
         // Non-fatal — run can proceed without direction context
-        console.warn(`[Pipeline] Failed to write Codex AGENTS.md: ${err.message}`);
+        logger.warn(`[Pipeline] Failed to write Codex AGENTS.md: ${err.message}`);
       }
     }
 
@@ -1582,7 +1583,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }
 
         if (!ocServer.isAlive()) {
-          console.log(`[Pipeline] OpenCode server crashed for run ${runId}, attempting restart...`);
+          logger.info(`[Pipeline] OpenCode server crashed for run ${runId}, attempting restart...`);
 
           const restartMsg = `\r\n\x1b[33m[OpenCode server crashed — attempting restart...]\x1b[0m\r\n`;
           buf.chunks.push(restartMsg);
@@ -1591,7 +1592,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
           const restarted = await ocServer.restart();
           if (restarted) {
-            console.log(`[Pipeline] OpenCode server restarted for run ${runId}`);
+            logger.info(`[Pipeline] OpenCode server restarted for run ${runId}`);
             const successMsg = `\r\n\x1b[32m[OpenCode server restarted successfully]\x1b[0m\r\n`;
             buf.chunks.push(successMsg);
             buf.subscribers.forEach(cb => cb(successMsg));
@@ -1606,7 +1607,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
               broadcastAll(walEvent);
             }
           } else {
-            console.error(`[Pipeline] OpenCode server restart failed for run ${runId} — killing execution engine`);
+            logger.error(`[Pipeline] OpenCode server restart failed for run ${runId} — killing execution engine`);
             const failMsg = `\r\n\x1b[31m[OpenCode server restart failed — aborting run]\x1b[0m\r\n`;
             buf.chunks.push(failMsg);
             buf.subscribers.forEach(cb => cb(failMsg));
@@ -1750,7 +1751,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       ...(orchestration ? { orchestration } : {}),
     });
   } catch (error: any) {
-    console.error('[Pipeline] Trigger error:', error);
+    logger.error('[Pipeline] Trigger error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2393,7 +2394,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
 
     res.status(202).json({ runId, specId: slug });
   } catch (error: any) {
-    console.error('[Pipeline] Quick-run error:', error);
+    logger.error('[Pipeline] Quick-run error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2463,7 +2464,7 @@ router.post('/runs', (req: Request, res: Response) => {
 
     res.status(201).json({ run });
   } catch (error: any) {
-    console.error('[Pipeline] Create run error:', error);
+    logger.error('[Pipeline] Create run error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2516,7 +2517,7 @@ router.get('/runs', (req: Request, res: Response) => {
 
     res.json(result);
   } catch (error: any) {
-    console.error('[Pipeline] List runs error:', error);
+    logger.error('[Pipeline] List runs error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2709,7 +2710,7 @@ router.get('/runs/compare', (req: Request, res: Response) => {
 
     res.json({ run1, run2, stories, summary });
   } catch (error: any) {
-    console.error('[Pipeline] Compare runs error:', error);
+    logger.error('[Pipeline] Compare runs error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2895,7 +2896,7 @@ router.get('/runs/:runId', (req: Request, res: Response) => {
       contextComparison,
     });
   } catch (error: any) {
-    console.error('[Pipeline] Get run error:', error);
+    logger.error('[Pipeline] Get run error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2986,11 +2987,11 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
                 model_used: null, cost_usd: null,
               } as StoryResultRow);
             }
-            console.log(`[retry] Derived ${latestByStory.size} story statuses from spec JSON (story_results table was empty)`);
+            logger.info(`[retry] Derived ${latestByStory.size} story statuses from spec JSON (story_results table was empty)`);
           }
         }
       } catch (specErr: unknown) {
-        console.warn(`[retry] Could not derive stories from spec JSON: ${(specErr as Error).message}`);
+        logger.warn(`[retry] Could not derive stories from spec JSON: ${(specErr as Error).message}`);
       }
     }
 
@@ -3331,7 +3332,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       copiedStories: passedStories.map(s => s.story_id),
     });
   } catch (error: any) {
-    console.error('[Pipeline] Retry error:', error);
+    logger.error('[Pipeline] Retry error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3421,7 +3422,7 @@ router.post('/runs/:runId/pause', (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'paused' });
   } catch (error: any) {
-    console.error('[Pipeline] Pause error:', error);
+    logger.error('[Pipeline] Pause error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3498,7 +3499,7 @@ router.post('/runs/:runId/resume', (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'running' });
   } catch (error: any) {
-    console.error('[Pipeline] Resume error:', error);
+    logger.error('[Pipeline] Resume error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3613,7 +3614,7 @@ router.post('/runs/:runId/context', (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'running' });
   } catch (error: any) {
-    console.error('[Pipeline] Context injection error:', error);
+    logger.error('[Pipeline] Context injection error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3722,7 +3723,7 @@ router.post('/runs/:runId/cancel', (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'cancelled' });
   } catch (error: any) {
-    console.error('[Pipeline] Cancel error:', error);
+    logger.error('[Pipeline] Cancel error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3996,7 +3997,7 @@ router.post('/story-result', (req: Request, res: Response) => {
 
     res.status(201).json({ ok: true });
   } catch (error: any) {
-    console.error('[Pipeline] Story result error:', error);
+    logger.error('[Pipeline] Story result error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4072,7 +4073,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response
 
     res.json({ ok: true });
   } catch (error: any) {
-    console.error('[Pipeline] Record tokens error:', error);
+    logger.error('[Pipeline] Record tokens error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4248,7 +4249,7 @@ router.get('/runs/:runId/stories/:storyId/output', (req: Request, res: Response)
       lineCount: outputLines.length,
     });
   } catch (error: any) {
-    console.error('[Pipeline] Story output error:', error);
+    logger.error('[Pipeline] Story output error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4693,7 +4694,7 @@ export function cleanupOldLogs(): number {
   }
 
   if (deleted > 0) {
-    console.log(`[Pipeline] Cleaned up ${deleted} log file(s) older than ${LOG_RETENTION_DAYS} days`);
+    logger.info(`[Pipeline] Cleaned up ${deleted} log file(s) older than ${LOG_RETENTION_DAYS} days`);
   }
   return deleted;
 }
@@ -4787,12 +4788,12 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
       }
     } catch (gitErr: any) {
       // Branch may not exist yet or repo issues
-      console.warn(`[Pipeline] Git log error for run ${runId}:`, gitErr.message);
+      logger.warn(`[Pipeline] Git log error for run ${runId}:`, gitErr.message);
     }
 
     res.json({ commits, branchName: branchName || null });
   } catch (error: any) {
-    console.error('[Pipeline] Get run commits error:', error);
+    logger.error('[Pipeline] Get run commits error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4823,7 +4824,7 @@ export function cleanupOrphanRuns(): number {
         process.kill(run.pid, 0); // Check alive
         try {
           process.kill(-run.pid, 'SIGTERM'); // Kill process group
-          console.log(`[Cleanup] Sent SIGTERM to engine PID ${run.pid} (run ${run.id})`);
+          logger.info(`[Cleanup] Sent SIGTERM to engine PID ${run.pid} (run ${run.id})`);
         } catch {
           try { process.kill(run.pid, 'SIGTERM'); } catch { /* already dead */ }
         }
@@ -4838,7 +4839,7 @@ export function cleanupOrphanRuns(): number {
         process.kill(run.opencode_server_pid, 0); // Check alive
         try {
           process.kill(run.opencode_server_pid, 'SIGTERM');
-          console.log(`[Cleanup] Sent SIGTERM to OpenCode server PID ${run.opencode_server_pid} (run ${run.id})`);
+          logger.info(`[Cleanup] Sent SIGTERM to OpenCode server PID ${run.opencode_server_pid} (run ${run.id})`);
         } catch { /* already dead */ }
       } catch {
         // Process already dead — expected
@@ -4870,11 +4871,11 @@ export function cleanupOrphanRuns(): number {
     }
 
     cleaned++;
-    console.log(`[Cleanup] Run ${run.id} (agent: ${run.agent_type ?? 'claude'}) marked as failed (orphan cleanup)`);
+    logger.info(`[Cleanup] Run ${run.id} (agent: ${run.agent_type ?? 'claude'}) marked as failed (orphan cleanup)`);
   }
 
   if (cleaned > 0) {
-    console.log(`[Cleanup] Cleaned up ${cleaned} orphan run(s)`);
+    logger.info(`[Cleanup] Cleaned up ${cleaned} orphan run(s)`);
   }
 
   return cleaned;

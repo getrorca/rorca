@@ -1,5 +1,6 @@
 import { db } from '../db/index';
 import { subscribe, broadcastAll, type WalEvent } from './sse-hub';
+import { logger } from './logger';
 
 interface RunQueueEntry {
   id: number;
@@ -83,14 +84,14 @@ function triggerQueueEntry(entry: RunQueueEntry): void {
             // Emit WAL event
             emitQueueTriggerEvent(entry);
 
-            console.log(`[QueueConsumer] Triggered run for spec ${entry.spec_id} (queue entry ${entry.id})`);
+            logger.info(`[QueueConsumer] Triggered run for spec ${entry.spec_id} (queue entry ${entry.id})`);
           } else if (result.conflict) {
             // Active run conflict — revert to pending, retry after delay
             db.prepare(
               `UPDATE run_queue SET status = 'pending' WHERE id = ?`
             ).run(entry.id);
 
-            console.log(`[QueueConsumer] Conflict for workspace ${entry.workspace_id}, retrying in ${RETRY_DELAY_MS}ms`);
+            logger.info(`[QueueConsumer] Conflict for workspace ${entry.workspace_id}, retrying in ${RETRY_DELAY_MS}ms`);
             setTimeout(() => retryNextEntry(entry.workspace_id), RETRY_DELAY_MS);
           } else {
             // Other error
@@ -119,7 +120,7 @@ function markEntryFailed(entry: RunQueueEntry, errorMessage: string): void {
   db.prepare(
     `UPDATE run_queue SET status = 'failed', error_message = ? WHERE id = ?`
   ).run(errorMessage, entry.id);
-  console.error(`[QueueConsumer] Failed to trigger spec ${entry.spec_id}: ${errorMessage}`);
+  logger.error(`[QueueConsumer] Failed to trigger spec ${entry.spec_id}: ${errorMessage}`);
 }
 
 function retryNextEntry(workspaceId: number): void {

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
+import { logger } from '../lib/logger';
 
 const router = Router({ mergeParams: true });
 
@@ -233,7 +234,7 @@ router.post('/', (req: Request, res: Response) => {
       cap_exceeded: budgetStatus.capExceeded,
     });
   } catch (error: any) {
-    console.error('[Budget] Config update error:', error);
+    logger.error('[Budget] Config update error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -316,7 +317,7 @@ router.get('/', (req: Request, res: Response) => {
       cap_exceeded: capExceeded,
     });
   } catch (error: any) {
-    console.error('[Budget] Get config error:', error);
+    logger.error('[Budget] Get config error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -366,7 +367,7 @@ router.delete('/', (req: Request, res: Response) => {
 
     res.json({ deleted: true });
   } catch (error: any) {
-    console.error('[Budget] Delete config error:', error);
+    logger.error('[Budget] Delete config error:', error);
     res.status(500).json({ error: error.message });
   }
 });

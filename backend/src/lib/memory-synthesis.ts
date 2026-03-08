@@ -17,6 +17,7 @@ import {
   type ProposedMemoryEntry,
 } from './memory-ledger';
 import { chatComplete } from './llm-client';
+import { logger } from './logger';
 
 interface StoryResultRow {
   story_id: string;
@@ -56,7 +57,7 @@ export function startMemorySynthesis(): void {
     if (!workspaceId) return;
 
     synthesizeMemory(workspaceId, payload.run_id, payload.status).catch(err => {
-      console.error(`[memory-synthesis] Error for run ${payload.run_id}:`, err);
+      logger.error(`[memory-synthesis] Error for run ${payload.run_id}:`, err);
     });
   });
 }
@@ -244,7 +245,7 @@ async function synthesizeMemory(workspaceId: string, runId: number, runStatus: s
   try {
     result = await chatComplete([{ role: 'user', content: prompt }]);
   } catch (err) {
-    console.error('[memory-synthesis] LLM call failed:', err);
+    logger.error({ err }, '[memory-synthesis] LLM call failed');
     return;
   }
 
@@ -294,5 +295,5 @@ async function synthesizeMemory(workspaceId: string, runId: number, runStatus: s
     payload: walPayload,
   });
 
-  console.log(`[memory-synthesis] Proposed ${proposals.length} memory entries for run ${runId} (status: ${runStatus})`);
+  logger.info(`[memory-synthesis] Proposed ${proposals.length} memory entries for run ${runId} (status: ${runStatus})`);
 }

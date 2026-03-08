@@ -18,6 +18,7 @@ import { loadRorcaConfig, writeRorcaConfig, hasRorcaDir, ensureRorcaDirStructure
 import type { RorcaConfig } from '../lib/rorca-config';
 import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-scaffold';
 import type { ScaffoldFile } from '../lib/workspace-scaffold';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -302,7 +303,7 @@ router.post('/:id/hydrate', async (req, res) => {
     ).run(id, JSON.stringify({ tableCount: schemaResult.tableNames.length }));
 
     if (schemaResult.tableNames.length === 0) {
-      console.warn(`[Hydrate] Schema hydration returned 0 tables for workspace ${id}`);
+      logger.warn(`[Hydrate] Schema hydration returned 0 tables for workspace ${id}`);
     }
 
     result.schema = { tableCount: schemaResult.tableNames.length, snapshot_at: snapshotAt };
@@ -1063,7 +1064,7 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
       usage: result.usage,
     });
   } catch (err: any) {
-    console.error('[scan-direction] error:', err.message);
+    logger.error('[scan-direction] error:', err.message);
     res.status(500).json({ error: err.message || 'Repo scan failed' });
   }
 });
@@ -1432,7 +1433,7 @@ router.post('/:id/scaffold', async (req, res) => {
 
       res.json(preview);
     } catch (err: any) {
-      console.error('[scaffold] Preview error:', err.message);
+      logger.error('[scaffold] Preview error:', err.message);
       res.status(500).json({ error: err.message || 'Scaffold generation failed' });
     }
     return;
@@ -1492,13 +1493,13 @@ router.post('/:id/scaffold', async (req, res) => {
           );
         } catch (gitErr: any) {
           // Non-fatal — files were written even if commit fails
-          console.warn('[scaffold] Git commit failed:', gitErr.message);
+          logger.warn('[scaffold] Git commit failed:', gitErr.message);
         }
       }
 
       res.json(result);
     } catch (err: any) {
-      console.error('[scaffold] Write error:', err.message);
+      logger.error('[scaffold] Write error:', err.message);
       res.status(500).json({ error: err.message || 'Scaffold write failed' });
     }
     return;
@@ -1680,7 +1681,7 @@ router.post('/:id/bootstrap', async (req, res) => {
       }
     } catch (err: any) {
       // Timeout or LLM failure — continue with partial results
-      console.warn(`[bootstrap] Direction generation failed: ${err.message}`);
+      logger.warn(`[bootstrap] Direction generation failed: ${err.message}`);
     }
 
     // 6. Build .rorca/config.json
@@ -1751,7 +1752,7 @@ router.post('/:id/bootstrap', async (req, res) => {
       filesCreated,
     });
   } catch (err: any) {
-    console.error('[bootstrap] error:', err.message);
+    logger.error('[bootstrap] error:', err.message);
     res.status(500).json({ error: err.message || 'Bootstrap failed' });
   }
 });
