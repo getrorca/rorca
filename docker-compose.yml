@@ -23,6 +23,8 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      # AUTH_REQUIRED=true enforces JWT auth on all protected routes (default: false for local single-user)
+      # - AUTH_REQUIRED=true
       - RORCA_TELEMETRY=0
     volumes:
       - rorca-data:/data
