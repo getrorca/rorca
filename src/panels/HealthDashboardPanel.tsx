@@ -231,7 +231,12 @@ export default function HealthDashboardPanel() {
       )}
 
       {loading && !health ? (
-        <div className="text-muted text-sm">Loading health data...</div>
+        <div className="flex items-center justify-center py-16">
+          <div className="text-muted text-sm flex items-center gap-2">
+            <Loader2 size={16} className="animate-spin" />
+            Loading health data...
+          </div>
+        </div>
       ) : health ? (
         <>
           {/* Status banner */}
@@ -589,7 +594,17 @@ export default function HealthDashboardPanel() {
             </div>
           )}
         </>
-      ) : null}
+      ) : (
+        <div className="flex items-center justify-center py-16">
+          <div className="flex flex-col items-center text-center max-w-md px-6">
+            <HeartPulse size={48} className="text-[var(--text-muted)] opacity-40 mb-4" />
+            <h3 className="text-lg font-semibold text-[var(--text)] mb-2">Health data unavailable</h3>
+            <p className="text-sm text-[var(--text-muted)]">
+              Unable to load workspace health data. Make sure a workspace is selected and the backend is running.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

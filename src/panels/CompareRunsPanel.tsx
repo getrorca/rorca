@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { ArrowLeftRight, ArrowUp, ArrowDown, Plus, Minus, Equal, ChevronLeft } from 'lucide-react';
+import { ArrowLeftRight, ArrowUp, ArrowDown, Plus, Minus, Equal, ChevronLeft, GitCompare, BarChart2 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 
@@ -378,10 +378,26 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
 
       {/* Initial state — no runs selected */}
       {!comparison && !loading && !error && (
-        <div className="flex items-center justify-center flex-1 text-[var(--text-muted)] text-sm">
-          {runs.length < 2
-            ? 'Need at least 2 completed runs to compare.'
-            : 'Select two runs above to compare them.'}
+        <div className="flex items-center justify-center flex-1">
+          <div className="flex flex-col items-center text-center max-w-md px-6">
+            {runs.length < 2 ? (
+              <>
+                <BarChart2 size={48} className="text-[var(--text-muted)] opacity-40 mb-4" />
+                <h3 className="text-lg font-semibold text-[var(--text)] mb-2">Not enough runs to compare</h3>
+                <p className="text-sm text-[var(--text-muted)]">
+                  You need at least 2 completed pipeline runs to use run comparison. Trigger a spec from the Pipeline panel to get started.
+                </p>
+              </>
+            ) : (
+              <>
+                <GitCompare size={48} className="text-[var(--text-muted)] opacity-40 mb-4" />
+                <h3 className="text-lg font-semibold text-[var(--text)] mb-2">Select two runs to compare</h3>
+                <p className="text-sm text-[var(--text-muted)]">
+                  Choose a baseline run and a comparison run above to see a story-by-story diff of pass rates and outcomes.
+                </p>
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>

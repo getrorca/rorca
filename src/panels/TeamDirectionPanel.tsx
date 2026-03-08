@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Users } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 
@@ -136,8 +137,14 @@ export default function TeamDirectionPanel() {
 
   if (teams.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full text-muted">
-        No teams found. Create a team first to set shared direction layers.
+      <div className="flex items-center justify-center h-full">
+        <div className="flex flex-col items-center text-center max-w-md px-6">
+          <Users size={48} className="text-[var(--text-muted)] opacity-40 mb-4" />
+          <h3 className="text-lg font-semibold text-[var(--text)] mb-2">No team direction layers</h3>
+          <p className="text-sm text-[var(--text-muted)]">
+            Team direction layers let you share L1 and L2 conventions across all team members. Create a team in Settings to add team-scoped direction.
+          </p>
+        </div>
       </div>
     );
   }
