@@ -23,6 +23,8 @@ import {
   type MemoryEntry,
   type MemoryCategory,
 } from '../lib/memory-ledger';
+import { analyzeRunEvents } from '../lib/wal-feedback';
+import { broadcastAll } from '../lib/sse-hub';
 
 const router = Router();
 
@@ -508,6 +510,87 @@ router.post('/rotate', (req: Request, res: Response) => {
   });
 
   res.json(result);
+});
+
+/**
+ * @swagger
+ * /api/memory/synthesize-from-run/{runId}:
+ *   post:
+ *     summary: Manually trigger memory synthesis from a completed pipeline run
+ *     operationId: synthesizeMemoryFromRun
+ *     description: |
+ *       Analyzes WAL events for the specified run and generates candidate memory entries.
+ *       Entries are deduplicated against existing memory, persisted as proposals in the
+ *       memory_proposals table, and broadcast via SSE.
+ *     parameters:
+ *       - name: runId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ */
+router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
+  const runId = parseInt(req.params.runId as string, 10);
+  if (isNaN(runId)) return res.status(400).json({ error: 'Invalid runId' });
+
+  const run = db.prepare(
+    'SELECT id, workspace_id, status FROM pipeline_runs WHERE id = ?'
+  ).get(runId) as { id: number; workspace_id: string; status: string } | undefined;
+
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+
+  // Generate candidates from WAL event analysis
+  const candidates = analyzeRunEvents(runId);
+
+  if (candidates.length === 0) {
+    return res.json({ proposals: [], total: 0 });
+  }
+
+  // Persist as proposals in memory_proposals table
+  const today = new Date().toISOString().slice(0, 10);
+  const insertStmt = db.prepare(
+    `INSERT OR IGNORE INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
+  );
+
+  const proposals = candidates.map((c, i) => {
+    const proposalId = `wal-feedback-${runId}-${i}`;
+    insertStmt.run(proposalId, runId, run.workspace_id, c.category, c.title, c.rule, c.context, c.source);
+    return {
+      proposalId,
+      date: today,
+      category: c.category,
+      title: c.title,
+      rule: c.rule,
+      context: c.context,
+      source: c.source,
+      status: 'pending',
+    };
+  });
+
+  // Broadcast via SSE
+  const walPayload = JSON.stringify({
+    run_id: runId,
+    workspace_id: run.workspace_id,
+    proposals,
+  });
+
+  const walResult = db.prepare(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', ?, ?)`
+  ).run(run.workspace_id, walPayload);
+
+  broadcastAll({
+    id: Number(walResult.lastInsertRowid),
+    ts: new Date().toISOString(),
+    event_type: 'memory_proposals',
+    workspace_id: run.workspace_id,
+    spec_id: null,
+    story_id: null,
+    actor: 'system',
+    payload: walPayload,
+  });
+
+  res.json({ proposals, total: proposals.length });
 });
 
 export default router;
