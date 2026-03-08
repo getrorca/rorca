@@ -261,6 +261,12 @@ function deriveStoriesFromEvents(events: WalEvent[]): DerivedStory[] {
           existing.status = 'running';
         }
         break;
+      case 'story_token_update':
+        if (existing) {
+          existing.inputTokens = payload.cumulative_input ?? existing.inputTokens;
+          existing.outputTokens = payload.cumulative_output ?? existing.outputTokens;
+        }
+        break;
       case 'story_rerouted':
         if (existing) {
           existing.reroute = {
@@ -318,21 +324,49 @@ export default function PipelineMonitorPanel() {
   const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
   const [specPickerOpen, setSpecPickerOpen] = useState(false);
 
-  // SSE for live updates
-  const sseEvents = usePipelineSSE(selectedRunId ? String(selectedRunId) : null);
+  // SSE for live updates — scoped to workspace
+  const sseEvents = usePipelineSSE(selectedRunId ? String(selectedRunId) : null, workspaceId);
 
-  // Fetch run list on mount / workspace change
+  // Reset all state when workspace changes to prevent cross-contamination
   useEffect(() => {
+    setSelectedRunId(null);
+    setSelectedRunDetail(null);
+    setExpandedStory(null);
+    setLogLines([]);
+    setDetailTab('terminal');
+    setSpecStories([]);
+    setSpecModel(null);
+    setCommits([]);
+    setCommitsBranch(null);
+  }, [workspaceId]);
+
+  // Fetch run list
+  const fetchRuns = useCallback(() => {
     if (!workspaceId) return;
     apiFetch<{ items: PipelineRun[]; total: number; hasMore: boolean; cursor?: string }>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
       .then((data) => {
         setRuns(data.items);
+        // Auto-select first run only if nothing is selected
         if (data.items.length > 0 && !selectedRunId) {
           setSelectedRunId(data.items[0].id);
         }
       })
       .catch(console.error);
-  }, [workspaceId]);
+  }, [workspaceId, selectedRunId]);
+
+  // Fetch on mount / workspace change
+  useEffect(() => { fetchRuns(); }, [fetchRuns]);
+
+  // Poll runs every 15s + re-fetch on network reconnect
+  useEffect(() => {
+    const interval = setInterval(fetchRuns, 15_000);
+    const onOnline = () => { fetchRuns(); };
+    window.addEventListener('online', onOnline);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [fetchRuns]);
 
   // ─── Queue data ────────────────────────────────────────────────
   const fetchQueue = useCallback(() => {
@@ -379,12 +413,23 @@ export default function PipelineMonitorPanel() {
   useEffect(() => {
     if (!selectedRunId) {
       setSelectedRunDetail(null);
+      setSpecStories([]);
       return;
     }
-    apiFetch<{ run: PipelineRun; stories: StoryResult[]; specStories?: Array<{ id: string; title: string; agent?: string; reroute?: RerouteInfo }>; specModel?: string }>(`/api/pipeline/runs/${selectedRunId}`)
+    apiFetch<{ run: PipelineRun; stories: StoryResult[]; specStories?: Array<{ id: string; title: string; priority?: number; agent?: string; reroute?: RerouteInfo; passes?: boolean }>; specModel?: string }>(`/api/pipeline/runs/${selectedRunId}`)
       .then((data) => {
         setSelectedRunDetail(data);
         if (data.specModel) setSpecModel(data.specModel);
+        // Seed specStories immediately from run detail to avoid empty-state flash.
+        // The spec poll below will refine with live passes data.
+        if (data.specStories?.length) {
+          setSpecStories(data.specStories.map(s => ({
+            id: s.id,
+            title: s.title,
+            priority: s.priority ?? 3,
+            passes: s.passes ?? false,
+          })) as SpecStory[]);
+        }
       })
       .catch(console.error);
   }, [selectedRunId]);
@@ -393,9 +438,9 @@ export default function PipelineMonitorPanel() {
   // Polls every 10s while run is active so story pass/fail status updates live.
   useEffect(() => {
     if (!selectedRunDetail || !workspaceId) {
-      setSpecStories([]);
       return;
     }
+
     const specPath = selectedRunDetail.run.spec_path;
     const filename = specPath.split('/').pop() || '';
     const specId = filename.replace(/\.json$/, '');
@@ -404,7 +449,7 @@ export default function PipelineMonitorPanel() {
     const fetchSpec = () => {
       apiFetch<{ userStories?: SpecStory[] }>(`/api/specs/${specId}?workspaceId=${workspaceId}`)
         .then((data) => setSpecStories(data.userStories ?? []))
-        .catch(() => setSpecStories([]));
+        .catch(() => { /* keep existing specStories on error */ });
     };
 
     fetchSpec();
@@ -439,6 +484,15 @@ export default function PipelineMonitorPanel() {
     setCommitsBranch(null);
     fetchCommits();
   }, [fetchCommits]);
+
+  // Re-fetch commits each time a story passes so the Commits tab stays live during a run
+  const passedCount = useMemo(
+    () => sseEvents.filter(e => e.event_type === 'story_passed').length,
+    [sseEvents]
+  );
+  useEffect(() => {
+    if (passedCount > 0) fetchCommits();
+  }, [passedCount, fetchCommits]);
 
   // Build priority lookup from spec stories
   const priorityMap = useMemo(() => {
@@ -1149,7 +1203,7 @@ export default function PipelineMonitorPanel() {
                       useMultiPane ? (
                         <MultiPaneTerminal key={selectedRunId} runId={selectedRunId} walEvents={sseEvents} />
                       ) : (
-                        <RunTerminal key={selectedRunId} runId={selectedRunId} />
+                        <RunTerminal key={selectedRunId} runId={selectedRunId} workspaceId={workspaceId} />
                       )
                     ) : (
                       <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
@@ -1224,15 +1278,9 @@ export default function PipelineMonitorPanel() {
                                 <HelpTooltip helpKey="story-priority" size={9} />
                               </span>
                               <span className="w-5 text-center flex-shrink-0">{STORY_ICONS[story.status]}</span>
-                              {story.status === 'skipped' ? (
-                                <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-teal-500/15 text-teal-400 border border-teal-500/30 flex-shrink-0">
-                                  Already Passing
-                                </span>
-                              ) : (
-                                <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
-                                  {story.status}
-                                </span>
-                              )}
+                              <span className="text-xs text-[var(--text-muted)] w-14 flex-shrink-0">
+                                {story.status === 'skipped' ? 'pass' : story.status}
+                              </span>
                               {story.escalation && (
                                 <span
                                   className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-500/15 text-amber-400 border border-amber-500/30 flex-shrink-0"

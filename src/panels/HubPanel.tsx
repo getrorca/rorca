@@ -8,6 +8,7 @@ import { ToastContainer, useToast } from '../components/Toast';
 import { HubSkeleton } from '../components/Skeleton';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
+import { useWalSSE } from '../hooks/useWalSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import type { PanelId } from '../components/Sidebar';
 import AgentBadge from '../components/AgentBadge';
@@ -211,7 +212,7 @@ function ActiveRunCard({ run, totalStories, onNavigateToRun, onRunCompleted }: {
   onNavigateToRun?: (runId: number) => void;
   onRunCompleted?: (status: 'done' | 'failed') => void;
 }) {
-  const walEvents = usePipelineSSE(String(run.id));
+  const walEvents = usePipelineSSE(String(run.id), run.workspace_id);
   const [actionLoading, setActionLoading] = useState<'pause' | 'kill' | null>(null);
   const [completionBorder, setCompletionBorder] = useState<'none' | 'success' | 'failure'>('none');
   const completionFired = useRef(false);
@@ -479,13 +480,14 @@ function PendingReviewCard({ spec, workspaceId, onNavigate, onAction, onNavigate
 
 // ─── Ready-to-Run Card ──────────────────────────────────────────────────────
 
-function ReadyToRunCard({ spec, workspaceId, workspaceBusy, workspaceName, onTriggered, onNavigate, onQueueRefresh }: {
+function ReadyToRunCard({ spec, workspaceId, workspaceBusy, workspaceName, onTriggered, onNavigate, onNavigateToRun, onQueueRefresh }: {
   spec: SpecSummary;
   workspaceId: string;
   workspaceBusy: boolean;
   workspaceName: string;
   onTriggered: (specId: string) => void;
   onNavigate: (panel: PanelId) => void;
+  onNavigateToRun?: (runId: number) => void;
   onQueueRefresh?: () => void;
 }) {
   const specPath = `forge/specs/approved/${spec.id}.json`;
@@ -499,7 +501,7 @@ function ReadyToRunCard({ spec, workspaceId, workspaceBusy, workspaceName, onTri
     if (workspaceBusy || triggerState === 'triggering') return;
     setTriggerState('triggering');
     try {
-      const result = await apiFetch<{ conflict?: boolean }>('/api/pipeline/trigger', {
+      const result = await apiFetch<{ conflict?: boolean; runId?: number }>('/api/pipeline/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ specPath, workspaceId }),
@@ -510,6 +512,10 @@ function ReadyToRunCard({ spec, workspaceId, workspaceBusy, workspaceName, onTri
       }
       setTriggerState('success');
       onTriggered(spec.id);
+      // Navigate to the run view after a brief delay so user sees "Launching..."
+      if (result.runId && onNavigateToRun) {
+        setTimeout(() => onNavigateToRun(result.runId!), 800);
+      }
     } catch {
       setTriggerState('error');
       setTimeout(() => setTriggerState('idle'), 3000);
@@ -741,18 +747,10 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
     fetchHealth();
   }, [fetchHealth]);
 
-  // SSE: auto-refresh on health_recalculated events
+  // Refresh health every 60s (lightweight — no SSE connection needed for rare events)
   useEffect(() => {
-    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
-    es.addEventListener('wal_event', (e) => {
-      try {
-        const evt = JSON.parse(e.data);
-        if (evt.event_type === 'health_recalculated') {
-          fetchHealth();
-        }
-      } catch {}
-    });
-    return () => es.close();
+    const interval = setInterval(fetchHealth, 60_000);
+    return () => clearInterval(interval);
   }, [fetchHealth]);
 
   const handleGenerateScaffold = async () => {
@@ -838,9 +836,12 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="border border-border rounded-lg overflow-hidden">
       {/* Header with score */}
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded(!expanded)}
-        className="w-full text-left p-4 hover:bg-surface-200 transition-colors"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(!expanded); } }}
+        className="w-full text-left p-4 hover:bg-surface-200 transition-colors cursor-pointer"
       >
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
@@ -869,7 +870,7 @@ function WorkspaceHealthCard({ workspaceId }: { workspaceId: string }) {
             style={{ width: `${report.score}%` }}
           />
         </div>
-      </button>
+      </div>
 
       {/* Scaffold generation prompt — shown when missing context files */}
       {showScaffoldPrompt && (
@@ -1169,10 +1170,15 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
       }
     };
 
+    // Re-fetch immediately when network comes back online
+    const onOnline = () => { fetchAll(); };
+
     document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('online', onOnline);
     return () => {
       clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('online', onOnline);
     };
   }, [fetchData, fetchQueueStatus]);
 
@@ -1181,28 +1187,21 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   fetchRef.current = fetchData;
   const queueRef = useRef(fetchQueueStatus);
   queueRef.current = fetchQueueStatus;
-  useEffect(() => {
-    const es = new EventSource(`${BASE_URL}/api/pipeline/stream`);
-    const RUN_TERMINAL_EVENTS = new Set([
-      'run_finished', 'run_failed', 'run_cancelled',
-      'run_started', 'run_paused', 'run_resumed',
-    ]);
-    const QUEUE_EVENTS = new Set([
-      'run_queued_trigger', 'run_finished',
-    ]);
-    es.addEventListener('wal_event', (e) => {
-      try {
-        const evt = JSON.parse(e.data);
-        if (RUN_TERMINAL_EVENTS.has(evt.event_type)) {
-          fetchRef.current();
-        }
-        if (QUEUE_EVENTS.has(evt.event_type)) {
-          queueRef.current();
-        }
-      } catch { /* ignore malformed events */ }
-    });
-    return () => es.close();
-  }, []);
+  const RUN_TERMINAL_EVENTS = new Set([
+    'run_finished', 'run_failed', 'run_cancelled',
+    'run_started', 'run_paused', 'run_resumed',
+  ]);
+  const QUEUE_EVENTS = new Set([
+    'run_queued_trigger', 'run_finished',
+  ]);
+  useWalSSE((event) => {
+    if (RUN_TERMINAL_EVENTS.has(event.event_type)) {
+      fetchRef.current();
+    }
+    if (QUEUE_EVENTS.has(event.event_type)) {
+      queueRef.current();
+    }
+  });
 
   // ── Wizard: check health score on workspace change ──
   useEffect(() => {
@@ -1312,10 +1311,6 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
     );
   }
 
-  if (!loaded) {
-    return <HubSkeleton />;
-  }
-
   const hasActiveRun = !!activeRun;
   const hasPending = pendingSpecs.length > 0;
   const hasApproved = approvedSpecs.length > 0;
@@ -1400,6 +1395,9 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
               <MemoryUpdatesCard workspaceId={workspaceId} onNavigateToMemory={() => onNavigate('memory')} />
             </section>
           )}
+
+          {/* Data-dependent sections — show skeleton while loading */}
+          {!loaded ? <HubSkeleton /> : <>
 
           {/* Active Run */}
           {hasActiveRun && (
@@ -1529,6 +1527,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
                       workspaceName={selectedWorkspace?.name ?? ''}
                       onTriggered={() => fetchData()}
                       onNavigate={onNavigate}
+                      onNavigateToRun={onNavigateToRun}
                       onQueueRefresh={fetchQueueStatus}
                     />
                   </li>
@@ -1560,6 +1559,7 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
             </section>
           )}
 
+          </>}
         </div>
       </div>
     </div>

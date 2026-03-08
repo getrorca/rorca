@@ -158,11 +158,11 @@ router.put('/', (req: Request, res: Response) => {
     }
   }
 
-  // Upsert via INSERT OR REPLACE (unique index on layer + coalesced workspace_id + domain)
+  // Upsert via INSERT OR REPLACE (unique index on layer + workspace_id + domain + team_id)
   db.prepare(`
     INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, preferred_model, updated_at)
     VALUES (?, ?, ?, ?, ?, datetime('now'))
-    ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
+    ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
     DO UPDATE SET content_yaml = excluded.content_yaml, preferred_model = excluded.preferred_model, updated_at = datetime('now')
   `).run(layer, workspaceId || null, domain || null, contentYaml, (layer === 3 ? preferredModel ?? null : null));
 

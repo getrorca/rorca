@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useWalSSE } from '../hooks/useWalSSE';
 
 export type GenerationStage = 'analyzing' | 'context' | 'generating' | 'validating';
 
@@ -123,52 +124,40 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
     setCompletedPasses(new Set());
   }, [isActive, stages]);
 
-  // Multi-pass: listen to SSE events for real pass progress
-  useEffect(() => {
+  // Multi-pass: listen to SSE events for real pass progress via shared singleton
+  useWalSSE((event) => {
     if (!isActive || !multiPass) return;
+    if (event.event_type !== 'spec_generation_pass') return;
 
-    const es = new EventSource('/api/pipeline/stream');
-    sseRef.current = es;
+    try {
+      const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
+      const passNum = payload.pass;
+      const status = payload.status;
 
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.event_type !== 'spec_generation_pass') return;
+      // Filter by spec slug if available
+      if (specSlug && event.spec_id && event.spec_id !== specSlug) return;
 
-        const payload = typeof data.payload === 'string' ? JSON.parse(data.payload) : data.payload;
-        const passNum = payload.pass;
-        const status = payload.status;
+      const passId = `pass${passNum}`;
 
-        // Filter by spec slug if available
-        if (specSlug && data.spec_id && data.spec_id !== specSlug) return;
-
-        const passId = `pass${passNum}`;
-
-        if (status === 'started') {
-          const now = Date.now();
-          setCurrentStage(passId);
-          setStageStartTimes((prev) => ({ ...prev, [passId]: now }));
-        } else if (status === 'completed') {
-          const now = Date.now();
-          setCompletedPasses((prev) => new Set([...prev, passId]));
-          setStageStartTimes((prev) => {
-            const startTime = prev[passId];
-            if (startTime) {
-              setElapsed((el) => ({ ...el, [passId]: now - startTime }));
-            }
-            return prev;
-          });
-        }
-      } catch {
-        // Ignore parse errors from non-JSON SSE data (heartbeats, etc.)
+      if (status === 'started') {
+        const now = Date.now();
+        setCurrentStage(passId);
+        setStageStartTimes((prev) => ({ ...prev, [passId]: now }));
+      } else if (status === 'completed') {
+        const now = Date.now();
+        setCompletedPasses((prev) => new Set([...prev, passId]));
+        setStageStartTimes((prev) => {
+          const startTime = prev[passId];
+          if (startTime) {
+            setElapsed((el) => ({ ...el, [passId]: now - startTime }));
+          }
+          return prev;
+        });
       }
-    };
-
-    return () => {
-      es.close();
-      sseRef.current = null;
-    };
-  }, [isActive, multiPass, specSlug]);
+    } catch {
+      // Ignore parse errors
+    }
+  });
 
   // Tick elapsed times
   useEffect(() => {

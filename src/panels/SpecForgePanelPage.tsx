@@ -20,6 +20,8 @@ import { ChevronRight, ChevronDown, Clock, Plus, Inbox } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
 import { briefToSlug, KEBAB_RE } from '../lib/slugify';
 import type { GeneratedSpec } from './SpecForgeOutput';
+import AgentPicker, { type AgentType } from '../components/AgentPicker';
+import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 
 type ForgeMode = 'single' | 'batch';
 type ReviewFilter = 'all' | 'review_requested' | 'changes_requested';
@@ -29,15 +31,6 @@ const REVIEW_FILTERS: { id: ReviewFilter; label: string }[] = [
   { id: 'review_requested', label: 'Needs Review' },
   { id: 'changes_requested', label: 'Changes Requested' },
 ];
-
-interface ModelOption {
-  id: string;
-  label: string;
-  provider: string;
-  costPer1kInput: number;
-  costPer1kOutput: number;
-  recommended: boolean;
-}
 
 interface DirectionLayerData {
   content: string | null;
@@ -66,7 +59,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [specName, setSpecName] = useState('');
   const [specNameError, setSpecNameError] = useState('');
 
-  // Model selection (persisted in localStorage)
+  // Spec generation model selection (persisted in localStorage)
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState(() => {
     try { return localStorage.getItem('rorca:forge:model') ?? ''; } catch { return ''; }
@@ -74,16 +67,60 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
   const [activeProvider, setActiveProvider] = useState<string>('claude-cli');
 
-  // Fetch available models and active provider
+  // Workspace execution agent config (from Settings)
+  const [wsAgentType, setWsAgentType] = useState<AgentType>('claude');
+  const [wsAgentModel, setWsAgentModel] = useState<string | null>(null);
+  const [wsModelDisplayName, setWsModelDisplayName] = useState<string | null>(null);
+  const [wsAgentBinaries, setWsAgentBinaries] = useState<{ claudeInstalled?: boolean; opencodeInstalled?: boolean; codexInstalled?: boolean }>({});
+
+  // Per-spec execution agent override
+  const [overrideAgent, setOverrideAgent] = useState(false);
+  const [overrideAgentType, setOverrideAgentType] = useState<AgentType>('claude');
+  const [overrideAgentModel, setOverrideAgentModel] = useState<string | null>(null);
+
+  // OpenCode model catalog (for AgentPicker)
+  const [opencodeModels, setOpencodeModels] = useState<ModelOption[]>([]);
+
+  // Fetch available spec generation models, active provider, workspace agent config, and opencode models
   useEffect(() => {
     if (!workspaceId) return;
     Promise.all([
       apiFetch<{ models: ModelOption[]; defaultModel: string }>(`/api/direction/models?workspaceId=${workspaceId}`),
       apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`),
-    ]).then(([modelData, providerData]) => {
+      apiFetch<{
+        agentType: AgentType; agentModel: string | null; modelDisplayName: string | null;
+        opencodeInstalled?: boolean; codexInstalled?: boolean;
+      }>('/api/config'),
+      apiFetch<{ models: Array<{ id: string; name: string; provider: string; contextWindow: number; costPer1kInput?: number; costPer1kOutput?: number; speedTier?: string; costTier?: string }> }>('/api/config/opencode-models'),
+    ]).then(([modelData, providerData, configData, ocModels]) => {
       setAvailableModels(modelData.models);
       setDefaultModelId(modelData.defaultModel);
       setActiveProvider(providerData.provider);
+      // Workspace agent config
+      setWsAgentType(configData.agentType);
+      setWsAgentModel(configData.agentModel);
+      setWsModelDisplayName(configData.modelDisplayName);
+      setWsAgentBinaries({
+        claudeInstalled: true, // Claude CLI is always assumed present
+        opencodeInstalled: configData.opencodeInstalled,
+        codexInstalled: configData.codexInstalled,
+      });
+      // Initialize override defaults from workspace config
+      setOverrideAgentType(configData.agentType);
+      setOverrideAgentModel(configData.agentModel);
+      // Transform opencode models to ModelOption format
+      setOpencodeModels(ocModels.models.map(m => ({
+        id: m.id,
+        label: m.name,
+        provider: m.provider,
+        providerType: undefined,
+        costPer1kInput: m.costPer1kInput ?? 0,
+        costPer1kOutput: m.costPer1kOutput ?? 0,
+        contextWindow: m.contextWindow,
+        speedTier: m.speedTier,
+        costTier: m.costTier,
+        recommended: false,
+      })));
     }).catch(() => { });
   }, [workspaceId]);
 
@@ -225,13 +262,16 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     if (!advancedOpen) return;
     const measure = () => {
       if (advancedInnerRef.current) {
-        setAdvancedHeight(advancedInnerRef.current.scrollHeight);
+        // Add buffer for mt-4 margin (not included in scrollHeight) + breathing room
+        setAdvancedHeight(advancedInnerRef.current.scrollHeight + 32);
       }
     };
     measure();
+    // Re-measure after a frame in case async content (models dropdown) loaded late
+    const raf = requestAnimationFrame(measure);
     window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, [advancedOpen, showCustomInput]);
+    return () => { window.removeEventListener('resize', measure); cancelAnimationFrame(raf); };
+  }, [advancedOpen, showCustomInput, availableModels.length, overrideAgent, overrideAgentType]);
 
   const validateSpecName = useCallback((value: string) => {
     if (!value) {
@@ -261,8 +301,9 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
     if (specName) count++;
     if (selectedModel) count++;
     if (storyCount !== 0) count++;
+    if (overrideAgent) count++;
     return count;
-  }, [specName, selectedModel, storyCount]);
+  }, [specName, selectedModel, storyCount, overrideAgent]);
 
   const handleStoryCountSelect = (value: string) => {
     if (value === 'custom') {
@@ -643,7 +684,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
               {workspace?.name ?? 'Workspace'}
             </span>
             <ChevronRight size={14} className="text-muted" />
-            <span className="text-sm text-muted">Forge</span>
+            <span className="text-sm text-muted">Spec</span>
             {hasPending && (
               <>
                 <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-warning/15 text-warning">
@@ -750,7 +791,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
       ) : (
         /* ─── Main Forge view: Create + Pending ──────────────────────── */
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-2xl mx-auto px-6 py-10 space-y-6">
+          <div className="max-w-2xl mx-auto px-6 pt-10 pb-20 space-y-6">
 
             {/* Create area — collapsible when pending specs exist */}
             {hasPending && !createExpanded && !generatedSpec && !isGenerating ? (
@@ -763,15 +804,22 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
               </button>
             ) : (
               <>
-                {/* "Start from template" link */}
-                <div className="flex justify-end">
+                {/* Template prompt — visible when brief is empty */}
+                {!specBrief.trim() && !generatedSpec && !isGenerating && (
                   <button
                     onClick={() => setShowTemplatePicker(true)}
-                    className="text-xs text-accent hover:text-accent-hover transition-colors"
+                    className="w-full flex items-center gap-3 px-4 py-3 text-left bg-panel border border-dashed border-border rounded-lg hover:border-accent/40 hover:bg-accent/5 transition-colors group"
                   >
-                    Start from template &rarr;
+                    <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center shrink-0 group-hover:bg-accent/20 transition-colors">
+                      <Inbox size={16} className="text-accent" />
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium text-[var(--text)]">Start from a template</span>
+                      <p className="text-xs text-muted mt-0.5">Pick a saved spec template to pre-fill your brief</p>
+                    </div>
+                    <ChevronRight size={14} className="ml-auto text-muted group-hover:text-accent transition-colors" />
                   </button>
-                </div>
+                )}
 
                 {/* Brief textarea — collapses to single line after generation */}
                 {generatedSpec && !isGenerating && !briefExpanded ? (
@@ -923,6 +971,30 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                   )}
                 </>}
 
+                {/* Workspace execution agent indicator */}
+                {!generatedSpec && (
+                  <div className="flex items-center justify-center gap-1.5 text-xs text-muted/60">
+                    <span className={`w-1.5 h-1.5 rounded-full ${
+                      wsAgentType === 'claude' ? 'bg-purple-400/60' :
+                      wsAgentType === 'codex' ? 'bg-green-400/60' :
+                      'bg-accent/60'
+                    }`} />
+                    Running with{' '}
+                    <span className="font-medium text-muted">
+                      {wsAgentType === 'claude' ? 'Claude' : wsAgentType === 'codex' ? 'Codex' : 'OpenCode'}
+                      {wsAgentType === 'opencode' && wsModelDisplayName ? ` · ${wsModelDisplayName}` : ''}
+                    </span>
+                    {wsAgentType !== 'opencode' && (
+                      <span className="text-muted/40">(subscription)</span>
+                    )}
+                    {overrideAgent && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                        Override
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {/* Generate Spec + Quick Run buttons — hidden after generation */}
                 {(!generatedSpec || isGenerating) && (
                 <div className="space-y-2">
@@ -1020,9 +1092,51 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                         </p>
                       </Field>
 
+                      {/* Execution Engine Override */}
+                      <div className="space-y-2">
+                        <label className="flex items-center gap-2 cursor-pointer group">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={overrideAgent}
+                            onClick={() => setOverrideAgent(o => !o)}
+                            className={`relative w-8 h-[18px] rounded-full transition-colors ${
+                              overrideAgent ? 'bg-accent' : 'bg-border group-hover:bg-muted/40'
+                            }`}
+                          >
+                            <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${
+                              overrideAgent ? 'translate-x-[14px]' : ''
+                            }`} />
+                          </button>
+                          <span className="text-xs font-medium text-text">Override execution engine</span>
+                        </label>
+                        {!overrideAgent && (
+                          <p className="text-[11px] text-muted/50 ml-10">
+                            Using workspace default: {wsAgentType === 'claude' ? 'Claude (subscription)' :
+                              wsAgentType === 'codex' ? 'Codex (subscription)' :
+                              `OpenCode${wsModelDisplayName ? ` · ${wsModelDisplayName}` : ''}`}
+                          </p>
+                        )}
+                        {overrideAgent && (
+                          <AgentPicker
+                            agentType={overrideAgentType}
+                            agentModel={overrideAgentModel}
+                            onAgentTypeChange={setOverrideAgentType}
+                            onModelChange={setOverrideAgentModel}
+                            models={opencodeModels}
+                            defaultModelId={wsAgentModel}
+                            compact
+                            claudeInstalled={wsAgentBinaries.claudeInstalled}
+                            opencodeInstalled={wsAgentBinaries.opencodeInstalled}
+                            codexInstalled={wsAgentBinaries.codexInstalled}
+                          />
+                        )}
+                      </div>
+
+                      {/* Spec Generation Model */}
                       <Field label={
                         <span className="flex items-center gap-2">
-                          LLM Model
+                          Spec Generation Model
                           <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${activeProvider === 'claude-cli'
                               ? 'bg-green-500/10 text-green-400 border border-green-500/20'
                               : 'bg-accent/10 text-accent border border-accent/20'
@@ -1037,18 +1151,12 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                           </span>
                         </span>
                       }>
-                        <select
+                        <ModelSearchSelect
+                          models={availableModels}
                           value={selectedModel || defaultModelId || ''}
-                          onChange={(e) => setSelectedModel(e.target.value)}
-                          className="w-full px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors appearance-none cursor-pointer bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22M6%209l6%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center]"
-                          aria-label="Select LLM model"
-                        >
-                          {availableModels.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.label} — {m.provider}{m.recommended ? ' (Recommended)' : ''} · ${m.costPer1kInput}/1K in · ${m.costPer1kOutput}/1K out
-                            </option>
-                          ))}
-                        </select>
+                          defaultModelId={defaultModelId}
+                          onChange={setSelectedModel}
+                        />
                       </Field>
 
                       <Field label="Story Count" className="max-w-xs">
