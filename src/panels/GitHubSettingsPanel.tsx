@@ -280,7 +280,11 @@ export default function GitHubSettingsPanel() {
   }
 
   return (
-    <div className="h-full overflow-y-auto max-w-2xl mx-auto space-y-8">
+    <div
+      role="main"
+      aria-label="GitHub Settings"
+      className="h-full overflow-y-auto max-w-2xl mx-auto space-y-8"
+    >
       {/* ─── Section 1: OAuth Account ─────────────────────────────────── */}
       <section>
         <div className="flex items-center gap-2 mb-4">
@@ -400,6 +404,7 @@ export default function GitHubSettingsPanel() {
           <h2 className="text-base font-semibold text-[var(--text)]">Workspace Repository</h2>
         </div>
 
+        <div aria-live="polite" aria-atomic="true">
         {loading ? (
           <div className="flex items-center gap-2 text-muted text-sm">
             <Loader2 size={16} className="animate-spin" /> Loading connection status...
@@ -548,6 +553,7 @@ export default function GitHubSettingsPanel() {
             </button>
           </div>
         )}
+        </div>
       </section>
 
       {/* ─── Section 3: Auto-PR Settings ──────────────────────────────── */}
@@ -566,7 +572,9 @@ export default function GitHubSettingsPanel() {
                 role="switch"
                 aria-checked={autoPrEnabled}
                 onClick={() => setAutoPrEnabled(!autoPrEnabled)}
-                className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors ${
+                onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setAutoPrEnabled(!autoPrEnabled); } }}
+                aria-label="Automatically create pull requests on run completion"
+                className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 ${
                   autoPrEnabled ? 'bg-accent' : 'bg-border'
                 }`}
               >
