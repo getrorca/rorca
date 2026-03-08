@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   GitBranch, ChevronRight, Plus, X, Copy, Check,
   Terminal, Trash2, AlertTriangle, Loader2,
-  FileWarning, ChevronDown, ChevronUp, Eye, EyeOff, Merge,
+  FileWarning, ChevronDown, ChevronUp, Eye, EyeOff, Merge, GitFork,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
@@ -358,8 +358,14 @@ export default function WorktreesPanel() {
         {/* ── Worktree rows ── */}
         <div className="flex-1 overflow-y-auto">
           {worktrees.length === 0 ? (
-            <div className="p-4 text-center text-xs text-[var(--text-muted)]">
-              No worktrees found. The main working copy is the only tree.
+            <div className="flex items-center justify-center h-full py-16">
+              <div className="flex flex-col items-center text-center max-w-md px-6">
+                <GitFork size={48} className="text-[var(--text-muted)] opacity-40 mb-4" />
+                <h3 className="text-lg font-semibold text-[var(--text)] mb-2">No worktrees yet</h3>
+                <p className="text-sm text-[var(--text-muted)]">
+                  Run a spec with auto-worktree enabled to isolate each story in its own branch. Worktrees let multiple stories execute in parallel without conflicts.
+                </p>
+              </div>
             </div>
           ) : (
             worktrees.map((wt) => (

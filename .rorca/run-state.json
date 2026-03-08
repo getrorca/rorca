@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T11:45:16.842Z",
+  "lastUpdatedAt": "2026-03-08T11:50:33.417Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -183,6 +183,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 358590
+    },
+    {
+      "storyId": "PR-027",
+      "title": "Empty State Consistency Sweep",
+      "status": "passed",
+      "startedAt": "2026-03-08T11:45:27.503Z",
+      "finishedAt": "2026-03-08T11:50:33.417Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 305914
     }
   ],
   "failedStories": [],
