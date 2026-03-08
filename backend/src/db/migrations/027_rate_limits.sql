@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 );
 
 -- Seed default limits
+-- Note: SSE endpoints (/api/pipeline/stream, /api/pipeline/runs/:id/output, etc.)
+-- are exempt from rate limiting in rate-limiter.ts — they support long-lived connections
+-- and frequent polling by monitoring tools. No DB entries needed.
 INSERT OR IGNORE INTO rate_limits (endpoint_pattern, tier, max_requests, window_seconds) VALUES
   ('*', 'authenticated', 100, 60),
   ('*', 'unauthenticated', 20, 60),

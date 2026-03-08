@@ -200,4 +200,51 @@ describe('rate limiter middleware', () => {
       expect(res.status).toBe(200);
     }
   });
+
+  test('SSE endpoints are exempt from rate limiting', async () => {
+    // Set a very low limit to ensure they would be rate limited if not exempt
+    db.prepare('UPDATE rate_limits SET max_requests = 1 WHERE endpoint_pattern = ? AND tier = ?')
+      .run('*', 'authenticated');
+    const { invalidateRateLimitCache } = require('../rate-limiter');
+    invalidateRateLimitCache();
+
+    // Normal endpoint should be rate limited after 1 request
+    await request(app)
+      .get('/api/workspaces')
+      .set('Authorization', `Bearer ${authToken}`);
+    const blockedRes = await request(app)
+      .get('/api/workspaces')
+      .set('Authorization', `Bearer ${authToken}`);
+    expect(blockedRes.status).toBe(429);
+
+    // SSE endpoints should never return 429, even with very low limits
+    // Test that first request to each SSE endpoint is not rate limited
+    const sseEndpoints = [
+      '/api/pipeline/stream',
+      '/api/pipeline/runs/test-run-123/output',
+      '/api/pipeline/runs/test-run-123/stories/US-001/output',
+      '/api/pipeline/runs/test-run-123/stories/US-001/log',
+    ];
+
+    for (const endpoint of sseEndpoints) {
+      // Use abort to prevent hanging on SSE stream
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 100);
+      try {
+        const res = await request(app)
+          .get(endpoint)
+          .set('Authorization', `Bearer ${authToken}`)
+          .timeout(100);
+        // Should NOT be 429 (rate limited)
+        expect(res.status).not.toBe(429);
+      } catch (e: any) {
+        // Timeout or abort is OK — we just want to ensure no 429 status
+        if (e.status !== undefined) {
+          expect(e.status).not.toBe(429);
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+  });
 });
