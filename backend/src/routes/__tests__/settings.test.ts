@@ -1,0 +1,177 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import type { Express } from 'express';
+import type Database from 'better-sqlite3';
+import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
+
+let app: Express;
+let db: Database.Database;
+let tmpDir: string;
+let authToken: string;
+
+beforeEach(async () => {
+  jest.resetModules();
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-settings-test-'));
+  const dbPath = path.join(tmpDir, 'test.db');
+  process.env.DB_PATH = dbPath;
+  process.env.NODE_ENV = 'test';
+
+  const serverMod = require('../../server');
+  app = serverMod.default;
+  const dbMod = require('../../db/index');
+  db = dbMod.db;
+
+  authToken = await getAuthToken(app);
+});
+
+afterEach(() => {
+  db.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.DB_PATH;
+  delete process.env.NODE_ENV;
+});
+
+describe('GET /api/settings/profile', () => {
+  it('returns the current user profile', async () => {
+    const res = await request(app)
+      .get('/api/settings/profile')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.email).toBeDefined();
+    expect(res.body.displayName).toBeDefined();
+    expect(res.body.id).toBeDefined();
+  });
+});
+
+describe('PUT /api/settings/profile', () => {
+  it('updates display name', async () => {
+    const res = await request(app)
+      .put('/api/settings/profile')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ displayName: 'Updated Name' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+
+    // Verify in DB
+    const profile = await request(app)
+      .get('/api/settings/profile')
+      .set('Authorization', `Bearer ${authToken}`);
+    expect(profile.body.displayName).toBe('Updated Name');
+  });
+
+  it('updates avatar URL', async () => {
+    const res = await request(app)
+      .put('/api/settings/profile')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ avatarUrl: 'https://example.com/avatar.png' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
+
+  it('returns 4xx for empty displayName', async () => {
+    const res = await request(app)
+      .put('/api/settings/profile')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ displayName: '' });
+
+    // Zod validation returns 422 for schema violations
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+  });
+
+  it('returns 400 for empty body', async () => {
+    const res = await request(app)
+      .put('/api/settings/profile')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({});
+
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('PUT /api/settings/password', () => {
+  it('rejects wrong current password with 403', async () => {
+    const res = await request(app)
+      .put('/api/settings/password')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ currentPassword: 'definitelywrongpassword', newPassword: 'newpassword456' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/incorrect/i);
+  });
+
+  it('returns 400 for missing currentPassword', async () => {
+    const res = await request(app)
+      .put('/api/settings/password')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ newPassword: 'newpassword456' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/currentPassword/i);
+  });
+
+  it('returns 400 for short new password', async () => {
+    const res = await request(app)
+      .put('/api/settings/password')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ currentPassword: 'securepass123', newPassword: 'abc' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/6 characters/i);
+  });
+});
+
+describe('GET /api/settings/display', () => {
+  it('returns default display settings', async () => {
+    const res = await request(app)
+      .get('/api/settings/display')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.defaultModel).toBeDefined();
+    expect(res.body.itemsPerPage).toBeDefined();
+    expect(typeof res.body.itemsPerPage).toBe('number');
+  });
+});
+
+describe('PUT /api/settings/display', () => {
+  it('updates display preferences', async () => {
+    const res = await request(app)
+      .put('/api/settings/display')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ defaultModel: 'claude-opus-4-6', itemsPerPage: 50 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.defaultModel).toBe('claude-opus-4-6');
+    expect(res.body.itemsPerPage).toBe(50);
+  });
+
+  it('clamps itemsPerPage to valid range', async () => {
+    const res = await request(app)
+      .put('/api/settings/display')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ itemsPerPage: 200 }); // exceeds max of 100
+
+    expect(res.status).toBe(200);
+    expect(res.body.itemsPerPage).toBe(20); // falls back to default when out of range
+  });
+
+  it('persists display settings across requests', async () => {
+    await request(app)
+      .put('/api/settings/display')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ itemsPerPage: 75 });
+
+    const getRes = await request(app)
+      .get('/api/settings/display')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(getRes.body.itemsPerPage).toBe(75);
+  });
+});
