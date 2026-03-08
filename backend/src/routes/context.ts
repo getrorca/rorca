@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import * as path from 'path';
+import { z } from 'zod';
 import {
   extractContext,
   combineMultiSources,
@@ -10,6 +11,7 @@ import {
   fetchUrlPreview,
   type ExtractRequest,
 } from '../lib/context-extractor';
+import { validateBody } from '../lib/validate';
 import { chatComplete } from '../lib/llm-client';
 
 const router = Router();
@@ -66,19 +68,18 @@ const upload = multer({
  *                 tokenCount: { type: integer }
  *       400: { description: "Missing mode or invalid targetLayer" }
  */
-router.post('/extract', async (req: Request, res: Response) => {
+const ContextExtractSchema = z.object({
+  mode: z.enum(['paste', 'url', 'qa']),
+  targetLayer: z.number().int().refine(v => [1, 2, 3].includes(v), { message: 'targetLayer must be 1, 2, or 3' }),
+  content: z.string().optional(),
+  url: z.string().optional(),
+  questions: z.record(z.string(), z.unknown()).optional(),
+  workspaceId: z.union([z.string(), z.number()]).optional(),
+});
+
+router.post('/extract', validateBody(ContextExtractSchema), async (req: Request, res: Response) => {
   try {
     const body = req.body as ExtractRequest;
-
-    if (!body.mode) {
-      res.status(400).json({ error: 'mode is required' });
-      return;
-    }
-
-    if (![1, 2, 3].includes(body.targetLayer)) {
-      res.status(400).json({ error: 'targetLayer must be 1, 2, or 3' });
-      return;
-    }
 
     const result = await extractContext(body);
     res.json(result);
