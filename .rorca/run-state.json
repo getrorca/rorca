@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T13:35:45.615Z",
+  "lastUpdatedAt": "2026-03-08T14:08:39.558Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -273,6 +273,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1588409
+    },
+    {
+      "storyId": "PR-036",
+      "title": "Backend Route Tests — Untested Routes Wave 2 (12 routes)",
+      "status": "passed",
+      "startedAt": "2026-03-08T13:35:55.853Z",
+      "finishedAt": "2026-03-08T14:08:39.557Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 1963704
     }
   ],
   "failedStories": [],
