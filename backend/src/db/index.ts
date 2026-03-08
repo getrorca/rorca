@@ -545,7 +545,7 @@ export function runMigrations() {
         preferred_model TEXT,
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
-      CREATE UNIQUE INDEX idx_direction_layers_new_unique
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_direction_layers_new_unique
         ON direction_layers_new(layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''));
       INSERT INTO direction_layers_new (id, workspace_id, domain, team_id, layer, content_yaml, preferred_model, updated_at)
         SELECT id, workspace_id, domain, team_id, layer, content_yaml, preferred_model, updated_at FROM direction_layers;
