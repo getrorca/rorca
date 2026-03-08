@@ -4,6 +4,7 @@ import { WorkspaceProvider, type Workspace } from '../contexts/WorkspaceContext'
 import { AuthProvider } from '../contexts/AuthContext';
 import { ThemeProvider } from '../contexts/ThemeContext';
 import { ToastProvider } from '../contexts/ToastContext';
+import { HelpTipsProvider } from '../contexts/HelpTipsContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,7 +56,9 @@ export function renderWithProviders(
       <ThemeProvider>
         <ToastProvider>
           <AuthProvider>
-            <WorkspaceProvider>{children}</WorkspaceProvider>
+            <HelpTipsProvider>
+              <WorkspaceProvider>{children}</WorkspaceProvider>
+            </HelpTipsProvider>
           </AuthProvider>
         </ToastProvider>
       </ThemeProvider>
