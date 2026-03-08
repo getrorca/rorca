@@ -283,7 +283,7 @@ export default function GitHubSettingsPanel() {
     <div
       role="main"
       aria-label="GitHub Settings"
-      className="h-full overflow-y-auto max-w-2xl mx-auto space-y-8"
+      className="h-full overflow-y-auto max-w-2xl mx-auto space-y-8 px-4 sm:px-0"
     >
       {/* ─── Section 1: OAuth Account ─────────────────────────────────── */}
       <section>
@@ -417,7 +417,7 @@ export default function GitHubSettingsPanel() {
                 <span className="text-sm font-medium text-emerald-400">Connected</span>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                 <div>
                   <span className="text-muted">Repository</span>
                   <p className="font-mono text-[var(--text)]">{status.repoOwner}/{status.repoName}</p>
@@ -499,7 +499,7 @@ export default function GitHubSettingsPanel() {
               Connect a GitHub repository to receive push, pull_request, and issue events via webhook.
             </p>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="block text-xs text-muted">
                 Repo owner
                 <input

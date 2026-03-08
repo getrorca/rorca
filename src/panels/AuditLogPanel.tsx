@@ -212,7 +212,7 @@ export default function AuditLogPanel() {
             value={actorFilter}
             onChange={(e) => setActorFilter(e.target.value)}
             aria-label="Filter by actor"
-            className="h-8 w-28 px-2 text-xs bg-bg border border-border rounded text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent"
+            className="h-8 w-full sm:w-28 px-2 text-xs bg-bg border border-border rounded text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent"
           />
 
           {/* Date from */}
@@ -247,6 +247,7 @@ export default function AuditLogPanel() {
 
       {/* Table */}
       <div className="flex-1 overflow-auto" aria-label="Audit log events" role="region">
+        <div className="overflow-x-auto min-w-full">
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <Loader2 size={24} className="animate-spin text-muted" />
@@ -282,6 +283,7 @@ export default function AuditLogPanel() {
             </tbody>
           </table>
         )}
+        </div>
       </div>
 
       {/* Pagination */}

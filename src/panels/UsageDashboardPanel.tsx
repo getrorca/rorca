@@ -185,7 +185,7 @@ export default function UsageDashboardPanel() {
         ) : (
           <>
             {/* Summary Cards */}
-            <div className="grid grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <SummaryCard
                 label="Total Tokens"
                 value={formatTokens(data.totals.total_input_tokens + data.totals.total_output_tokens)}
@@ -339,6 +339,7 @@ export default function UsageDashboardPanel() {
               <h3 className="text-sm font-medium text-muted mb-3 capitalize">
                 Cost Breakdown by {groupBy}
               </h3>
+              <div className="overflow-x-auto">
               <table className="w-full text-sm" role="table" aria-label={`Cost breakdown by ${groupBy}`}>
                 <thead>
                   <tr className="text-left text-muted border-b border-border">
@@ -370,6 +371,7 @@ export default function UsageDashboardPanel() {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           </>
         )}
