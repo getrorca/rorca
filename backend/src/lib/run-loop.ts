@@ -555,6 +555,18 @@ function createStoryWorktree(
       `git worktree add -b "${branchName}" "${worktreePath}" HEAD`,
       { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 },
     );
+
+    // Symlink node_modules from parent so agents can run `npx tsc`, `npm test`, etc.
+    // git worktree excludes node_modules (gitignored) — without this, every `npx` call
+    // downloads packages fresh, causing type-check failures and story cascade failures.
+    for (const rel of ['node_modules', 'backend/node_modules']) {
+      const src = path.join(workspaceCwd, rel);
+      const dst = path.join(worktreePath, rel);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
+        try { fs.symlinkSync(src, dst, 'dir'); } catch { /* non-fatal */ }
+      }
+    }
+
     console.log(`  [worktree] Created ${worktreePath} (${branchName})`);
     return { storyId, worktreePath, branchName };
   } catch (err: unknown) {

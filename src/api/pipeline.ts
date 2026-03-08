@@ -14,6 +14,7 @@ export interface TriggerParams extends ApiOptions {
   autoWorktree?: boolean;
   dryRun?: boolean;
   storyId?: string;
+  forceSequential?: boolean;
 }
 
 export interface CapabilityWarning {
@@ -39,6 +40,7 @@ export function triggerPipeline(p: TriggerParams): Promise<TriggerResponse> {
       autoWorktree: p.autoWorktree,
       dryRun: p.dryRun,
       storyId: p.storyId,
+      forceSequential: p.forceSequential,
     }),
     signal: p.signal,
   });

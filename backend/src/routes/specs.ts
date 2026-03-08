@@ -2339,6 +2339,26 @@ router.get('/', (req: Request, res: Response) => {
 
 // ─── W-003 / US-005: GET /archive — Full-text searchable spec archive ─────────
 
+interface RunTelemetry {
+  runId: number;
+  runStatus: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationSeconds: number | null;
+  totalInputTokens: number | null;
+  totalOutputTokens: number | null;
+  totalCostUsd: number | null;
+  agentType: string;
+  agentModel: string | null;
+  storyOutcomes: {
+    pass: number;
+    fail: number;
+    skip: number;
+    timeout: number;
+    excluded: number;
+  };
+}
+
 interface ArchiveSpecSummary extends SpecSummary {
   rejectedAt?: string;
   rejectReason?: string;
@@ -2348,6 +2368,7 @@ interface ArchiveSpecSummary extends SpecSummary {
   forkedFrom?: string;
   agentType?: string;
   agentModel?: string | null;
+  runTelemetry?: RunTelemetry | null;
   matchSnippets?: MatchSnippet[];
   relevanceScore?: number;
 }
@@ -2356,6 +2377,57 @@ interface MatchSnippet {
   field: 'title' | 'storyTitle' | 'storyDescription' | 'acceptanceCriteria';
   text: string;
   storyId?: string;
+}
+
+function getRunTelemetry(specSlug: string, workspaceId: string): RunTelemetry | null {
+  const run = db.prepare(
+    `SELECT id, status, started_at, finished_at,
+            total_input_tokens, total_output_tokens, total_cost_usd,
+            COALESCE(agent_type, agent, 'claude') AS agent_type, agent_model
+     FROM pipeline_runs
+     WHERE workspace_id = ? AND spec_path LIKE '%' || ? || '.json'
+     ORDER BY id DESC LIMIT 1`
+  ).get(workspaceId, specSlug) as {
+    id: number; status: string;
+    started_at: string; finished_at: string | null;
+    total_input_tokens: number | null; total_output_tokens: number | null;
+    total_cost_usd: number | null;
+    agent_type: string; agent_model: string | null;
+  } | undefined;
+
+  if (!run) return null;
+
+  let durationSeconds: number | null = null;
+  if (run.started_at && run.finished_at) {
+    durationSeconds = Math.round(
+      (new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000
+    );
+  }
+
+  const outcomes = db.prepare(
+    `SELECT status, COUNT(*) as cnt FROM story_results WHERE run_id = ? GROUP BY status`
+  ).all(run.id) as { status: string; cnt: number }[];
+
+  const storyOutcomes = { pass: 0, fail: 0, skip: 0, timeout: 0, excluded: 0 };
+  for (const row of outcomes) {
+    if (row.status in storyOutcomes) {
+      storyOutcomes[row.status as keyof typeof storyOutcomes] = row.cnt;
+    }
+  }
+
+  return {
+    runId: run.id,
+    runStatus: run.status,
+    startedAt: run.started_at,
+    finishedAt: run.finished_at,
+    durationSeconds,
+    totalInputTokens: run.total_input_tokens,
+    totalOutputTokens: run.total_output_tokens,
+    totalCostUsd: run.total_cost_usd,
+    agentType: run.agent_type,
+    agentModel: run.agent_model,
+    storyOutcomes,
+  };
 }
 
 function buildArchiveSummary(
@@ -2373,6 +2445,13 @@ function buildArchiveSummary(
   const storyTitles = stories.map((s: any) => s.title ?? s.id ?? '').filter(Boolean);
   const repoName = path.basename(workspacePath);
   const forkedFrom = (content as any).forkedFrom as string | undefined;
+  const slug = path.basename(fileName, '.json');
+
+  // Fetch run telemetry for completed/approved specs
+  const runTelemetry = (status === 'completed' || status === 'approved') && workspaceId
+    ? getRunTelemetry(slug, workspaceId)
+    : null;
+
   return {
     ...base,
     storyTitles,
@@ -2381,6 +2460,7 @@ function buildArchiveSummary(
     ...(forkedFrom ? { forkedFrom } : {}),
     ...(agentInfo?.agentType ? { agentType: agentInfo.agentType } : {}),
     ...(agentInfo?.agentModel ? { agentModel: agentInfo.agentModel } : {}),
+    runTelemetry,
   };
 }
 

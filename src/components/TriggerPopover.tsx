@@ -127,9 +127,9 @@ interface TriggerPopoverProps {
   /** Whether a trigger is currently in progress */
   loading?: boolean;
   /** Called when user clicks Run Now */
-  onTrigger: (autoWorktree: boolean) => void;
+  onTrigger: (autoWorktree: boolean, options?: { forceSequential?: boolean }) => void;
   /** Called when user clicks Add to Queue */
-  onAddToQueue?: (autoWorktree: boolean) => void;
+  onAddToQueue?: (autoWorktree: boolean, options?: { forceSequential?: boolean }) => void;
   /** Whether Add to Queue action is loading */
   queueLoading?: boolean;
   /** Called when popover is dismissed */
@@ -163,6 +163,7 @@ export default function TriggerPopover({
   const [expandedStory, setExpandedStory] = useState<string | null>(null);
   const [driftData, setDriftData] = useState<DriftReportData | null>(null);
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
+  const [forceSequential, setForceSequential] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // Fetch workspace health badge on mount
@@ -211,8 +212,8 @@ export default function TriggerPopover({
   useEffect(() => {
     if (!workspaceId) return;
     // Fetch latest drift report
-    apiFetch<DriftReportData>(`/api/conventions/drift/${workspaceId}`)
-      .then(setDriftData)
+    apiFetch<DriftReportData | { report: null }>(`/api/conventions/drift/${workspaceId}`)
+      .then((res) => { if ('report' in res && res.report === null) return; setDriftData(res as DriftReportData); })
       .catch(() => {});
     // Fetch workspace config to check if driftCheck is enabled
     apiFetch<{ config: WorkspaceConfig }>(`/api/workspaces/${workspaceId}/rorca-config`)
@@ -413,32 +414,48 @@ export default function TriggerPopover({
         </div>
       )}
 
-      {/* Orchestration mode badge (read-only, auto-selected) */}
+      {/* Orchestration mode — toggleable between wave-parallel and sequential */}
       <div>
         <label className="block text-xs text-muted mb-1.5">Execution</label>
         {orchestration ? (
-          <div className="flex items-center gap-2">
-            <Layers size={13} className={isWaveParallel ? 'text-accent shrink-0' : 'text-muted shrink-0'} />
-            <span className={`text-xs font-medium ${isWaveParallel ? 'text-accent' : 'text-[var(--text)]'}`}>
-              {orchBadgeText}
-            </span>
+          <div>
+            {isWaveParallel ? (
+              <div className="flex items-center gap-2">
+                <Layers size={13} className={forceSequential ? 'text-muted shrink-0' : 'text-accent shrink-0'} />
+                <button
+                  onClick={() => setForceSequential(!forceSequential)}
+                  className={`text-xs font-medium hover:underline cursor-pointer ${forceSequential ? 'text-[var(--text)]' : 'text-accent'}`}
+                  title={forceSequential ? 'Click to enable wave parallel' : 'Click to force sequential'}
+                >
+                  {forceSequential
+                    ? `Sequential · ${orchestration.totalStories} stories`
+                    : orchBadgeText}
+                </button>
+                <span className="text-[9px] text-muted ml-auto">(click to toggle)</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Layers size={13} className="text-muted shrink-0" />
+                <span className="text-xs font-medium text-[var(--text)]">{orchBadgeText}</span>
+              </div>
+            )}
+            {/* Show wave breakdown when wave-parallel and not forced sequential */}
+            {isWaveParallel && !forceSequential && orchestration && (
+              <div className="mt-1.5 space-y-0.5">
+                {orchestration.waves.map((w) => (
+                  <div key={w.index} className="flex items-center gap-1 text-[10px] text-muted">
+                    <span className="font-medium tabular-nums w-12 shrink-0">Wave {w.index}</span>
+                    <ArrowRight size={8} className="shrink-0" />
+                    <span className="truncate">{w.storyIds.join(', ')}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex items-center gap-2">
             <Layers size={13} className="text-muted shrink-0 animate-pulse" />
             <span className="text-xs text-muted">Analyzing dependencies...</span>
-          </div>
-        )}
-        {/* Show wave breakdown for wave-parallel */}
-        {isWaveParallel && orchestration && (
-          <div className="mt-1.5 space-y-0.5">
-            {orchestration.waves.map((w) => (
-              <div key={w.index} className="flex items-center gap-1 text-[10px] text-muted">
-                <span className="font-medium tabular-nums w-12 shrink-0">Wave {w.index}</span>
-                <ArrowRight size={8} className="shrink-0" />
-                <span className="truncate">{w.storyIds.join(', ')}</span>
-              </div>
-            ))}
           </div>
         )}
       </div>
@@ -626,19 +643,19 @@ export default function TriggerPopover({
       <label className="flex items-center gap-2 cursor-pointer">
         <input
           type="checkbox"
-          checked={autoWorktree || isWaveParallel}
+          checked={autoWorktree || (isWaveParallel && !forceSequential)}
           onChange={(e) => {
-            if (isWaveParallel) return;
+            if (isWaveParallel && !forceSequential) return;
             setAutoWorktree(e.target.checked);
           }}
-          disabled={isWaveParallel}
+          disabled={isWaveParallel && !forceSequential}
           className="rounded border-border accent-[var(--accent)]"
         />
         <span className="text-xs text-[var(--text)] flex items-center gap-1">
           <GitBranch size={12} className="text-muted" />
           Use worktrees
         </span>
-        {isWaveParallel && (
+        {isWaveParallel && !forceSequential && (
           <span className="text-[10px] text-muted">(required for parallel)</span>
         )}
       </label>
@@ -647,7 +664,10 @@ export default function TriggerPopover({
       <div className="space-y-2">
         {/* Run Now — primary */}
         <button
-          onClick={() => onTrigger(autoWorktree || isWaveParallel)}
+          onClick={() => {
+            const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
+            onTrigger(effectiveWorktree, { forceSequential: forceSequential || undefined });
+          }}
           disabled={triggerDisabled}
           className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
         >
@@ -661,7 +681,10 @@ export default function TriggerPopover({
         {/* Add to Queue — secondary */}
         {onAddToQueue && (
           <button
-            onClick={() => onAddToQueue(autoWorktree || isWaveParallel)}
+            onClick={() => {
+              const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
+              onAddToQueue(effectiveWorktree, { forceSequential: forceSequential || undefined });
+            }}
             disabled={triggerDisabled}
             title="Will run after the active spec completes"
             className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium border border-border text-[var(--text)] hover:bg-bg disabled:opacity-60 transition-colors"

@@ -280,8 +280,26 @@ Key routes (see `backend/src/server.ts` for full mount list):
 | `GET /api/workspaces/:id/agent-hooks` | Agent lifecycle hooks |
 | `GET /api/workspaces/:id/agent-profiles` | Named agent configurations |
 | `GET /api/workspaces/:id/github` | GitHub integration per workspace |
+| `GET /api/workspaces/:id/health` | CIE health report (score + component breakdown) |
+| `POST /api/workspaces/:id/hydrate` | Schema + git hydration via LLM map-reduce |
+| `POST /api/workspaces/:id/scan-direction` | Auto-generate L1/L2/L3 direction YAML from codebase |
+| `POST /api/workspaces/:id/monorepo/discover` | Discover monorepo apps + generate scopes + AGENTS.md |
+| `POST /api/workspaces/:id/monorepo/discover/apply` | Write discovered scopes to config.json + files |
+| `GET/PUT /api/workspaces/:id/rorca-config` | Load / save `.rorca/config.json` routing config |
+| `GET /api/workspaces/:id/skills` | List skill files in `.rorca/skills/` |
 | `GET /api/teams` | Team management |
 | `GET /api/invites` | Team invite management |
+
+**Skills**
+| Route | Purpose |
+|-------|---------|
+| `GET /api/skills` | List all discovered + installed skills (merged filesystem + DB) |
+| `POST /api/skills/install` | Install skill from raw markdown content |
+| `POST /api/skills/install-from-sh` | Install from skills.sh registry → GitHub fetch → dual-save |
+| `GET /api/skills/preview` | Preview uninstalled skill from skills.sh WITHOUT installing |
+| `GET /api/skills/suggestions` | Echolocation-inferred skill suggestions for current workspace |
+| `GET /api/skills/:name/content` | Full markdown of installed skill (SkillRegistry → DB fallback) |
+| `DELETE /api/skills/:name` | Remove installed skill |
 
 **Analytics & Observability**
 | Route | Purpose |
@@ -326,9 +344,11 @@ Key `backend/src/lib/` modules beyond `llm-client` and `direction-stack`:
 - **`scheduler.ts`** — Cron job runner for `pipeline_schedules`. Calls pipeline trigger internally.
 - **`agent-hook-runner.ts`** — Subscribes to SSE hub; fires agent hooks on WAL events matching configured patterns.
 - **`notification-dispatcher.ts`** — Subscribes to SSE hub; routes WAL events to email/webhook/in-app notification channels.
-- **`rate-limiter.ts`** — IP-based Express middleware. Applied to public routes with a tighter limit, and all routes after auth.
+- **`rate-limiter.ts`** — In-memory sliding window, keyed `userId:method:path` (authenticated) or `ip:method:path` (unauthenticated). Limits are loaded from the `rate_limits` DB table (30s cache); defaults: 100 req/min authenticated, 20 req/min unauthenticated. To change limits: `UPDATE rate_limits SET max_requests=500 WHERE tier='authenticated'` then call `invalidateRateLimitCache()` or restart backend. Skipped in `NODE_ENV=test` unless `RATE_LIMIT_ENABLED=true`.
 - **`paginate.ts`** — Standard `{ items, total, page, pageSize }` helper for paginated routes.
 - **`swagger.ts`** — Auto-generates OpenAPI spec from JSDoc `@swagger` annotations. Served at `/api/docs`.
+- **`context-router.ts`** — CIE virtual context payload compiler. `route(story, config, workspacePath, monorepoApps?)` assembles story-specific context: matches story paths via micromatch, resolves priority conflicts (highest wins), enforces token budget (globals = priority 101, never dropped). `detectCrossAppPaths()` synthesizes paths from monorepo app names mentioned in story text. `writeContextFile()` emits a temp file including the memory ledger section if `workspacePath` is provided. Token estimate: `text.length / 4` chars (±10%).
+- **`workspace-echolocation.ts`** — Workspace intelligence scanner. `echolocate(path)` → `EcholocationReport` detects stack (80+ npm packages, Cargo.toml, requirements.txt, go.mod, Dockerfile), context files, monorepo structure, and computes weighted health score (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt). `discoverMonorepo()` scans `apps/`, `packages/`, `libs/`, `services/`, `modules/` for manifests. `inferSkillsFromStack()` maps detected tech names to skill filenames via `STACK_TO_SKILLS` lookup. Health penalty: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit.
 
 ### Static Serving (Self-Hosted)
 When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the built frontend and handles SPA fallback. This is the `rorca start` CLI mode — frontend and backend served from the same process on port 3030.
@@ -382,6 +402,9 @@ UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE stat
 ### WAL Events Drive UI
 The Pipeline Monitor (`/api/pipeline/stream` SSE) polls `wal_events` every 3s. Story progress only appears after `run-loop.sh` writes `story_started`/`story_passed` events to the WAL (via its own Python scripts). The Terminal tab shows raw output independently of WAL events.
 
+### WAL Events Table — Column Is `ts`, Not `created_at`
+The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Queries against this table must use `ORDER BY ts DESC` and `SELECT ts`. The route handler can alias it (`ts AS created_at`) for API consumers, but the SQL itself must use `ts`. Using `created_at` produces `SqliteError: no such column: created_at`.
+
 ### Direction Stack Synthesis
 `synthesize()` in `backend/src/lib/direction-stack.ts` merges L1→L5 into a single context string. L4/L5 come from the spec brief and story annotations — not stored in `direction_layers`.
 
@@ -394,6 +417,31 @@ The Pipeline Monitor (`/api/pipeline/stream` SSE) polls `wal_events` every 3s. S
 
 ### SQLite Migration Pattern
 Migrations are SQL files in `backend/src/db/migrations/`. They run in numeric order on first startup. For column additions (SQLite lacks `ADD COLUMN IF NOT EXISTS`), use `pragma table_info` check in `db/index.ts` instead of a migration file.
+
+### Skills Install Chain (install-from-sh)
+`POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
+1. Search `https://skills.sh/api/search?q={name}` → gets `{ skillId, source }` where `source` = GitHub owner/repo (e.g., `vercel-labs/agent-skills`)
+2. Try `https://raw.githubusercontent.com/{source}/main/skills/{skillId}/SKILL.md`
+3. Try `https://raw.githubusercontent.com/{source}/main/{skillId}/SKILL.md`
+4. Fallback: GitHub tree API scan for any `SKILL.md` with matching frontmatter name
+5. Save to BOTH `.rorca/skills/{name}.md` AND `.claude/skills/{name}.md`, register in DB
+
+The `anthropics/skills` repo only contains docx/pdf/pptx/xlsx tools — not generic web skills. Generic skills (react, node, tailwind) come from `vercel-labs/agent-skills`, `wshobson/agents`, etc. Never hardcode GitHub source repos.
+
+### Workspace Context Files — Root Level Required
+The health check (`computeHealthReport`) and workspace setup look for files at the **workspace root**, not subdirectories:
+- `AGENTS.md` must exist at `<workspace>/AGENTS.md` (subdirectory AGENTS.md files don't satisfy this check)
+- `MEMORY.md` must exist at `<workspace>/MEMORY.md` (NOT at `<workspace>/.rorca/MEMORY.md`)
+- `.rorca/config.json` must exist at `<workspace>/.rorca/config.json`
+
+### ContextRoutingSettings — Visual Config Editor
+`src/components/ContextRoutingSettings.tsx` (1318 lines) is the UI for `.rorca/config.json` editing. Key behaviors:
+- Has `viewMode: 'visual' | 'json'` — visual editor with directory tree picker, or raw JSON with inline validation
+- Directory tree is lazy-loaded from `GET /api/workspaces/:id/directory-tree`; root expands on mount
+- Scope rules have priority 1–100; globals are always priority 101 and shown as read-only
+- `isDirty` check uses `JSON.stringify()` comparison (not reference equality)
+- After monorepo discovery is applied, may add 5–20 new scope rules (one per app) — config is re-fetched
+- Saves via `PUT /api/workspaces/:id/rorca-config`
 
 ### MCP Architecture — API-First, MCP-Second
 Rorca follows an **API-first** approach: Express routes are the source of truth, MCP tools are auto-generated from the OpenAPI spec. This eliminates hand-written MCP wrappers and version skew.
@@ -632,6 +680,8 @@ Escalation cascade on failure:
 
 **In Progress:**
 - `rorca-context-intent-engine` (18 stories, 15 passed — CIE-001–014, CIE-016; CIE-015 excluded; CIE-017–018 pending)
+  - CIE-017: Monorepo cross-app path detection (`detectCrossAppPaths()` in context-router.ts, `discoverMonorepo()` in workspace-echolocation.ts)
+  - CIE-018: TBD
 
 **Stale / Duplicate (can be deleted):**
 - `rorca-nav-drawer` (4 stories) — already completed as NAV-001–004 in rorca-opencode-integration
