@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T15:02:35.804Z",
+  "lastUpdatedAt": "2026-03-08T15:15:15.005Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -323,6 +323,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 215961
+    },
+    {
+      "storyId": "PR-044",
+      "title": "Marketplace Publish & Fork Routes",
+      "status": "passed",
+      "startedAt": "2026-03-08T15:02:45.795Z",
+      "finishedAt": "2026-03-08T15:15:15.005Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 749210
     }
   ],
   "failedStories": [],

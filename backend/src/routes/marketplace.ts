@@ -1,7 +1,52 @@
 import { Router, Request, Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as crypto from 'crypto';
+import { db } from '../db/index';
 import { sanitizeSpec } from '../lib/spec-sanitizer';
+import { getEffectiveUser } from '../lib/get-user';
+import { ValidationError, NotFoundError, ForbiddenError } from '../lib/errors';
 
 const router = Router();
+
+// ─── Row types ───────────────────────────────────────────────────────────────
+
+interface PublicationRow {
+  id: string;
+  spec_id: string;
+  workspace_id: string;
+  publisher_id: string | null;
+  title: string;
+  description: string;
+  tags: string;
+  sanitized_spec_json: string;
+  redaction_count: number;
+  download_count: number;
+  source: string;
+  deleted_at: string | null;
+  created_at: string;
+}
+
+interface WorkspaceRow {
+  id: string;
+  path: string;
+  label: string;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function ensureTable(): void {
+  const exists = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='spec_publications'")
+    .get() as { name: string } | undefined;
+  if (!exists) {
+    throw new ValidationError(
+      'Marketplace tables not initialized. Restart backend to run migrations.',
+    );
+  }
+}
+
+// ─── POST /api/marketplace/preview-sanitize ──────────────────────────────────
 
 /**
  * @swagger
@@ -67,6 +112,504 @@ router.post('/preview-sanitize', (req: Request, res: Response) => {
 
   const result = sanitizeSpec(spec);
   res.json(result);
+});
+
+// ─── POST /api/marketplace/publish ───────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/marketplace/publish:
+ *   post:
+ *     tags: [Marketplace]
+ *     summary: Publish a spec to the community marketplace
+ *     operationId: publishSpec
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [spec_id, workspace_id]
+ *             properties:
+ *               spec_id:
+ *                 type: string
+ *                 description: Spec slug (filename without .json)
+ *               workspace_id:
+ *                 type: string
+ *                 description: Workspace ID that owns the spec
+ *               title:
+ *                 type: string
+ *                 description: Optional override title (defaults to spec title)
+ *               description:
+ *                 type: string
+ *                 description: Optional description
+ *               tags:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: Optional tags for categorization
+ *     responses:
+ *       200:
+ *         description: Publication created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 publicationId:
+ *                   type: string
+ *                 redactionCount:
+ *                   type: integer
+ *       400:
+ *         description: Missing required fields
+ *       404:
+ *         description: Spec or workspace not found
+ */
+router.post('/publish', (req: Request, res: Response) => {
+  ensureTable();
+  const user = getEffectiveUser(req);
+  const { spec_id, workspace_id, title, description, tags } = req.body as {
+    spec_id?: string;
+    workspace_id?: string;
+    title?: string;
+    description?: string;
+    tags?: string[];
+  };
+
+  if (!spec_id || !workspace_id) {
+    throw new ValidationError('Missing required fields: spec_id, workspace_id');
+  }
+
+  // Resolve workspace path
+  const workspace = db
+    .prepare('SELECT id, path, label FROM workspaces WHERE id = ?')
+    .get(workspace_id) as WorkspaceRow | undefined;
+  if (!workspace) throw new NotFoundError('Workspace', workspace_id);
+
+  // Try approved first, then pending
+  let specPath = path.join(workspace.path, 'forge', 'specs', 'approved', `${spec_id}.json`);
+  if (!fs.existsSync(specPath)) {
+    specPath = path.join(workspace.path, 'forge', 'specs', 'pending', `${spec_id}.json`);
+  }
+  if (!fs.existsSync(specPath)) {
+    throw new NotFoundError('Spec', spec_id);
+  }
+
+  const rawSpec = JSON.parse(fs.readFileSync(specPath, 'utf-8'));
+
+  // Sanitize PII/secrets
+  const sanitizeResult = sanitizeSpec(rawSpec);
+
+  const pubId = `pub_${crypto.randomUUID()}`;
+  const specTitle = title || rawSpec.title || rawSpec.specName || spec_id;
+  const specDesc =
+    description ||
+    rawSpec.brief ||
+    (rawSpec.userStories
+      ? `${rawSpec.userStories.length} user stories`
+      : '');
+  const tagsJson = JSON.stringify(tags || []);
+
+  db.prepare(
+    `INSERT INTO spec_publications
+      (id, spec_id, workspace_id, publisher_id, title, description, tags, sanitized_spec_json, redaction_count, source, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'local', datetime('now'))`,
+  ).run(
+    pubId,
+    spec_id,
+    workspace_id,
+    user?.id || null,
+    specTitle,
+    specDesc,
+    tagsJson,
+    JSON.stringify(sanitizeResult.sanitized),
+    sanitizeResult.redactionCount,
+  );
+
+  // Insert into FTS5 index
+  db.prepare(
+    'INSERT INTO spec_fts (publication_id, title, description, tags) VALUES (?, ?, ?, ?)',
+  ).run(pubId, specTitle, specDesc, (tags || []).join(' '));
+
+  res.json({ publicationId: pubId, redactionCount: sanitizeResult.redactionCount });
+});
+
+// ─── POST /api/marketplace/:id/fork ──────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/marketplace/{id}/fork:
+ *   post:
+ *     tags: [Marketplace]
+ *     summary: Fork a published spec into a workspace
+ *     operationId: forkSpec
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Publication ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspace_id]
+ *             properties:
+ *               workspace_id:
+ *                 type: string
+ *                 description: Target workspace ID to fork into
+ *     responses:
+ *       200:
+ *         description: Spec forked successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specId:
+ *                   type: string
+ *                 path:
+ *                   type: string
+ *       400:
+ *         description: Missing workspace_id
+ *       404:
+ *         description: Publication or workspace not found
+ */
+router.post('/:id/fork', (req: Request, res: Response) => {
+  ensureTable();
+  const id = String(req.params.id);
+  const { workspace_id } = req.body as { workspace_id?: string };
+
+  if (!workspace_id) {
+    throw new ValidationError('Missing required field: workspace_id');
+  }
+
+  const pub = db
+    .prepare('SELECT * FROM spec_publications WHERE id = ? AND deleted_at IS NULL')
+    .get(id) as PublicationRow | undefined;
+  if (!pub) throw new NotFoundError('Publication', id);
+
+  const workspace = db
+    .prepare('SELECT id, path, label FROM workspaces WHERE id = ?')
+    .get(workspace_id) as WorkspaceRow | undefined;
+  if (!workspace) throw new NotFoundError('Workspace', workspace_id);
+
+  // Parse sanitized spec and add attribution
+  const specJson = JSON.parse(pub.sanitized_spec_json);
+  specJson.forkedFrom = {
+    publicationId: pub.id,
+    originalSpecId: pub.spec_id,
+    title: pub.title,
+    forkedAt: new Date().toISOString(),
+  };
+
+  // Reset all story passes so the forked spec starts fresh
+  if (specJson.userStories) {
+    for (const story of specJson.userStories) {
+      story.passes = false;
+    }
+  }
+
+  // Generate a unique slug for the forked spec
+  const baseSlug = pub.spec_id;
+  const suffix = crypto.randomUUID().slice(0, 8);
+  const forkedSlug = `${baseSlug}-fork-${suffix}`;
+  specJson.id = forkedSlug;
+  specJson.title = forkedSlug;
+
+  // Write to target workspace's pending directory
+  const pendingDir = path.join(workspace.path, 'forge', 'specs', 'pending');
+  fs.mkdirSync(pendingDir, { recursive: true });
+  const specPath = path.join(pendingDir, `${forkedSlug}.json`);
+  fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2));
+
+  // Increment download count
+  db.prepare('UPDATE spec_publications SET download_count = download_count + 1 WHERE id = ?').run(
+    pub.id,
+  );
+
+  res.json({
+    specId: forkedSlug,
+    path: `forge/specs/pending/${forkedSlug}.json`,
+  });
+});
+
+// ─── DELETE /api/marketplace/:id ─────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/marketplace/{id}:
+ *   delete:
+ *     tags: [Marketplace]
+ *     summary: Soft-delete a published spec (sets deleted_at)
+ *     operationId: unpublishSpec
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Publication ID
+ *     responses:
+ *       200:
+ *         description: Publication deleted
+ *       403:
+ *         description: Not the original publisher
+ *       404:
+ *         description: Publication not found
+ */
+router.delete('/:id', (req: Request, res: Response) => {
+  ensureTable();
+  const user = getEffectiveUser(req);
+  const id = String(req.params.id);
+
+  const pub = db
+    .prepare('SELECT * FROM spec_publications WHERE id = ? AND deleted_at IS NULL')
+    .get(id) as PublicationRow | undefined;
+  if (!pub) throw new NotFoundError('Publication', id);
+
+  // Only original publisher can delete
+  if (pub.publisher_id && user && pub.publisher_id !== user.id) {
+    throw new ForbiddenError('Only the original publisher can delete this publication');
+  }
+
+  db.prepare('UPDATE spec_publications SET deleted_at = datetime(\'now\') WHERE id = ?').run(id);
+
+  // Remove from FTS index
+  db.prepare('DELETE FROM spec_fts WHERE publication_id = ?').run(id);
+
+  res.json({ deleted: true });
+});
+
+// ─── GET /api/marketplace/popular ────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/marketplace/popular:
+ *   get:
+ *     tags: [Marketplace]
+ *     summary: Get top 20 specs by download count
+ *     operationId: popularSpecs
+ *     responses:
+ *       200:
+ *         description: List of popular publications
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Publication'
+ *                 total:
+ *                   type: integer
+ */
+router.get('/popular', (req: Request, res: Response) => {
+  ensureTable();
+  const rows = db
+    .prepare(
+      `SELECT id, spec_id, title, description, tags, download_count, source, created_at
+       FROM spec_publications
+       WHERE deleted_at IS NULL
+       ORDER BY download_count DESC
+       LIMIT 20`,
+    )
+    .all() as PublicationRow[];
+
+  const items = rows.map((r) => ({
+    ...r,
+    tags: JSON.parse(r.tags),
+  }));
+
+  res.json({ items, total: items.length });
+});
+
+// ─── GET /api/marketplace/search ─────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/marketplace/search:
+ *   get:
+ *     tags: [Marketplace]
+ *     summary: Full-text search for published specs
+ *     operationId: searchMarketplace
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *         description: Search query (empty returns popular specs)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *         description: Max results to return
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *         description: Number of results to skip
+ *     responses:
+ *       200:
+ *         description: Search results with snippets
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       title:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *                       snippet:
+ *                         type: string
+ *                         description: FTS5 highlighted snippet
+ *                       tags:
+ *                         type: array
+ *                         items:
+ *                           type: string
+ *                       download_count:
+ *                         type: integer
+ *                       source:
+ *                         type: string
+ *                       created_at:
+ *                         type: string
+ *                 total:
+ *                   type: integer
+ *                   description: Total matching results for pagination
+ */
+router.get('/search', (req: Request, res: Response) => {
+  ensureTable();
+  const query = String(req.query.q || '').trim();
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
+  const offset = Math.max(parseInt(String(req.query.offset), 10) || 0, 0);
+
+  // Empty query → return popular specs
+  if (!query) {
+    const countRow = db
+      .prepare('SELECT COUNT(*) as total FROM spec_publications WHERE deleted_at IS NULL')
+      .get() as { total: number };
+    const rows = db
+      .prepare(
+        `SELECT id, spec_id, title, description, tags, download_count, source, created_at
+         FROM spec_publications
+         WHERE deleted_at IS NULL
+         ORDER BY download_count DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(limit, offset) as PublicationRow[];
+
+    res.json({
+      items: rows.map((r) => ({ ...r, tags: JSON.parse(r.tags), snippet: '' })),
+      total: countRow.total,
+    });
+    return;
+  }
+
+  // FTS5 search with snippet extraction
+  const countRow = db
+    .prepare(
+      `SELECT COUNT(*) as total FROM spec_fts
+       INNER JOIN spec_publications ON spec_publications.id = spec_fts.publication_id
+       WHERE spec_fts MATCH ? AND spec_publications.deleted_at IS NULL`,
+    )
+    .get(query) as { total: number };
+
+  const rows = db
+    .prepare(
+      `SELECT
+         spec_publications.id,
+         spec_publications.spec_id,
+         spec_publications.title,
+         spec_publications.description,
+         spec_publications.tags,
+         spec_publications.download_count,
+         spec_publications.source,
+         spec_publications.created_at,
+         snippet(spec_fts, 1, '<b>', '</b>', '...', 32) AS snippet
+       FROM spec_fts
+       INNER JOIN spec_publications ON spec_publications.id = spec_fts.publication_id
+       WHERE spec_fts MATCH ? AND spec_publications.deleted_at IS NULL
+       ORDER BY rank
+       LIMIT ? OFFSET ?`,
+    )
+    .all(query, limit, offset) as (PublicationRow & { snippet: string })[];
+
+  res.json({
+    items: rows.map((r) => ({
+      id: r.id,
+      spec_id: r.spec_id,
+      title: r.title,
+      description: r.description,
+      tags: JSON.parse(r.tags),
+      download_count: r.download_count,
+      source: r.source,
+      created_at: r.created_at,
+      snippet: r.snippet || '',
+    })),
+    total: countRow.total,
+  });
+});
+
+// ─── GET /api/marketplace/:id ────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/marketplace/{id}:
+ *   get:
+ *     tags: [Marketplace]
+ *     summary: Get full publication detail including sanitized spec JSON
+ *     operationId: getPublication
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Publication ID
+ *     responses:
+ *       200:
+ *         description: Publication detail
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Publication'
+ *       404:
+ *         description: Publication not found
+ */
+router.get('/:id', (req: Request, res: Response) => {
+  ensureTable();
+  const id = String(req.params.id);
+
+  const pub = db
+    .prepare(
+      `SELECT id, spec_id, workspace_id, publisher_id, title, description, tags,
+              sanitized_spec_json, redaction_count, download_count, source, created_at
+       FROM spec_publications
+       WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .get(id) as PublicationRow | undefined;
+  if (!pub) throw new NotFoundError('Publication', id);
+
+  res.json({
+    ...pub,
+    tags: JSON.parse(pub.tags),
+    sanitized_spec_json: JSON.parse(pub.sanitized_spec_json),
+  });
 });
 
 export default router;
