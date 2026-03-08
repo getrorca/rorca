@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, useCallback, Suspense } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -15,31 +15,50 @@ import EmailVerificationBanner from './components/EmailVerificationBanner';
 import WorkspaceBootstrapBanner from './components/WorkspaceBootstrapBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { apiFetch, onApiFetchError } from './lib/apiFetch';
-import PublicReviewPage from './pages/PublicReviewPage';
-import { HubSkeleton, GenericPanelSkeleton, RunViewTerminalSkeleton } from './components/Skeleton';
+import {
+  HubSkeleton,
+  GenericPanelSkeleton,
+  RunViewTerminalSkeleton,
+  ForgeSkeleton,
+  ArchiveSkeleton,
+  PipelineSkeleton,
+  WorktreesSkeleton,
+  CompareSkeleton,
+  MarketplaceSkeleton,
+  DirectionStackSkeleton,
+  MemorySkeleton,
+  SettingsSkeleton,
+} from './components/Skeleton';
 import SlideOver from './components/SlideOver';
-import CommandPalette from './components/CommandPalette';
-import ForgotPasswordPage from './components/ForgotPasswordPage';
-import ResetPasswordPage from './components/ResetPasswordPage';
-import OnboardingWizard from './components/OnboardingWizard';
-import SpecForgePanelPage from './panels/SpecForgePanelPage';
-// ReviewQueuePanel removed — pending specs are now inline in Forge (UX-007)
-import PipelineMonitorPanel from './panels/PipelineMonitorPanel';
-import WorktreesPanel from './panels/WorktreesPanel';
-import ArchivePanel from './panels/ArchivePanel';
-import CompareRunsPanel from './panels/CompareRunsPanel';
-import GitHubSettingsPanel from './panels/GitHubSettingsPanel';
-import TeamDirectionPanel from './panels/TeamDirectionPanel';
-import TemplateMarketplacePanel from './panels/TemplateMarketplacePanel';
-import SettingsPanel, { type SettingsTab } from './panels/SettingsPanel';
-import HubPanel from './panels/HubPanel';
-import RunViewPanel from './panels/RunViewPanel';
-import SpecReviewPanel from './panels/SpecReviewPanel';
-import MemoryPanel from './panels/MemoryPanel';
-import DirectionTabbedPanel from './panels/DirectionTabbedPanel';
-import RunsTabbedPanel from './panels/RunsTabbedPanel';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
+
+// — Lazy-loaded pages (not part of initial bundle) —
+const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
+const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
+const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
+const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
+const CommandPalette = lazy(() => import('./components/CommandPalette'));
+
+// — Lazy-loaded panel components (each gets its own chunk) —
+const HubPanel = lazy(() => import('./panels/HubPanel'));
+// ReviewQueuePanel removed — pending specs are now inline in Forge (UX-007)
+const SpecForgePanelPage = lazy(() => import('./panels/SpecForgePanelPage'));
+const ArchivePanel = lazy(() => import('./panels/ArchivePanel'));
+const TemplateMarketplacePanel = lazy(() => import('./panels/TemplateMarketplacePanel'));
+const RunsTabbedPanel = lazy(() => import('./panels/RunsTabbedPanel'));
+const WorktreesPanel = lazy(() => import('./panels/WorktreesPanel'));
+const CompareRunsPanel = lazy(() => import('./panels/CompareRunsPanel'));
+const DirectionTabbedPanel = lazy(() => import('./panels/DirectionTabbedPanel'));
+const TeamDirectionPanel = lazy(() => import('./panels/TeamDirectionPanel'));
+const MemoryPanel = lazy(() => import('./panels/MemoryPanel'));
+const SettingsPanel = lazy(() => import('./panels/SettingsPanel'));
+const GitHubSettingsPanel = lazy(() => import('./panels/GitHubSettingsPanel'));
+const RunViewPanel = lazy(() => import('./panels/RunViewPanel'));
+const SpecReviewPanel = lazy(() => import('./panels/SpecReviewPanel'));
+
+// SettingsTab type — imported from SettingsPanel module
+type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
@@ -227,6 +246,27 @@ function AppRoutes() {
   );
 }
 
+/** Returns the appropriate Suspense fallback skeleton for a given panel */
+function getPanelSkeleton(panel: PanelId) {
+  switch (panel) {
+    case 'hub': return <HubSkeleton />;
+    case 'forge': case 'queue': return <ForgeSkeleton />;
+    case 'archive': return <ArchiveSkeleton />;
+    case 'marketplace': return <MarketplaceSkeleton />;
+    case 'pipeline': return <PipelineSkeleton />;
+    case 'worktrees': return <WorktreesSkeleton />;
+    case 'compare': return <CompareSkeleton />;
+    case 'stack': return <DirectionStackSkeleton />;
+    case 'team-direction': return <DirectionStackSkeleton />;
+    case 'memory': return <MemorySkeleton />;
+    case 'settings': case 'workspace-settings': case 'usage': case 'costs':
+    case 'models': case 'velocity': case 'completion': case 'roi':
+    case 'finops': case 'health': case 'audit-log': case 'activity':
+    case 'github': return <SettingsSkeleton />;
+    default: return <GenericPanelSkeleton />;
+  }
+}
+
 /** Renders the correct panel component based on the panel prop */
 function PanelRoute({ panel }: { panel: PanelId }) {
   const navigate = useAppNavigate();
@@ -234,15 +274,17 @@ function PanelRoute({ panel }: { panel: PanelId }) {
 
   return (
     <ErrorBoundary key={panel} label={PANEL_LABELS[panel] || 'Panel'}>
-      <ActivePanel
-        id={panel}
-        onNavigate={navigate}
-        onNavigateToRun={navigateToRun}
-        reviewSpecId={reviewSpecId}
-        onNavigateToSpecReview={navigateToSpecReview}
-        forgeBrief={forgeBrief}
-        onForgeBriefConsumed={handleForgeBriefConsumed}
-      />
+      <Suspense fallback={getPanelSkeleton(panel)}>
+        <ActivePanel
+          id={panel}
+          onNavigate={navigate}
+          onNavigateToRun={navigateToRun}
+          reviewSpecId={reviewSpecId}
+          onNavigateToSpecReview={navigateToSpecReview}
+          forgeBrief={forgeBrief}
+          onForgeBriefConsumed={handleForgeBriefConsumed}
+        />
+      </Suspense>
     </ErrorBoundary>
   );
 }

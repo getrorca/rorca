@@ -245,6 +245,149 @@ export function GenericPanelSkeleton() {
   );
 }
 
+/** Archive panel skeleton: search bar + list of spec cards */
+export function ArchiveSkeleton() {
+  return (
+    <div className="h-full flex flex-col p-6 space-y-4">
+      <div className="flex items-center gap-3">
+        <SkeletonBlock className="flex-1 h-9 rounded-lg" />
+        <SkeletonBadge className="w-20 h-9 rounded-md" />
+      </div>
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="p-4 bg-panel border border-border rounded-lg space-y-2">
+          <div className="flex items-center justify-between">
+            <SkeletonLine className="w-48 h-4" />
+            <SkeletonBadge className="w-16 h-5 rounded" />
+          </div>
+          <SkeletonLine className="w-32 h-3" />
+          <div className="flex items-center gap-2 pt-1">
+            <SkeletonBadge className="w-20 h-6 rounded-md" />
+            <SkeletonBadge className="w-16 h-6 rounded-md" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Pipeline/Runs panel skeleton: tab bar + run list */
+export function PipelineSkeleton() {
+  return (
+    <div className="h-full flex flex-col">
+      <div className="shrink-0 px-4 border-b border-border flex items-center gap-3 py-3">
+        <SkeletonLine className="w-20 h-4" />
+        <SkeletonLine className="w-16 h-4" />
+        <SkeletonLine className="w-18 h-4" />
+      </div>
+      <div className="flex-1 p-4 space-y-3 overflow-y-auto">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="p-3 bg-panel border border-border rounded-lg flex items-center gap-3">
+            <SkeletonCircle className="w-2.5 h-2.5 shrink-0" />
+            <div className="flex-1 space-y-1.5">
+              <SkeletonLine className="w-40" />
+              <SkeletonLine className="w-24 h-3" />
+            </div>
+            <SkeletonBadge className="w-14 h-5 rounded" />
+            <SkeletonLine className="w-16 h-3" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Worktrees panel skeleton */
+export function WorktreesSkeleton() {
+  return (
+    <div className="h-full flex flex-col p-6 space-y-4">
+      <SkeletonLine className="w-32 h-5" />
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="p-4 bg-panel border border-border rounded-lg space-y-2">
+          <div className="flex items-center justify-between">
+            <SkeletonLine className="w-36 h-4" />
+            <SkeletonBadge className="w-16 h-6 rounded-md" />
+          </div>
+          <SkeletonLine className="w-48 h-3" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Compare runs panel skeleton */
+export function CompareSkeleton() {
+  return (
+    <div className="h-full flex flex-col p-6 space-y-4">
+      <SkeletonLine className="w-40 h-5" />
+      <div className="grid grid-cols-2 gap-4">
+        <SkeletonBlock className="h-40 rounded-lg" />
+        <SkeletonBlock className="h-40 rounded-lg" />
+      </div>
+      <SkeletonBlock className="w-full h-48 rounded-lg" />
+    </div>
+  );
+}
+
+/** Marketplace panel skeleton: search + grid of template cards */
+export function MarketplaceSkeleton() {
+  return (
+    <div className="h-full flex flex-col p-6 space-y-4">
+      <SkeletonBlock className="w-full h-9 rounded-lg" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {[0, 1, 2, 3, 4, 5].map((i) => (
+          <div key={i} className="p-4 bg-panel border border-border rounded-lg space-y-2">
+            <SkeletonLine className="w-32 h-4" />
+            <SkeletonLine className="w-full h-3" />
+            <SkeletonLine className="w-3/4 h-3" />
+            <div className="flex items-center gap-2 pt-1">
+              <SkeletonBadge className="w-16 h-5 rounded" />
+              <SkeletonBadge className="w-12 h-5 rounded" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Direction stack panel skeleton: layer list */
+export function DirectionStackSkeleton() {
+  return (
+    <div className="h-full flex flex-col p-6 space-y-4">
+      <SkeletonLine className="w-36 h-5" />
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div key={i} className="p-4 bg-panel border border-border rounded-lg space-y-2">
+          <div className="flex items-center gap-2">
+            <SkeletonCircle className="w-2 h-2" />
+            <SkeletonLine className="w-20 h-4" />
+          </div>
+          <SkeletonLine className="w-full h-3" />
+          <SkeletonLine className="w-2/3 h-3" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Memory ledger panel skeleton */
+export function MemorySkeleton() {
+  return (
+    <div className="h-full flex flex-col p-6 space-y-4">
+      <SkeletonLine className="w-32 h-5" />
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="p-4 bg-panel border border-border rounded-lg space-y-2">
+          <div className="flex items-center gap-2">
+            <SkeletonBadge className="w-16 h-5 rounded" />
+            <SkeletonLine className="w-36 h-4" />
+          </div>
+          <SkeletonLine className="w-full h-3" />
+          <SkeletonLine className="w-3/4 h-3" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Matches DirectionPreviewSidebar content: 3 layer rows (rendered inside existing container) */
 export function DirectionSidebarSkeleton() {
   return (
