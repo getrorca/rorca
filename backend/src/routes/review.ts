@@ -59,6 +59,45 @@ function findSpecFile(workspacePath: string, specId: string): string | null {
 // ─── POST /api/specs/:specId/review-link ─────────────────────────────────────
 // Mounted under /api/specs — generates a shareable review link
 
+/**
+ * @swagger
+ * /api/specs/{specId}/review-link:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Generate a shareable review link for a spec
+ *     operationId: createSpecReviewLink
+ *     description: Creates a time-limited (7-day) review token and returns a shareable URL that allows external reviewers to view the spec and leave comments without authentication.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug ID (e.g., rorca-feature-enhancements)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID that owns the spec
+ *     responses:
+ *       201:
+ *         description: Review link created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 url: { type: string, description: "Full shareable URL with token embedded" }
+ *                 token: { type: string, description: "Raw review token" }
+ *                 expiresAt: { type: string, description: "ISO 8601 expiry timestamp (7 days from now)" }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ */
 specReviewRouter.post('/:specId/review-link', (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
@@ -124,6 +163,58 @@ specReviewRouter.post('/:specId/review-link', (req: Request, res: Response) => {
 
 // ─── GET /api/review/:token — Public: fetch spec + comments ──────────────────
 
+/**
+ * @swagger
+ * /api/review/{token}:
+ *   get:
+ *     tags: [Review]
+ *     summary: Get spec content and comments via review token
+ *     operationId: getReviewSpec
+ *     description: Public endpoint — validates the review token, loads the spec JSON from disk, and returns spec content with all story comments grouped by story ID. No authentication required.
+ *     parameters:
+ *       - in: path
+ *         name: token
+ *         required: true
+ *         schema: { type: string }
+ *         description: Raw review token (from the generated review link URL)
+ *     responses:
+ *       200:
+ *         description: Spec content and comments
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specId: { type: string }
+ *                 title: { type: string }
+ *                 model: { type: string }
+ *                 stories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       title: { type: string }
+ *                       description: { type: string }
+ *                       acceptanceCriteria: { type: array, items: { type: string } }
+ *                       passes: { type: boolean }
+ *                 commentsByStory:
+ *                   type: object
+ *                   description: Map of storyId → array of comment objects
+ *                   additionalProperties:
+ *                     type: array
+ *                     items:
+ *                       type: object
+ *                       properties:
+ *                         id: { type: string }
+ *                         body: { type: string }
+ *                         author_name: { type: string, nullable: true }
+ *                         display_name: { type: string, nullable: true }
+ *                         created_at: { type: string }
+ *                 expiresAt: { type: string, description: "ISO 8601 expiry timestamp" }
+ *       404: { description: "Invalid review token" }
+ *       410: { description: "Review link has expired" }
+ */
 publicReviewRouter.get('/:token', (req: Request, res: Response) => {
   try {
     const token = req.params.token as string;
@@ -191,6 +282,50 @@ publicReviewRouter.get('/:token', (req: Request, res: Response) => {
 
 // ─── POST /api/review/:token/comments — Public: add a guest comment ─────────
 
+/**
+ * @swagger
+ * /api/review/{token}/comments:
+ *   post:
+ *     tags: [Review]
+ *     summary: Add a guest comment via review token
+ *     operationId: addReviewComment
+ *     description: Public endpoint — validates the review token and inserts a guest comment on a specific story. No authentication required. Emits a WAL event for the comment.
+ *     parameters:
+ *       - in: path
+ *         name: token
+ *         required: true
+ *         schema: { type: string }
+ *         description: Raw review token
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [storyId, body]
+ *             properties:
+ *               storyId: { type: string, description: "Story ID (e.g., US-001)" }
+ *               body: { type: string, description: "Comment text (non-empty)" }
+ *               authorName: { type: string, description: "Optional guest display name (defaults to 'Guest')" }
+ *     responses:
+ *       201:
+ *         description: Comment created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 spec_id: { type: string }
+ *                 story_id: { type: string }
+ *                 body: { type: string }
+ *                 author_name: { type: string }
+ *                 display_name: { type: string }
+ *                 created_at: { type: string }
+ *       400: { description: "Missing storyId or body" }
+ *       404: { description: "Invalid review token" }
+ *       410: { description: "Review link has expired" }
+ */
 publicReviewRouter.post('/:token/comments', (req: Request, res: Response) => {
   try {
     const token = req.params.token as string;
@@ -265,6 +400,44 @@ publicReviewRouter.post('/:token/comments', (req: Request, res: Response) => {
 // CA-011: Used by execution-engine.ts to store adversarial review results.
 // No auth token required — only accessible from localhost (execution engine subprocess).
 
+/**
+ * @swagger
+ * /api/review/comment:
+ *   post:
+ *     tags: [Review]
+ *     summary: Store an adversarial review comment from the execution engine
+ *     operationId: addInternalReviewComment
+ *     description: Internal endpoint used by execution-engine.ts to persist adversarial review results (persona-based reviews) in the story_comments table. No review token required — designed for localhost-only access from subprocess agents.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [spec_id, story_id, body]
+ *             properties:
+ *               spec_id: { type: string, description: "Spec slug ID" }
+ *               story_id: { type: string, description: "Story ID (e.g., US-001)" }
+ *               body: { type: string, description: "Review comment text" }
+ *               author_name: { type: string, description: "Persona display name (e.g., 'Security Reviewer')" }
+ *               review_persona: { type: string, description: "Persona identifier (e.g., 'security', 'red-team')" }
+ *               review_type: { type: string, description: "Review type (e.g., 'adversarial', 'compliance')" }
+ *     responses:
+ *       201:
+ *         description: Review comment stored
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 spec_id: { type: string }
+ *                 story_id: { type: string }
+ *                 author_name: { type: string }
+ *                 review_persona: { type: string, nullable: true }
+ *                 review_type: { type: string, nullable: true }
+ *       400: { description: "Missing spec_id, story_id, or body" }
+ */
 publicReviewRouter.post('/comment', (req: Request, res: Response) => {
   try {
     const { spec_id, story_id, body, author_name, review_persona, review_type } = req.body;
