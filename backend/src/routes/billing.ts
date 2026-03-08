@@ -348,6 +348,34 @@ router.post('/portal', async (req: Request, res: Response) => {
 // NOTE: This route is registered BEFORE authRequired in server.ts
 export const webhookRouter = Router();
 
+/**
+ * @swagger
+ * /api/billing/webhook:
+ *   post:
+ *     tags: [Billing]
+ *     summary: Stripe webhook receiver
+ *     operationId: handleBillingWebhook
+ *     description: Receives Stripe webhook events. Verifies the Stripe-Signature header using STRIPE_WEBHOOK_SECRET. Handles customer.subscription.created, customer.subscription.updated, and customer.subscription.deleted events to keep the local subscriptions table and user plan synchronized.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: Raw Stripe event payload (verified by signature)
+ *     responses:
+ *       200:
+ *         description: Webhook processed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 received: { type: boolean }
+ *       400: { description: "Missing or invalid Stripe signature" }
+ *       503: { description: "Stripe webhooks not configured" }
+ *       500: { description: "Webhook processing failed" }
+ */
 webhookRouter.post('/webhook', async (req: Request, res: Response) => {
   if (!stripe || !STRIPE_WEBHOOK_SECRET) {
     res.status(503).json({ error: 'Stripe webhooks not configured' });
