@@ -137,15 +137,48 @@ function findLimit(method: string, path: string, tier: string): { maxRequests: n
   return { maxRequests: match.max_requests, windowSeconds: match.window_seconds };
 }
 
+// ─── Rate limit exemptions ───
+// These endpoints are exempt from rate limiting:
+// - Health check: monitoring tools (Docker, Kubernetes, load balancers) poll frequently
+// - SSE endpoints: long-lived connections, not per-request rate limited
+const EXEMPT_PATTERNS = [
+  'GET /api/health',                           // health check
+  'GET /api/pipeline/stream',                  // SSE event stream
+  'GET /api/pipeline/runs/:id/output',         // SSE terminal output
+  'GET /api/pipeline/runs/:id/stories/:storyId/output', // SSE story output
+  'GET /api/pipeline/runs/:id/stories/:storyId/log',    // SSE story log
+];
+
+function isExempt(method: string, path: string): boolean {
+  for (const pattern of EXEMPT_PATTERNS) {
+    if (matchesPattern(method, path, pattern)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // ─── Middleware ───
 
 /**
  * Express middleware that enforces per-user (authenticated) or per-IP
  * (unauthenticated) rate limiting using an in-memory sliding window.
+ *
+ * Exempt endpoints: /api/health, /api/pipeline/stream, SSE endpoints.
+ * These are not rate-limited to support monitoring tools and long-lived connections.
  */
 export function rateLimiter(req: Request, res: Response, next: NextFunction): void {
   // Skip rate limiting in test environment (dedicated rate-limiter tests opt in via RATE_LIMIT_ENABLED)
   if (process.env.NODE_ENV === 'test' && process.env.RATE_LIMIT_ENABLED !== 'true') {
+    next();
+    return;
+  }
+
+  const method = req.method;
+  const pathOnly = req.path;
+
+  // Skip rate limiting for exempt endpoints
+  if (isExempt(method, pathOnly)) {
     next();
     return;
   }
@@ -161,16 +194,17 @@ export function rateLimiter(req: Request, res: Response, next: NextFunction): vo
   }
   const tier = user ? 'authenticated' : 'unauthenticated';
 
-  // Strip query string for matching
-  const pathOnly = req.path;
-  const method = req.method;
-
   const { maxRequests, windowSeconds } = findLimit(method, pathOnly, tier);
   const windowMs = windowSeconds * 1000;
 
   // Build key: userId for authenticated, IP for unauthenticated
   const identity = user ? `user:${user.id}` : `ip:${req.ip || req.socket.remoteAddress || 'unknown'}`;
   const key = `${identity}:${method}:${pathOnly}`;
+
+  // Debug logging (only in verbose mode)
+  if (process.env.RATE_LIMIT_DEBUG === 'true') {
+    console.log(`[RateLimit] ${method} ${pathOnly} — ${tier} (${maxRequests}/${windowSeconds}s)`);
+  }
 
   const now = Date.now();
   let entry = windows.get(key);
