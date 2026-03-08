@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T10:56:32.287Z",
+  "lastUpdatedAt": "2026-03-08T11:05:40.885Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -143,6 +143,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 527711
+    },
+    {
+      "storyId": "PR-024",
+      "title": "Accessibility Audit — System Panels (7 panels)",
+      "status": "passed",
+      "startedAt": "2026-03-08T10:56:42.931Z",
+      "finishedAt": "2026-03-08T11:05:40.885Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 537954
     }
   ],
   "failedStories": [],

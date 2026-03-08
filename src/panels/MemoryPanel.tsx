@@ -108,6 +108,7 @@ function EntryForm({ initial, onSave, onCancel }: {
         <select
           value={category}
           onChange={(e) => setCategory(e.target.value)}
+          aria-label="Category"
           className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
         >
           {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
@@ -117,6 +118,7 @@ function EntryForm({ initial, onSave, onCancel }: {
           value={source}
           onChange={(e) => setSource(e.target.value)}
           placeholder="Source (e.g. CIE-005)"
+          aria-label="Source"
           className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] placeholder:text-muted w-32 focus:border-accent focus:ring-1 focus:ring-accent"
         />
       </div>
@@ -126,6 +128,7 @@ function EntryForm({ initial, onSave, onCancel }: {
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder="Title — short descriptive name"
+        aria-label="Title"
         className="w-full text-sm px-3 py-2 rounded border border-border bg-bg text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
       />
 
@@ -134,6 +137,7 @@ function EntryForm({ initial, onSave, onCancel }: {
         value={rule}
         onChange={(e) => setRule(e.target.value)}
         placeholder="Rule — the actionable pattern or convention"
+        aria-label="Rule"
         className="w-full text-xs px-3 py-2 rounded border border-border bg-bg text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
       />
 
@@ -142,6 +146,7 @@ function EntryForm({ initial, onSave, onCancel }: {
         value={context}
         onChange={(e) => setContext(e.target.value)}
         placeholder="Context — why this matters (optional)"
+        aria-label="Context"
         className="w-full text-xs px-3 py-2 rounded border border-border bg-bg text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
       />
 
@@ -295,7 +300,11 @@ export default function MemoryPanel() {
   }
 
   return (
-    <div className="h-full flex flex-col overflow-hidden bg-bg">
+    <div
+      role="main"
+      aria-label="Memory Ledger"
+      className="h-full flex flex-col overflow-hidden bg-bg"
+    >
       <AppHeader
         breadcrumbs={
           <div className="flex items-center gap-2">
@@ -317,6 +326,7 @@ export default function MemoryPanel() {
                 placeholder="Search entries..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                aria-label="Search memory entries"
                 className="w-full pl-8 pr-3 py-1.5 text-xs bg-bg border border-border rounded-md text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
               />
             </div>
@@ -326,6 +336,7 @@ export default function MemoryPanel() {
               <select
                 value={filteredCategory ?? ''}
                 onChange={(e) => setFilteredCategory(e.target.value || null)}
+                aria-label="Filter by category"
                 className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
               >
                 <option value="">All categories</option>
@@ -397,36 +408,38 @@ export default function MemoryPanel() {
           )}
 
           {/* Entries list */}
-          <div className="space-y-2">
+          <ul role="list" aria-label="Memory entries" className="space-y-2">
             {filtered.length === 0 ? (
-              <div className="py-12 text-center">
+              <li role="listitem" className="py-12 text-center">
                 <BookOpen size={24} className="mx-auto text-muted mb-3" />
                 <p className="text-sm text-muted">
                   {entries.length === 0
                     ? 'No memory entries yet. Add one manually or run a pipeline to auto-capture.'
                     : 'No entries match your search.'}
                 </p>
-              </div>
+              </li>
             ) : (
               filtered.map((entry, i) => (
                 editingEntry?.date === entry.date && editingEntry?.title === entry.title ? (
-                  <EntryForm
-                    key={`${entry.date}-${entry.title}`}
-                    initial={entry}
-                    onSave={(updates) => handleEdit(entry, updates)}
-                    onCancel={() => setEditingEntry(null)}
-                  />
+                  <li key={`${entry.date}-${entry.title}`} role="listitem">
+                    <EntryForm
+                      initial={entry}
+                      onSave={(updates) => handleEdit(entry, updates)}
+                      onCancel={() => setEditingEntry(null)}
+                    />
+                  </li>
                 ) : (
-                  <EntryCard
-                    key={`${entry.date}-${entry.title}-${i}`}
-                    entry={entry}
-                    onEdit={() => { setEditingEntry(entry); setShowAddForm(false); }}
-                    onDelete={() => handleDelete(entry)}
-                  />
+                  <li key={`${entry.date}-${entry.title}-${i}`} role="listitem">
+                    <EntryCard
+                      entry={entry}
+                      onEdit={() => { setEditingEntry(entry); setShowAddForm(false); }}
+                      onDelete={() => handleDelete(entry)}
+                    />
+                  </li>
                 )
               ))
             )}
-          </div>
+          </ul>
         </div>
       </div>
     </div>
