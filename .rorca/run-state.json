@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T14:57:03.177Z",
+  "lastUpdatedAt": "2026-03-08T14:58:49.763Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -303,6 +303,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 193542
+    },
+    {
+      "storyId": "PR-042",
+      "title": "DB Migrations — Marketplace Tables",
+      "status": "passed",
+      "startedAt": "2026-03-08T14:57:13.273Z",
+      "finishedAt": "2026-03-08T14:58:49.763Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 96490
     }
   ],
   "failedStories": [],
