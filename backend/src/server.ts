@@ -107,11 +107,40 @@ app.use((_req, res, next) => {
   next();
 });
 
-// When serving static frontend (rorca start), allow same-origin; otherwise allow Vite dev server
-const corsOrigin = process.env.RORCA_SERVE_STATIC === '1'
-  ? true  // reflect request origin (same-origin when served by Express)
-  : (process.env.CORS_ORIGIN || 'http://localhost:5210');
-app.use(cors({ origin: corsOrigin }));
+// CORS configuration — supports comma-separated allowed origins
+// In production, CORS_ORIGIN must be set to a specific origin; '*' or absent logs a warning.
+let corsOrigin: boolean | string | string[];
+let allowCredentials = false;
+
+if (process.env.RORCA_SERVE_STATIC === '1') {
+  // Same-origin static mode: reflect request origin (frontend served by Express)
+  corsOrigin = true;
+  allowCredentials = true;
+} else {
+  const rawOrigin = process.env.CORS_ORIGIN || '';
+
+  if (process.env.NODE_ENV === 'production' && (!rawOrigin || rawOrigin === '*')) {
+    console.warn('WARNING: CORS_ORIGIN not configured — API accessible from any origin');
+  }
+
+  if (!rawOrigin || rawOrigin === '*') {
+    // Wildcard: allow all origins, no credentials
+    corsOrigin = '*';
+    allowCredentials = false;
+  } else {
+    // Specific origin(s): support comma-separated list
+    const origins = rawOrigin.split(',').map((o: string) => o.trim()).filter(Boolean);
+    corsOrigin = origins.length === 1 ? origins[0] : origins;
+    allowCredentials = true;
+  }
+}
+
+app.use(cors({
+  origin: corsOrigin,
+  credentials: allowCredentials,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 
 // Capture raw body for webhook signature verification.
 // The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
