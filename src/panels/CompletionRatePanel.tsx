@@ -250,7 +250,7 @@ export default function CompletionRatePanel() {
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-5 space-y-5" aria-live="polite" aria-busy={loading}>
         {/* Filters */}
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label htmlFor="completion-workspace-filter" className="sr-only">Filter by workspace</label>
           <select
             id="completion-workspace-filter"
@@ -285,7 +285,7 @@ export default function CompletionRatePanel() {
 
         {/* Summary cards */}
         {data && (
-          <div className="grid grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             <div className="bg-bg rounded-lg p-3 border border-border" aria-label={`Total stories: ${data.summary.total}`}>
               <p className="text-xs text-muted mb-1">Total Stories</p>
               <p className="text-xl font-bold" aria-hidden="true">{data.summary.total}</p>
@@ -325,8 +325,8 @@ export default function CompletionRatePanel() {
             No story results for this period. Run some pipelines to see completion rates.
           </div>
         ) : (
-          <div className="h-72">
-            <div role="img" aria-label={`Horizontal bar chart showing pass rate by ${viewTab === 'complexity' ? 'complexity' : 'tag'}`}>
+          <div className="min-h-[200px] h-72">
+            <div className="w-full" role="img" aria-label={`Horizontal bar chart showing pass rate by ${viewTab === 'complexity' ? 'complexity' : 'tag'}`}>
               <ResponsiveContainer width="100%" height={288}>
                 <BarChart
                   data={chartData}

@@ -146,10 +146,10 @@ export default function TeamDirectionPanel() {
     <div
       role="main"
       aria-label="Team Direction"
-      className="flex h-full gap-px bg-border"
+      className="flex flex-col sm:flex-row h-full gap-px bg-border"
     >
       {/* Column 1: Team selector + L1/L2 editor */}
-      <div className="flex-1 flex flex-col bg-bg min-w-0">
+      <div className="flex-1 flex flex-col bg-bg min-w-0 min-h-[40%] sm:min-h-0">
         {/* Team selector */}
         <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
           <label htmlFor="team-direction-select" className="text-xs font-medium text-muted whitespace-nowrap">Team:</label>
@@ -218,7 +218,7 @@ export default function TeamDirectionPanel() {
       </div>
 
       {/* Column 2: Synthesized preview */}
-      <div className="flex-1 flex flex-col bg-bg min-w-0">
+      <div className="flex-1 flex flex-col bg-bg min-w-0 min-h-[40%] sm:min-h-0">
         <div className="flex items-center justify-between px-3 py-2 border-b border-border">
           <span className="text-xs font-medium text-muted">
             Merged Preview
