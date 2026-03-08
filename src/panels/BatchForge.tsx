@@ -206,7 +206,7 @@ export default function BatchForge() {
   }
 
   return (
-    <div className="flex h-full gap-px bg-border">
+    <div role="main" aria-label="Batch forge panel - generate multiple specs at once" className="flex h-full gap-px bg-border">
       {/* Left pane: Brief entry form */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         <div className="flex-1 overflow-y-auto">
@@ -264,7 +264,8 @@ export default function BatchForge() {
                       {entries.length > 1 && !batchId && (
                         <button
                           onClick={() => removeEntry(i)}
-                          className="text-xs text-muted hover:text-error transition-colors"
+                          aria-label={`Remove brief #${i + 1}`}
+                          className="text-xs text-muted hover:text-error transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 rounded"
                         >
                           Remove
                         </button>
@@ -276,7 +277,7 @@ export default function BatchForge() {
                       onChange={(e) => updateEntry(i, 'title', e.target.value)}
                       placeholder="Spec title (kebab-case, e.g. user-auth-oauth)"
                       disabled={!!batchId}
-                      className="w-full px-3 py-1.5 text-sm bg-bg border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors disabled:opacity-50"
+                      className="w-full px-3 py-1.5 text-sm bg-bg border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors disabled:opacity-50"
                     />
                     {titleErrors[i] && (
                       <p className="text-xs text-error">{titleErrors[i]}</p>
@@ -337,7 +338,7 @@ export default function BatchForge() {
       </div>
 
       {/* Right pane: Progress */}
-      <div className="flex-1 flex flex-col bg-bg min-w-0">
+      <div aria-live="polite" className="flex-1 flex flex-col bg-bg min-w-0">
         <BatchProgress items={items} summary={summary} entries={entries} />
       </div>
     </div>

@@ -148,12 +148,13 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div role="main" aria-label="Compare runs panel - compare pipeline run outcomes" className="flex flex-col h-full">
       {/* Header */}
       <div className="p-4 border-b border-[var(--border)] flex items-center gap-3">
         <button
           onClick={onBack}
-          className="p-1 rounded hover:bg-[var(--surface)] transition-colors"
+          aria-label="Back to Pipeline Monitor"
+          className="p-1 rounded hover:bg-[var(--surface)] transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
           title="Back to Pipeline Monitor"
         >
           <ChevronLeft className="w-4 h-4 text-[var(--text-muted)]" />
@@ -169,7 +170,8 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
           <select
             value={run1Id ?? ''}
             onChange={(e) => setRun1Id(e.target.value ? Number(e.target.value) : null)}
-            className="w-full px-3 py-1.5 text-sm bg-[var(--surface)] border border-[var(--border)] rounded text-[var(--text)]"
+            aria-label="Baseline run (Run 1)"
+            className="w-full px-3 py-1.5 text-sm bg-[var(--surface)] border border-[var(--border)] rounded text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-accent/50"
           >
             <option value="">Select a run...</option>
             {runs.map((r) => (
@@ -187,7 +189,8 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
           <select
             value={run2Id ?? ''}
             onChange={(e) => setRun2Id(e.target.value ? Number(e.target.value) : null)}
-            className="w-full px-3 py-1.5 text-sm bg-[var(--surface)] border border-[var(--border)] rounded text-[var(--text)]"
+            aria-label="Comparison run (Run 2)"
+            className="w-full px-3 py-1.5 text-sm bg-[var(--surface)] border border-[var(--border)] rounded text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-accent/50"
           >
             <option value="">Select a run...</option>
             {runs.map((r) => (
@@ -201,7 +204,8 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
 
       {/* Loading / Error */}
       {loading && (
-        <div className="flex items-center justify-center py-12 text-[var(--text-muted)] text-sm">
+        <div aria-live="polite" className="flex items-center justify-center py-12 text-[var(--text-muted)] text-sm">
+          <span className="sr-only">Loading...</span>
           Loading comparison...
         </div>
       )}
@@ -211,7 +215,7 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
 
       {/* Comparison results */}
       {comparison && !loading && (
-        <div className="flex-1 overflow-y-auto">
+        <div aria-live="polite" className="flex-1 overflow-y-auto">
           {/* Summary header */}
           <div className="p-4 border-b border-[var(--border)] grid grid-cols-2 md:grid-cols-4 gap-4">
             {/* Pass rate */}
@@ -287,7 +291,8 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
               <button
                 key={f}
                 onClick={() => setFilterChange(f)}
-                className={`px-2 py-0.5 text-xs rounded transition-colors ${
+                aria-pressed={filterChange === f}
+                className={`px-2 py-0.5 text-xs rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${
                   filterChange === f
                     ? 'bg-[var(--accent)] text-white'
                     : 'bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)]'
@@ -307,19 +312,19 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
           </div>
 
           {/* Story comparison table */}
-          <div className="divide-y divide-[var(--border)]">
+          <div role="table" aria-label="Story comparison results" className="divide-y divide-[var(--border)]">
             {/* Table header */}
-            <div className="grid grid-cols-[1fr_100px_100px_80px_80px_100px] px-4 py-2 text-xs font-medium text-[var(--text-muted)] bg-[var(--surface)]">
-              <span>Story</span>
-              <span className="text-center">Run 1 Status</span>
-              <span className="text-center">Run 2 Status</span>
-              <span className="text-right">Run 1 Time</span>
-              <span className="text-right">Run 2 Time</span>
-              <span className="text-center">Change</span>
+            <div role="row" className="grid grid-cols-[1fr_100px_100px_80px_80px_100px] px-4 py-2 text-xs font-medium text-[var(--text-muted)] bg-[var(--surface)]">
+              <span role="columnheader">Story</span>
+              <span role="columnheader" className="text-center">Run 1 Status</span>
+              <span role="columnheader" className="text-center">Run 2 Status</span>
+              <span role="columnheader" className="text-right">Run 1 Time</span>
+              <span role="columnheader" className="text-right">Run 2 Time</span>
+              <span role="columnheader" className="text-center">Change</span>
             </div>
 
             {filteredStories.length === 0 ? (
-              <div className="px-4 py-8 text-center text-sm text-[var(--text-muted)]">
+              <div aria-live="polite" className="px-4 py-8 text-center text-sm text-[var(--text-muted)]">
                 No stories match the selected filter.
               </div>
             ) : (
@@ -329,10 +334,11 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
                 return (
                   <div
                     key={story.storyId}
+                    role="row"
                     className="grid grid-cols-[1fr_100px_100px_80px_80px_100px] px-4 py-2 items-center hover:bg-[var(--surface)] transition-colors"
                   >
-                    <span className="text-sm font-mono truncate">{story.storyId}</span>
-                    <span className="text-center">
+                    <span role="cell" className="text-sm font-mono truncate">{story.storyId}</span>
+                    <span role="cell" className="text-center">
                       {story.run1Status ? (
                         <span className={`inline-block px-2 py-0.5 text-xs rounded ${STATUS_BADGE[story.run1Status] || 'bg-zinc-500/20 text-zinc-400'}`}>
                           {story.run1Status}
@@ -341,7 +347,7 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
                         <span className="text-xs text-zinc-600">-</span>
                       )}
                     </span>
-                    <span className="text-center">
+                    <span role="cell" className="text-center">
                       {story.run2Status ? (
                         <span className={`inline-block px-2 py-0.5 text-xs rounded ${STATUS_BADGE[story.run2Status] || 'bg-zinc-500/20 text-zinc-400'}`}>
                           {story.run2Status}
@@ -350,14 +356,14 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
                         <span className="text-xs text-zinc-600">-</span>
                       )}
                     </span>
-                    <span className="text-xs font-mono text-[var(--text-muted)] text-right">
+                    <span role="cell" className="text-xs font-mono text-[var(--text-muted)] text-right">
                       {formatElapsed(story.run1Elapsed)}
                     </span>
-                    <span className="text-xs font-mono text-[var(--text-muted)] text-right">
+                    <span role="cell" className="text-xs font-mono text-[var(--text-muted)] text-right">
                       {formatElapsed(story.run2Elapsed)}
                     </span>
-                    <span className={`flex items-center justify-center gap-1 text-xs ${changeConfig.className}`}>
-                      <ChangeIcon className="w-3 h-3" />
+                    <span role="cell" className={`flex items-center justify-center gap-1 text-xs ${changeConfig.className}`}>
+                      <ChangeIcon className="w-3 h-3" aria-hidden="true" />
                       {changeConfig.label}
                     </span>
                   </div>

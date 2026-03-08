@@ -885,7 +885,7 @@ export default function PipelineMonitorPanel() {
   // ─── Main Layout ─────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-full bg-bg">
+    <div role="main" aria-label="Pipeline monitor - view and manage pipeline runs" className="flex flex-col h-full bg-bg">
       <AppHeader
         breadcrumbs={
           <div className="flex items-center gap-2">
@@ -906,7 +906,9 @@ export default function PipelineMonitorPanel() {
             </span>
             <button
               onClick={() => setShowStartHelp(!showStartHelp)}
-              className="p-1 rounded hover:bg-[var(--border)] transition-colors"
+              aria-label="Start new run"
+              aria-expanded={showStartHelp}
+              className="p-1 rounded hover:bg-[var(--border)] transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
               title="Start New Run"
             >
               <Play className="w-3.5 h-3.5 text-[var(--text-muted)]" />
@@ -937,7 +939,9 @@ export default function PipelineMonitorPanel() {
               <button
                 key={run.id}
                 onClick={() => setSelectedRunId(run.id)}
-                className={`w-full text-left px-3 py-2.5 border-b border-[var(--border)] transition-colors ${selectedRunId === run.id
+                aria-pressed={selectedRunId === run.id}
+                aria-label={`Run #${run.id} - ${specName(run.spec_path)} - ${run.status}`}
+                className={`w-full text-left px-3 py-2.5 border-b border-[var(--border)] transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50 ${selectedRunId === run.id
                   ? 'bg-[var(--accent)]/10'
                   : 'hover:bg-[var(--surface)]'
                   }`}
@@ -975,7 +979,8 @@ export default function PipelineMonitorPanel() {
                 </span>
                 <button
                   onClick={() => setSpecPickerOpen(true)}
-                  className="p-1 rounded hover:bg-[var(--border)] transition-colors"
+                  aria-label="Add to queue"
+                  className="p-1 rounded hover:bg-[var(--border)] transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
                   title="Add to Queue"
                 >
                   <List className="w-3.5 h-3.5 text-[var(--text-muted)]" />
@@ -1001,7 +1006,7 @@ export default function PipelineMonitorPanel() {
         )}
 
         {/* Main area — Selected run detail */}
-        <div className="flex-1 flex flex-col min-w-0">
+        <div role="region" aria-label="Run detail" aria-live="polite" className="flex-1 flex flex-col min-w-0">
           {!liveRun ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-sm">
               Select a run to view details
@@ -1094,10 +1099,12 @@ export default function PipelineMonitorPanel() {
               </div>
 
               {/* Tab bar: Stories | Terminal */}
-              <div className="flex border-b border-[var(--border)] shrink-0">
+              <div role="tablist" className="flex border-b border-[var(--border)] shrink-0">
                 <button
+                  role="tab"
+                  aria-selected={detailTab === 'terminal'}
                   onClick={() => setDetailTab('terminal')}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'terminal'
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${detailTab === 'terminal'
                     ? 'text-[var(--text)] border-[var(--accent)]'
                     : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
                     }`}
@@ -1106,8 +1113,10 @@ export default function PipelineMonitorPanel() {
                   Terminal
                 </button>
                 <button
+                  role="tab"
+                  aria-selected={detailTab === 'stories'}
                   onClick={() => setDetailTab('stories')}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'stories'
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${detailTab === 'stories'
                     ? 'text-[var(--text)] border-[var(--accent)]'
                     : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
                     }`}
@@ -1121,8 +1130,10 @@ export default function PipelineMonitorPanel() {
                   )}
                 </button>
                 <button
+                  role="tab"
+                  aria-selected={detailTab === 'graph'}
                   onClick={() => setDetailTab('graph')}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'graph'
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${detailTab === 'graph'
                     ? 'text-[var(--text)] border-[var(--accent)]'
                     : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
                     }`}
@@ -1131,8 +1142,10 @@ export default function PipelineMonitorPanel() {
                   Graph
                 </button>
                 <button
+                  role="tab"
+                  aria-selected={detailTab === 'tokens'}
                   onClick={() => setDetailTab('tokens')}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'tokens'
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${detailTab === 'tokens'
                     ? 'text-[var(--text)] border-[var(--accent)]'
                     : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
                     }`}
@@ -1146,8 +1159,10 @@ export default function PipelineMonitorPanel() {
                   )}
                 </button>
                 <button
+                  role="tab"
+                  aria-selected={detailTab === 'finops'}
                   onClick={() => setDetailTab('finops')}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'finops'
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${detailTab === 'finops'
                     ? 'text-[var(--text)] border-[var(--accent)]'
                     : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
                     }`}
@@ -1156,8 +1171,10 @@ export default function PipelineMonitorPanel() {
                   FinOps
                 </button>
                 <button
+                  role="tab"
+                  aria-selected={detailTab === 'run-info'}
                   onClick={() => setDetailTab('run-info')}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'run-info'
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${detailTab === 'run-info'
                     ? 'text-[var(--text)] border-[var(--accent)]'
                     : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
                     }`}
@@ -1166,8 +1183,10 @@ export default function PipelineMonitorPanel() {
                   Run Info
                 </button>
                 <button
+                  role="tab"
+                  aria-selected={detailTab === 'commits'}
                   onClick={() => { setDetailTab('commits'); fetchCommits(); }}
-                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${detailTab === 'commits'
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50 ${detailTab === 'commits'
                     ? 'text-[var(--text)] border-[var(--accent)]'
                     : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text)]'
                     }`}
