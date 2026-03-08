@@ -32,13 +32,38 @@ function getWorkspacePath(workspaceId: string): string | null {
  * @swagger
  * /api/agents:
  *   get:
+ *     tags: [Agents]
  *     summary: Get AGENTS.md roles for a workspace
  *     operationId: getAgentRoles
- *     description: Returns the parsed AGENTS.md roles, raw content, and file existence status for the specified workspace.
+ *     description: Returns the parsed AGENTS.md roles, raw file content, existence status, and absolute file path for the specified workspace.
  *     parameters:
  *       - name: workspaceId
  *         in: query
  *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: AGENTS.md content and parsed roles
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 roles:
+ *                   type: array
+ *                   description: Parsed agent role definitions
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name: { type: string }
+ *                       owns: { type: array, items: { type: string } }
+ *                       avoids: { type: array, items: { type: string } }
+ *                       rules: { type: array, items: { type: string } }
+ *                 raw: { type: string, description: "Raw AGENTS.md content" }
+ *                 exists: { type: boolean, description: "Whether AGENTS.md exists at workspace root" }
+ *                 path: { type: string, description: "Absolute path to AGENTS.md" }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found" }
  */
 router.get('/', (req: Request, res: Response) => {
   const { workspaceId } = req.query;
@@ -63,22 +88,44 @@ router.get('/', (req: Request, res: Response) => {
  * @swagger
  * /api/agents:
  *   put:
+ *     tags: [Agents]
  *     summary: Update AGENTS.md roles for a workspace
  *     operationId: updateAgentRoles
- *     description: Writes updated roles or raw content to the workspace AGENTS.md file.
+ *     description: Writes updated roles or raw content to the workspace AGENTS.md file. Provide either `raw` (written directly) or `roles` array (serialized from structured objects).
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [workspaceId]
  *             properties:
- *               workspaceId:
- *                 type: string
+ *               workspaceId: { type: string }
+ *               raw: { type: string, description: "Raw markdown to write directly to AGENTS.md" }
  *               roles:
  *                 type: array
- *               raw:
- *                 type: string
+ *                 description: Structured roles to serialize and write (alternative to raw)
+ *                 items:
+ *                   type: object
+ *                   required: [name]
+ *                   properties:
+ *                     name: { type: string }
+ *                     owns: { type: array, items: { type: string } }
+ *                     avoids: { type: array, items: { type: string } }
+ *                     rules: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: AGENTS.md updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 roles: { type: array, items: { type: object } }
+ *                 raw: { type: string }
+ *                 path: { type: string }
+ *       400: { description: "Missing workspaceId or invalid roles structure" }
+ *       404: { description: "Workspace not found" }
  */
 router.put('/', (req: Request, res: Response) => {
   const { workspaceId, roles, raw } = req.body;
@@ -121,18 +168,32 @@ router.put('/', (req: Request, res: Response) => {
  * @swagger
  * /api/agents/generate:
  *   post:
- *     summary: Generate AGENTS.md from workspace directory structure (echolocation)
+ *     tags: [Agents]
+ *     summary: Generate AGENTS.md from workspace directory structure
  *     operationId: generateAgentRoles
- *     description: Analyzes the workspace directory structure to auto-generate AGENTS.md file governance roles.
+ *     description: Analyzes the workspace directory structure via echolocation to auto-generate AGENTS.md file governance roles. Returns the generated content without writing to disk — use PUT /api/agents to save.
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [workspaceId]
  *             properties:
- *               workspaceId:
- *                 type: string
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Generated AGENTS.md content and roles (not written to disk)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 roles: { type: array, items: { type: object } }
+ *                 raw: { type: string }
+ *                 generated: { type: boolean }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found" }
  */
 router.post('/generate', (req: Request, res: Response) => {
   const { workspaceId } = req.body;
@@ -155,19 +216,43 @@ router.post('/generate', (req: Request, res: Response) => {
  * @swagger
  * /api/agents/violations:
  *   get:
- *     summary: Query recent violations from WAL events
+ *     tags: [Agents]
+ *     summary: Query AGENTS.md governance violations
  *     operationId: listAgentViolations
- *     description: Returns AGENTS.md governance violations recorded in WAL events, optionally filtered by run ID.
+ *     description: Returns AGENTS.md governance violations recorded in WAL events (event_type=story_violation), optionally filtered by run ID.
  *     parameters:
  *       - name: workspaceId
  *         in: query
  *         required: true
+ *         schema: { type: string }
  *       - name: runId
  *         in: query
- *         description: Filter by specific run ID
+ *         schema: { type: integer }
+ *         description: Filter by specific pipeline run ID
  *       - name: limit
  *         in: query
- *         description: Max results (default 50)
+ *         schema: { type: integer, default: 50 }
+ *         description: Max results
+ *     responses:
+ *       200:
+ *         description: Violations list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       created_at: { type: string }
+ *                       story_id: { type: string, nullable: true }
+ *                       file_path: { type: string, nullable: true }
+ *                       rule_violated: { type: string, nullable: true }
+ *                 total: { type: integer }
+ *       400: { description: "Missing workspaceId" }
  */
 router.get('/violations', (req: Request, res: Response) => {
   const { workspaceId, runId, limit } = req.query;

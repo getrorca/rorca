@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T14:08:39.558Z",
+  "lastUpdatedAt": "2026-03-08T14:53:39.542Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -283,6 +283,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1963704
+    },
+    {
+      "storyId": "PR-040",
+      "title": "OpenAPI Annotation Audit — Wave 1 (12 routes with 0 annotations)",
+      "status": "passed",
+      "startedAt": "2026-03-08T14:08:49.804Z",
+      "finishedAt": "2026-03-08T14:53:39.542Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 2689738
     }
   ],
   "failedStories": [],

@@ -1,3 +1,18 @@
+/**
+ * @module webhook-handlers
+ * @description
+ * GitHub webhook event handler utilities. This module does not expose HTTP routes directly.
+ * Instead, it registers event handlers via `onGithubEvent()` from webhooks.ts.
+ *
+ * Registered handlers (via registerWebhookHandlers()):
+ * - handlePullRequestMerge: On PR close+merge, marks matching stories as passed in spec JSON
+ * - handlePullRequestCheck: On PR open/synchronize/reopen, posts GitHub commit status check
+ * - handlePush: On push, maps commit messages to story IDs and records in story_commits table
+ *
+ * WAL events emitted:
+ * - github_pr_merged: When a merged PR contains story IDs from spec files
+ * - github_push_commits: When commits reference story IDs
+ */
 import * as fs from 'fs';
 import * as path from 'path';
 import { db } from '../db/index';

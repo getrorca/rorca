@@ -151,15 +151,18 @@ const ACTIVITY_EVENT_TYPES = [
  * @swagger
  * /api/activity:
  *   get:
- *     tags: [Activity]
+ *     tags: [Analytics]
  *     summary: Get paginated activity feed
  *     operationId: getActivityFeed
- *     description: Returns a paginated list of activity events derived from WAL events, enriched with user display names and human-readable descriptions.
+ *     description: |
+ *       Returns a paginated list of activity events derived from WAL events, enriched with
+ *       user display names and human-readable descriptions. Filters out low-level noise events
+ *       (e.g., story_started, batch_progress). Supports cursor-based pagination.
  *     parameters:
  *       - in: query
  *         name: type
  *         schema: { type: string, enum: [spec_created, spec_approved, spec_rejected, spec_edited, run_triggered, run_completed, comment_added, member_joined] }
- *         description: Filter by activity type
+ *         description: Filter by activity category (mapped from underlying WAL event types)
  *       - in: query
  *         name: workspaceId
  *         schema: { type: string }
@@ -167,9 +170,11 @@ const ACTIVITY_EVENT_TYPES = [
  *       - in: query
  *         name: limit
  *         schema: { type: integer, default: 30, maximum: 100 }
+ *         description: Number of items per page (max 100)
  *       - in: query
  *         name: cursor
  *         schema: { type: string }
+ *         description: Opaque cursor for next page (from previous response)
  *     responses:
  *       200:
  *         description: Paginated activity feed
@@ -183,19 +188,29 @@ const ACTIVITY_EVENT_TYPES = [
  *                   items:
  *                     type: object
  *                     properties:
- *                       id: { type: integer }
- *                       timestamp: { type: string }
- *                       activityType: { type: string }
- *                       rawEventType: { type: string }
- *                       actor: { type: object, properties: { id: { type: string }, name: { type: string }, avatarUrl: { type: string, nullable: true } } }
- *                       target: { type: object, nullable: true, properties: { type: { type: string }, id: { type: string } } }
- *                       description: { type: string }
+ *                       id: { type: integer, description: "WAL event ID" }
+ *                       timestamp: { type: string, description: "ISO 8601 event timestamp" }
+ *                       activityType: { type: string, description: "Human-friendly activity category" }
+ *                       rawEventType: { type: string, description: "Raw WAL event_type value" }
+ *                       actor:
+ *                         type: object
+ *                         properties:
+ *                           id: { type: string }
+ *                           name: { type: string }
+ *                           avatarUrl: { type: string, nullable: true }
+ *                       target:
+ *                         type: object
+ *                         nullable: true
+ *                         properties:
+ *                           type: { type: string, enum: [spec, run, story] }
+ *                           id: { type: string }
+ *                       description: { type: string, description: "Human-readable action summary" }
  *                       workspaceId: { type: string, nullable: true }
  *                       specId: { type: string, nullable: true }
  *                       storyId: { type: string, nullable: true }
  *                 total: { type: integer }
  *                 hasMore: { type: boolean }
- *                 cursor: { type: string, nullable: true }
+ *                 cursor: { type: string, nullable: true, description: "Pass as cursor param in next request" }
  */
 router.get('/', (req, res) => {
   const pagination = parsePaginationParams(req, { limit: 30, maxLimit: 100 });

@@ -3,9 +3,9 @@
 Spec: rorca-production-ready
 Run ID: 936
 Started: 2026-03-08T09:29:52.787Z
-Last Updated: 2026-03-08T14:08:39.558Z
+Last Updated: 2026-03-08T14:53:39.542Z
 
-## Completed Stories (28)
+## Completed Stories (29)
 - PR-002: GitHub Actions CI Pipeline — DONE (claude, claude-haiku-4-5-20251001, 46s)
 - PR-003: Docker Image & docker-compose (Production Config) — DONE (claude, claude-sonnet-4-6, 144s)
 - PR-004: rorca CLI — start and init commands — DONE (claude, claude-sonnet-4-6, 328s)
@@ -34,6 +34,7 @@ Last Updated: 2026-03-08T14:08:39.558Z
 - PR-034: Frontend Component Tests — Analytics + System Panels — DONE (claude, claude-sonnet-4-6, 1324s)
 - PR-035: Backend Route Tests — Untested Routes Wave 1 (13 routes) — DONE (claude, claude-sonnet-4-6, 1588s)
 - PR-036: Backend Route Tests — Untested Routes Wave 2 (12 routes) — DONE (claude, claude-sonnet-4-6, 1964s)
+- PR-040: OpenAPI Annotation Audit — Wave 1 (12 routes with 0 annotations) — DONE (claude, claude-sonnet-4-6, 2690s)
 
 ## Decisions (1)
 - [undefined] PR-005: undefined — undefined
