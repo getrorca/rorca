@@ -190,7 +190,11 @@ export default function HealthDashboardPanel() {
   const statusBg = health?.status === 'healthy' ? 'bg-green-500/10 border-green-500/30' : health?.status === 'degraded' ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-red-500/10 border-red-500/30';
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
+    <div
+      role="main"
+      aria-label="Health Dashboard"
+      className="p-6 max-w-6xl mx-auto space-y-6"
+    >
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -201,6 +205,7 @@ export default function HealthDashboardPanel() {
           <select
             value={pollInterval}
             onChange={e => setPollInterval(Number(e.target.value))}
+            aria-label="Poll interval"
             className="bg-panel border border-border rounded px-2 py-1 text-sm"
           >
             <option value={10}>10s</option>
@@ -349,11 +354,14 @@ export default function HealthDashboardPanel() {
                   } />
                   <h2 className="text-sm font-semibold">Convention Compliance</h2>
                   {driftReport && (
-                    <span className={`text-xs font-medium tabular-nums px-1.5 py-0.5 rounded ${
-                      driftReport.score >= 80 ? 'bg-green-500/15 text-green-400' :
-                      driftReport.score >= 50 ? 'bg-yellow-500/15 text-yellow-400' :
-                      'bg-red-500/15 text-red-400'
-                    }`}>
+                    <span
+                      aria-label={`Convention compliance: ${driftReport.score}%`}
+                      className={`text-xs font-medium tabular-nums px-1.5 py-0.5 rounded ${
+                        driftReport.score >= 80 ? 'bg-green-500/15 text-green-400' :
+                        driftReport.score >= 50 ? 'bg-yellow-500/15 text-yellow-400' :
+                        'bg-red-500/15 text-red-400'
+                      }`}
+                    >
                       {driftReport.score}%
                     </span>
                   )}
@@ -425,10 +433,15 @@ export default function HealthDashboardPanel() {
                       </button>
 
                       {driftExpanded && (
-                        <div className="mt-2 space-y-1 max-h-64 overflow-y-auto">
+                        <ul
+                          role="list"
+                          aria-label="Convention violations"
+                          className="mt-2 space-y-1 max-h-64 overflow-y-auto"
+                        >
                           {driftReport.violations.map((v, i) => (
-                            <div
+                            <li
                               key={i}
+                              role="listitem"
                               className="flex items-start gap-2 p-2 rounded bg-bg/50 text-sm"
                             >
                               <span className={`shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${
@@ -445,9 +458,9 @@ export default function HealthDashboardPanel() {
                                 </div>
                                 <p className="text-xs text-muted mt-0.5">{v.description}</p>
                               </div>
-                            </div>
+                            </li>
                           ))}
-                        </div>
+                        </ul>
                       )}
                     </div>
                   )}

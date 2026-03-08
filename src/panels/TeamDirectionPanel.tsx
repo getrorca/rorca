@@ -143,13 +143,18 @@ export default function TeamDirectionPanel() {
   }
 
   return (
-    <div className="flex h-full gap-px bg-border">
+    <div
+      role="main"
+      aria-label="Team Direction"
+      className="flex h-full gap-px bg-border"
+    >
       {/* Column 1: Team selector + L1/L2 editor */}
       <div className="flex-1 flex flex-col bg-bg min-w-0">
         {/* Team selector */}
         <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
-          <label className="text-xs font-medium text-muted whitespace-nowrap">Team:</label>
+          <label htmlFor="team-direction-select" className="text-xs font-medium text-muted whitespace-nowrap">Team:</label>
           <select
+            id="team-direction-select"
             value={selectedTeamId ?? ''}
             onChange={(e) => setSelectedTeamId(e.target.value)}
             className="flex-1 text-xs bg-panel border border-border rounded px-2 py-1 text-text"
@@ -163,10 +168,18 @@ export default function TeamDirectionPanel() {
         </div>
 
         {/* Tab bar */}
-        <div className="flex border-b border-border">
+        <div
+          role="tablist"
+          aria-label="Direction layers"
+          className="flex border-b border-border"
+        >
           {([1, 2] as const).map((n) => (
             <button
               key={n}
+              role="tab"
+              aria-selected={activeTab === n}
+              aria-controls={`team-direction-panel-${n}`}
+              id={`team-direction-tab-${n}`}
               onClick={() => setActiveTab(n)}
               className={`flex-1 px-3 py-2 text-xs font-medium transition-colors relative ${
                 activeTab === n
@@ -176,10 +189,10 @@ export default function TeamDirectionPanel() {
             >
               {LAYER_LABELS[n]}
               {(n === 1 ? l1 !== savedL1 : l2 !== savedL2) && (
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-warning ml-1.5 opacity-60" />
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-warning ml-1.5 opacity-60" aria-label="Unsaved changes" />
               )}
               {isSaving && layerIsDirty && activeTab === n && (
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent ml-1.5 animate-pulse" />
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent ml-1.5 animate-pulse" aria-label="Saving" />
               )}
             </button>
           ))}
@@ -192,8 +205,12 @@ export default function TeamDirectionPanel() {
 
         {/* Editor */}
         <textarea
+          id={`team-direction-panel-${activeTab}`}
+          role="tabpanel"
+          aria-labelledby={`team-direction-tab-${activeTab}`}
           value={activeContent}
           onChange={(e) => setContent(e.target.value)}
+          aria-label={`${LAYER_LABELS[activeTab]} content (YAML)`}
           className="flex-1 w-full p-3 font-mono text-sm bg-bg text-text border-none outline-none resize-none"
           placeholder={`Enter ${LAYER_LABELS[activeTab]} content (YAML)...`}
           spellCheck={false}
@@ -211,6 +228,7 @@ export default function TeamDirectionPanel() {
           </span>
           <button
             onClick={handleCopy}
+            aria-label="Copy merged preview to clipboard"
             className="px-2 py-1 text-xs text-muted hover:text-text transition-colors"
           >
             Copy
@@ -220,10 +238,15 @@ export default function TeamDirectionPanel() {
           Shows how team Standards/Conventions merge with global layers and workspace Project context.
           Team layers override global defaults.
         </div>
-        <div className="flex-1 overflow-auto p-3">
+        <div
+          className="flex-1 overflow-auto p-3"
+          aria-label="Merged direction preview"
+          aria-live="polite"
+          aria-busy={isSynthesizing}
+        >
           {isSynthesizing ? (
-            <div className="flex items-center gap-2 text-muted text-sm">
-              <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+            <div className="flex items-center gap-2 text-muted text-sm" aria-label="Synthesizing preview">
+              <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
