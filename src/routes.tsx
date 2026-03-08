@@ -19,7 +19,7 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   hub: '/',
   // Specs
   forge: '/forge',
-  queue: '/forge',
+  queue: '/queue',
   archive: '/archive',
   marketplace: '/marketplace',
   // Pipeline
@@ -63,6 +63,7 @@ export function pathToPanelId(pathname: string): PanelId {
   if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'hub';
   // FR-004: /settings/* nested routes all resolve to 'settings' panel
   if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
+  if (pathname === '/queue') return 'queue';
   return PATH_TO_PANEL[pathname] ?? 'hub';
 }
 
