@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T15:53:21.087Z",
+  "lastUpdatedAt": "2026-03-08T15:54:31.747Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -393,6 +393,16 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 424541
+    },
+    {
+      "storyId": "PR-NEW-2",
+      "title": "CORS Hardening for Production",
+      "status": "passed",
+      "startedAt": "2026-03-08T15:53:31.164Z",
+      "finishedAt": "2026-03-08T15:54:31.747Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 60583
     }
   ],
   "failedStories": [],
