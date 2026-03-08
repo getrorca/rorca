@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
+import { z } from 'zod';
 import { db } from '../db';
+import { validateBody } from '../lib/validate';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
 
@@ -100,20 +102,15 @@ router.get('/profile', (req: Request, res: Response) => {
  *       500:
  *         description: No user configured
  */
-router.put('/profile', (req: Request, res: Response) => {
+const ProfileUpdateSchema = z.object({
+  displayName: z.string().min(1, 'displayName must be a non-empty string').optional(),
+  avatarUrl: z.string().nullable().optional(),
+});
+
+router.put('/profile', validateBody(ProfileUpdateSchema), (req: Request, res: Response) => {
   const user = getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { displayName, avatarUrl } = req.body;
-
-  if (displayName !== undefined && (typeof displayName !== 'string' || displayName.trim().length === 0)) {
-    res.status(400).json({ error: 'displayName must be a non-empty string' });
-    return;
-  }
-
-  if (avatarUrl !== undefined && avatarUrl !== null && typeof avatarUrl !== 'string') {
-    res.status(400).json({ error: 'avatarUrl must be a string or null' });
-    return;
-  }
 
   const updates: string[] = [];
   const params: (string | null)[] = [];
