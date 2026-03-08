@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import { db } from '../db/index';
 import type { PipelineHookRow } from '../lib/hook-runner';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { encryptToken } from './auth';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -75,10 +77,16 @@ router.get('/', (req: Request, res: Response) => {
  */
 router.post('/', (req: Request, res: Response) => {
   try {
-    const { workspaceId, hookType, command, enabled } = req.body;
+    const { workspaceId, hookType, command, webhookUrl, enabled } = req.body;
 
-    if (!workspaceId || !hookType || !command) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, hookType, command' });
+    if (!workspaceId || !hookType) {
+      res.status(400).json({ error: 'Missing required fields: workspaceId, hookType' });
+      return;
+    }
+
+    // Either command (shell hook) or webhookUrl (HTTP webhook) must be provided
+    if (!command && !webhookUrl) {
+      res.status(400).json({ error: 'Either command or webhookUrl is required' });
       return;
     }
 
@@ -89,15 +97,32 @@ router.post('/', (req: Request, res: Response) => {
 
     const isEnabled = enabled !== undefined ? (enabled ? 1 : 0) : 1;
 
+    // For webhook hooks, auto-generate a signing secret (stored encrypted)
+    let encryptedSecret: string | null = null;
+    let webhookSecret: string | null = null;
+    if (webhookUrl) {
+      webhookSecret = crypto.randomBytes(32).toString('hex');
+      encryptedSecret = encryptToken(webhookSecret);
+    }
+
     const result = db.prepare(
-      `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES (?, ?, ?, ?)`
-    ).run(workspaceId, hookType, command, isEnabled);
+      `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, webhook_url, encrypted_webhook_secret, enabled)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(workspaceId, hookType, command || '', webhookUrl || null, encryptedSecret, isEnabled);
 
     const hook = db.prepare('SELECT * FROM pipeline_hooks WHERE id = ?').get(
       result.lastInsertRowid
     ) as PipelineHookRow;
 
-    res.status(201).json(hook);
+    // Return the plaintext secret once so the user can configure their endpoint
+    const response: Record<string, unknown> = { ...hook };
+    if (webhookSecret) {
+      response.webhookSecret = webhookSecret;
+    }
+    // Never expose encrypted_webhook_secret to clients
+    delete response.encrypted_webhook_secret;
+
+    res.status(201).json(response);
   } catch (error: any) {
     logger.error('[Hooks] Create error:', error);
     res.status(500).json({ error: error.message });
