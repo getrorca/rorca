@@ -271,9 +271,9 @@ export default function WorktreesPanel() {
   // ─── Main Layout ──────────────────────────────────────────────────────
 
   return (
-    <div role="main" aria-label="Worktrees panel - manage git worktrees" className="flex h-full">
+    <div role="main" aria-label="Worktrees panel - manage git worktrees" className="flex flex-col md:flex-row h-full">
       {/* ── Left column: Worktree list ── */}
-      <div className="w-72 border-r border-[var(--border)] flex flex-col">
+      <div className="w-full md:w-72 border-b md:border-b-0 md:border-r border-[var(--border)] flex flex-col md:max-h-full max-h-48 shrink-0">
         <div className="p-3 border-b border-[var(--border)] flex items-center justify-between">
           <span className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
             Worktrees
@@ -412,7 +412,7 @@ export default function WorktreesPanel() {
             </div>
 
             {/* ── Info grid ── */}
-            <div className="p-4 border-b border-[var(--border)] grid grid-cols-2 gap-3">
+            <div className="p-4 border-b border-[var(--border)] grid grid-cols-1 sm:grid-cols-2 gap-3">
               <InfoItem label="HEAD SHA" value={selectedWorktree.headSha.slice(0, 8)} mono />
               <InfoItem
                 label="Worktree Path"
@@ -494,7 +494,7 @@ export default function WorktreesPanel() {
                   <Terminal className="w-3.5 h-3.5 text-[var(--text-muted)]" />
                 )}
                 <span>{copiedTerminal ? 'Copied!' : 'Open in Terminal'}</span>
-                <code className="ml-auto text-[10px] font-mono text-[var(--text-muted)] truncate max-w-[200px]">
+                <code className="ml-auto text-[10px] font-mono text-[var(--text-muted)] truncate hidden sm:block max-w-[200px]">
                   cd {selectedWorktree.path}
                 </code>
               </button>

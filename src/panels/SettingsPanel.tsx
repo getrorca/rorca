@@ -418,14 +418,14 @@ function ClaudeAuthStatus() {
           : 'border-green-500/30 bg-green-500/5'
         : 'border-amber-500/30 bg-amber-500/5'
       }`}>
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className={`w-2.5 h-2.5 rounded-full ${auth.connected
+          <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${auth.connected
               ? expiringWarning ? 'bg-amber-400' : 'bg-green-400'
               : 'bg-amber-400'
             }`} />
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-medium text-[var(--text)]">Claude Account</span>
               {auth.cliVersion && (
                 <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent border border-accent/20">
@@ -570,12 +570,12 @@ function CodexAuthStatus() {
         ? 'border-green-500/30 bg-green-500/5'
         : 'border-amber-500/30 bg-amber-500/5'
       }`}>
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className={`w-2.5 h-2.5 rounded-full ${auth.connected ? 'bg-green-400' : 'bg-amber-400'
+          <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${auth.connected ? 'bg-green-400' : 'bg-amber-400'
             }`} />
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-medium text-[var(--text)]">ChatGPT Account</span>
               {auth.cliVersion && (
                 <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent border border-accent/20">
@@ -966,11 +966,11 @@ function ExecutionEngineSection() {
             ? 'border-green-500/30 bg-green-500/5'
             : 'border-border bg-bg'
           }`}>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex items-center gap-3">
               <Github size={18} className={copilotStatus.connected ? 'text-green-400' : 'text-muted'} />
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-sm font-medium text-[var(--text)]">GitHub Copilot</span>
                   <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">
                     Subscription
@@ -1034,11 +1034,11 @@ function ExecutionEngineSection() {
             ? 'border-orange-500/30 bg-orange-500/5'
             : 'border-border bg-bg'
           }`}>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex items-center gap-3">
               <Globe size={18} className={openRouterConnected ? 'text-orange-400' : 'text-muted'} />
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-sm font-medium text-[var(--text)]">OpenRouter</span>
                   {openRouterConnected && openRouterModelCount !== null && (
                     <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-orange-500/15 text-orange-400 border border-orange-500/20">
@@ -1061,7 +1061,7 @@ function ExecutionEngineSection() {
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap shrink-0">
               {openRouterConnected && (
                 <button
                   onClick={() => handleOpenRouterTest()}
@@ -1324,11 +1324,11 @@ function ProvidersSection() {
             <div key={p.id} className={`border rounded p-4 transition-colors ${isDefault ? 'border-accent/40 bg-accent/5' : 'border-border bg-bg'
               }`}>
               {/* Provider header */}
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div className="flex items-center gap-3">
-                  <div className={`w-2 h-2 rounded-full ${p.configured ? 'bg-green-500' : 'bg-zinc-500'}`} />
+                  <div className={`w-2 h-2 rounded-full shrink-0 ${p.configured ? 'bg-green-500' : 'bg-zinc-500'}`} />
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium text-[var(--text)]">{p.name}</span>
                       {isDefault && (
                         <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-accent/15 text-accent">
@@ -1339,7 +1339,7 @@ function ProvidersSection() {
                     <p className="text-xs text-muted mt-0.5">{PROVIDER_DESCRIPTIONS[p.id]}</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap shrink-0">
                   {p.configured && (
                     <button
                       onClick={() => testConnection(p.id)}
@@ -1978,13 +1978,13 @@ function BillingSection() {
     <div className="max-w-2xl space-y-6">
       {/* Current Plan Badge */}
       <div className={`border rounded-lg p-5 ${planColor}`}>
-        <div className="flex items-start justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg border border-current/20 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-lg border border-current/20 flex items-center justify-center shrink-0">
               <PlanIcon size={20} />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-base font-semibold">{planInfo?.name || 'Free'} Plan</h2>
                 {isActive && isPaid && (
                   <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-green-500/15 text-green-500">
@@ -2024,7 +2024,7 @@ function BillingSection() {
 
         {/* Subscription details */}
         {isPaid && (
-          <div className="mt-4 grid grid-cols-2 gap-4 pt-4 border-t border-current/10">
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4 border-t border-current/10">
             <div>
               <p className="text-[10px] uppercase tracking-wider opacity-60 mb-0.5">Renewal Date</p>
               <p className="text-sm font-medium">
@@ -2135,7 +2135,8 @@ function BillingSection() {
             <p className="text-xs text-muted mt-1">Invoices will appear here after your first payment</p>
           </div>
         ) : (
-          <div className="border border-border rounded overflow-hidden">
+          <div className="border border-border rounded overflow-hidden overflow-x-auto">
+            <div className="min-w-[400px]">
             <div className="grid grid-cols-[1fr_80px_80px_60px] gap-2 px-4 py-2 bg-bg text-[10px] text-muted font-medium uppercase tracking-wider border-b border-border">
               <span>Invoice</span>
               <span>Amount</span>
@@ -2191,6 +2192,7 @@ function BillingSection() {
                 {showAllInvoices ? 'Show less' : `Show all ${invoices.length} invoices`}
               </button>
             )}
+            </div>
           </div>
         )}
       </div>
