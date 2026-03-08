@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T15:20:22.692Z",
+  "lastUpdatedAt": "2026-03-08T15:24:27.752Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -343,6 +343,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 297719
+    },
+    {
+      "storyId": "PR-047",
+      "title": "Publish Flow from Archive Panel",
+      "status": "passed",
+      "startedAt": "2026-03-08T15:20:32.579Z",
+      "finishedAt": "2026-03-08T15:24:27.751Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 235172
     }
   ],
   "failedStories": [],
