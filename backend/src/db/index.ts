@@ -15,6 +15,20 @@ export function runMigrations() {
     // Running from compiled backend/dist/db/ — look at source directory
     migrationsDir = path.join(__dirname, '..', '..', 'src', 'db', 'migrations');
   }
+  // Pre-migration: ensure spec_publications has all columns that 044 migration expects
+  // (042 created the table without publisher_id, title, sanitized_spec_json, redaction_count, source, deleted_at)
+  const spExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='spec_publications'`).get();
+  if (spExists) {
+    const spCols = db.pragma('table_info(spec_publications)') as { name: string }[];
+    const spColNames = spCols.map(c => c.name);
+    if (!spColNames.includes('deleted_at')) db.exec('ALTER TABLE spec_publications ADD COLUMN deleted_at TEXT');
+    if (!spColNames.includes('publisher_id')) db.exec('ALTER TABLE spec_publications ADD COLUMN publisher_id TEXT');
+    if (!spColNames.includes('title')) db.exec('ALTER TABLE spec_publications ADD COLUMN title TEXT');
+    if (!spColNames.includes('sanitized_spec_json')) db.exec('ALTER TABLE spec_publications ADD COLUMN sanitized_spec_json TEXT');
+    if (!spColNames.includes('redaction_count')) db.exec('ALTER TABLE spec_publications ADD COLUMN redaction_count INTEGER NOT NULL DEFAULT 0');
+    if (!spColNames.includes('source')) db.exec("ALTER TABLE spec_publications ADD COLUMN source TEXT NOT NULL DEFAULT 'local'");
+  }
+
   const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
   for (const file of files) {
     const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
@@ -473,6 +487,60 @@ export function runMigrations() {
   const runColsCIE016 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
   if (!runColsCIE016.some(c => c.name === 'context_preview')) {
     db.exec('ALTER TABLE pipeline_runs ADD COLUMN context_preview TEXT');
+  }
+
+  // PR-RQ-1: Add 'queued' to pipeline_runs status CHECK constraint (idempotent)
+  const tableSqlRQ1 = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
+  ).get() as { sql: string } | undefined)?.sql || '';
+  if (!tableSqlRQ1.includes('queued')) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE pipeline_runs_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec_path TEXT NOT NULL,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+        status TEXT NOT NULL CHECK(status IN ('running','paused','done','failed','partial_failure','cancelled','queued')),
+        pid INTEGER,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT,
+        branch_name TEXT,
+        worktree_path TEXT,
+        trigger_type TEXT NOT NULL DEFAULT 'manual'
+      );
+      INSERT INTO pipeline_runs_new SELECT id, spec_path, workspace_id, status, pid, started_at, finished_at, branch_name, worktree_path, trigger_type FROM pipeline_runs;
+      DROP TABLE pipeline_runs;
+      ALTER TABLE pipeline_runs_new RENAME TO pipeline_runs;
+    `);
+    db.pragma('foreign_keys = ON');
+
+    // Re-add columns that were added after the initial table definition
+    const colsRQ1 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+    const addIfMissing = (col: string, ddl: string) => {
+      if (!colsRQ1.some(c => c.name === col)) db.exec(ddl);
+    };
+    addIfMissing('retried_from_run_id', 'ALTER TABLE pipeline_runs ADD COLUMN retried_from_run_id INTEGER REFERENCES pipeline_runs(id)');
+    addIfMissing('log_path', 'ALTER TABLE pipeline_runs ADD COLUMN log_path TEXT');
+    addIfMissing('agent', "ALTER TABLE pipeline_runs ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'");
+    addIfMissing('agent_type', "ALTER TABLE pipeline_runs ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'claude'");
+    addIfMissing('agent_model', 'ALTER TABLE pipeline_runs ADD COLUMN agent_model TEXT');
+    addIfMissing('opencode_server_pid', 'ALTER TABLE pipeline_runs ADD COLUMN opencode_server_pid INTEGER');
+    addIfMissing('total_input_tokens', 'ALTER TABLE pipeline_runs ADD COLUMN total_input_tokens INTEGER');
+    addIfMissing('total_output_tokens', 'ALTER TABLE pipeline_runs ADD COLUMN total_output_tokens INTEGER');
+    addIfMissing('total_cost_usd', 'ALTER TABLE pipeline_runs ADD COLUMN total_cost_usd REAL');
+    addIfMissing('parallelism', "ALTER TABLE pipeline_runs ADD COLUMN parallelism INTEGER NOT NULL DEFAULT 1");
+    addIfMissing('context_preview', 'ALTER TABLE pipeline_runs ADD COLUMN context_preview TEXT');
+    addIfMissing('queued_at', 'ALTER TABLE pipeline_runs ADD COLUMN queued_at TEXT');
+    addIfMissing('queue_position', 'ALTER TABLE pipeline_runs ADD COLUMN queue_position INTEGER');
+  }
+
+  // PR-RQ-1: Add queued_at and queue_position columns to pipeline_runs (idempotent)
+  const runColsRQ1 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
+  if (!runColsRQ1.some(c => c.name === 'queued_at')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN queued_at TEXT');
+  }
+  if (!runColsRQ1.some(c => c.name === 'queue_position')) {
+    db.exec('ALTER TABLE pipeline_runs ADD COLUMN queue_position INTEGER');
   }
 
   // OC-009: agent_config table for persisting execution engine settings (hot-reloadable)

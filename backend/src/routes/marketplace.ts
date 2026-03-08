@@ -455,7 +455,7 @@ router.get('/', (req: Request, res: Response) => {
       spec_id: pub.spec_id,
       title: pub.title,
       description: pub.description,
-      tags: JSON.parse(pub.tags),
+      tags: JSON.parse(pub.tags || '[]') as string[],
       download_count: pub.download_count,
       source: pub.source,
       created_at: pub.created_at,
@@ -502,7 +502,7 @@ router.get('/my', (req: Request, res: Response) => {
 
   const items = rows.map((r) => ({
     ...r,
-    tags: JSON.parse(r.tags),
+    tags: JSON.parse(r.tags || '[]') as string[],
   }));
 
   res.json({ items, total: items.length });
@@ -546,7 +546,7 @@ router.get('/popular', (req: Request, res: Response) => {
 
   const items = rows.map((r) => ({
     ...r,
-    tags: JSON.parse(r.tags),
+    tags: JSON.parse(r.tags || '[]') as string[],
   }));
 
   res.json({ items, total: items.length });
@@ -638,7 +638,7 @@ router.get('/search', (req: Request, res: Response) => {
       .all(limit, offset) as PublicationRow[];
 
     res.json({
-      items: rows.map((r) => ({ ...r, tags: JSON.parse(r.tags), snippet: '' })),
+      items: rows.map((r) => ({ ...r, tags: JSON.parse(r.tags || '[]') as string[], snippet: '' })),
       total: countRow.total,
     });
     return;
@@ -679,7 +679,7 @@ router.get('/search', (req: Request, res: Response) => {
       spec_id: r.spec_id,
       title: r.title,
       description: r.description,
-      tags: JSON.parse(r.tags),
+      tags: JSON.parse(r.tags || '[]') as string[],
       download_count: r.download_count,
       source: r.source,
       created_at: r.created_at,
@@ -731,7 +731,7 @@ router.get('/:id', (req: Request, res: Response) => {
 
   res.json({
     ...pub,
-    tags: JSON.parse(pub.tags),
+    tags: JSON.parse(pub.tags || '[]') as string[],
     sanitized_spec_json: JSON.parse(pub.sanitized_spec_json),
   });
 });
