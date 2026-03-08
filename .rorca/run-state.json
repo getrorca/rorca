@@ -2,7 +2,7 @@
   "specId": "rorca-production-ready",
   "runId": 936,
   "startedAt": "2026-03-08T09:29:52.787Z",
-  "lastUpdatedAt": "2026-03-08T09:54:06.191Z",
+  "lastUpdatedAt": "2026-03-08T10:04:44.801Z",
   "completedStories": [
     {
       "storyId": "PR-002",
@@ -73,6 +73,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 618523
+    },
+    {
+      "storyId": "PR-008",
+      "title": "Structured Logging (pino)",
+      "status": "passed",
+      "startedAt": "2026-03-08T09:54:10.851Z",
+      "finishedAt": "2026-03-08T10:04:44.799Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 633948
     }
   ],
   "failedStories": [],

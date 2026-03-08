@@ -5,6 +5,7 @@
 import { db } from '../db/index';
 import { isTelemetryEnabled } from './telemetry-config';
 import { agentType } from './config';
+import { logger } from './logger';
 
 export interface TelemetryMetrics {
   eventType: string;
@@ -48,7 +49,7 @@ export function collectRunMetrics(runId: number): TelemetryMetrics | null {
       timestamp: run.finished_at,
     };
   } catch (err) {
-    console.error('Failed to collect run metrics:', err);
+    logger.error({ err }, 'Failed to collect run metrics');
     return null;
   }
 }

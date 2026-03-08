@@ -4,6 +4,7 @@ import { db } from '../db/index';
 import { AuthUser } from './auth';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -192,7 +193,7 @@ router.post('/', (req: Request, res: Response) => {
     const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(id) as TemplateRow;
     res.status(201).json(formatTemplate(row, true));
   } catch (error: any) {
-    console.error('[Templates] Create error:', error);
+    logger.error('[Templates] Create error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -253,7 +254,7 @@ router.get('/', (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(templates, pagination, { cursorKey: (t) => t.id as string }));
   } catch (error: any) {
-    console.error('[Templates] List error:', error);
+    logger.error('[Templates] List error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -333,7 +334,7 @@ router.post('/:id/rate', (req: Request, res: Response) => {
     const { avgRating, ratingCount } = getTemplateRating(templateId);
     res.json({ avgRating, ratingCount, userRating: rating });
   } catch (error: any) {
-    console.error('[Templates] Rate error:', error);
+    logger.error('[Templates] Rate error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -376,7 +377,7 @@ router.post('/:id/use', (req: Request, res: Response) => {
 
     res.json({ ok: true });
   } catch (error: any) {
-    console.error('[Templates] Use error:', error);
+    logger.error('[Templates] Use error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -436,7 +437,7 @@ router.get('/:id', (req: Request, res: Response) => {
 
     res.json(result);
   } catch (error: any) {
-    console.error('[Templates] Get error:', error);
+    logger.error('[Templates] Get error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -454,7 +455,7 @@ router.delete('/:id', (req: Request, res: Response) => {
 
     res.status(204).send();
   } catch (error: any) {
-    console.error('[Templates] Delete error:', error);
+    logger.error('[Templates] Delete error:', error);
     res.status(500).json({ error: error.message });
   }
 });

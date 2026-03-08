@@ -3,6 +3,7 @@ import * as path from 'path';
 import { db } from '../db/index';
 import { decryptToken } from '../routes/auth';
 import { broadcastAll, type WalEvent } from './sse-hub';
+import { logger } from './logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ export async function postCommitStatus(
 ): Promise<boolean> {
   const token = getGithubToken();
   if (!token) {
-    console.error('[Checks] No GitHub token available to post commit status');
+    logger.error('[Checks] No GitHub token available to post commit status');
     return false;
   }
 
@@ -95,14 +96,14 @@ export async function postCommitStatus(
 
     if (!res.ok) {
       const text = await res.text();
-      console.error(`[Checks] GitHub status API error (${res.status}):`, text);
+      logger.error({ text }, `[Checks] GitHub status API error (${res.status})`);
       return false;
     }
 
-    console.log(`[Checks] Posted ${state} status to ${owner}/${repo}@${sha.slice(0, 7)}`);
+    logger.info(`[Checks] Posted ${state} status to ${owner}/${repo}@${sha.slice(0, 7)}`);
     return true;
   } catch (err) {
-    console.error('[Checks] Failed to post commit status:', err);
+    logger.error({ err }, '[Checks] Failed to post commit status');
     return false;
   }
 }
@@ -240,7 +241,7 @@ export async function evaluatePrAndPostCheck(
   const storyIds: string[] = extractStoryIds(prTitle, branchName);
 
   if (storyIds.length === 0) {
-    console.log(`[Checks] No story IDs in PR #${prNumber}, skipping check`);
+    logger.info(`[Checks] No story IDs in PR #${prNumber}, skipping check`);
     return null;
   }
 
@@ -249,7 +250,7 @@ export async function evaluatePrAndPostCheck(
     'SELECT * FROM workspaces WHERE id = ?'
   ).get(workspaceId) as WorkspaceRow | undefined;
   if (!workspace) {
-    console.error(`[Checks] Workspace ${workspaceId} not found`);
+    logger.error(`[Checks] Workspace ${workspaceId} not found`);
     return null;
   }
 
@@ -284,7 +285,7 @@ export async function evaluatePrAndPostCheck(
   }
 
   if (allCriteria.length === 0) {
-    console.log(`[Checks] No acceptance criteria found for stories: ${storyIds.join(', ')}`);
+    logger.info(`[Checks] No acceptance criteria found for stories: ${storyIds.join(', ')}`);
     // Post a neutral success since there's nothing to check
     const result: CheckResult = {
       state: 'success',

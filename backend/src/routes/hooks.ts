@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
 import type { PipelineHookRow } from '../lib/hook-runner';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -41,7 +42,7 @@ router.get('/', (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(hooks, pagination));
   } catch (error: any) {
-    console.error('[Hooks] List error:', error);
+    logger.error('[Hooks] List error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -98,7 +99,7 @@ router.post('/', (req: Request, res: Response) => {
 
     res.status(201).json(hook);
   } catch (error: any) {
-    console.error('[Hooks] Create error:', error);
+    logger.error('[Hooks] Create error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -166,7 +167,7 @@ router.put('/:id', (req: Request, res: Response) => {
     const updated = db.prepare('SELECT * FROM pipeline_hooks WHERE id = ?').get(hookId) as PipelineHookRow;
     res.json(updated);
   } catch (error: any) {
-    console.error('[Hooks] Update error:', error);
+    logger.error('[Hooks] Update error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -209,7 +210,7 @@ router.delete('/:id', (req: Request, res: Response) => {
     db.prepare('DELETE FROM pipeline_hooks WHERE id = ?').run(hookId);
     res.status(204).send();
   } catch (error: any) {
-    console.error('[Hooks] Delete error:', error);
+    logger.error('[Hooks] Delete error:', error);
     res.status(500).json({ error: error.message });
   }
 });

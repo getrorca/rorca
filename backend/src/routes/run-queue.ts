@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/index';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -55,7 +56,7 @@ router.get('/', (req: Request, res: Response) => {
 
     res.json({ items: entries });
   } catch (error: any) {
-    console.error('[RunQueue] GET error:', error);
+    logger.error('[RunQueue] GET error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -124,7 +125,7 @@ router.get('/status', (req: Request, res: Response) => {
       runningRunId: runningRun?.id ?? null,
     });
   } catch (error: any) {
-    console.error('[RunQueue] GET /status error:', error);
+    logger.error('[RunQueue] GET /status error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -206,7 +207,7 @@ router.post('/', (req: Request, res: Response) => {
     const entry = db.prepare('SELECT * FROM run_queue WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json(entry);
   } catch (error: any) {
-    console.error('[RunQueue] POST error:', error);
+    logger.error('[RunQueue] POST error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -259,7 +260,7 @@ router.delete('/:id', (req: Request, res: Response) => {
     db.prepare('DELETE FROM run_queue WHERE id = ?').run(id);
     res.json({ success: true });
   } catch (error: any) {
-    console.error('[RunQueue] DELETE error:', error);
+    logger.error('[RunQueue] DELETE error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -316,7 +317,7 @@ router.put('/reorder', (req: Request, res: Response) => {
 
     res.json({ success: true });
   } catch (error: any) {
-    console.error('[RunQueue] PUT /reorder error:', error);
+    logger.error('[RunQueue] PUT /reorder error:', error);
     res.status(500).json({ error: error.message });
   }
 });

@@ -1,6 +1,7 @@
 import { exec } from 'child_process';
 import { db } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
+import { logger } from './logger';
 
 export interface AgentHookRow {
   id: number;
@@ -88,7 +89,7 @@ export function fireAgentHooks(walEvent: WalEvent): void {
           broadcastAll(hookWalEvent);
         }
       } catch (err) {
-        console.error(`[AgentHooks] Failed to log hook result for hook ${hook.id}:`, err);
+        logger.error({ err }, `[AgentHooks] Failed to log hook result for hook ${hook.id}`);
       }
     });
   }

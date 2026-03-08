@@ -13,6 +13,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { logger } from './logger';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -39,9 +40,9 @@ export async function retryPost(
       });
       if (resp.ok) return true;
       // Non-2xx but server responded — log and retry
-      console.error(`[resilient-post] ${label} attempt ${attempt}/${POST_MAX_RETRIES}: HTTP ${resp.status}`);
+      logger.error(`[resilient-post] ${label} attempt ${attempt}/${POST_MAX_RETRIES}: HTTP ${resp.status}`);
     } catch (err: any) {
-      console.error(`[resilient-post] ${label} attempt ${attempt}/${POST_MAX_RETRIES}: ${err.message ?? err}`);
+      logger.error(`[resilient-post] ${label} attempt ${attempt}/${POST_MAX_RETRIES}: ${err.message ?? err}`);
     }
     if (attempt < POST_MAX_RETRIES) {
       await new Promise(resolve => setTimeout(resolve, POST_RETRY_DELAY_MS));
@@ -74,9 +75,9 @@ export function writeFallbackResult(cwd: string, entry: FallbackResultEntry): vo
   const filePath = path.join(cwd, FALLBACK_FILENAME);
   try {
     fs.appendFileSync(filePath, JSON.stringify(entry) + '\n');
-    console.log(`[resilient-post] Wrote fallback result: ${entry.type} ${entry.storyId ?? 'n/a'} → ${filePath}`);
+    logger.info(`[resilient-post] Wrote fallback result: ${entry.type} ${entry.storyId ?? 'n/a'} → ${filePath}`);
   } catch (err: any) {
-    console.error(`[resilient-post] Failed to write fallback file ${filePath}: ${err.message ?? err}`);
+    logger.error(`[resilient-post] Failed to write fallback file ${filePath}: ${err.message ?? err}`);
   }
 }
 
@@ -97,7 +98,7 @@ export function readFallbackResults(cwd: string): FallbackResultEntry[] {
     try {
       entries.push(JSON.parse(line));
     } catch {
-      console.error(`[resilient-post] Skipping malformed fallback line: ${line.slice(0, 100)}`);
+      logger.error(`[resilient-post] Skipping malformed fallback line: ${line.slice(0, 100)}`);
     }
   }
   return entries;

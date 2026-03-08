@@ -9,6 +9,7 @@
 // newline-delimited JSON objects, possibly split mid-line across chunks.
 
 import type { SemanticStep } from './semantic-log-parser';
+import { logger } from './logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -451,7 +452,7 @@ export class OpenCodeStreamParser {
       if (trimmed.length > 0) {
         // Log malformed lines for diagnostics (first occurrence per burst)
         if (this.malformedCount === 1) {
-          console.error(`[opencode-parser] Malformed JSON line: ${trimmed.slice(0, 200)}`);
+          logger.error(`[opencode-parser] Malformed JSON line: ${trimmed.slice(0, 200)}`);
         }
         return {
           raw: { type: 'raw', content: trimmed },

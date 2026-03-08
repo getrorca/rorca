@@ -3,6 +3,7 @@
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
 import { execSync } from 'child_process';
+import { logger } from './logger';
 
 export const MIN_OPENCODE_VERSION = '0.1.0';
 
@@ -81,10 +82,10 @@ export function requireOpenCode(): OpenCodeStatus {
   const status = detectOpenCode();
 
   if (!status.opencodeInstalled) {
-    console.error(
+    logger.error(
       '\x1b[31m[FATAL] OpenCode not installed. Run: npm i -g opencode\x1b[0m'
     );
-    console.error(
+    logger.error(
       'Set RORCA_AGENT=claude to use Claude subscription instead, ' +
       'or set OPENCODE_BIN=/path/to/opencode if installed in a non-standard location.'
     );
@@ -92,14 +93,14 @@ export function requireOpenCode(): OpenCodeStatus {
   }
 
   if (status.opencodeVersion && !semverGte(status.opencodeVersion, MIN_OPENCODE_VERSION)) {
-    console.error(
+    logger.error(
       `\x1b[31m[FATAL] OpenCode version ${status.opencodeVersion} is below minimum required ${MIN_OPENCODE_VERSION}.\x1b[0m`
     );
-    console.error('Run: npm i -g opencode@latest');
+    logger.error('Run: npm i -g opencode@latest');
     process.exit(1);
   }
 
-  console.log(
+  logger.info(
     `[opencode] Detected opencode ${status.opencodeVersion ?? '(unknown version)'} at ${status.opencodeBinPath}`
   );
 

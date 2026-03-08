@@ -4,6 +4,7 @@ import * as path from 'path';
 import { db } from '../db';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -138,7 +139,7 @@ router.get('/me/assigned', (req: Request, res: Response) => {
 
     res.json({ assignments: Array.from(specMap.values()) });
   } catch (error: any) {
-    console.error('[Users] Get assignments error:', error);
+    logger.error('[Users] Get assignments error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -199,7 +200,7 @@ router.get('/workspace-members', (req: Request, res: Response) => {
       })),
     });
   } catch (error: any) {
-    console.error('[Users] List workspace members error:', error);
+    logger.error('[Users] List workspace members error:', error);
     res.status(500).json({ error: error.message });
   }
 });
