@@ -253,9 +253,14 @@ export default function AuditLogPanel() {
             <Loader2 size={24} className="animate-spin text-muted" />
           </div>
         ) : events.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-32 text-muted text-sm">
-            <ScrollText size={32} className="mb-2 opacity-50" />
-            <p>No events found</p>
+          <div className="flex items-center justify-center py-16">
+            <div className="flex flex-col items-center text-center max-w-md px-6">
+              <ScrollText size={48} className="text-[var(--text-muted)] opacity-40 mb-4" />
+              <h3 className="text-lg font-semibold text-[var(--text)] mb-2">No audit events recorded yet</h3>
+              <p className="text-sm text-[var(--text-muted)]">
+                Audit events appear here as you generate specs, run pipelines, and manage workspaces. All system activity is logged automatically.
+              </p>
+            </div>
           </div>
         ) : (
           <table className="w-full text-xs">

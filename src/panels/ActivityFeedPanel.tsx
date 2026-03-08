@@ -218,9 +218,14 @@ export default function ActivityFeedPanel() {
             <Loader2 size={24} className="animate-spin text-muted" aria-label="Loading activity feed" />
           </div>
         ) : items.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-32 text-muted text-sm">
-            <Clock size={32} className="mb-2 opacity-50" />
-            <p>No activity yet</p>
+          <div className="flex items-center justify-center h-48">
+            <div className="flex flex-col items-center text-center max-w-md px-6">
+              <Clock size={48} className="text-[var(--text-muted)] opacity-40 mb-4" />
+              <h3 className="text-lg font-semibold text-[var(--text)] mb-2">No activity yet</h3>
+              <p className="text-sm text-[var(--text-muted)]">
+                Activity appears here as you generate specs, trigger pipeline runs, and approve stories.
+              </p>
+            </div>
           </div>
         ) : (
           <>
