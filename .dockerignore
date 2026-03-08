@@ -2,11 +2,14 @@ node_modules
 backend/node_modules
 dist
 backend/dist
-backend/rorcha.db
-backend/rorcha.db-wal
-backend/rorcha.db-shm
+backend/rorca.db
+backend/rorca.db-wal
+backend/rorca.db-shm
 *.log
+forge/specs/logs/
 .git
 .env
+.env.*
+*.env
 .env.local
 .DS_Store
