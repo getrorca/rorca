@@ -164,7 +164,7 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
       </div>
 
       {/* Run selectors */}
-      <div className="p-4 border-b border-[var(--border)] flex items-center gap-4">
+      <div className="p-4 border-b border-[var(--border)] flex flex-col sm:flex-row items-stretch sm:items-center gap-3 sm:gap-4">
         <div className="flex-1">
           <label className="block text-xs font-medium text-[var(--text-muted)] mb-1">Baseline (Run 1)</label>
           <select
@@ -182,7 +182,7 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
           </select>
         </div>
 
-        <ArrowLeftRight className="w-4 h-4 text-[var(--text-muted)] mt-5 flex-shrink-0" />
+        <ArrowLeftRight className="w-4 h-4 text-[var(--text-muted)] hidden sm:block sm:mt-5 flex-shrink-0" />
 
         <div className="flex-1">
           <label className="block text-xs font-medium text-[var(--text-muted)] mb-1">Comparison (Run 2)</label>
@@ -312,64 +312,66 @@ export default function CompareRunsPanel({ onBack }: CompareRunsPanelProps) {
           </div>
 
           {/* Story comparison table */}
-          <div role="table" aria-label="Story comparison results" className="divide-y divide-[var(--border)]">
-            {/* Table header */}
-            <div role="row" className="grid grid-cols-[1fr_100px_100px_80px_80px_100px] px-4 py-2 text-xs font-medium text-[var(--text-muted)] bg-[var(--surface)]">
-              <span role="columnheader">Story</span>
-              <span role="columnheader" className="text-center">Run 1 Status</span>
-              <span role="columnheader" className="text-center">Run 2 Status</span>
-              <span role="columnheader" className="text-right">Run 1 Time</span>
-              <span role="columnheader" className="text-right">Run 2 Time</span>
-              <span role="columnheader" className="text-center">Change</span>
-            </div>
-
-            {filteredStories.length === 0 ? (
-              <div aria-live="polite" className="px-4 py-8 text-center text-sm text-[var(--text-muted)]">
-                No stories match the selected filter.
+          <div className="overflow-x-auto">
+            <div role="table" aria-label="Story comparison results" className="divide-y divide-[var(--border)] min-w-[480px]">
+              {/* Table header */}
+              <div role="row" className="grid grid-cols-[1fr_90px_90px_70px_70px_90px] md:grid-cols-[1fr_100px_100px_80px_80px_100px] px-4 py-2 text-xs font-medium text-[var(--text-muted)] bg-[var(--surface)]">
+                <span role="columnheader">Story</span>
+                <span role="columnheader" className="text-center">Run 1</span>
+                <span role="columnheader" className="text-center">Run 2</span>
+                <span role="columnheader" className="text-right hidden md:block">R1 Time</span>
+                <span role="columnheader" className="text-right hidden md:block">R2 Time</span>
+                <span role="columnheader" className="text-center">Change</span>
               </div>
-            ) : (
-              filteredStories.map((story) => {
-                const changeConfig = CHANGE_CONFIG[story.change];
-                const ChangeIcon = changeConfig.icon;
-                return (
-                  <div
-                    key={story.storyId}
-                    role="row"
-                    className="grid grid-cols-[1fr_100px_100px_80px_80px_100px] px-4 py-2 items-center hover:bg-[var(--surface)] transition-colors"
-                  >
-                    <span role="cell" className="text-sm font-mono truncate">{story.storyId}</span>
-                    <span role="cell" className="text-center">
-                      {story.run1Status ? (
-                        <span className={`inline-block px-2 py-0.5 text-xs rounded ${STATUS_BADGE[story.run1Status] || 'bg-zinc-500/20 text-zinc-400'}`}>
-                          {story.run1Status}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-zinc-600">-</span>
-                      )}
-                    </span>
-                    <span role="cell" className="text-center">
-                      {story.run2Status ? (
-                        <span className={`inline-block px-2 py-0.5 text-xs rounded ${STATUS_BADGE[story.run2Status] || 'bg-zinc-500/20 text-zinc-400'}`}>
-                          {story.run2Status}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-zinc-600">-</span>
-                      )}
-                    </span>
-                    <span role="cell" className="text-xs font-mono text-[var(--text-muted)] text-right">
-                      {formatElapsed(story.run1Elapsed)}
-                    </span>
-                    <span role="cell" className="text-xs font-mono text-[var(--text-muted)] text-right">
-                      {formatElapsed(story.run2Elapsed)}
-                    </span>
-                    <span role="cell" className={`flex items-center justify-center gap-1 text-xs ${changeConfig.className}`}>
-                      <ChangeIcon className="w-3 h-3" aria-hidden="true" />
-                      {changeConfig.label}
-                    </span>
-                  </div>
-                );
-              })
-            )}
+
+              {filteredStories.length === 0 ? (
+                <div aria-live="polite" className="px-4 py-8 text-center text-sm text-[var(--text-muted)]">
+                  No stories match the selected filter.
+                </div>
+              ) : (
+                filteredStories.map((story) => {
+                  const changeConfig = CHANGE_CONFIG[story.change];
+                  const ChangeIcon = changeConfig.icon;
+                  return (
+                    <div
+                      key={story.storyId}
+                      role="row"
+                      className="grid grid-cols-[1fr_90px_90px_70px_70px_90px] md:grid-cols-[1fr_100px_100px_80px_80px_100px] px-4 py-2 items-center hover:bg-[var(--surface)] transition-colors"
+                    >
+                      <span role="cell" className="text-sm font-mono truncate">{story.storyId}</span>
+                      <span role="cell" className="text-center">
+                        {story.run1Status ? (
+                          <span className={`inline-block px-2 py-0.5 text-xs rounded ${STATUS_BADGE[story.run1Status] || 'bg-zinc-500/20 text-zinc-400'}`}>
+                            {story.run1Status}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-zinc-600">-</span>
+                        )}
+                      </span>
+                      <span role="cell" className="text-center">
+                        {story.run2Status ? (
+                          <span className={`inline-block px-2 py-0.5 text-xs rounded ${STATUS_BADGE[story.run2Status] || 'bg-zinc-500/20 text-zinc-400'}`}>
+                            {story.run2Status}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-zinc-600">-</span>
+                        )}
+                      </span>
+                      <span role="cell" className="text-xs font-mono text-[var(--text-muted)] text-right hidden md:block">
+                        {formatElapsed(story.run1Elapsed)}
+                      </span>
+                      <span role="cell" className="text-xs font-mono text-[var(--text-muted)] text-right hidden md:block">
+                        {formatElapsed(story.run2Elapsed)}
+                      </span>
+                      <span role="cell" className={`flex items-center justify-center gap-1 text-xs ${changeConfig.className}`}>
+                        <ChangeIcon className="w-3 h-3" aria-hidden="true" />
+                        <span className="hidden sm:inline">{changeConfig.label}</span>
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       )}
