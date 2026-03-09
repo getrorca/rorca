@@ -481,6 +481,7 @@ function CommentBubble({ comment }: { comment: ReviewComment }) {
         <img
           src={comment.avatar_url}
           alt={name}
+          loading="lazy"
           className="w-6 h-6 rounded-full shrink-0"
         />
       ) : (
