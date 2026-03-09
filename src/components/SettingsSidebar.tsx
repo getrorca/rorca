@@ -72,7 +72,7 @@ export default function SettingsSidebar({ onNavigate }: SettingsSidebarProps) {
       <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
         <Link
           to="/"
-          onClick={(e) => { e.preventDefault(); onNavigate('hub'); }}
+          onClick={(e) => { e.preventDefault(); onNavigate('specs'); }}
           className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-[var(--text)] hover:bg-surface-100 transition-colors"
         >
           <ArrowLeft size={14} className="text-muted shrink-0" />

@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T08:33:03.414Z",
+  "lastUpdatedAt": "2026-03-09T08:43:33.215Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-09T08:33:03.414Z",
       "agentType": "claude",
       "elapsedMs": 662060
+    },
+    {
+      "storyId": "ULT-006",
+      "title": "5-Item Sidebar Navigation — Kill the Clutter",
+      "status": "passed",
+      "startedAt": "2026-03-09T08:33:17.480Z",
+      "finishedAt": "2026-03-09T08:43:33.215Z",
+      "agentType": "claude",
+      "elapsedMs": 615735
     }
   ],
   "failedStories": [],
