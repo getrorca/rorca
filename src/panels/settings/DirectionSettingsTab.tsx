@@ -1,8 +1,9 @@
+import { useNavigate } from 'react-router-dom';
+import { ArrowRight, Compass } from 'lucide-react';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useGlobalToast } from '../../contexts/ToastContext';
 import {
   WsGeneralSection as WsGeneralSectionBase,
-  WsDirectionSection as WsDirectionSectionBase,
   WsContextSection as WsContextSectionBase,
   WsEnvVarsSection as WsEnvVarsSectionBase,
   WsPipelineSection as WsPipelineSectionBase,
@@ -28,11 +29,26 @@ export function WsGeneralSection() {
   return <WsGeneralSectionBase workspaceId={workspaceId} showToast={show} />;
 }
 
+// ULT-008: Direction editor removed from Settings — link to Direction panel instead
 export function WsDirectionSection() {
-  const { workspaceId } = useWorkspace();
-  const { show } = useGlobalToast();
-  if (!workspaceId) return <WsNoWorkspace />;
-  return <WsDirectionSectionBase workspaceId={workspaceId} showToast={show} />;
+  const navigate = useNavigate();
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold text-[var(--text)]">Direction</h2>
+      <p className="text-sm text-muted">
+        Direction layers (Standards, Conventions, Project) are managed in the dedicated Direction panel
+        with auto-save, AI Setup, and a synthesized preview.
+      </p>
+      <button
+        onClick={() => navigate('/direction')}
+        className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium bg-accent text-white rounded hover:bg-accent/90 transition-colors"
+      >
+        <Compass size={14} />
+        Edit Direction
+        <ArrowRight size={14} />
+      </button>
+    </div>
+  );
 }
 
 export function WsContextSection() {
