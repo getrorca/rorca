@@ -7,7 +7,7 @@ import type { SettingsTab } from './panels/SettingsPanel';
 const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
   'general', 'direction', 'context', 'providers', 'github', 'env-vars', 'pipeline', 'hooks', 'agents',
   'shortcuts', 'account', 'billing',
-  'analytics', 'system',
+  'system',
 ] as const;
 
 /**
@@ -30,15 +30,16 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   // Direction
   stack: '/direction',
   'team-direction': '/team-direction',
-  // Analytics — now inside Settings > Analytics tab
-  usage: '/settings/analytics',
-  costs: '/settings/analytics',
-  models: '/settings/analytics',
-  velocity: '/settings/analytics',
-  completion: '/settings/analytics',
-  roi: '/settings/analytics',
-  finops: '/settings/analytics',
-  health: '/settings/analytics',
+  // Analytics — unified panel (ULT-005)
+  analytics: '/analytics',
+  usage: '/analytics',
+  costs: '/analytics',
+  models: '/analytics',
+  velocity: '/analytics',
+  completion: '/analytics',
+  roi: '/analytics',
+  finops: '/analytics',
+  health: '/analytics',
   // System — now inside Settings > System tab
   'audit-log': '/settings/system',
   activity: '/settings/system',
@@ -63,6 +64,8 @@ export function pathToPanelId(pathname: string): PanelId {
   if (/^\/runs\/\d+/.test(pathname)) return 'pipeline';
   // Spec review slide-over resolves to hub
   if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'hub';
+  // ULT-005: Analytics unified panel
+  if (pathname === '/analytics') return 'analytics';
   // FR-004: /settings/* nested routes all resolve to 'settings' panel
   if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
   // ULT-001: Consolidated specs panel
