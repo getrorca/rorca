@@ -566,10 +566,12 @@ export default function SpecReviewPanel({
   specId,
   onBack,
   onNavigate,
+  onNavigateToRun,
 }: {
   specId: string;
   onBack: () => void;
   onNavigate: (panel: PanelId) => void;
+  onNavigateToRun?: (runId: number) => void;
 }) {
   const { workspaceId } = useWorkspace();
   const toast = useGlobalToast();
@@ -783,9 +785,39 @@ export default function SpecReviewPanel({
     }
   };
 
-  const handleRunPipeline = useCallback(() => {
-    onNavigate('pipeline');
-  }, [onNavigate]);
+  const [pipelineLoading, setPipelineLoading] = useState(false);
+
+  const handleRunPipeline = useCallback(async () => {
+    if (!workspaceId || pipelineLoading) return;
+    const status = spec?._status;
+    const specDir = status === 'approved' ? 'approved' : 'pending';
+    const specPath = `forge/specs/${specDir}/${specId}.json`;
+    setPipelineLoading(true);
+    try {
+      const result = await apiFetch<{ ok?: boolean; conflict?: boolean; queued?: boolean; runId?: number; activeRunId?: number; position?: number }>('/api/pipeline/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ specPath, workspaceId, autoWorktree: true }),
+      });
+      if (result.conflict) {
+        toast.show('A pipeline run is already active', 'error');
+        if (result.activeRunId && onNavigateToRun) {
+          onNavigateToRun(result.activeRunId);
+        }
+      } else if (result.queued) {
+        toast.show(`Run queued at position ${result.position}`, 'success');
+      } else if (result.runId) {
+        toast.show('Pipeline started', 'success');
+        if (onNavigateToRun) {
+          onNavigateToRun(result.runId);
+        }
+      }
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to trigger pipeline', 'error');
+    } finally {
+      setPipelineLoading(false);
+    }
+  }, [workspaceId, spec, specId, pipelineLoading, toast, onNavigateToRun]);
 
   const handleEdit = useCallback(() => {
     onNavigate('forge');
@@ -1012,10 +1044,20 @@ export default function SpecReviewPanel({
 
           {/* Right: primary actions */}
           <div className="flex items-center gap-2 ml-auto">
-            {isApproved && (
+            {(isPending || isApproved) ? (
               <button
                 onClick={handleRunPipeline}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors"
+                disabled={pipelineLoading}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
+              >
+                {pipelineLoading ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                {pipelineLoading ? 'Starting…' : 'Run Pipeline'}
+              </button>
+            ) : (
+              <button
+                disabled
+                title="Archived specs cannot be run — approve a new version first"
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-accent/40 text-white/60 cursor-not-allowed"
               >
                 <Play size={14} />
                 Run Pipeline
