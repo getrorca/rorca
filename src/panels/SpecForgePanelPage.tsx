@@ -869,7 +869,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                               overrideAgent ? 'bg-accent' : 'bg-border group-hover:bg-muted/40'
                             }`}
                           >
-                            <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${
+                            <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-switch-knob transition-transform ${
                               overrideAgent ? 'translate-x-[14px]' : ''
                             }`} />
                           </button>

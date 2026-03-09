@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { User, Save, Loader2, Trash2, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, CheckCircle2, XCircle, Crown, Users, ChevronDown, ChevronUp, Download, ExternalLink, FileText, CreditCard, Shield } from 'lucide-react';
+import { User, Save, Loader2, Trash2, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, CheckCircle2, XCircle, Crown, Users, ChevronDown, ChevronUp, Download, ExternalLink, FileText, CreditCard, Shield, Sun, Moon, Monitor } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
+import { useTheme } from '../../contexts/ThemeContext';
 import { apiFetch, clearTokens } from '../../lib/apiFetch';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -81,7 +82,7 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
         }`}
     >
       <span
-        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${checked ? 'left-[18px]' : 'left-0.5'
+        className={`absolute top-0.5 w-4 h-4 rounded-full bg-switch-knob transition-transform ${checked ? 'left-[18px]' : 'left-0.5'
           }`}
       />
     </button>
@@ -95,6 +96,9 @@ export function AccountSettingsTab() {
     <div className="max-w-lg space-y-8">
       <ProfileSection />
       <div className="border-t border-border pt-6">
+        <ThemeSection />
+      </div>
+      <div className="border-t border-border pt-6">
         <NotificationsSection />
       </div>
       <div className="border-t border-border pt-6">
@@ -102,6 +106,44 @@ export function AccountSettingsTab() {
       </div>
       <div className="border-t border-border pt-6">
         <AccountDeletionSection />
+      </div>
+    </div>
+  );
+}
+
+// ─── Theme Section ──────────────────────────────────────────────────────────
+
+const THEME_OPTIONS = [
+  { mode: 'system' as const, icon: Monitor, label: 'System', description: 'Follow OS preference' },
+  { mode: 'light' as const, icon: Sun, label: 'Light', description: 'Always light' },
+  { mode: 'dark' as const, icon: Moon, label: 'Dark', description: 'Always dark' },
+];
+
+function ThemeSection() {
+  const { mode, setMode } = useTheme();
+  return (
+    <div>
+      <h3 className="text-sm font-semibold text-text mb-1">Appearance</h3>
+      <p className="text-xs text-muted mb-3">Choose your preferred theme. System follows your OS setting.</p>
+      <div className="flex gap-2">
+        {THEME_OPTIONS.map(opt => {
+          const Icon = opt.icon;
+          const active = mode === opt.mode;
+          return (
+            <button
+              key={opt.mode}
+              onClick={() => setMode(opt.mode)}
+              className={`flex-1 flex flex-col items-center gap-1.5 px-3 py-3 rounded-lg border text-xs font-medium transition-colors ${
+                active
+                  ? 'border-accent bg-accent/10 text-accent'
+                  : 'border-border bg-panel text-muted hover:text-text hover:border-border'
+              }`}
+            >
+              <Icon size={18} />
+              <span>{opt.label}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
