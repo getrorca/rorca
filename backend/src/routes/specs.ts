@@ -2354,6 +2354,147 @@ router.get('/', (req: Request, res: Response) => {
   }
 });
 
+// ─── US-003: GET /kanban — Pre-grouped specs for Kanban board ─────────────────
+
+interface KanbanSpec {
+  id: string;
+  title: string;
+  storyCount: number;
+  generatedAt: string;
+  approvedAt?: string;
+  readinessPercent: number;
+  tags: string[];
+  reviewStatus: ReviewStatus;
+  storyTitles?: string[];
+  passedStories?: number;
+  activeRunId?: number;
+}
+
+router.get('/kanban', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspaceId as string;
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+
+    // Build summaries from filesystem
+    const pendingSpecs: KanbanSpec[] = [];
+    for (const file of safeReaddir(pendingDir)) {
+      try {
+        const s = buildSummary(path.join(pendingDir, file), file, 'pending', workspace.path, workspaceId);
+        pendingSpecs.push({
+          id: s.id,
+          title: s.specName,
+          storyCount: s.storyCount,
+          generatedAt: s.generatedAt,
+          readinessPercent: s.readinessPercent,
+          tags: s.tags,
+          reviewStatus: s.reviewStatus,
+          storyTitles: s.storyTitles,
+        });
+      } catch { /* skip unparseable */ }
+    }
+
+    const approvedSpecs: KanbanSpec[] = [];
+    for (const file of safeReaddir(approvedDir)) {
+      try {
+        const s = buildSummary(path.join(approvedDir, file), file, 'approved', workspace.path, workspaceId);
+        approvedSpecs.push({
+          id: s.id,
+          title: s.specName,
+          storyCount: s.storyCount,
+          generatedAt: s.generatedAt,
+          approvedAt: s.approvedAt,
+          readinessPercent: s.readinessPercent,
+          tags: s.tags,
+          reviewStatus: s.reviewStatus,
+          storyTitles: s.storyTitles,
+        });
+      } catch { /* skip unparseable */ }
+    }
+
+    // Detect active runs and completed runs per spec
+    const runs = db.prepare(
+      `SELECT id, spec_path, status FROM pipeline_runs WHERE workspace_id = ? ORDER BY id DESC`
+    ).all(workspaceId) as { id: number; spec_path: string; status: string }[];
+
+    const activeRunBySlug = new Map<string, number>();
+    const completedSlugs = new Set<string>();
+    for (const run of runs) {
+      const slug = run.spec_path.replace(/^.*\//, '').replace(/\.json$/, '');
+      if ((run.status === 'running' || run.status === 'queued') && !activeRunBySlug.has(slug)) {
+        activeRunBySlug.set(slug, run.id);
+      }
+      if (run.status === 'done' || run.status === 'completed') {
+        completedSlugs.add(slug);
+      }
+    }
+
+    // Fetch story pass counts for approved specs with runs
+    const approvedSlugs = approvedSpecs.map(s => s.id);
+    const storyProgress = new Map<string, number>();
+    if (approvedSlugs.length > 0) {
+      for (const slug of approvedSlugs) {
+        // Find latest run for this spec
+        const latestRun = runs.find(r =>
+          r.spec_path.replace(/^.*\//, '').replace(/\.json$/, '') === slug
+        );
+        if (latestRun) {
+          const passCount = db.prepare(
+            `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status = 'pass'`
+          ).get(latestRun.id) as { cnt: number } | undefined;
+          if (passCount) storyProgress.set(slug, passCount.cnt);
+        }
+      }
+    }
+
+    // Bucket into columns:
+    // - draft: pending specs (no active run)
+    // - inProgress: approved specs with active run OR approved but not yet completed
+    // - done: approved specs where latest run is done/completed
+    const draft: KanbanSpec[] = pendingSpecs.sort(
+      (a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
+    );
+
+    const inProgress: KanbanSpec[] = [];
+    const done: KanbanSpec[] = [];
+
+    for (const spec of approvedSpecs) {
+      const activeRunId = activeRunBySlug.get(spec.id);
+      const isCompleted = completedSlugs.has(spec.id);
+      const passed = storyProgress.get(spec.id);
+
+      if (isCompleted && !activeRunId) {
+        done.push({ ...spec, passedStories: passed });
+      } else {
+        inProgress.push({
+          ...spec,
+          passedStories: passed,
+          ...(activeRunId ? { activeRunId } : {}),
+        });
+      }
+    }
+
+    // Sort each column: newest first
+    inProgress.sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime());
+    done.sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime());
+
+    res.json({ draft, inProgress, done });
+  } catch (error: any) {
+    logger.error('[Specs] Kanban grouping error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── W-003 / US-005: GET /archive — Full-text searchable spec archive ─────────
 
 interface RunTelemetry {
