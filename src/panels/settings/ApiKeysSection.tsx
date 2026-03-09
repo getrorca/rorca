@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Key, Loader2, Trash2, Plus, Check, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { apiFetch } from '../../lib/apiFetch';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
+import { useGlobalToast } from '../../contexts/ToastContext';
 
 interface VaultKey {
   id: string;
@@ -12,6 +13,7 @@ interface VaultKey {
 }
 
 export default function ApiKeysSection() {
+  const toast = useGlobalToast();
   const { workspaceId } = useWorkspace();
   const [keys, setKeys] = useState<VaultKey[]>([]);
   const [loading, setLoading] = useState(true);
@@ -49,9 +51,12 @@ export default function ApiKeysSection() {
       setNewProvider('');
       setNewLabel('');
       setNewKey('');
+      toast.show('API key added', 'success');
       fetchKeys();
     } catch (err: any) {
-      setError(err.message || 'Failed to add key');
+      const msg = err.message || 'Failed to add key';
+      setError(msg);
+      toast.show(msg, 'error');
     } finally {
       setSaving(false);
     }
@@ -62,9 +67,12 @@ export default function ApiKeysSection() {
     setDeleting(keyId);
     try {
       await apiFetch(`/api/vault/keys/${keyId}?workspaceId=${workspaceId}`, { method: 'DELETE' });
+      toast.show('API key removed', 'success');
       fetchKeys();
     } catch (err: any) {
-      setError(err.message || 'Failed to delete key');
+      const msg = err.message || 'Failed to delete key';
+      setError(msg);
+      toast.show(msg, 'error');
     } finally {
       setDeleting(null);
     }

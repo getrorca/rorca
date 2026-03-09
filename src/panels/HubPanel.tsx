@@ -4,13 +4,12 @@ import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import AddWorkspaceModal from '../components/AddWorkspaceModal';
 // TriggerPopover removed — Ready-to-Run cards now trigger directly
-import { ToastContainer, useToast } from '../components/Toast';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { HubSkeleton } from '../components/Skeleton';
 import { BoardSkeleton } from '../components/skeletons';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useWalSSE } from '../hooks/useWalSSE';
-import { useGlobalToast } from '../contexts/ToastContext';
 import type { PanelId } from '../components/Sidebar';
 import AgentBadge from '../components/AgentBadge';
 import MemoryUpdatesCard from '../components/MemoryUpdatesCard';
@@ -1069,13 +1068,13 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
   const [healthScore, setHealthScore] = useState<number | null>(null);
   const wizardChecked = useRef(false);
 
-  const { toasts: completionToasts, show: showCompletionToastRaw, dismiss: dismissCompletionToast } = useToast();
+  const { show: showGlobalToastHub } = useGlobalToast();
   const showCompletionToast = useCallback((status: string, label: string) => {
-    showCompletionToastRaw(
-      status === 'completed' ? `✓ ${label} completed` : `✗ ${label} failed`,
+    showGlobalToastHub(
+      status === 'completed' ? `${label} completed` : `${label} failed`,
       status === 'completed' ? 'success' : 'error',
     );
-  }, [showCompletionToastRaw]);
+  }, [showGlobalToastHub]);
 
   const fetchData = useCallback(async () => {
     if (!workspaceId) return;
@@ -1357,9 +1356,6 @@ export default function HubPanel({ onNavigate, onNavigateToRun, onNavigateToSpec
       )}
 
       <div className="h-full overflow-y-auto">
-        {/* Completion toast — top-right slide-in */}
-        <ToastContainer toasts={completionToasts} onDismiss={dismissCompletionToast} position="top-right" />
-
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8">
           {/* Unconfigured workspace — prominent setup prompt */}
           {!wizardCompleted && healthScore !== null && healthScore < 40 && !showWizard && (
