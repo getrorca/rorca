@@ -17,10 +17,11 @@ const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
 export const PANEL_ROUTES: Record<PanelId, string> = {
   // Index
   hub: '/',
-  // Specs
-  forge: '/forge',
-  queue: '/queue',
-  archive: '/archive',
+  // Specs — consolidated panel
+  specs: '/specs',
+  forge: '/specs',
+  queue: '/specs',
+  archive: '/specs',
   marketplace: '/marketplace',
   // Pipeline
   pipeline: '/pipeline',
@@ -63,7 +64,10 @@ export function pathToPanelId(pathname: string): PanelId {
   if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'hub';
   // FR-004: /settings/* nested routes all resolve to 'settings' panel
   if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
-  if (pathname === '/queue') return 'queue';
+  // ULT-001: Consolidated specs panel
+  if (pathname === '/specs') return 'specs';
+  // Legacy redirects
+  if (pathname === '/forge' || pathname === '/queue' || pathname === '/archive') return 'specs';
   return PATH_TO_PANEL[pathname] ?? 'hub';
 }
 
