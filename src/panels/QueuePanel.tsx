@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Clock, CheckCircle, XCircle, Eye, Inbox, ArrowRight, FileText, Play, CheckCircle2 } from 'lucide-react';
+import { Clock, Inbox, ArrowRight, FileText, Play, CheckCircle2, Layers } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
-import { useGlobalToast } from '../contexts/ToastContext';
 import { relativeTime } from '../components/SpecReviewInline';
 import type { SpecSummary } from '../components/SpecReviewInline';
 import type { PanelId } from '../components/Sidebar';
@@ -13,188 +12,71 @@ function slugToTitle(slug: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function reviewStatusLabel(status?: string): string | null {
-  if (!status || status === 'draft') return null;
-  if (status === 'review_requested') return 'Needs Review';
-  if (status === 'changes_requested') return 'Changes Requested';
-  if (status === 'approved') return 'Review Approved';
-  return status;
-}
+/* ─── Compact Kanban Card ──────────────────────────────────────── */
 
-interface SpecCardProps {
+interface KanbanSpecCardProps {
   spec: SpecSummary;
-  workspaceId: string;
-  onReviewClick: (specId: string) => void;
-  onRemove: (specId: string) => void;
+  passedCount?: number;
+  onClick: () => void;
   column: 'draft' | 'in-progress' | 'done';
 }
 
-function SpecCard({ spec, workspaceId, onReviewClick, onRemove, column }: SpecCardProps) {
-  const { show: showToast } = useGlobalToast();
-  const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
-  const [rejecting, setRejecting] = useState(false);
-  const [rejectReason, setRejectReason] = useState('');
-  const [removing, setRemoving] = useState(false);
-
-  const handleApprove = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setActionLoading('approve');
-    try {
-      await apiFetch(`/api/specs/${spec.id}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
-      });
-      showToast('Spec approved', 'success');
-      setRemoving(true);
-      setTimeout(() => onRemove(spec.id), 300);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Approve failed';
-      showToast(msg, 'error');
-      setActionLoading(null);
-    }
-  };
-
-  const handleRejectClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setRejecting(true);
-  };
-
-  const handleRejectCancel = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setRejecting(false);
-    setRejectReason('');
-  };
-
-  const handleRejectConfirm = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setActionLoading('reject');
-    try {
-      await apiFetch(`/api/specs/${spec.id}/reject`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, reason: rejectReason || undefined }),
-      });
-      showToast('Spec rejected', 'success');
-      setRemoving(true);
-      setTimeout(() => onRemove(spec.id), 300);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Reject failed';
-      showToast(msg, 'error');
-      setActionLoading(null);
-    }
-  };
+function KanbanSpecCard({ spec, passedCount, onClick, column }: KanbanSpecCardProps) {
+  const total = spec.storyCount;
+  const passed = passedCount ?? 0;
+  const hasProgress = passedCount !== undefined && column !== 'draft';
+  const progressPct = total > 0 ? Math.round((passed / total) * 100) : 0;
 
   return (
-    <div
-      className={`bg-panel border border-border rounded-lg overflow-hidden transition-all duration-300 ${removing ? 'opacity-0 scale-95' : 'opacity-100 scale-100'}`}
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full h-[120px] bg-panel border border-border rounded-lg p-3 text-left
+        flex flex-col justify-between overflow-hidden
+        transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
+        hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
     >
-      {/* Card header */}
-      <div className="p-3">
-        <h3 className="text-sm font-semibold text-[var(--text)] truncate">
+      {/* Top: title + slug */}
+      <div className="min-w-0">
+        <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3]">
           {slugToTitle(spec.id)}
         </h3>
-        <p className="text-xs text-muted mt-0.5 truncate">{spec.id}</p>
-
-        <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-          {/* Story count badge */}
-          <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
-            {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
-          </span>
-          {/* Review status badge */}
-          {reviewStatusLabel(spec.reviewStatus) && (
-            <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-surface-100 text-muted border border-border">
-              {reviewStatusLabel(spec.reviewStatus)}
-            </span>
-          )}
-        </div>
-
-        {/* Timestamp */}
-        <p className="text-xs text-muted mt-2 flex items-center gap-1">
-          <Clock size={11} />
-          {column === 'done' && spec.approvedAt
-            ? `Completed ${relativeTime(spec.approvedAt)}`
-            : `Generated ${relativeTime(spec.generatedAt)}`}
-        </p>
       </div>
 
-      {/* Reject reason input (shown inline when rejecting) */}
-      {rejecting && (
-        <div
-          className="px-3 pb-3 space-y-2"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <textarea
-            autoFocus
-            value={rejectReason}
-            onChange={(e) => setRejectReason(e.target.value)}
-            placeholder="Reason for rejection (optional)"
-            rows={2}
-            className="w-full text-sm px-3 py-2 rounded bg-surface-100 border border-border text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent resize-none"
+      {/* Bottom: badges + timestamp */}
+      <div className="flex items-center justify-between gap-2 mt-auto min-w-0">
+        {/* Story count badge */}
+        <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
+          <Layers size={10} />
+          {hasProgress
+            ? `${passed}/${total} stories`
+            : `${total} ${total === 1 ? 'story' : 'stories'}`}
+        </span>
+
+        {/* Timestamp */}
+        <span className="shrink-0 text-[11px] text-muted flex items-center gap-1">
+          <Clock size={10} />
+          {column === 'done' && spec.approvedAt
+            ? relativeTime(spec.approvedAt)
+            : relativeTime(spec.generatedAt)}
+        </span>
+      </div>
+
+      {/* Progress bar (only for in-progress / done with data) */}
+      {hasProgress && (
+        <div className="w-full h-1 rounded-full bg-surface-200 mt-1.5 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-300 ${
+              progressPct === 100 ? 'bg-success' : 'bg-accent'
+            }`}
+            style={{ width: `${progressPct}%` }}
           />
-          <div className="flex gap-2">
-            <button
-              onClick={handleRejectConfirm}
-              disabled={actionLoading === 'reject'}
-              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-error/10 text-error border border-error/30 hover:bg-error/20 disabled:opacity-50 transition-colors"
-            >
-              <XCircle size={13} />
-              {actionLoading === 'reject' ? 'Rejecting…' : 'Confirm Reject'}
-            </button>
-            <button
-              onClick={handleRejectCancel}
-              className="px-3 py-1.5 rounded text-xs font-medium border border-border text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
         </div>
       )}
-
-      {/* Action buttons — only show for draft column */}
-      {column === 'draft' && !rejecting && (
-        <div className="px-3 pb-3 flex gap-2">
-          <button
-            onClick={(e) => { e.stopPropagation(); onReviewClick(spec.id); }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-border text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
-          >
-            <Eye size={13} />
-            Review
-          </button>
-          <button
-            onClick={handleApprove}
-            disabled={actionLoading === 'approve'}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-success/10 text-success border border-success/30 hover:bg-success/20 disabled:opacity-50 transition-colors"
-          >
-            <CheckCircle size={13} />
-            {actionLoading === 'approve' ? 'Approving…' : 'Approve'}
-          </button>
-          <button
-            onClick={handleRejectClick}
-            disabled={actionLoading !== null}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-error/10 text-error border border-error/30 hover:bg-error/20 disabled:opacity-50 transition-colors"
-          >
-            <XCircle size={13} />
-            Reject
-          </button>
-        </div>
-      )}
-
-      {/* View button for in-progress and done columns */}
-      {column !== 'draft' && (
-        <div className="px-3 pb-3">
-          <button
-            onClick={(e) => { e.stopPropagation(); onReviewClick(spec.id); }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-border text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
-          >
-            <Eye size={13} />
-            View
-          </button>
-        </div>
-      )}
-    </div>
+    </button>
   );
 }
+
 
 /* ─── Column Component ──────────────────────────────────────────── */
 
@@ -237,12 +119,11 @@ const COLUMNS: ColumnConfig[] = [
 interface KanbanColumnProps {
   config: ColumnConfig;
   specs: SpecSummary[];
-  workspaceId: string;
   onReviewClick: (specId: string) => void;
-  onRemove: (specId: string) => void;
+  storyProgress?: Record<string, number>;
 }
 
-function KanbanColumn({ config, specs, workspaceId, onReviewClick, onRemove }: KanbanColumnProps) {
+function KanbanColumn({ config, specs, onReviewClick, storyProgress }: KanbanColumnProps) {
   const Icon = config.icon;
 
   return (
@@ -257,7 +138,7 @@ function KanbanColumn({ config, specs, workspaceId, onReviewClick, onRemove }: K
       </div>
 
       {/* Column body */}
-      <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-3">
+      <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-2">
         {specs.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <Icon size={32} className="text-muted/30 mb-2" />
@@ -265,12 +146,11 @@ function KanbanColumn({ config, specs, workspaceId, onReviewClick, onRemove }: K
           </div>
         ) : (
           specs.map((spec) => (
-            <SpecCard
+            <KanbanSpecCard
               key={spec.id}
               spec={spec}
-              workspaceId={workspaceId}
-              onReviewClick={onReviewClick}
-              onRemove={onRemove}
+              passedCount={storyProgress?.[spec.id]}
+              onClick={() => onReviewClick(spec.id)}
               column={config.key}
             />
           ))
@@ -291,6 +171,7 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
   const { workspaceId } = useWorkspace();
   const [specs, setSpecs] = useState<SpecSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [storyProgress, setStoryProgress] = useState<Record<string, number>>({});
 
   const fetchSpecs = useCallback(async () => {
     if (!workspaceId) { setSpecs([]); setLoading(false); return; }
@@ -303,6 +184,34 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
         (a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
       );
       setSpecs(sorted);
+
+      // Fetch story progress for non-draft specs
+      const nonDraft = sorted.filter((s) => s.status !== 'pending');
+      if (nonDraft.length > 0) {
+        try {
+          const runs = await apiFetch<{ items: Array<{ spec_path: string; id: number }> }>(
+            `/api/pipeline/runs?workspaceId=${workspaceId}&limit=100`
+          );
+          const progress: Record<string, number> = {};
+          for (const run of runs.items) {
+            // Extract spec slug from path like "forge/specs/approved/my-spec.json"
+            const slug = run.spec_path.replace(/^.*\//, '').replace(/\.json$/, '');
+            if (!progress[slug]) {
+              try {
+                const results = await apiFetch<{ items: Array<{ status: string }> }>(
+                  `/api/pipeline/runs/${run.id}/story-results`
+                );
+                progress[slug] = results.items.filter((r) => r.status === 'pass').length;
+              } catch {
+                // Story results not available for this run
+              }
+            }
+          }
+          setStoryProgress(progress);
+        } catch {
+          // Pipeline runs endpoint may not be available
+        }
+      }
     } catch {
       // Silently fail — no toast spam on background poll
     } finally {
@@ -316,10 +225,6 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
     const interval = setInterval(fetchSpecs, 10_000);
     return () => clearInterval(interval);
   }, [fetchSpecs]);
-
-  const handleRemove = useCallback((specId: string) => {
-    setSpecs((prev) => prev.filter((s) => s.id !== specId));
-  }, []);
 
   const handleReviewClick = useCallback((specId: string) => {
     if (onNavigateToSpecReview) {
@@ -366,9 +271,9 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
                 <div className="px-3 py-2.5 border-b border-border shrink-0">
                   <div className="h-5 w-24 bg-surface-100 rounded animate-pulse" />
                 </div>
-                <div className="flex-1 p-3 space-y-3">
+                <div className="flex-1 p-3 space-y-2">
                   {[1, 2].map((i) => (
-                    <div key={i} className="bg-panel border border-border rounded-lg h-28 animate-pulse" />
+                    <div key={i} className="bg-panel border border-border rounded-lg h-[120px] animate-pulse" />
                   ))}
                 </div>
               </div>
@@ -399,9 +304,8 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
                   key={col.key}
                   config={col}
                   specs={colSpecs}
-                  workspaceId={workspaceId!}
                   onReviewClick={handleReviewClick}
-                  onRemove={handleRemove}
+                  storyProgress={storyProgress}
                 />
               );
             })}
