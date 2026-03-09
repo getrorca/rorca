@@ -83,14 +83,19 @@ export default function DirectionTabbedPanel() {
 
   return (
     <div className="flex flex-col h-full">
+      <h1 className="sr-only">Direction</h1>
       {/* Tab bar with health indicator */}
-      <div className="flex items-center border-b border-border bg-panel shrink-0">
+      <div className="flex items-center border-b border-border bg-panel shrink-0" role="tablist" aria-label="Direction tabs">
         {TABS.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
           return (
             <button
               key={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`direction-tabpanel-${tab.id}`}
+              id={`direction-tab-${tab.id}`}
               onClick={() => setActiveTab(tab.id)}
               className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium transition-colors relative ${
                 isActive
@@ -98,7 +103,7 @@ export default function DirectionTabbedPanel() {
                   : 'text-muted hover:text-text'
               }`}
             >
-              <Icon size={13} />
+              <Icon size={13} aria-hidden="true" />
               {tab.label}
             </button>
           );
@@ -133,7 +138,12 @@ export default function DirectionTabbedPanel() {
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 min-h-0 overflow-hidden">
+      <div
+        className="flex-1 min-h-0 overflow-hidden"
+        role="tabpanel"
+        id={`direction-tabpanel-${activeTab}`}
+        aria-labelledby={`direction-tab-${activeTab}`}
+      >
         {activeTab === 'stack' && <DirectionStackPanel />}
         {activeTab === 'memory' && <MemoryPanel />}
         {activeTab === 'team' && <TeamDirectionPanel />}

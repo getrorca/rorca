@@ -99,10 +99,10 @@ export default function SettingsPanel() {
 
   return (
     <div
-      role="main"
       aria-label="Settings"
       className="h-full flex flex-col overflow-y-auto"
     >
+      <h1 className="sr-only">Settings</h1>
       <div className="p-4 sm:p-6 mx-auto w-full max-w-4xl">
         <Suspense fallback={<TabLoader />}>
           {/* Workspace group */}

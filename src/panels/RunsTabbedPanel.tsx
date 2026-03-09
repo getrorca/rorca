@@ -23,14 +23,19 @@ export default function RunsTabbedPanel({ onNavigate, onNavigateToRun }: RunsTab
 
   return (
     <div className="flex flex-col h-full">
+      <h1 className="sr-only">Runs</h1>
       {/* Tab bar */}
-      <div className="flex items-center border-b border-border bg-panel shrink-0">
+      <div className="flex items-center border-b border-border bg-panel shrink-0" role="tablist" aria-label="Runs tabs">
         {TABS.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
           return (
             <button
               key={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`runs-tabpanel-${tab.id}`}
+              id={`runs-tab-${tab.id}`}
               onClick={() => setActiveTab(tab.id)}
               className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium transition-colors relative ${
                 isActive
@@ -38,7 +43,7 @@ export default function RunsTabbedPanel({ onNavigate, onNavigateToRun }: RunsTab
                   : 'text-muted hover:text-text'
               }`}
             >
-              <Icon size={13} />
+              <Icon size={13} aria-hidden="true" />
               {tab.label}
             </button>
           );
@@ -46,7 +51,12 @@ export default function RunsTabbedPanel({ onNavigate, onNavigateToRun }: RunsTab
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 min-h-0 overflow-hidden">
+      <div
+        className="flex-1 min-h-0 overflow-hidden"
+        role="tabpanel"
+        id={`runs-tabpanel-${activeTab}`}
+        aria-labelledby={`runs-tab-${activeTab}`}
+      >
         {activeTab === 'active' && <PipelineMonitorPanel onNavigateToRun={onNavigateToRun} />}
         {activeTab === 'worktrees' && <WorktreesPanel />}
         {activeTab === 'compare' && <CompareRunsPanel onBack={() => setActiveTab('active')} />}

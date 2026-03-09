@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T11:31:17.327Z",
+  "lastUpdatedAt": "2026-03-09T11:49:04.758Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -183,6 +183,15 @@
       "finishedAt": "2026-03-09T11:31:17.327Z",
       "agentType": "claude",
       "elapsedMs": 677294
+    },
+    {
+      "storyId": "ULT-021",
+      "title": "Accessibility Audit and WCAG 2.1 AA Compliance",
+      "status": "passed",
+      "startedAt": "2026-03-09T11:31:31.147Z",
+      "finishedAt": "2026-03-09T11:49:04.757Z",
+      "agentType": "claude",
+      "elapsedMs": 1053610
     }
   ],
   "failedStories": [],
