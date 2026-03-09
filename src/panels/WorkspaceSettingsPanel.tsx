@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
-import { useToast, ToastContainer } from '../components/Toast';
+import { useGlobalToast } from '../contexts/ToastContext';
 import AgentsEditorSection from '../components/AgentsEditorSection';
 import ContextRoutingSettings from '../components/ContextRoutingSettings';
 import ContextFilesEditor from '../components/ContextFilesEditor';
@@ -59,7 +59,7 @@ const TABS: { id: WsSettingsTab; label: string; icon: typeof Settings2 }[] = [
 export default function WorkspaceSettingsPanel() {
   const [activeTab, setActiveTab] = useState<WsSettingsTab>('general');
   const { workspaceId } = useWorkspace();
-  const { toasts, show: showToast, dismiss } = useToast();
+  const { show: showToast } = useGlobalToast();
 
   if (!workspaceId) {
     return (
@@ -152,7 +152,6 @@ export default function WorkspaceSettingsPanel() {
         </div>
       </div>
 
-      <ToastContainer toasts={toasts} onDismiss={dismiss} />
     </div>
   );
 }
@@ -161,7 +160,7 @@ export default function WorkspaceSettingsPanel() {
 
 export interface WsSectionProps {
   workspaceId: string;
-  showToast: (message: string, type?: 'success' | 'error') => void;
+  showToast: (message: string, type?: 'success' | 'error' | 'warning' | 'info') => void;
 }
 
 // ─── Context Section (sub-tabs: Routing | Files) ────────────────────────────
