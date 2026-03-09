@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   Search, X, Clock, CheckCircle2, XCircle, AlertCircle,
   Check, ChevronRight, ChevronLeft, Play, GitBranch, GitFork,
   Loader2, Plus, ExternalLink,
   FileText, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
-  GripVertical,
+  GripVertical, Trash2, Palette,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -95,10 +95,19 @@ interface KanbanSpec {
   activeRunId?: number;
 }
 
+interface CustomColumnData {
+  id: number;
+  name: string;
+  color: string;
+  position: number;
+  specs: KanbanSpec[];
+}
+
 interface KanbanResponse {
   draft: KanbanSpec[];
   inProgress: KanbanSpec[];
   done: KanbanSpec[];
+  customColumns?: CustomColumnData[];
 }
 
 interface DirectionLayerData {
@@ -134,11 +143,35 @@ const STATUS_CONFIG: Record<SpecStatus, { label: string; icon: typeof CheckCircl
   rejected: { label: 'REJECTED', icon: XCircle, className: 'bg-error/15 text-error border-error/30', dotClass: 'bg-error' },
 };
 
-const BOARD_COLUMNS = [
-  { key: 'draft' as const, label: 'Draft', icon: FileText, emptyMessage: 'No draft specs', accentClass: 'bg-muted/15 text-muted', iconClass: 'text-muted', headerBg: '', color: '#71717a' },
-  { key: 'in-progress' as const, label: 'In Progress', icon: Play, emptyMessage: 'No specs in progress', accentClass: 'bg-accent/15 text-accent', iconClass: 'text-accent', headerBg: '', color: '#4f46e5' },
-  { key: 'done' as const, label: 'Done', icon: CheckCircle2, emptyMessage: 'No completed specs', accentClass: 'bg-success/15 text-success', iconClass: 'text-success', headerBg: '', color: '#10b981' },
+const SYSTEM_COLUMNS = [
+  { key: 'draft' as const, label: 'Draft', icon: FileText, emptyMessage: 'No draft specs', accentClass: 'bg-muted/15 text-muted', iconClass: 'text-muted', headerBg: '', color: '#71717a', system: true },
+  { key: 'in-progress' as const, label: 'In Progress', icon: Play, emptyMessage: 'No specs in progress', accentClass: 'bg-accent/15 text-accent', iconClass: 'text-accent', headerBg: '', color: '#4f46e5', system: true },
+  { key: 'done' as const, label: 'Done', icon: CheckCircle2, emptyMessage: 'No completed specs', accentClass: 'bg-success/15 text-success', iconClass: 'text-success', headerBg: '', color: '#10b981', system: true },
 ];
+
+// Legacy compat reference (used by keyboard nav and some helpers)
+const BOARD_COLUMNS = SYSTEM_COLUMNS;
+
+const COLUMN_COLORS: { name: string; hex: string }[] = [
+  { name: 'indigo', hex: '#6366f1' },
+  { name: 'blue', hex: '#3b82f6' },
+  { name: 'cyan', hex: '#06b6d4' },
+  { name: 'teal', hex: '#14b8a6' },
+  { name: 'emerald', hex: '#10b981' },
+  { name: 'green', hex: '#22c55e' },
+  { name: 'lime', hex: '#84cc16' },
+  { name: 'yellow', hex: '#eab308' },
+  { name: 'amber', hex: '#f59e0b' },
+  { name: 'orange', hex: '#f97316' },
+  { name: 'red', hex: '#ef4444' },
+  { name: 'pink', hex: '#ec4899' },
+];
+
+const MAX_CUSTOM_COLUMNS = 8;
+
+function colorHex(name: string): string {
+  return COLUMN_COLORS.find(c => c.name === name)?.hex ?? '#6366f1';
+}
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
 
@@ -331,8 +364,147 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   BOARD VIEW — Kanban columns (Draft, In Progress, Done)
+   BOARD VIEW — Kanban columns (Draft, In Progress, [Custom...], Done)
    ════════════════════════════════════════════════════════════════════ */
+
+/* ─── Add Column Popover ─── */
+function AddColumnPopover({ onAdd, disabled }: { onAdd: (name: string, color: string) => void; disabled: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [color, setColor] = useState('indigo');
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const handleSubmit = () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    onAdd(trimmed, color);
+    setName('');
+    setColor('indigo');
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative shrink-0 flex items-stretch" ref={ref}>
+      <button
+        onClick={() => !disabled && setOpen(!open)}
+        disabled={disabled}
+        title={disabled ? 'Maximum 8 columns reached' : 'Add custom column'}
+        className={`flex items-center justify-center w-10 border-l border-border transition-colors
+          ${disabled ? 'text-muted/30 cursor-not-allowed' : 'text-muted hover:text-accent hover:bg-surface-100/30 cursor-pointer'}`}
+      >
+        <Plus size={16} />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 z-50 w-64 bg-panel border border-border rounded-lg shadow-xl p-3 space-y-3">
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(); if (e.key === 'Escape') setOpen(false); }}
+            placeholder="Column name..."
+            className="w-full px-3 py-1.5 rounded-md border border-border bg-bg text-sm text-[var(--text)] placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/50"
+          />
+          <div className="grid grid-cols-6 gap-1.5">
+            {COLUMN_COLORS.map((c) => (
+              <button
+                key={c.name}
+                onClick={() => setColor(c.name)}
+                className={`w-7 h-7 rounded-md transition-all ${color === c.name ? 'ring-2 ring-offset-1 ring-offset-bg scale-110' : 'hover:scale-105'}`}
+                style={{ backgroundColor: c.hex, ...(color === c.name ? { boxShadow: `0 0 0 2px ${c.hex}` } : {}) }}
+                title={c.name}
+              />
+            ))}
+          </div>
+          <button
+            onClick={handleSubmit}
+            disabled={!name.trim()}
+            className="w-full py-1.5 rounded-md text-sm font-medium text-white transition-colors disabled:opacity-40"
+            style={{ backgroundColor: colorHex(color) }}
+          >
+            Add
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Color Picker Popover (for existing columns) ─── */
+function ColorPickerPopover({ currentColor, onChange }: { currentColor: string; onChange: (color: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        className="p-1 rounded hover:bg-surface-100/50 transition-colors"
+        title="Change color"
+      >
+        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: colorHex(currentColor) }} />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 z-50 bg-panel border border-border rounded-lg shadow-xl p-2"
+          onClick={(e) => e.stopPropagation()}>
+          <div className="grid grid-cols-6 gap-1.5">
+            {COLUMN_COLORS.map((c) => (
+              <button
+                key={c.name}
+                onClick={() => { onChange(c.name); setOpen(false); }}
+                className={`w-6 h-6 rounded-md transition-all ${currentColor === c.name ? 'ring-2 ring-offset-1 ring-offset-bg scale-110' : 'hover:scale-105'}`}
+                style={{ backgroundColor: c.hex }}
+                title={c.name}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Delete Column Confirmation ─── */
+function DeleteColumnDialog({ columnName, specCount, onConfirm, onCancel }: {
+  columnName: string; specCount: number; onConfirm: () => void; onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50" onClick={onCancel}>
+      <div className="bg-panel border border-border rounded-xl shadow-2xl p-5 w-[380px] space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={20} className="text-warning" />
+          <h3 className="text-sm font-semibold text-[var(--text)]">Delete "{columnName}"?</h3>
+        </div>
+        <p className="text-sm text-muted">
+          {specCount > 0
+            ? `${specCount} spec${specCount === 1 ? '' : 's'} will be moved back to In Progress.`
+            : 'This column is empty.'}
+        </p>
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel} className="px-3 py-1.5 rounded-md text-sm text-muted hover:text-[var(--text)] transition-colors">Cancel</button>
+          <button onClick={onConfirm} className="px-3 py-1.5 rounded-md text-sm font-medium bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors">Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   workspaceId: string;
@@ -355,7 +527,10 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   const dragOverColumnRef = useRef<string | null>(null);
   const dragLeaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const dragGhostRef = useRef<HTMLDivElement | null>(null);
-  const [dragRenderKey, setDragRenderKey] = useState(0); // single state bump for visual updates
+  const [dragRenderKey, setDragRenderKey] = useState(0);
+  // Column header drag state
+  const dragColumnIdRef = useRef<number | null>(null);
+  const dragColumnOverIdRef = useRef<number | null>(null);
   // Touch drag refs
   const touchDragTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const touchDragActiveRef = useRef(false);
@@ -366,6 +541,11 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   // Optimistic kanban state for rollback
   const [optimisticKanban, setOptimisticKanban] = useState<KanbanResponse | null>(null);
   const effectiveKanban = optimisticKanban ?? kanban;
+
+  // Custom column management state
+  const [editingColumnId, setEditingColumnId] = useState<number | null>(null);
+  const [editingColumnName, setEditingColumnName] = useState('');
+  const [deleteDialog, setDeleteDialog] = useState<{ id: number; name: string; specCount: number } | null>(null);
 
   // Column collapse state — persisted per workspace
   const collapseKey = `${COLLAPSE_KEY_PREFIX}${workspaceId}`;
@@ -428,6 +608,76 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     debouncedFetchKanban();
   });
 
+  // ─── Custom column CRUD ───
+  const handleAddColumn = useCallback(async (name: string, color: string) => {
+    try {
+      await apiFetch('/api/specs/kanban/columns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, name, color }),
+      });
+      toast.show(`Column "${name}" added`, 'success');
+      fetchKanban();
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to add column', 'error');
+    }
+  }, [workspaceId, fetchKanban, toast]);
+
+  const handleRenameColumn = useCallback(async (colId: number, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) { setEditingColumnId(null); return; }
+    try {
+      await apiFetch(`/api/specs/kanban/columns/${colId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      fetchKanban();
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to rename column', 'error');
+    } finally {
+      setEditingColumnId(null);
+    }
+  }, [fetchKanban, toast]);
+
+  const handleChangeColor = useCallback(async (colId: number, color: string) => {
+    try {
+      await apiFetch(`/api/specs/kanban/columns/${colId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ color }),
+      });
+      fetchKanban();
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to change color', 'error');
+    }
+  }, [fetchKanban, toast]);
+
+  const handleDeleteColumn = useCallback(async (colId: number) => {
+    try {
+      await apiFetch(`/api/specs/kanban/columns/${colId}`, { method: 'DELETE' });
+      toast.show('Column deleted', 'success');
+      fetchKanban();
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to delete column', 'error');
+    } finally {
+      setDeleteDialog(null);
+    }
+  }, [fetchKanban, toast]);
+
+  const handleReorderColumn = useCallback(async (colId: number, newPosition: number) => {
+    try {
+      await apiFetch(`/api/specs/kanban/columns/${colId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ position: newPosition }),
+      });
+      fetchKanban();
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to reorder column', 'error');
+    }
+  }, [fetchKanban, toast]);
+
   const handleApprove = useCallback(async (specId: string) => {
     if (!workspaceId) return;
     setActionLoadingMap((prev) => ({ ...prev, [specId]: 'approve' }));
@@ -468,19 +718,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     if (announceRef.current) { announceRef.current.textContent = ''; requestAnimationFrame(() => { if (announceRef.current) announceRef.current.textContent = msg; }); }
   }, []);
 
-  // Column label helper
-  const columnLabel = useCallback((key: string) => BOARD_COLUMNS.find(c => c.key === key)?.label ?? key, []);
-
-  // Execute drop transition (source→target) with optimistic UI
+  // Execute card drop transition (source→target) with optimistic UI
   const executeMove = useCallback(async (specId: string, sourceColumn: string, targetColumn: string) => {
     if (sourceColumn === targetColumn) return;
-
-    // Determine the spec and build optimistic state
-    const sourceKey = sourceColumn === 'in-progress' ? 'inProgress' : sourceColumn as 'draft' | 'done';
-    const targetKey = targetColumn === 'in-progress' ? 'inProgress' : targetColumn as 'draft' | 'done';
-    const base = effectiveKanban;
-    const spec = (base[sourceKey] as KanbanSpec[]).find(s => s.id === specId);
-    if (!spec) return;
 
     // Block moves TO done (read-only from pipeline completion)
     if (targetColumn === 'done') {
@@ -488,11 +728,39 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
       return;
     }
 
+    // Handle custom column assignments
+    const isCustomSource = sourceColumn.startsWith('custom-');
+    const isCustomTarget = targetColumn.startsWith('custom-');
+
+    if (isCustomSource || isCustomTarget) {
+      // Assign/unassign spec to custom column
+      const targetColumnId = isCustomTarget ? Number(targetColumn.replace('custom-', '')) : null;
+      try {
+        await apiFetch('/api/specs/kanban/columns/assign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId, specId, columnId: targetColumnId }),
+        });
+        fetchKanban();
+      } catch (err: any) {
+        toast.show(err?.message || 'Move failed', 'error');
+      }
+      return;
+    }
+
+    // System column moves
+    const sourceKey = sourceColumn === 'in-progress' ? 'inProgress' : sourceColumn as 'draft' | 'done';
+    const targetKey = targetColumn === 'in-progress' ? 'inProgress' : targetColumn as 'draft' | 'done';
+    const base = effectiveKanban;
+    const spec = (base[sourceKey] as KanbanSpec[]).find(s => s.id === specId);
+    if (!spec) return;
+
     // Optimistic update
     const optimistic: KanbanResponse = {
       draft: [...base.draft],
       inProgress: [...base.inProgress],
       done: [...base.done],
+      customColumns: base.customColumns ? [...base.customColumns] : [],
     };
     (optimistic[sourceKey] as KanbanSpec[]) = (optimistic[sourceKey] as KanbanSpec[]).filter(s => s.id !== specId);
     (optimistic[targetKey] as KanbanSpec[]) = [...(optimistic[targetKey] as KanbanSpec[]), spec];
@@ -501,7 +769,6 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     const specTitle = slugToTitle(specId);
 
     try {
-      // draft → in-progress = approve
       if (sourceColumn === 'draft' && targetColumn === 'in-progress') {
         await apiFetch(`/api/specs/${encodeURIComponent(specId)}/approve`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -509,17 +776,17 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
         });
         toast.show(`Spec "${specTitle}" approved`, 'success');
       } else {
-        toast.show('Invalid move — only Draft → In Progress (approve) is supported', 'error');
+        toast.show('Invalid move — only Draft → In Progress (approve) is supported for system columns', 'error');
         setOptimisticKanban(null);
         return;
       }
-      announce(`Moved ${specTitle} from ${columnLabel(sourceColumn)} to ${columnLabel(targetColumn)}`);
+      announce(`Moved ${specTitle}`);
       fetchKanban();
     } catch (err: any) {
       toast.show(err?.message || 'Move failed — reverted', 'error');
       setOptimisticKanban(null);
     }
-  }, [effectiveKanban, workspaceId, toast, fetchKanban, announce, columnLabel]);
+  }, [effectiveKanban, workspaceId, toast, fetchKanban, announce]);
 
   // Clean up ghost element
   const cleanupGhost = useCallback(() => {
@@ -529,33 +796,27 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     }
   }, []);
 
-  // Drag and drop handlers (HTML5 API, using refs for zero re-renders during drag)
-  const handleDragStart = useCallback((e: React.DragEvent, specId: string, columnKey: string) => {
+  // Card drag handlers (HTML5 API)
+  const handleDragStart = useCallback((e: React.DragEvent, specId: string, columnKey: string, colColor: string) => {
     dragSpecIdRef.current = specId;
     dragFromColumnRef.current = columnKey;
 
-    // Set dataTransfer payload
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('application/json', JSON.stringify({ specId, fromColumnId: columnKey, fromColumnType: columnKey }));
+    e.dataTransfer.setData('text/plain', specId);
 
-    // Custom drag ghost
-    const colDef = BOARD_COLUMNS.find(c => c.key === columnKey);
     const ghost = document.createElement('div');
-    ghost.style.cssText = `position:fixed;top:-9999px;left:-9999px;padding:8px 14px;border-radius:8px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:13px;font-weight:600;border-left:3px solid ${colDef?.color ?? '#4f46e5'};box-shadow:0 4px 16px rgba(0,0,0,0.3);white-space:nowrap;pointer-events:none;z-index:99999;`;
+    ghost.style.cssText = `position:fixed;top:-9999px;left:-9999px;padding:8px 14px;border-radius:8px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:13px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 4px 16px rgba(0,0,0,0.3);white-space:nowrap;pointer-events:none;z-index:99999;`;
     ghost.textContent = slugToTitle(specId);
     document.body.appendChild(ghost);
     dragGhostRef.current = ghost;
     e.dataTransfer.setDragImage(ghost, 10, 10);
 
-    // Apply opacity to source card via DOM (no re-render)
     const target = e.currentTarget as HTMLElement;
     requestAnimationFrame(() => { target.style.opacity = '0.5'; });
-
     setDragRenderKey(k => k + 1);
   }, []);
 
   const handleDragEnd = useCallback((e: React.DragEvent) => {
-    // Restore source card opacity
     (e.currentTarget as HTMLElement).style.opacity = '';
     dragSpecIdRef.current = null;
     dragFromColumnRef.current = null;
@@ -576,7 +837,6 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   }, []);
 
   const handleDragLeave = useCallback(() => {
-    // 50ms debounce to prevent flicker between child elements
     clearTimeout(dragLeaveTimerRef.current);
     dragLeaveTimerRef.current = setTimeout(() => {
       dragOverColumnRef.current = null;
@@ -587,6 +847,25 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   const handleDrop = useCallback(async (e: React.DragEvent, targetColumn: string) => {
     e.preventDefault();
     clearTimeout(dragLeaveTimerRef.current);
+
+    // Check if this is a column header reorder
+    if (dragColumnIdRef.current !== null) {
+      const fromColId = dragColumnIdRef.current;
+      dragColumnIdRef.current = null;
+      dragColumnOverIdRef.current = null;
+      setDragRenderKey(k => k + 1);
+
+      // Target must be a custom column key like "custom-123"
+      if (targetColumn.startsWith('custom-')) {
+        const customCols = effectiveKanban.customColumns || [];
+        const targetIdx = customCols.findIndex(c => `custom-${c.id}` === targetColumn);
+        if (targetIdx !== -1) {
+          handleReorderColumn(fromColId, targetIdx);
+        }
+      }
+      return;
+    }
+
     const specId = dragSpecIdRef.current;
     const sourceColumn = dragFromColumnRef.current;
     dragSpecIdRef.current = null;
@@ -597,10 +876,35 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
 
     if (!specId || !sourceColumn || !workspaceId) return;
     await executeMove(specId, sourceColumn, targetColumn);
-  }, [workspaceId, executeMove, cleanupGhost]);
+  }, [workspaceId, executeMove, cleanupGhost, effectiveKanban, handleReorderColumn]);
 
-  // Touch drag handlers (long-press 300ms to initiate)
-  const handleTouchStart = useCallback((e: React.TouchEvent, specId: string, columnKey: string) => {
+  // Column header drag handlers
+  const handleColumnDragStart = useCallback((e: React.DragEvent, colId: number, colName: string, colColor: string) => {
+    e.stopPropagation();
+    dragColumnIdRef.current = colId;
+
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', `col-${colId}`);
+
+    const ghost = document.createElement('div');
+    ghost.style.cssText = `position:fixed;top:-9999px;left:-9999px;padding:6px 12px;border-radius:6px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:12px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 4px 16px rgba(0,0,0,0.3);pointer-events:none;z-index:99999;`;
+    ghost.textContent = colName;
+    document.body.appendChild(ghost);
+    dragGhostRef.current = ghost;
+    e.dataTransfer.setDragImage(ghost, 10, 10);
+
+    setDragRenderKey(k => k + 1);
+  }, []);
+
+  const handleColumnDragEnd = useCallback(() => {
+    dragColumnIdRef.current = null;
+    dragColumnOverIdRef.current = null;
+    cleanupGhost();
+    setDragRenderKey(k => k + 1);
+  }, [cleanupGhost]);
+
+  // Touch drag handlers
+  const handleTouchStart = useCallback((e: React.TouchEvent, specId: string, columnKey: string, colColor: string) => {
     const touch = e.touches[0];
     touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
     touchDragActiveRef.current = false;
@@ -610,12 +914,10 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
       dragSpecIdRef.current = specId;
       dragFromColumnRef.current = columnKey;
 
-      // Create floating clone
       const target = e.currentTarget as HTMLElement;
       const rect = target.getBoundingClientRect();
       const clone = document.createElement('div');
-      const colDef = BOARD_COLUMNS.find(c => c.key === columnKey);
-      clone.style.cssText = `position:fixed;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;padding:8px 14px;border-radius:8px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:13px;font-weight:600;border-left:3px solid ${colDef?.color ?? '#4f46e5'};box-shadow:0 8px 24px rgba(0,0,0,0.4);pointer-events:none;z-index:99999;opacity:0.9;`;
+      clone.style.cssText = `position:fixed;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;padding:8px 14px;border-radius:8px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:13px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 8px 24px rgba(0,0,0,0.4);pointer-events:none;z-index:99999;opacity:0.9;`;
       clone.textContent = slugToTitle(specId);
       document.body.appendChild(clone);
       touchCloneRef.current = clone;
@@ -627,7 +929,6 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
 
   const handleTouchMove = useCallback((e: React.TouchEvent) => {
     if (!touchDragActiveRef.current) {
-      // If finger moved > 10px before 300ms, cancel long-press
       if (touchStartPosRef.current) {
         const touch = e.touches[0];
         const dx = touch.clientX - touchStartPosRef.current.x;
@@ -638,17 +939,12 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
       }
       return;
     }
-
     e.preventDefault();
     const touch = e.touches[0];
-
-    // Move floating clone
     if (touchCloneRef.current) {
       touchCloneRef.current.style.top = `${touch.clientY - 20}px`;
       touchCloneRef.current.style.left = `${touch.clientX - 20}px`;
     }
-
-    // Detect which column is under the finger
     const el = document.elementFromPoint(touch.clientX, touch.clientY);
     if (el) {
       const colEl = el.closest('[data-column-key]');
@@ -663,56 +959,44 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   const handleTouchEnd = useCallback((e: React.TouchEvent) => {
     clearTimeout(touchDragTimerRef.current);
     (e.currentTarget as HTMLElement).style.opacity = '';
-
     if (touchDragActiveRef.current && dragSpecIdRef.current && dragFromColumnRef.current) {
       const specId = dragSpecIdRef.current;
       const sourceColumn = dragFromColumnRef.current;
       const targetColumn = dragOverColumnRef.current;
-
       dragSpecIdRef.current = null;
       dragFromColumnRef.current = null;
       dragOverColumnRef.current = null;
       touchDragActiveRef.current = false;
-
-      if (touchCloneRef.current) {
-        document.body.removeChild(touchCloneRef.current);
-        touchCloneRef.current = null;
-      }
+      if (touchCloneRef.current) { document.body.removeChild(touchCloneRef.current); touchCloneRef.current = null; }
       setDragRenderKey(k => k + 1);
-
       if (targetColumn && targetColumn !== sourceColumn && workspaceId) {
         executeMove(specId, sourceColumn, targetColumn);
       }
     } else {
       touchDragActiveRef.current = false;
-      if (touchCloneRef.current) {
-        document.body.removeChild(touchCloneRef.current);
-        touchCloneRef.current = null;
-      }
+      if (touchCloneRef.current) { document.body.removeChild(touchCloneRef.current); touchCloneRef.current = null; }
     }
   }, [workspaceId, executeMove]);
 
-  // Keyboard card movement: Ctrl+ArrowLeft/Right moves card to adjacent column
+  // Keyboard card movement
   const handleCardKeyDown = useCallback((e: React.KeyboardEvent, specId: string, columnKey: string) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      onSpecClick(specId);
-      return;
-    }
-
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSpecClick(specId); return; }
     if (!e.ctrlKey && !e.metaKey) return;
-    const colIdx = BOARD_COLUMNS.findIndex(c => c.key === columnKey);
+
+    // Build full column key list for keyboard nav
+    const customCols = effectiveKanban.customColumns || [];
+    const allKeys = ['draft', 'in-progress', ...customCols.map(c => `custom-${c.id}`), 'done'];
+    const colIdx = allKeys.indexOf(columnKey);
     if (colIdx === -1) return;
 
     let targetIdx = -1;
-    if (e.key === 'ArrowRight' && colIdx < BOARD_COLUMNS.length - 1) targetIdx = colIdx + 1;
+    if (e.key === 'ArrowRight' && colIdx < allKeys.length - 1) targetIdx = colIdx + 1;
     if (e.key === 'ArrowLeft' && colIdx > 0) targetIdx = colIdx - 1;
     if (targetIdx === -1) return;
 
     e.preventDefault();
-    const targetCol = BOARD_COLUMNS[targetIdx].key;
-    executeMove(specId, columnKey, targetCol);
-  }, [executeMove, onSpecClick]);
+    executeMove(specId, columnKey, allKeys[targetIdx]);
+  }, [executeMove, onSpecClick, effectiveKanban]);
 
   // Cleanup on unmount
   useEffect(() => () => {
@@ -725,49 +1009,73 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   // Reset optimistic state when real kanban updates
   useEffect(() => { setOptimisticKanban(null); }, [kanban]);
 
-  // Build story progress from effective (possibly optimistic) kanban data
+  // Build story progress from all column data
   const storyProgress: Record<string, number> = {};
   for (const k of [...effectiveKanban.inProgress, ...effectiveKanban.done]) {
     if (k.passedStories !== undefined) storyProgress[k.id] = k.passedStories;
   }
+  for (const cc of (effectiveKanban.customColumns || [])) {
+    for (const s of cc.specs) {
+      if (s.passedStories !== undefined) storyProgress[s.id] = s.passedStories;
+    }
+  }
 
-  const totalCount = effectiveKanban.draft.length + effectiveKanban.inProgress.length + effectiveKanban.done.length;
+  const customCols = effectiveKanban.customColumns || [];
+  const customSpecCount = customCols.reduce((n, c) => n + c.specs.length, 0);
+  const totalCount = effectiveKanban.draft.length + effectiveKanban.inProgress.length + effectiveKanban.done.length + customSpecCount;
+
+  // Build unified column list: Draft, In Progress, [custom...], Done
+  type ColumnDef = {
+    key: string;
+    label: string;
+    icon: typeof FileText;
+    emptyMessage: string;
+    accentClass: string;
+    iconClass: string;
+    color: string;
+    system: boolean;
+    customId?: number;
+    specs: KanbanSpec[];
+  };
+
+  const allColumns: ColumnDef[] = useMemo(() => {
+    const cols: ColumnDef[] = [
+      { ...SYSTEM_COLUMNS[0], specs: effectiveKanban.draft },
+      { ...SYSTEM_COLUMNS[1], specs: effectiveKanban.inProgress },
+    ];
+    for (const cc of customCols) {
+      cols.push({
+        key: `custom-${cc.id}`,
+        label: cc.name,
+        icon: Layers,
+        emptyMessage: 'Drag specs here or click + to add cards',
+        accentClass: '',
+        iconClass: '',
+        color: colorHex(cc.color),
+        system: false,
+        customId: cc.id,
+        specs: cc.specs,
+      });
+    }
+    cols.push({ ...SYSTEM_COLUMNS[2], specs: effectiveKanban.done });
+    return cols;
+  }, [effectiveKanban, customCols]);
 
   if (loading) {
     return (
       <div className="flex h-full">
-        {[0, 1, 2].map((col) => {
-          const isCollapsed = !!collapsedColumns[BOARD_COLUMNS[col].key];
-          return (
-            <div
-              key={col}
-              className={`flex flex-col min-h-0 ${col > 0 ? 'border-l border-border' : ''}`}
-              style={{
-                flex: isCollapsed ? '0 0 40px' : '1 1 0%',
-                minWidth: isCollapsed ? 40 : 280,
-                maxWidth: isCollapsed ? 40 : undefined,
-              }}
-            >
-              {isCollapsed ? (
-                <div className="flex flex-col items-center pt-3 gap-2">
-                  <div className="w-2 h-2 rounded-full bg-surface-100 animate-pulse" />
-                  <div className="h-3 w-3 bg-surface-100 rounded animate-pulse" />
-                </div>
-              ) : (
-                <>
-                  <div className="px-3 py-2.5 border-b border-border shrink-0">
-                    <div className="h-5 w-24 bg-surface-100 rounded animate-pulse" />
-                  </div>
-                  <div className="flex-1 p-3 space-y-2">
-                    {[1, 2].map((i) => (
-                      <div key={i} className="bg-panel border border-border rounded-lg h-[120px] animate-pulse" />
-                    ))}
-                  </div>
-                </>
-              )}
+        {[0, 1, 2].map((col) => (
+          <div key={col} className={`flex flex-col min-h-0 flex-1 ${col > 0 ? 'border-l border-border' : ''}`}>
+            <div className="px-3 py-2.5 border-b border-border shrink-0">
+              <div className="h-5 w-24 bg-surface-100 rounded animate-pulse" />
             </div>
-          );
-        })}
+            <div className="flex-1 p-3 space-y-2">
+              {[1, 2].map((i) => (
+                <div key={i} className="bg-panel border border-border rounded-lg h-[120px] animate-pulse" />
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     );
   }
@@ -792,7 +1100,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     );
   }
 
-  if (totalCount === 0) {
+  if (totalCount === 0 && customCols.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4 text-center">
         <Inbox size={48} className="text-muted/40" />
@@ -804,28 +1112,107 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     );
   }
 
-  const columnData: Record<string, KanbanSpec[]> = {
-    'draft': effectiveKanban.draft,
-    'in-progress': effectiveKanban.inProgress,
-    'done': effectiveKanban.done,
-  };
+  // Render a spec card (shared between all columns)
+  const renderCard = (spec: KanbanSpec, colKey: string, colColor: string, isDraft: boolean) => {
+    const total = spec.storyCount;
+    const passed = storyProgress[spec.id] ?? 0;
+    const hasProgress = storyProgress[spec.id] !== undefined && colKey !== 'draft';
+    const progressPct = total > 0 ? Math.round((passed / total) * 100) : 0;
+    const actionLoading = actionLoadingMap[spec.id] ?? null;
+    const isActioning = actionLoading !== null;
+    const hasActiveRun = activeRunSpecs.has(spec.id);
 
-  // Max card count across all columns — for progress bar height scaling
-  const maxCardCount = Math.max(1, ...BOARD_COLUMNS.map(c => (columnData[c.key] || []).length));
+    return (
+      <div key={spec.id} className="group relative">
+        <div
+          role="button"
+          tabIndex={0}
+          draggable
+          aria-label={`${slugToTitle(spec.id)}, ${total} stories. Ctrl+Arrow to move.`}
+          onDragStart={(e) => handleDragStart(e, spec.id, colKey, colColor)}
+          onDragEnd={handleDragEnd}
+          onTouchStart={(e) => handleTouchStart(e, spec.id, colKey, colColor)}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          onKeyDown={(e) => handleCardKeyDown(e, spec.id, colKey)}
+          onFocus={() => { focusedCardRef.current = { specId: spec.id, columnKey: colKey }; }}
+          onClick={() => !isActioning && onSpecClick(spec.id)}
+          className={`w-full h-[120px] bg-panel border rounded-lg p-3 text-left
+            flex flex-col justify-between overflow-hidden cursor-grab select-none
+            transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
+            hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
+            ${isActioning ? 'opacity-60 pointer-events-none' : ''} border-border`}
+        >
+          <div className="min-w-0">
+            <div className="flex items-start gap-1.5">
+              <GripVertical size={12} className="text-muted/30 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
+              <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
+                {slugToTitle(spec.id)}
+              </h3>
+              {hasActiveRun && (
+                <span className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30 animate-pulse">
+                  <Play size={8} className="fill-current" /> Running
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center justify-between gap-2 mt-auto min-w-0">
+            <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
+              <Layers size={10} />
+              {hasProgress ? `${passed}/${total} stories` : `${total} ${total === 1 ? 'story' : 'stories'}`}
+            </span>
+            <span className="shrink-0 text-[11px] text-muted flex items-center gap-1">
+              <Clock size={10} />
+              {relativeTime(spec.generatedAt)}
+            </span>
+          </div>
+          {hasProgress && (
+            <div className="w-full h-1 rounded-full bg-surface-200 mt-1.5 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-300 ${progressPct === 100 ? 'bg-success' : 'bg-accent'}`}
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+          )}
+        </div>
+        {isDraft && (
+          <div className={`absolute top-2 right-2 flex items-center gap-1 ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity duration-150`}>
+            <button type="button" onClick={(e) => { e.stopPropagation(); handleApprove(spec.id); }} disabled={isActioning} title="Approve spec"
+              className="p-1.5 rounded-md bg-success/15 text-success border border-success/30 hover:bg-success/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              {actionLoading === 'approve' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+            </button>
+            <button type="button" onClick={(e) => { e.stopPropagation(); handleDeny(spec.id); }} disabled={isActioning} title="Deny spec"
+              className="p-1.5 rounded-md bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              {actionLoading === 'deny' ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="flex h-full board-columns-container">
-      {/* aria-live region for screen reader announcements */}
       <div ref={announceRef} aria-live="assertive" aria-atomic="true" className="sr-only" />
 
-      {BOARD_COLUMNS.map((col, colIdx) => {
-        const specs = columnData[col.key] || [];
+      {allColumns.map((col, colIdx) => {
+        const specs = col.specs;
         const Icon = col.icon;
-        const isDragOver = dragOverColumnRef.current === col.key && dragSpecIdRef.current != null;
+        const isDragOver = dragOverColumnRef.current === col.key && (dragSpecIdRef.current != null || dragColumnIdRef.current != null);
         const isCollapsed = !!collapsedColumns[col.key];
-        const progressBarHeight = Math.min(50, (specs.length / maxCardCount) * 50); // vh, max 50
+        const isDraft = col.key === 'draft';
+        const isCustom = !col.system;
+        const isDoneColumn = col.key === 'done';
 
         return (
+          <React.Fragment key={col.key}>
+          {/* Add column button — render before Done column */}
+          {isDoneColumn && (
+            <AddColumnPopover
+              onAdd={handleAddColumn}
+              disabled={customCols.length >= MAX_CUSTOM_COLUMNS}
+            />
+          )}
           <div
             key={col.key}
             data-column-key={col.key}
@@ -833,10 +1220,10 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
               ${colIdx > 0 ? 'border-l border-border' : ''}`}
             style={{
               width: isCollapsed ? 40 : undefined,
-              minWidth: isCollapsed ? 40 : 280,
+              minWidth: isCollapsed ? 40 : 220,
               maxWidth: isCollapsed ? 40 : undefined,
               flex: isCollapsed ? '0 0 40px' : '1 1 0%',
-              transition: 'flex 300ms cubic-bezier(0.34, 1.56, 0.64, 1), width 300ms cubic-bezier(0.34, 1.56, 0.64, 1), min-width 300ms cubic-bezier(0.34, 1.56, 0.64, 1), max-width 300ms cubic-bezier(0.34, 1.56, 0.64, 1)',
+              transition: 'flex 300ms cubic-bezier(0.34, 1.56, 0.64, 1), width 300ms, min-width 300ms, max-width 300ms',
               overflow: 'hidden',
               ...(isDragOver && !isCollapsed ? { border: `2px dashed ${col.color}`, backgroundColor: `${col.color}26` } : {}),
             }}
@@ -845,7 +1232,6 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
             onDrop={isCollapsed ? undefined : (e) => handleDrop(e, col.key)}
           >
             {isCollapsed ? (
-              /* ─── Collapsed column ─── */
               <div
                 role="button"
                 tabIndex={0}
@@ -855,160 +1241,121 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
                 className="flex flex-col items-center h-full cursor-pointer hover:bg-surface-100/50 transition-colors select-none"
                 style={{ width: 40 }}
               >
-                {/* Color dot */}
                 <div className="shrink-0 mt-3 mb-1.5 w-2 h-2 rounded-full" style={{ backgroundColor: col.color }} />
-
-                {/* Count badge */}
-                <span className={`shrink-0 text-[10px] font-semibold px-1 py-0.5 rounded ${col.accentClass}`}>
+                <span className="shrink-0 text-[10px] font-semibold px-1 py-0.5 rounded" style={{ color: col.color }}>
                   {specs.length}
                 </span>
-
-                {/* Vertical label */}
                 <span
                   className="text-[11px] font-medium text-muted mt-3 whitespace-nowrap"
                   style={{ writingMode: 'vertical-rl', textOrientation: 'mixed' }}
                 >
                   {col.label}
                 </span>
-
-                {/* Progress bar — height proportional to card count */}
-                {specs.length > 0 && (
-                  <div
-                    className="mt-auto mb-3 w-1 rounded-full overflow-hidden"
-                    style={{ height: `${progressBarHeight}vh` }}
-                  >
-                    <div
-                      className="w-full h-full rounded-full"
-                      style={{
-                        background: `linear-gradient(to bottom, ${col.color}, color-mix(in srgb, ${col.color} 20%, transparent))`,
-                      }}
-                    />
-                  </div>
-                )}
-
-                {/* Expand chevron */}
-                <ChevronRight size={12} className="shrink-0 text-muted/50 mb-2" />
+                <ChevronRight size={12} className="shrink-0 text-muted/50 mt-auto mb-2" />
               </div>
             ) : (
-              /* ─── Expanded column ─── */
               <>
                 {/* Column header */}
                 <div
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`Collapse ${col.label} column`}
-                  onClick={() => toggleCollapse(col.key)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(col.key); } }}
-                  className="flex items-center gap-2 px-3 py-2.5 border-b border-border shrink-0 cursor-pointer hover:bg-surface-100/30 transition-colors select-none"
+                  className={`flex items-center gap-2 px-3 py-2.5 border-b border-border shrink-0 select-none
+                    ${isCustom ? 'cursor-grab' : 'cursor-pointer hover:bg-surface-100/30'} transition-colors`}
+                  draggable={isCustom}
+                  onDragStart={isCustom && col.customId ? (e) => handleColumnDragStart(e, col.customId!, col.label, col.color) : undefined}
+                  onDragEnd={isCustom ? handleColumnDragEnd : undefined}
+                  onClick={isCustom ? undefined : () => toggleCollapse(col.key)}
+                  onKeyDown={!isCustom ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(col.key); } } : undefined}
+                  role={isCustom ? undefined : 'button'}
+                  tabIndex={isCustom ? undefined : 0}
+                  aria-label={isCustom ? undefined : `Collapse ${col.label} column`}
                 >
-                  <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: col.color }} />
-                  <Icon size={14} className={col.iconClass} />
-                  <span className="text-sm font-medium text-[var(--text)]">{col.label}</span>
-                  <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-full ${col.accentClass}`}>
+                  {isCustom ? (
+                    <ColorPickerPopover currentColor={customCols.find(c => c.id === col.customId)?.color || 'indigo'} onChange={(c) => col.customId && handleChangeColor(col.customId, c)} />
+                  ) : (
+                    <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: col.color }} />
+                  )}
+
+                  {isCustom && col.customId != null ? (
+                    <GripVertical size={12} className="text-muted/30 shrink-0" />
+                  ) : (
+                    <Icon size={14} style={{ color: col.color }} />
+                  )}
+
+                  {/* Inline rename for custom columns */}
+                  {isCustom && editingColumnId === col.customId ? (
+                    <input
+                      autoFocus
+                      value={editingColumnName}
+                      onChange={(e) => setEditingColumnName(e.target.value)}
+                      onBlur={() => col.customId != null && handleRenameColumn(col.customId, editingColumnName)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') col.customId != null && handleRenameColumn(col.customId, editingColumnName);
+                        if (e.key === 'Escape') setEditingColumnId(null);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex-1 min-w-0 px-1 py-0 rounded text-sm font-medium bg-bg border border-accent/50 text-[var(--text)] focus:outline-none focus:ring-1 focus:ring-accent/50"
+                    />
+                  ) : (
+                    <span
+                      className="text-sm font-medium text-[var(--text)] truncate"
+                      onDoubleClick={isCustom && col.customId != null ? (e) => {
+                        e.stopPropagation();
+                        setEditingColumnId(col.customId!);
+                        setEditingColumnName(col.label);
+                      } : undefined}
+                      title={isCustom ? 'Double-click to rename' : undefined}
+                    >
+                      {col.label}
+                    </span>
+                  )}
+
+                  <span className="text-[11px] font-medium px-1.5 py-0.5 rounded-full" style={{ color: col.color, backgroundColor: `${col.color}20` }}>
                     {specs.length}
                   </span>
-                  <ChevronLeft size={12} className="ml-auto text-muted/40 shrink-0" />
+
+                  {/* Delete button for custom columns */}
+                  {isCustom && col.customId != null && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setDeleteDialog({ id: col.customId!, name: col.label, specCount: specs.length }); }}
+                      className="ml-auto p-1 rounded text-muted/40 hover:text-error hover:bg-error/10 transition-colors opacity-0 group-hover:opacity-100"
+                      title="Delete column"
+                      style={{ opacity: undefined }}
+                      onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+                      onMouseLeave={(e) => (e.currentTarget.style.opacity = '')}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+
+                  {col.system && <ChevronLeft size={12} className="ml-auto text-muted/40 shrink-0" />}
                 </div>
 
                 {/* Column body */}
                 <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-2">
                   {specs.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <div className={`flex flex-col items-center justify-center py-12 text-center ${isCustom ? 'border-2 border-dashed border-border rounded-lg' : ''}`}>
                       <Icon size={32} className="text-muted/30 mb-2" />
                       <p className="text-sm text-muted">{col.emptyMessage}</p>
                     </div>
                   ) : (
-                    specs.map((spec) => {
-                      const total = spec.storyCount;
-                      const passed = storyProgress[spec.id] ?? 0;
-                      const hasProgress = storyProgress[spec.id] !== undefined && col.key !== 'draft';
-                      const progressPct = total > 0 ? Math.round((passed / total) * 100) : 0;
-                      const isDraft = col.key === 'draft';
-                      const actionLoading = actionLoadingMap[spec.id] ?? null;
-                      const isActioning = actionLoading !== null;
-                      const hasActiveRun = activeRunSpecs.has(spec.id);
-
-                      return (
-                        <div key={spec.id} className="group relative">
-                          {/* div[role=button][draggable] — no nested <button> to swallow drag events */}
-                          <div
-                            role="button"
-                            tabIndex={0}
-                            draggable
-                            aria-label={`${slugToTitle(spec.id)}, ${total} stories, in ${col.label} column. Ctrl+Arrow to move.`}
-                            onDragStart={(e) => handleDragStart(e, spec.id, col.key)}
-                            onDragEnd={handleDragEnd}
-                            onTouchStart={(e) => handleTouchStart(e, spec.id, col.key)}
-                            onTouchMove={handleTouchMove}
-                            onTouchEnd={handleTouchEnd}
-                            onKeyDown={(e) => handleCardKeyDown(e, spec.id, col.key)}
-                            onFocus={() => { focusedCardRef.current = { specId: spec.id, columnKey: col.key }; }}
-                            onClick={() => !isActioning && onSpecClick(spec.id)}
-                            className={`w-full h-[120px] bg-panel border rounded-lg p-3 text-left
-                              flex flex-col justify-between overflow-hidden cursor-grab select-none
-                              transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
-                              hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
-                              ${isActioning ? 'opacity-60 pointer-events-none' : ''}
-                              border-border`}
-                          >
-                            <div className="min-w-0">
-                              <div className="flex items-start gap-1.5">
-                                <GripVertical size={12} className="text-muted/30 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-                                <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
-                                  {slugToTitle(spec.id)}
-                                </h3>
-                                {hasActiveRun && (
-                                  <span className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30 animate-pulse">
-                                    <Play size={8} className="fill-current" /> Running
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="flex items-center justify-between gap-2 mt-auto min-w-0">
-                              <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
-                                <Layers size={10} />
-                                {hasProgress ? `${passed}/${total} stories` : `${total} ${total === 1 ? 'story' : 'stories'}`}
-                              </span>
-                              <span className="shrink-0 text-[11px] text-muted flex items-center gap-1">
-                                <Clock size={10} />
-                                {col.key === 'done' && spec.approvedAt ? relativeTime(spec.approvedAt) : relativeTime(spec.generatedAt)}
-                              </span>
-                            </div>
-
-                            {hasProgress && (
-                              <div className="w-full h-1 rounded-full bg-surface-200 mt-1.5 overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full transition-all duration-300 ${progressPct === 100 ? 'bg-success' : 'bg-accent'}`}
-                                  style={{ width: `${progressPct}%` }}
-                                />
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Approve / Deny actions — Draft column only */}
-                          {isDraft && (
-                            <div className={`absolute top-2 right-2 flex items-center gap-1 ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity duration-150`}>
-                              <button type="button" onClick={(e) => { e.stopPropagation(); handleApprove(spec.id); }} disabled={isActioning} title="Approve spec"
-                                className="p-1.5 rounded-md bg-success/15 text-success border border-success/30 hover:bg-success/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                                {actionLoading === 'approve' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                              </button>
-                              <button type="button" onClick={(e) => { e.stopPropagation(); handleDeny(spec.id); }} disabled={isActioning} title="Deny spec"
-                                className="p-1.5 rounded-md bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                                {actionLoading === 'deny' ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />}
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
+                    specs.map((spec) => renderCard(spec, col.key, col.color, isDraft))
                   )}
                 </div>
               </>
             )}
           </div>
+          </React.Fragment>
         );
       })}
+
+      {/* Delete confirmation dialog */}
+      {deleteDialog && (
+        <DeleteColumnDialog
+          columnName={deleteDialog.name}
+          specCount={deleteDialog.specCount}
+          onConfirm={() => handleDeleteColumn(deleteDialog.id)}
+          onCancel={() => setDeleteDialog(null)}
+        />
+      )}
     </div>
   );
 }

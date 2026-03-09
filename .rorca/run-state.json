@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T09:20:30.407Z",
+  "lastUpdatedAt": "2026-03-09T09:49:51.465Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -84,6 +84,15 @@
       "finishedAt": "2026-03-09T09:20:30.407Z",
       "agentType": "claude",
       "elapsedMs": 390590
+    },
+    {
+      "storyId": "ULT-010",
+      "title": "Custom Column Management — Add, Rename, Reorder, Delete with Color Picker",
+      "status": "passed",
+      "startedAt": "2026-03-09T09:20:43.898Z",
+      "finishedAt": "2026-03-09T09:49:51.464Z",
+      "agentType": "claude",
+      "elapsedMs": 1747566
     }
   ],
   "failedStories": [],

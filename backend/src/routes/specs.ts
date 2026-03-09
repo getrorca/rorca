@@ -2488,11 +2488,152 @@ router.get('/kanban', (req: Request, res: Response) => {
     inProgress.sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime());
     done.sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime());
 
-    res.json({ draft, inProgress, done });
+    // Fetch custom columns and their spec assignments
+    const customColumns = db.prepare(
+      `SELECT id, name, color, position FROM kanban_columns WHERE workspace_id = ? ORDER BY position ASC`
+    ).all(workspaceId) as { id: number; name: string; color: string; position: number }[];
+
+    const assignments = db.prepare(
+      `SELECT spec_id, column_id FROM kanban_spec_assignments WHERE workspace_id = ?`
+    ).all(workspaceId) as { spec_id: string; column_id: number }[];
+
+    const assignmentBySpec = new Map<string, number>();
+    for (const a of assignments) assignmentBySpec.set(a.spec_id, a.column_id);
+
+    // Build custom column data — specs assigned to custom columns come from inProgress
+    const customColumnData: { id: number; name: string; color: string; position: number; specs: KanbanSpec[] }[] = [];
+    const customAssignedIds = new Set<string>();
+
+    for (const col of customColumns) {
+      const colSpecs: KanbanSpec[] = [];
+      for (const spec of inProgress) {
+        if (assignmentBySpec.get(spec.id) === col.id) {
+          colSpecs.push(spec);
+          customAssignedIds.add(spec.id);
+        }
+      }
+      customColumnData.push({ ...col, specs: colSpecs });
+    }
+
+    // Remove custom-assigned specs from inProgress
+    const filteredInProgress = inProgress.filter(s => !customAssignedIds.has(s.id));
+
+    res.json({ draft, inProgress: filteredInProgress, done, customColumns: customColumnData });
   } catch (error: any) {
     logger.error('[Specs] Kanban grouping error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// ─── Kanban Column CRUD ─────────────────────────────────────────────────────────
+
+const MAX_CUSTOM_COLUMNS = 8;
+
+router.get('/kanban/columns', (req: Request, res: Response) => {
+  const workspaceId = req.query.workspaceId as string;
+  if (!workspaceId) { res.status(400).json({ error: 'Missing workspaceId' }); return; }
+  const columns = db.prepare(
+    `SELECT id, name, color, position FROM kanban_columns WHERE workspace_id = ? ORDER BY position ASC`
+  ).all(workspaceId);
+  res.json({ columns });
+});
+
+router.post('/kanban/columns', (req: Request, res: Response) => {
+  const { workspaceId, name, color } = req.body;
+  if (!workspaceId || !name) { res.status(400).json({ error: 'Missing workspaceId or name' }); return; }
+
+  const count = (db.prepare(`SELECT COUNT(*) as cnt FROM kanban_columns WHERE workspace_id = ?`).get(workspaceId) as { cnt: number }).cnt;
+  if (count >= MAX_CUSTOM_COLUMNS) { res.status(422).json({ error: `Maximum ${MAX_CUSTOM_COLUMNS} custom columns reached` }); return; }
+
+  const maxPos = (db.prepare(`SELECT COALESCE(MAX(position), -1) as maxPos FROM kanban_columns WHERE workspace_id = ?`).get(workspaceId) as { maxPos: number }).maxPos;
+  const result = db.prepare(
+    `INSERT INTO kanban_columns (workspace_id, name, color, position) VALUES (?, ?, ?, ?)`
+  ).run(workspaceId, name.trim(), color || 'indigo', maxPos + 1);
+
+  res.json({ id: result.lastInsertRowid, name: name.trim(), color: color || 'indigo', position: maxPos + 1 });
+});
+
+router.put('/kanban/columns/:id', (req: Request, res: Response) => {
+  const colId = Number(req.params.id);
+  const { name, color, position } = req.body;
+
+  const col = db.prepare(`SELECT id, workspace_id, position FROM kanban_columns WHERE id = ?`).get(colId) as { id: number; workspace_id: string; position: number } | undefined;
+  if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
+
+  if (name !== undefined) {
+    db.prepare(`UPDATE kanban_columns SET name = ? WHERE id = ?`).run(name.trim(), colId);
+  }
+  if (color !== undefined) {
+    db.prepare(`UPDATE kanban_columns SET color = ? WHERE id = ?`).run(color, colId);
+  }
+  if (position !== undefined) {
+    // Reorder: shift other columns to make room
+    const allCols = db.prepare(
+      `SELECT id, position FROM kanban_columns WHERE workspace_id = ? ORDER BY position ASC`
+    ).all(col.workspace_id) as { id: number; position: number }[];
+
+    const filtered = allCols.filter(c => c.id !== colId);
+    filtered.splice(position, 0, { id: colId, position });
+
+    const update = db.prepare(`UPDATE kanban_columns SET position = ? WHERE id = ?`);
+    const reorderTx = db.transaction(() => {
+      filtered.forEach((c, i) => update.run(i, c.id));
+    });
+    reorderTx();
+  }
+
+  const updated = db.prepare(`SELECT id, name, color, position FROM kanban_columns WHERE id = ?`).get(colId);
+  res.json(updated);
+});
+
+router.delete('/kanban/columns/:id', (req: Request, res: Response) => {
+  const colId = Number(req.params.id);
+
+  const col = db.prepare(`SELECT id, workspace_id FROM kanban_columns WHERE id = ?`).get(colId) as { id: number; workspace_id: string } | undefined;
+  if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
+
+  // Count assigned specs before deleting
+  const assignedCount = (db.prepare(`SELECT COUNT(*) as cnt FROM kanban_spec_assignments WHERE column_id = ?`).get(colId) as { cnt: number }).cnt;
+
+  // Remove assignments (specs go back to In Progress)
+  db.prepare(`DELETE FROM kanban_spec_assignments WHERE column_id = ?`).run(colId);
+  db.prepare(`DELETE FROM kanban_columns WHERE id = ?`).run(colId);
+
+  // Recompact positions
+  const remaining = db.prepare(
+    `SELECT id FROM kanban_columns WHERE workspace_id = ? ORDER BY position ASC`
+  ).all(col.workspace_id) as { id: number }[];
+
+  const update = db.prepare(`UPDATE kanban_columns SET position = ? WHERE id = ?`);
+  const recompactTx = db.transaction(() => {
+    remaining.forEach((c, i) => update.run(i, c.id));
+  });
+  recompactTx();
+
+  res.json({ ok: true, reassignedCount: assignedCount });
+});
+
+// Move a spec to a custom column (or back to in-progress by passing columnId: null)
+router.post('/kanban/columns/assign', (req: Request, res: Response) => {
+  const { workspaceId, specId, columnId } = req.body;
+  if (!workspaceId || !specId) { res.status(400).json({ error: 'Missing workspaceId or specId' }); return; }
+
+  if (columnId === null || columnId === undefined) {
+    // Remove assignment — spec goes back to In Progress
+    db.prepare(`DELETE FROM kanban_spec_assignments WHERE workspace_id = ? AND spec_id = ?`).run(workspaceId, specId);
+  } else {
+    // Verify column exists
+    const col = db.prepare(`SELECT id FROM kanban_columns WHERE id = ? AND workspace_id = ?`).get(columnId, workspaceId);
+    if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
+
+    // Upsert assignment
+    db.prepare(
+      `INSERT INTO kanban_spec_assignments (workspace_id, spec_id, column_id) VALUES (?, ?, ?)
+       ON CONFLICT(workspace_id, spec_id) DO UPDATE SET column_id = excluded.column_id, assigned_at = datetime('now')`
+    ).run(workspaceId, specId, columnId);
+  }
+
+  res.json({ ok: true });
 });
 
 // ─── W-003 / US-005: GET /archive — Full-text searchable spec archive ─────────
