@@ -27,6 +27,7 @@ import { briefToSlug, KEBAB_RE } from '../lib/slugify';
 import type { GeneratedSpec } from './SpecForgeOutput';
 import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
+import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -1107,6 +1108,32 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     return cols;
   }, [effectiveKanban, customCols]);
 
+  // ULT-013: Board keyboard navigation (j/k/h/l/Enter/a/x/e/d)
+  const boardNavColumns = useMemo<BoardNavColumn[]>(() =>
+    allColumns.filter(c => !collapsedColumns[c.key]).map(c => ({
+      key: c.key,
+      cardIds: c.specs.map(s => s.id),
+    })),
+  [allColumns, collapsedColumns]);
+
+  const boardNavCallbacks = useMemo(() => ({
+    onOpen: (id: string) => onSpecClick(id),
+    onApprove: (id: string) => handleApprove(id),
+    onReject: (id: string) => {
+      if (window.confirm(`Reject spec "${slugToTitle(id)}"?`)) handleDeny(id);
+    },
+    onEdit: (id: string) => onSpecClick(id),
+    onDelete: (id: string) => {
+      if (window.confirm(`Delete spec "${slugToTitle(id)}"? This cannot be undone.`)) handleDeny(id);
+    },
+  }), [onSpecClick, handleApprove, handleDeny]);
+
+  const { focusedCardId, focusedColumnKey } = useBoardNav(
+    boardNavColumns,
+    boardNavCallbacks,
+    !loading && !error,
+  );
+
   if (loading) {
     return (
       <div className="flex h-full">
@@ -1185,6 +1212,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     const tags = spec.tags || [];
     const visibleTags = tags.slice(0, 2);
     const overflowCount = tags.length - 2;
+    const isBoardFocused = focusedCardId === spec.id && focusedColumnKey === colKey;
 
     // Click vs drag: only fire click if mouse moved < 5px
     const handleMouseDown = (e: React.MouseEvent) => {
@@ -1208,7 +1236,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
             role="button"
             tabIndex={0}
             draggable
-            aria-label={`${slugToTitle(spec.id)}, ${total} stories. Ctrl+Arrow to move.`}
+            data-board-card={spec.id}
+            data-board-col={colKey}
+            aria-label={`${slugToTitle(spec.id)}, ${total} stories. j/k to navigate, Enter to open, a to approve.`}
             onDragStart={(e) => handleDragStart(e, spec.id, colKey, colColor)}
             onDragEnd={handleDragEnd}
             onTouchStart={(e) => handleTouchStart(e, spec.id, colKey, colColor)}
@@ -1222,6 +1252,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
               flex items-center gap-2 overflow-hidden cursor-grab select-none
               transition-all duration-150 hover:shadow-sm hover:shadow-black/10
               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
+              ${isBoardFocused ? 'ring-2 ring-accent/70 border-accent/50' : ''}
               ${isActioning ? 'opacity-60 pointer-events-none' : ''} border-border`}
             style={{ borderLeftWidth: 3, borderLeftColor: colColor }}
           >
@@ -1240,7 +1271,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
           role="button"
           tabIndex={0}
           draggable
-          aria-label={`${slugToTitle(spec.id)}, ${total} stories. Ctrl+Arrow to move.`}
+          data-board-card={spec.id}
+          data-board-col={colKey}
+          aria-label={`${slugToTitle(spec.id)}, ${total} stories. j/k to navigate, Enter to open, a to approve.`}
           onDragStart={(e) => handleDragStart(e, spec.id, colKey, colColor)}
           onDragEnd={handleDragEnd}
           onTouchStart={(e) => handleTouchStart(e, spec.id, colKey, colColor)}
@@ -1255,6 +1288,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
             transition-all duration-150
             hover:shadow-md hover:shadow-black/20 hover:scale-[1.02] hover:-translate-y-0.5
             focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
+            ${isBoardFocused ? 'ring-2 ring-accent/70 border-accent/50' : ''}
             ${isActioning ? 'opacity-60 pointer-events-none' : ''} border-border`}
           style={{
             borderLeftWidth: 3,

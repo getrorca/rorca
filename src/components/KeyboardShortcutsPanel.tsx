@@ -16,37 +16,51 @@ const mod = modLabel();
 
 const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
-    category: 'Navigation',
+    category: 'Global',
     shortcuts: [
-      { keys: [`${mod}`, '1'], description: 'Go to Hub' },
-      { keys: [`${mod}`, '2'], description: 'Go to Forge' },
-      { keys: [`${mod}`, '3'], description: 'Go to Run View' },
-      { keys: [`${mod}`, '4'], description: 'Go to Settings' },
-      { keys: [`${mod}`, '\\'], description: 'Toggle navigation drawer' },
+      { keys: ['1'], description: 'Go to Specs' },
+      { keys: ['2'], description: 'Go to Runs' },
+      { keys: ['3'], description: 'Go to Analytics' },
+      { keys: ['4'], description: 'Go to Direction' },
+      { keys: ['5'], description: 'Go to Settings' },
+      { keys: ['N'], description: 'New Spec' },
+      { keys: ['?'], description: 'Show this shortcuts overlay' },
+      { keys: [`${mod}`, 'K'], description: 'Open command palette' },
+      { keys: ['Esc'], description: 'Close overlay / modal' },
     ],
   },
   {
-    category: 'Specs',
+    category: 'Board Navigation',
     shortcuts: [
-      { keys: [`${mod}`, 'N'], description: 'New spec in Spec Forge' },
-      { keys: [`${mod}`, 'Enter'], description: 'Approve selected spec' },
-      { keys: [`${mod}`, 'Backspace'], description: 'Reject selected spec' },
+      { keys: ['J'], description: 'Move focus down (next card)' },
+      { keys: ['K'], description: 'Move focus up (previous card)' },
+      { keys: ['H'], description: 'Move focus left (previous column)' },
+      { keys: ['L'], description: 'Move focus right (next column)' },
+      { keys: ['Enter'], description: 'Open focused card detail' },
+    ],
+  },
+  {
+    category: 'Card Actions',
+    shortcuts: [
+      { keys: ['A'], description: 'Approve focused spec' },
+      { keys: ['X'], description: 'Reject focused spec (with confirmation)' },
+      { keys: ['E'], description: 'Edit focused spec brief' },
+      { keys: ['D'], description: 'Delete focused spec (with confirmation)' },
+    ],
+  },
+  {
+    category: 'Command Palette',
+    shortcuts: [
+      { keys: ['\u2191', '\u2193'], description: 'Navigate results' },
+      { keys: ['Enter'], description: 'Execute selected command' },
+      { keys: ['Esc'], description: 'Close palette' },
     ],
   },
   {
     category: 'Pipeline',
     shortcuts: [
       { keys: [`${mod}`, 'Shift', 'R'], description: 'Trigger pipeline run' },
-      { keys: [`${mod}`, '.'], description: 'Cancel active run' },
-    ],
-  },
-  {
-    category: 'General',
-    shortcuts: [
-      { keys: [`${mod}`, 'K'], description: 'Open command palette' },
-      { keys: ['?'], description: 'Open shortcuts' },
-      { keys: [`${mod}`, '/'], description: 'Open shortcuts' },
-      { keys: ['Esc'], description: 'Close panel / modal' },
+      { keys: [`${mod}`, 'Shift', 'N'], description: 'New spec (opens Forge)' },
     ],
   },
 ];
@@ -71,8 +85,11 @@ export default function KeyboardShortcutsPanel({ onClose }: KeyboardShortcutsPan
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Keyboard shortcuts"
     >
       <div
         className="bg-panel border border-border rounded-lg shadow-xl w-full max-w-lg overflow-hidden"
