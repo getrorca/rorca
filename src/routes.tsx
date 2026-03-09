@@ -5,9 +5,16 @@ import type { SettingsTab } from './panels/SettingsPanel';
 
 /** Valid settings sub-tabs for URL validation */
 const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
-  'general', 'direction', 'context', 'providers', 'github', 'env-vars', 'pipeline', 'hooks', 'agents',
-  'shortcuts', 'account', 'billing',
-  'system',
+  // Workspace group
+  'general', 'env-vars', 'hooks', 'agents', 'context',
+  // Execution group
+  'providers', 'direction', 'pipeline',
+  // Integrations group
+  'github', 'slack', 'linear', 'vercel',
+  // Account group
+  'account', 'billing', 'shortcuts', 'notifications',
+  // System group
+  'system', 'api-keys', 'developer',
 ] as const;
 
 /**
