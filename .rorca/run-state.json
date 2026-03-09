@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T11:00:31.059Z",
+  "lastUpdatedAt": "2026-03-09T11:10:34.706Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -156,6 +156,15 @@
       "finishedAt": "2026-03-09T11:00:31.059Z",
       "agentType": "claude",
       "elapsedMs": 416316
+    },
+    {
+      "storyId": "ULT-018",
+      "title": "Dark Mode Polish and Theme Consistency",
+      "status": "passed",
+      "startedAt": "2026-03-09T11:00:44.787Z",
+      "finishedAt": "2026-03-09T11:10:34.706Z",
+      "agentType": "claude",
+      "elapsedMs": 589919
     }
   ],
   "failedStories": [],

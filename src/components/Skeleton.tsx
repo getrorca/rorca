@@ -165,11 +165,11 @@ export function RunViewTerminalSkeleton() {
         <SkeletonLine className="w-14 h-4" />
       </div>
       {/* Terminal lines */}
-      <div className="flex-1 bg-[#1e1e1e] p-4 space-y-2.5">
+      <div className="flex-1 bg-terminal-bg p-4 space-y-2.5">
         {Array.from({ length: 10 }).map((_, i) => (
           <div
             key={i}
-            className="animate-pulse bg-[#333] rounded h-3.5"
+            className="animate-pulse bg-terminal-line rounded h-3.5"
             style={{ width: `${45 + Math.sin(i * 1.7) * 30}%` }}
           />
         ))}

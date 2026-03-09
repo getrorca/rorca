@@ -342,7 +342,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
                 <span className="text-[10px] text-muted">Loading story log...</span>
               </div>
             ) : outputLines.length > 0 ? (
-              <pre className="text-[10px] font-mono text-muted bg-[#1e1e1e] rounded p-2 overflow-x-auto max-h-64 leading-relaxed overflow-y-auto">
+              <pre className="text-[10px] font-mono text-muted bg-terminal-bg rounded p-2 overflow-x-auto max-h-64 leading-relaxed overflow-y-auto">
                 {outputLines.join('\n')}
               </pre>
             ) : (

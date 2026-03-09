@@ -404,7 +404,7 @@ function PersonaCard({
         title={persona.enabled ? 'Disable persona' : 'Enable persona'}
       >
         <div className={`w-7 h-4 rounded-full relative transition-colors ${persona.enabled ? 'bg-accent' : 'bg-surface-200'}`}>
-          <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${persona.enabled ? 'left-3.5' : 'left-0.5'}`} />
+          <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-switch-knob transition-transform ${persona.enabled ? 'left-3.5' : 'left-0.5'}`} />
         </div>
       </button>
 
