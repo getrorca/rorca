@@ -265,7 +265,7 @@ export default function Shell({ sidebar, header, children, onMenuToggle, showMen
   const offline = useNetworkOffline();
 
   return (
-    <div className="h-screen flex bg-bg overflow-x-hidden w-full">
+    <div className="h-screen flex bg-bg overflow-x-hidden w-full max-w-[100vw]">
       <a href="#main-content" className="skip-to-content">
         Skip to content
       </a>
@@ -286,8 +286,8 @@ export default function Shell({ sidebar, header, children, onMenuToggle, showMen
           </div>
         )}
 
-        {/* Body Main Canvas */}
-        <main id="main-content" className="flex-1 min-h-0 min-w-0 overflow-y-auto contain-layout bg-bg relative">
+        {/* Body Main Canvas — pb-16 on mobile for bottom tab bar clearance */}
+        <main id="main-content" className="flex-1 min-h-0 min-w-0 overflow-y-auto contain-layout bg-bg relative pb-16 sm:pb-0">
           {children}
         </main>
       </div>

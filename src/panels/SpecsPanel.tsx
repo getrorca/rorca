@@ -951,6 +951,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
       dragSpecIdRef.current = specId;
       dragFromColumnRef.current = columnKey;
 
+      // Vibration feedback for touch drag initiation
+      if (navigator.vibrate) navigator.vibrate(30);
+
       const target = e.currentTarget as HTMLElement;
       const rect = target.getBoundingClientRect();
       const clone = document.createElement('div');

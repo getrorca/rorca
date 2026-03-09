@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect, type ReactNode } from 'react';
+import { useBreakpoint } from '../hooks/useBreakpoint';
 
 const STORAGE_KEY = 'rorca:sidebar-width';
 const MIN_WIDTH = 200;
@@ -23,6 +24,7 @@ interface ResizableSidebarProps {
 }
 
 export default function ResizableSidebar({ children, className = '' }: ResizableSidebarProps) {
+    const breakpoint = useBreakpoint();
     const [width, setWidth] = useState(getStoredWidth);
     const [collapsed, setCollapsed] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
@@ -85,12 +87,18 @@ export default function ResizableSidebar({ children, className = '' }: Resizable
         setCollapsed((prev) => !prev);
     }, []);
 
+    // Mobile + Tablet: Sidebar handles its own layout — ResizableSidebar just passes children through
+    if (breakpoint === 'mobile' || breakpoint === 'tablet') {
+        return <>{children}</>;
+    }
+
+    // Desktop: resizable wrapper with drag handle
     const effectiveWidth = collapsed ? COLLAPSED_WIDTH : width;
 
     return (
         <div
             ref={containerRef}
-            className={`relative shrink-0 h-full hidden md:flex ${className}`}
+            className={`relative shrink-0 h-full flex ${className}`}
             style={{
                 width: effectiveWidth,
                 transition: isDragging ? 'none' : 'width 200ms cubic-bezier(0.16, 1, 0.3, 1)',
