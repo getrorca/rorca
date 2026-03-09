@@ -117,25 +117,24 @@ const FORGE_FALLBACK_THRESHOLD = 80;
 
 /** Context-aware boost: maps active panel/context to command IDs that should rank higher */
 const CONTEXT_BOOSTS: Record<string, string[]> = {
-  // Run View: run commands first
+  // ULT-006: 5-panel context boosts
+  specs: [
+    'action:new-spec', 'action:search-archive', 'action:review', 'panel:marketplace',
+  ],
+  runs: [
+    'action:trigger-pipeline', 'action:view-active-run', 'panel:runs',
+  ],
   'run-view': [
-    'panel:pipeline', 'action:view-active-run', 'action:trigger-pipeline', 'action:worktrees', 'panel:compare', 'panel:worktrees',
+    'panel:runs', 'action:view-active-run', 'action:trigger-pipeline',
   ],
-  // Forge: template/brief commands first
-  forge: [
-    'action:new-spec', 'action:direction', 'panel:marketplace', 'panel:stack',
+  analytics: [
+    'panel:analytics',
   ],
-  // Hub: pending review actions first
-  hub: [
-    'action:review', 'panel:forge', 'action:new-spec', 'action:trigger-pipeline',
+  direction: [
+    'action:direction', 'panel:direction',
   ],
-  // Archive: search first
-  archive: [
-    'action:search-archive',
-  ],
-  // Pipeline: trigger + active run first
-  pipeline: [
-    'action:trigger-pipeline', 'action:view-active-run', 'action:worktrees',
+  settings: [
+    'action:workspace-settings', 'panel:settings',
   ],
 };
 
@@ -194,10 +193,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
         label: spec.specName,
         category: 'spec',
         description: `${spec.status} \u00B7 ${spec.storyCount} stories`,
-        action: () => {
-          onNavigate(spec.status === 'pending' ? 'forge' : 'archive');
-          onClose();
-        },
+        action: () => { onNavigate('specs'); onClose(); },
       });
     }
 
@@ -210,7 +206,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
         label: spec.specName,
         category: 'spec',
         description: `${spec.status} \u00B7 ${spec.storyTitles.length} stories`,
-        action: () => { onNavigate('archive'); onClose(); },
+        action: () => { onNavigate('specs'); onClose(); },
       });
       // Story-level entries from archive
       for (const title of spec.storyTitles) {
@@ -219,14 +215,13 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
           label: title,
           category: 'spec',
           description: `Story in ${spec.specName}`,
-          action: () => { onNavigate('archive'); onClose(); },
+          action: () => { onNavigate('specs'); onClose(); },
         });
       }
     }
 
     // Story-level entries from queue specs
     for (const spec of specs) {
-      // We don't have story titles in SpecSummary, but the archive has them
       const archiveMatch = archiveSpecs.find((a) => a.id === spec.id);
       if (archiveMatch) {
         for (const title of archiveMatch.storyTitles) {
@@ -235,10 +230,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
             label: title,
             category: 'spec',
             description: `Story in ${spec.specName}`,
-            action: () => {
-              onNavigate(spec.status === 'pending' ? 'forge' : 'archive');
-              onClose();
-            },
+            action: () => { onNavigate('specs'); onClose(); },
           });
         }
       }
@@ -252,7 +244,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
         label: `Run #${run.id}`,
         category: 'run',
         description: `${specSlug} \u00B7 ${run.status}`,
-        action: () => { onNavigate('pipeline'); onClose(); },
+        action: () => { onNavigate('runs'); onClose(); },
       });
     }
 
@@ -269,34 +261,33 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       id: 'action:new-spec',
       label: 'New Spec',
       category: 'action',
-      description: 'Create a new spec in Spec Forge',
+      description: 'Create a new spec',
       shortcut: '⌘N',
-      action: () => { onSendToForge?.(''); onNavigate('forge'); onClose(); },
+      action: () => { onSendToForge?.(''); onNavigate('specs'); onClose(); },
     });
     items.push({
       id: 'action:trigger-pipeline',
       label: 'Trigger Pipeline Run',
       category: 'action',
-      description: 'Open pipeline to start a new run',
+      description: 'Open Runs to start a new run',
       shortcut: '⌘⇧R',
-      action: () => { onNavigate('pipeline'); onClose(); },
+      action: () => { onNavigate('runs'); onClose(); },
     });
     items.push({
       id: 'action:view-active-run',
       label: 'View Active Run',
       category: 'action',
-      description: runs.find((r) => r.status === 'running') ? `Run #${runs.find((r) => r.status === 'running')!.id} in progress` : 'Navigate to Pipeline Monitor',
-      action: () => { onNavigate('pipeline'); onClose(); },
+      description: runs.find((r) => r.status === 'running') ? `Run #${runs.find((r) => r.status === 'running')!.id} in progress` : 'Navigate to Runs',
+      action: () => { onNavigate('runs'); onClose(); },
     });
     items.push({
       id: 'action:search-archive',
-      label: 'Search Archive',
+      label: 'Search Specs',
       category: 'action',
-      description: 'Find completed specs and stories',
+      description: 'Find specs and stories',
       action: () => {
-        onNavigate('archive');
+        onNavigate('specs');
         onClose();
-        // Signal archive panel to focus search input
         setTimeout(() => {
           const searchInput = document.querySelector<HTMLInputElement>('[data-archive-search]');
           searchInput?.focus();
@@ -308,28 +299,28 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       label: 'Edit Direction',
       category: 'action',
       description: 'Configure direction layers',
-      action: () => { onNavigate('stack'); onClose(); },
+      action: () => { onNavigate('direction'); onClose(); },
     });
     items.push({
       id: 'action:review',
       label: 'Review Pending Specs',
       category: 'action',
-      description: 'View pending specs in Forge',
-      action: () => { onNavigate('forge'); onClose(); },
+      description: 'View pending specs',
+      action: () => { onNavigate('specs'); onClose(); },
     });
     items.push({
       id: 'action:worktrees',
       label: 'Manage Worktrees',
       category: 'action',
       description: 'View and merge git worktrees',
-      action: () => { onNavigate('worktrees'); onClose(); },
+      action: () => { onNavigate('runs'); onClose(); },
     });
     items.push({
       id: 'action:workspace-settings',
       label: 'Workspace Settings',
       category: 'action',
       description: 'Configure workspace, environment variables, and hooks',
-      action: () => { onNavigate('workspace-settings'); onClose(); },
+      action: () => { onNavigate('settings'); onClose(); },
     });
 
     return items;
@@ -396,7 +387,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
     description: trimmedQuery,
     action: () => {
       onSendToForge?.(trimmedQuery);
-      onNavigate('forge');
+      onNavigate('specs');
       onClose();
     },
   } : null;
