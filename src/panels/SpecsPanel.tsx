@@ -326,6 +326,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
 
   return (
     <div className="flex flex-col h-full bg-bg overflow-hidden">
+      <h1 className="sr-only">Specs</h1>
       {/* Header */}
       <AppHeader
         breadcrumbs={
@@ -458,10 +459,11 @@ function AddColumnPopover({ onAdd, disabled }: { onAdd: (name: string, color: st
         onClick={() => !disabled && setOpen(!open)}
         disabled={disabled}
         title={disabled ? 'Maximum 8 columns reached' : 'Add custom column'}
+        aria-label={disabled ? 'Maximum 8 columns reached' : 'Add custom column'}
         className={`flex items-center justify-center w-10 border-l border-border transition-colors
           ${disabled ? 'text-muted/30 cursor-not-allowed' : 'text-muted hover:text-accent hover:bg-surface-100/30 cursor-pointer'}`}
       >
-        <Plus size={16} />
+        <Plus size={16} aria-hidden="true" />
       </button>
       {open && (
         <div className="absolute top-full left-0 mt-1 z-50 w-64 bg-panel border border-border rounded-lg shadow-xl p-3 space-y-3">
@@ -471,6 +473,7 @@ function AddColumnPopover({ onAdd, disabled }: { onAdd: (name: string, color: st
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(); if (e.key === 'Escape') setOpen(false); }}
             placeholder="Column name..."
+            aria-label="Column name"
             className="w-full px-3 py-1.5 rounded-md border border-border bg-bg text-sm text-[var(--text)] placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/50"
           />
           <div className="grid grid-cols-6 gap-1.5">
@@ -481,6 +484,7 @@ function AddColumnPopover({ onAdd, disabled }: { onAdd: (name: string, color: st
                 className={`w-7 h-7 rounded-md transition-all ${color === c.name ? 'ring-2 ring-offset-1 ring-offset-bg scale-110' : 'hover:scale-105'}`}
                 style={{ backgroundColor: c.hex, ...(color === c.name ? { boxShadow: `0 0 0 2px ${c.hex}` } : {}) }}
                 title={c.name}
+                aria-label={`Color: ${c.name}${color === c.name ? ' (selected)' : ''}`}
               />
             ))}
           </div>
@@ -1696,6 +1700,7 @@ function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
           <input
             type="text" value={searchText} onChange={(e) => setSearchText(e.target.value)}
             placeholder="Search specs..."
+            aria-label="Search specs"
             className="w-full h-8 pl-8 pr-8 bg-panel border border-border rounded text-sm text-text placeholder-muted/60 focus:outline-none focus:border-accent/40 focus:ring-2 focus:ring-accent/50 transition-shadow transition-colors"
           />
           {searchText && (
@@ -1708,6 +1713,7 @@ function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
         <select
           value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+          aria-label="Filter by status"
           className="h-8 px-2 pr-8 bg-transparent border border-border/50 rounded text-sm text-muted hover:text-text focus:outline-none focus:border-accent/40 transition-colors cursor-pointer appearance-none"
           style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
         >
@@ -1717,6 +1723,7 @@ function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
         <select
           value={tagFilter.length > 0 ? tagFilter[0] : 'all'}
           onChange={(e) => { const val = e.target.value; if (val === 'all') setTagFilter([]); else setTagFilter([val]); }}
+          aria-label="Filter by tag"
           className="h-8 px-2 pr-8 bg-transparent border border-border/50 rounded text-sm text-muted hover:text-text focus:outline-none focus:border-accent/40 transition-colors cursor-pointer appearance-none max-w-[100px]"
           style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
         >
@@ -2114,6 +2121,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
           ref={briefRef} rows={6} value={specBrief}
           onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
           placeholder="What do you want to build?"
+          aria-label="Spec brief — describe what you want to build"
           className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors resize-none leading-relaxed"
         />
       )}
@@ -2152,6 +2160,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                     </button>
                     <textarea rows={3} value={quickDirectionText} onChange={(e) => setQuickDirectionText(e.target.value)}
                       placeholder={`Add ${dot.label.toLowerCase()}...`}
+                      aria-label={`Add ${dot.label.toLowerCase()}`}
                       className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none" autoFocus />
                     <div className="flex items-center justify-between">
                       <button onClick={() => { setContextPopover(null); onNavigate?.('stack'); onClose(); }} className="text-[10px] text-accent hover:text-accent-hover transition-colors">Set up in Direction</button>
@@ -2249,6 +2258,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                     <input type="text" inputMode="numeric" value={storyCountRaw}
                       onChange={(e) => { setStoryCountRaw(e.target.value); const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1) setStoryCount(n); }}
                       onBlur={() => { const c = Math.min(500, Math.max(1, storyCount || 1)); setStoryCount(c); setStoryCountRaw(String(c)); }}
+                      aria-label="Custom story count"
                       className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center" autoFocus />
                   )}
                 </div>
