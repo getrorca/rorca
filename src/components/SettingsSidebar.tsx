@@ -1,7 +1,7 @@
 import { Link, NavLink } from 'react-router-dom';
 import {
   Settings2, Layers, Route, Zap, Github, Variable, Play, Webhook, Users,
-  User, CreditCard, Keyboard, ArrowLeft, BarChart3, ScrollText,
+  User, CreditCard, Keyboard, ArrowLeft, ScrollText,
 } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
@@ -26,7 +26,6 @@ const WORKSPACE_ITEMS: SidebarItem[] = [
   { id: 'pipeline',  label: 'Pipeline',           icon: Play      },
   { id: 'hooks',     label: 'Hooks',              icon: Webhook   },
   { id: 'agents',    label: 'Agents',             icon: Users     },
-  { id: 'analytics', label: 'Analytics',          icon: BarChart3 },
   { id: 'system',    label: 'System',             icon: ScrollText },
 ];
 
