@@ -167,51 +167,52 @@ interface QueuePanelProps {
   onNavigateToSpecReview?: (specId: string) => void;
 }
 
+interface KanbanSpec {
+  id: string;
+  title: string;
+  storyCount: number;
+  generatedAt: string;
+  approvedAt?: string;
+  readinessPercent: number;
+  tags: string[];
+  reviewStatus: string;
+  storyTitles?: string[];
+  passedStories?: number;
+  activeRunId?: number;
+}
+
+interface KanbanResponse {
+  draft: KanbanSpec[];
+  inProgress: KanbanSpec[];
+  done: KanbanSpec[];
+}
+
+/** Adapt KanbanSpec to SpecSummary for the card component */
+function toSpecSummary(k: KanbanSpec, status: 'pending' | 'approved' | 'completed'): SpecSummary {
+  return {
+    id: k.id,
+    specName: k.title,
+    storyCount: k.storyCount,
+    status,
+    generatedAt: k.generatedAt,
+    approvedAt: k.approvedAt,
+    readinessPercent: k.readinessPercent,
+    tags: k.tags,
+  } as SpecSummary;
+}
+
 export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: QueuePanelProps) {
   const { workspaceId } = useWorkspace();
-  const [specs, setSpecs] = useState<SpecSummary[]>([]);
+  const [kanban, setKanban] = useState<KanbanResponse>({ draft: [], inProgress: [], done: [] });
   const [loading, setLoading] = useState(true);
-  const [storyProgress, setStoryProgress] = useState<Record<string, number>>({});
 
-  const fetchSpecs = useCallback(async () => {
-    if (!workspaceId) { setSpecs([]); setLoading(false); return; }
+  const fetchKanban = useCallback(async () => {
+    if (!workspaceId) { setKanban({ draft: [], inProgress: [], done: [] }); setLoading(false); return; }
     try {
-      const res = await apiFetch<{ items: SpecSummary[]; total: number }>(
-        `/api/specs?workspaceId=${workspaceId}&status=all`
+      const res = await apiFetch<KanbanResponse>(
+        `/api/specs/kanban?workspaceId=${workspaceId}`
       );
-      // Sort newest first within each group
-      const sorted = [...res.items].sort(
-        (a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
-      );
-      setSpecs(sorted);
-
-      // Fetch story progress for non-draft specs
-      const nonDraft = sorted.filter((s) => s.status !== 'pending');
-      if (nonDraft.length > 0) {
-        try {
-          const runs = await apiFetch<{ items: Array<{ spec_path: string; id: number }> }>(
-            `/api/pipeline/runs?workspaceId=${workspaceId}&limit=100`
-          );
-          const progress: Record<string, number> = {};
-          for (const run of runs.items) {
-            // Extract spec slug from path like "forge/specs/approved/my-spec.json"
-            const slug = run.spec_path.replace(/^.*\//, '').replace(/\.json$/, '');
-            if (!progress[slug]) {
-              try {
-                const results = await apiFetch<{ items: Array<{ status: string }> }>(
-                  `/api/pipeline/runs/${run.id}/story-results`
-                );
-                progress[slug] = results.items.filter((r) => r.status === 'pass').length;
-              } catch {
-                // Story results not available for this run
-              }
-            }
-          }
-          setStoryProgress(progress);
-        } catch {
-          // Pipeline runs endpoint may not be available
-        }
-      }
+      setKanban(res);
     } catch {
       // Silently fail — no toast spam on background poll
     } finally {
@@ -221,10 +222,10 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
 
   useEffect(() => {
     setLoading(true);
-    fetchSpecs();
-    const interval = setInterval(fetchSpecs, 10_000);
+    fetchKanban();
+    const interval = setInterval(fetchKanban, 10_000);
     return () => clearInterval(interval);
-  }, [fetchSpecs]);
+  }, [fetchKanban]);
 
   const handleReviewClick = useCallback((specId: string) => {
     if (onNavigateToSpecReview) {
@@ -234,12 +235,17 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
     }
   }, [onNavigateToSpecReview, onNavigate]);
 
-  // Bucket specs into columns
-  const draftSpecs = specs.filter((s) => s.status === 'pending');
-  const inProgressSpecs = specs.filter((s) => s.status === 'approved');
-  const doneSpecs = specs.filter((s) => s.status === 'completed');
+  const draftSpecs = kanban.draft.map(k => toSpecSummary(k, 'pending'));
+  const inProgressSpecs = kanban.inProgress.map(k => toSpecSummary(k, 'approved'));
+  const doneSpecs = kanban.done.map(k => toSpecSummary(k, 'completed'));
 
-  const totalCount = specs.length;
+  // Build story progress from kanban data
+  const storyProgress: Record<string, number> = {};
+  for (const k of [...kanban.inProgress, ...kanban.done]) {
+    if (k.passedStories !== undefined) storyProgress[k.id] = k.passedStories;
+  }
+
+  const totalCount = draftSpecs.length + inProgressSpecs.length + doneSpecs.length;
 
   return (
     <div className="flex flex-col h-full min-h-0">
