@@ -14,7 +14,7 @@ import RorcaLogo from './RorcaLogo';
 import { UserMenu } from './Shell';
 import { PANEL_ROUTES } from '../routes';
 
-export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory';
+export type PanelId = 'hub' | 'specs' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory';
 
 interface NavItem {
   id: PanelId;
@@ -32,9 +32,7 @@ interface NavSection {
 
 const SIDEBAR_ITEMS: NavItem[] = [
   { id: 'hub', label: 'Overview', icon: LayoutDashboard },
-  { id: 'forge', label: 'Spec', icon: Wand2 },
-  { id: 'queue', label: 'Review Queue', icon: Inbox },
-  { id: 'archive', label: 'Wake', icon: Archive },
+  { id: 'specs', label: 'Specs', icon: Wand2 },
   { id: 'pipeline', label: 'Dive', icon: Activity },
   { id: 'marketplace', label: 'Skills', icon: Store },
   { id: 'stack', label: 'Direction', icon: Layers },
@@ -50,8 +48,7 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'specs',
     label: 'Specs',
     items: [
-      { id: 'forge', label: 'Spec', icon: Wand2 },
-      { id: 'archive', label: 'Wake', icon: Archive },
+      { id: 'specs', label: 'Specs', icon: Wand2 },
       { id: 'marketplace', label: 'Skills', icon: Store },
     ],
   },
@@ -158,7 +155,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
                   <>
                     <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
                     <span className="truncate flex-1">{item.label}</span>
-                    {item.id === 'queue' && queueCount > 0 && (
+                    {item.id === 'specs' && queueCount > 0 && (
                       <span className="ml-auto shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-accent text-white text-[10px] font-bold px-1">
                         {queueCount > 99 ? '99+' : queueCount}
                       </span>

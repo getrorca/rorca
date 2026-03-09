@@ -42,6 +42,7 @@ const CommandPalette = lazy(() => import('./components/CommandPalette'));
 
 // — Lazy-loaded panel components (each gets its own chunk) —
 const HubPanel = lazy(() => import('./panels/HubPanel'));
+const SpecsPanel = lazy(() => import('./panels/SpecsPanel'));
 const QueuePanel = lazy(() => import('./panels/QueuePanel'));
 const SpecForgePanelPage = lazy(() => import('./panels/SpecForgePanelPage'));
 const ArchivePanel = lazy(() => import('./panels/ArchivePanel'));
@@ -161,6 +162,7 @@ function GlobalErrorWiring() {
 /** Panel label for ErrorBoundary fallback */
 const PANEL_LABELS: Record<PanelId, string> = {
   hub: 'Hub',
+  specs: 'Specs',
   forge: 'Spec',
   stack: 'Direction',
   'team-direction': 'Team Direction',
@@ -206,10 +208,12 @@ function AppRoutes() {
       <Route element={<AppLayout />}>
         {/* Index route — Hub */}
         <Route index element={<PanelRoute panel="hub" />} />
-        {/* Specs */}
-        <Route path="forge" element={<PanelRoute panel="forge" />} />
-        <Route path="queue" element={<PanelRoute panel="queue" />} />
-        <Route path="archive" element={<PanelRoute panel="archive" />} />
+        {/* Specs — consolidated panel */}
+        <Route path="specs" element={<PanelRoute panel="specs" />} />
+        {/* Legacy redirects to consolidated Specs panel */}
+        <Route path="forge" element={<Navigate to="/specs" replace />} />
+        <Route path="queue" element={<Navigate to="/specs" replace />} />
+        <Route path="archive" element={<Navigate to="/specs" replace />} />
         <Route path="marketplace" element={<PanelRoute panel="marketplace" />} />
         {/* Pipeline */}
         <Route path="pipeline" element={<PanelRoute panel="pipeline" />} />
@@ -250,6 +254,7 @@ function AppRoutes() {
 function getPanelSkeleton(panel: PanelId) {
   switch (panel) {
     case 'hub': return <HubSkeleton />;
+    case 'specs': return <ForgeSkeleton />;
     case 'forge': return <ForgeSkeleton />;
     case 'queue': return <GenericPanelSkeleton />;
     case 'archive': return <ArchiveSkeleton />;
@@ -303,6 +308,7 @@ interface ActivePanelProps {
 function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed }: ActivePanelProps) {
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
+    case 'specs': return <SpecsPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
     case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
     // Direction tabbed panel — embeds Direction Stack, Team, Memory, Rules
     case 'stack': return <DirectionTabbedPanel />;
@@ -439,13 +445,13 @@ function AppLayout() {
     { key: '?', handler: () => navigateToSettingsTab('shortcuts') },
     { key: 'mod+/', handler: () => navigateToSettingsTab('shortcuts') },
     { key: 'mod+1', handler: () => handleNavigate('hub') },
-    { key: 'mod+2', handler: () => handleNavigate('forge') },
+    { key: 'mod+2', handler: () => handleNavigate('specs') },
     { key: 'mod+3', handler: () => handleNavigate('pipeline') },
     { key: 'mod+4', handler: () => handleNavigate('settings') },
-    { key: 'mod+n', handler: () => handleNavigate('forge') },
-    { key: 'mod+enter', handler: () => { if (activePanel !== 'forge' && activePanel !== 'spec-review') handleNavigate('forge'); } },
-    { key: 'mod+backspace', handler: () => { if (activePanel !== 'forge' && activePanel !== 'spec-review') handleNavigate('forge'); } },
-    { key: 'mod+shift+n', handler: () => { handleSendToForge(''); handleNavigate('forge'); } },
+    { key: 'mod+n', handler: () => handleNavigate('specs') },
+    { key: 'mod+enter', handler: () => { if (activePanel !== 'specs' && activePanel !== 'spec-review') handleNavigate('specs'); } },
+    { key: 'mod+backspace', handler: () => { if (activePanel !== 'specs' && activePanel !== 'spec-review') handleNavigate('specs'); } },
+    { key: 'mod+shift+n', handler: () => { handleSendToForge(''); handleNavigate('specs'); } },
     { key: 'mod+shift+r', handler: () => handleNavigate('pipeline') },
   ], [handleNavigate, handleSendToForge, navigateToSettingsTab, activePanel]);
 
