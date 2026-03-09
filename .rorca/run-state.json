@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T10:29:23.198Z",
+  "lastUpdatedAt": "2026-03-09T10:39:11.038Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -129,6 +129,15 @@
       "finishedAt": "2026-03-09T10:29:23.197Z",
       "agentType": "claude",
       "elapsedMs": 566370
+    },
+    {
+      "storyId": "ULT-015",
+      "title": "Activity Feed Consolidation — Merge Activity + Audit",
+      "status": "passed",
+      "startedAt": "2026-03-09T10:29:36.694Z",
+      "finishedAt": "2026-03-09T10:39:11.038Z",
+      "agentType": "claude",
+      "elapsedMs": 574344
     }
   ],
   "failedStories": [],

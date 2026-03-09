@@ -1,9 +1,7 @@
 import { useState, useEffect } from 'react';
-import { User, Save, Loader2, Trash2, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, CheckCircle2, XCircle, Crown, Users, ChevronDown, ChevronUp, Download, ExternalLink, FileText, CreditCard, Shield, ScrollText, Rss, BarChart3 } from 'lucide-react';
+import { User, Save, Loader2, Trash2, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, CheckCircle2, XCircle, Crown, Users, ChevronDown, ChevronUp, Download, ExternalLink, FileText, CreditCard, Shield } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, clearTokens } from '../../lib/apiFetch';
-import AuditLogPanel from '../AuditLogPanel';
-import ActivityFeedPanel from '../ActivityFeedPanel';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -87,70 +85,6 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
           }`}
       />
     </button>
-  );
-}
-
-// ─── System Section (Audit Log + Activity Feed) ─────────────────────────────
-
-type SystemSubTab = 'audit-log' | 'activity';
-
-const SYSTEM_SUBTABS: { id: SystemSubTab; label: string; icon: typeof ScrollText }[] = [
-  { id: 'audit-log', label: 'Audit Log', icon: ScrollText },
-  { id: 'activity', label: 'Activity Feed', icon: Rss },
-];
-
-export function SystemSection() {
-  const [activeSubTab, setActiveSubTab] = useState<SystemSubTab>('audit-log');
-
-  return (
-    <div>
-      {/* Sub-tab pills */}
-      <div
-        role="tablist"
-        aria-label="System sections"
-        className="flex flex-wrap gap-1 mb-4"
-      >
-        {SYSTEM_SUBTABS.map((tab) => {
-          const Icon = tab.icon;
-          return (
-            <button
-              key={tab.id}
-              role="tab"
-              aria-selected={activeSubTab === tab.id}
-              aria-controls={`system-panel-${tab.id}`}
-              id={`system-tab-${tab.id}`}
-              onClick={() => setActiveSubTab(tab.id)}
-              className={`flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-full transition-colors ${
-                activeSubTab === tab.id
-                  ? 'bg-accent text-white'
-                  : 'bg-surface-100 text-muted hover:text-text hover:bg-surface-200'
-              }`}
-            >
-              <Icon size={11} />
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Sub-tab content */}
-      {SYSTEM_SUBTABS.map((tab) => (
-        <div
-          key={tab.id}
-          id={`system-panel-${tab.id}`}
-          role="tabpanel"
-          aria-labelledby={`system-tab-${tab.id}`}
-          hidden={activeSubTab !== tab.id}
-        >
-          {activeSubTab === tab.id && (
-            <>
-              {tab.id === 'audit-log' && <AuditLogPanel />}
-              {tab.id === 'activity' && <ActivityFeedPanel />}
-            </>
-          )}
-        </div>
-      ))}
-    </div>
   );
 }
 

@@ -462,6 +462,11 @@
   animation: checkDraw 400ms ease-out 200ms forwards;
 }
 
+@keyframes activityHighlight {
+  from { background-color: rgb(59 130 246 / 0.08); }
+  to { background-color: transparent; }
+}
+
 /* ─── Skill Preview — Markdown renderer styles ───────────────────────────── */
 
 .skill-preview .md-h1 { font-size: 1.25rem; font-weight: 700; margin: 1rem 0 0.5rem; color: var(--text); }
