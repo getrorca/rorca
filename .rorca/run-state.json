@@ -2,7 +2,7 @@
   "specId": "build a spec to turn the wake page into columns similar to fizzy.do: draft, in-progress, and done from left to right cards like kanban style and with the draft to have approve deny but also you can click on the card and it expands into the current card that says run pipeline, etc",
   "runId": 7,
   "startedAt": "2026-03-09T01:28:57.800Z",
-  "lastUpdatedAt": "2026-03-09T01:38:16.452Z",
+  "lastUpdatedAt": "2026-03-09T01:44:18.587Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-09T01:38:16.452Z",
       "agentType": "claude",
       "elapsedMs": 318069
+    },
+    {
+      "storyId": "US-003",
+      "title": "Update queue route to fetch specs grouped by status",
+      "status": "passed",
+      "startedAt": "2026-03-09T01:38:30.586Z",
+      "finishedAt": "2026-03-09T01:44:18.587Z",
+      "agentType": "claude",
+      "elapsedMs": 348001
     }
   ],
   "failedStories": [],
