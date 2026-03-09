@@ -59,8 +59,9 @@ for (const [panel, path] of Object.entries(PANEL_ROUTES)) {
 
 /** Resolve current URL path to a PanelId. Returns 'hub' for unknown paths. */
 export function pathToPanelId(pathname: string): PanelId {
-  // Nested slide-over routes resolve to the underlying panel
-  if (/^\/runs\/\d+/.test(pathname)) return 'hub';
+  // ULT-004: RunView renders as full-width panel under Pipeline
+  if (/^\/runs\/\d+/.test(pathname)) return 'pipeline';
+  // Spec review slide-over resolves to hub
   if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'hub';
   // FR-004: /settings/* nested routes all resolve to 'settings' panel
   if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
