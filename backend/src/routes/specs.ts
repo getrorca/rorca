@@ -237,7 +237,7 @@ function safeReaddir(dir: string): string[] {
   }
 }
 
-function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string; reviewStatus?: ReviewStatus; source?: string } {
+function parseSpecFile(filePath: string): { title?: string; userStories?: unknown[]; generatedAt?: string; forkedFrom?: string; reviewStatus?: ReviewStatus; source?: string; model?: string } {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
 }
@@ -2367,7 +2367,9 @@ interface KanbanSpec {
   reviewStatus: ReviewStatus;
   storyTitles?: string[];
   passedStories?: number;
+  failedStories?: number;
   activeRunId?: number;
+  model?: string;
 }
 
 router.get('/kanban', (req: Request, res: Response) => {
@@ -2390,7 +2392,9 @@ router.get('/kanban', (req: Request, res: Response) => {
     const pendingSpecs: KanbanSpec[] = [];
     for (const file of safeReaddir(pendingDir)) {
       try {
-        const s = buildSummary(path.join(pendingDir, file), file, 'pending', workspace.path, workspaceId);
+        const filePath = path.join(pendingDir, file);
+        const content = parseSpecFile(filePath);
+        const s = buildSummary(filePath, file, 'pending', workspace.path, workspaceId);
         pendingSpecs.push({
           id: s.id,
           title: s.specName,
@@ -2400,6 +2404,7 @@ router.get('/kanban', (req: Request, res: Response) => {
           tags: s.tags,
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
+          model: content.model,
         });
       } catch { /* skip unparseable */ }
     }
@@ -2407,7 +2412,9 @@ router.get('/kanban', (req: Request, res: Response) => {
     const approvedSpecs: KanbanSpec[] = [];
     for (const file of safeReaddir(approvedDir)) {
       try {
-        const s = buildSummary(path.join(approvedDir, file), file, 'approved', workspace.path, workspaceId);
+        const filePath = path.join(approvedDir, file);
+        const content = parseSpecFile(filePath);
+        const s = buildSummary(filePath, file, 'approved', workspace.path, workspaceId);
         approvedSpecs.push({
           id: s.id,
           title: s.specName,
@@ -2418,6 +2425,7 @@ router.get('/kanban', (req: Request, res: Response) => {
           tags: s.tags,
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
+          model: content.model,
         });
       } catch { /* skip unparseable */ }
     }
@@ -2439,9 +2447,10 @@ router.get('/kanban', (req: Request, res: Response) => {
       }
     }
 
-    // Fetch story pass counts for approved specs with runs
+    // Fetch story pass/fail counts for approved specs with runs
     const approvedSlugs = approvedSpecs.map(s => s.id);
     const storyProgress = new Map<string, number>();
+    const storyFailed = new Map<string, number>();
     if (approvedSlugs.length > 0) {
       for (const slug of approvedSlugs) {
         // Find latest run for this spec
@@ -2453,6 +2462,10 @@ router.get('/kanban', (req: Request, res: Response) => {
             `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status = 'pass'`
           ).get(latestRun.id) as { cnt: number } | undefined;
           if (passCount) storyProgress.set(slug, passCount.cnt);
+          const failCount = db.prepare(
+            `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status = 'fail'`
+          ).get(latestRun.id) as { cnt: number } | undefined;
+          if (failCount) storyFailed.set(slug, failCount.cnt);
         }
       }
     }
@@ -2473,12 +2486,14 @@ router.get('/kanban', (req: Request, res: Response) => {
       const isCompleted = completedSlugs.has(spec.id);
       const passed = storyProgress.get(spec.id);
 
+      const failed = storyFailed.get(spec.id);
       if (isCompleted && !activeRunId) {
-        done.push({ ...spec, passedStories: passed });
+        done.push({ ...spec, passedStories: passed, failedStories: failed });
       } else {
         inProgress.push({
           ...spec,
           passedStories: passed,
+          failedStories: failed,
           ...(activeRunId ? { activeRunId } : {}),
         });
       }
