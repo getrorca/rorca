@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { useDebounce } from '../hooks/useDebounce';
 import {
   Search,
   X,
@@ -225,6 +227,165 @@ function extractDiagramText(spec: SpecDetail): { text: string; type: 'mermaid' |
   return null;
 }
 
+/* ─── Load More Sentinel (infinite scroll via IntersectionObserver) ── */
+
+function LoadMoreSentinel({ onVisible, loading }: { onVisible: () => void; loading: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || loading) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) onVisible(); },
+      { rootMargin: '200px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [onVisible, loading]);
+
+  return (
+    <div ref={ref} className="flex items-center justify-center py-2">
+      {loading && (
+        <Loader2 size={16} className="animate-spin text-muted" />
+      )}
+    </div>
+  );
+}
+
+/* ─── Memoized Spec Row ─────────────────────────────────────────── */
+
+const ArchiveSpecRow = memo(function ArchiveSpecRow({
+  spec,
+  isSelected,
+  tagFilter,
+  onSelect,
+  onTagClick,
+}: {
+  spec: ArchiveSpec;
+  isSelected: boolean;
+  tagFilter: string[];
+  onSelect: () => void;
+  onTagClick: (tag: string) => void;
+}) {
+  const cfg = STATUS_CONFIG[spec.status];
+  const tel = spec.runTelemetry;
+
+  return (
+    <button
+      onClick={onSelect}
+      aria-expanded={isSelected}
+      aria-label={`${spec.specName} - ${spec.status}`}
+      className={`w-full text-left px-4 py-2.5 border-b border-border transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50 ${
+        isSelected ? 'bg-accent/10' : 'hover:bg-panel'
+      } ${spec.status === 'completed' ? 'opacity-80' : ''}`}
+    >
+      {/* Row 1: Status dot + Spec name + Quick badge + Date + Chevron */}
+      <div className="flex items-center gap-2 mb-1">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dotClass}`} />
+        <span className="text-sm font-mono font-semibold text-text truncate flex-1">
+          {spec.specName}
+        </span>
+        {spec.source === 'quick-run' && (
+          <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400">
+            Quick
+          </span>
+        )}
+        <span className="text-[10px] text-muted tabular-nums shrink-0">
+          {formatDate(spec.generatedAt)}
+        </span>
+        <ChevronRight
+          size={14}
+          className={`shrink-0 text-muted transition-transform ${isSelected ? 'rotate-90' : ''}`}
+        />
+      </div>
+
+      {/* Row 2: Repo + Branch + Spacer + Outcome bar + Pass rate */}
+      <div className="flex items-center gap-2 mb-1 ml-3.5 min-w-0">
+        {spec.repoName && (
+          <span className="text-[10px] text-muted font-mono truncate">{spec.repoName}</span>
+        )}
+        {spec.branchName && (
+          <span className="flex items-center gap-0.5 text-[10px] text-muted font-mono truncate">
+            <GitBranch className="w-2.5 h-2.5" />
+            {spec.branchName.replace('feat/', '')}
+          </span>
+        )}
+        {spec.forkedFrom && (
+          <span className="flex items-center gap-0.5 text-[10px] text-accent font-mono">
+            <GitFork className="w-2.5 h-2.5" />
+            {spec.forkedFrom}
+          </span>
+        )}
+        <div className="flex-1" />
+        {tel ? (
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="w-16">
+              <StoryOutcomeBar outcomes={tel.storyOutcomes} storyCount={spec.storyCount} />
+            </div>
+            <span className="text-[10px] font-mono tabular-nums text-muted">
+              {tel.storyOutcomes.pass}/{spec.storyCount}
+            </span>
+          </div>
+        ) : (
+          <span className="text-[10px] text-muted tabular-nums shrink-0">
+            {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
+          </span>
+        )}
+      </div>
+
+      {/* Row 3: Telemetry (if run data) or Tags + Review status */}
+      {tel ? (
+        <div className="flex items-center gap-3 ml-3.5 text-[10px] text-muted">
+          {tel.durationSeconds != null && (
+            <span className="font-mono tabular-nums">{formatDurationShort(tel.durationSeconds)}</span>
+          )}
+          {(tel.totalInputTokens != null || tel.totalOutputTokens != null) && (
+            <span className="font-mono tabular-nums">
+              {formatTokensCompact((tel.totalInputTokens ?? 0) + (tel.totalOutputTokens ?? 0))} tok
+            </span>
+          )}
+          {tel.totalCostUsd != null && tel.totalCostUsd > 0 && (
+            <span className="font-mono tabular-nums">{formatCostCompact(tel.totalCostUsd)}</span>
+          )}
+          <AgentBadge agentType={tel.agentType} agentModel={tel.agentModel} size="sm" />
+          {spec.tags?.length > 0 && (
+            <div className="flex-1 min-w-0 overflow-hidden">
+              <TagChipsReadonly tags={spec.tags} onTagClick={onTagClick} />
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          {spec.tags?.length > 0 && (
+            <div className="ml-3.5">
+              <TagChipsReadonly tags={spec.tags} onTagClick={onTagClick} />
+            </div>
+          )}
+          {spec.reviewStatus && spec.reviewStatus !== 'draft' && (
+            <div className="ml-3.5 mt-0.5">
+              <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${
+                spec.reviewStatus === 'review_requested' ? 'bg-accent/15 text-accent' :
+                spec.reviewStatus === 'approved' ? 'bg-success/15 text-success' :
+                'bg-warning/15 text-warning'
+              }`}>
+                {spec.reviewStatus === 'review_requested' ? 'Needs Review' :
+                 spec.reviewStatus === 'approved' ? 'Review OK' : 'Changes Req.'}
+              </span>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Reject reason */}
+      {spec.status === 'rejected' && spec.rejectReason && (
+        <p className="text-xs text-error/70 mt-1 ml-3.5 truncate">
+          Reason: {spec.rejectReason}
+        </p>
+      )}
+    </button>
+  );
+});
+
 /* ─── Main Component ──────────────────────────────────────────────── */
 
 export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: PanelId) => void }) {
@@ -238,7 +399,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
   const [error, setError] = useState('');
 
   const [searchText, setSearchText] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const debouncedSearch = useDebounce(searchText, 300);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [tagFilter, setTagFilter] = useState<string[]>([]);
 
@@ -246,7 +407,14 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
   const [specDetail, setSpecDetail] = useState<SpecDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  // ─── Virtual scrolling ──────────────────────────────────────────
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: specs.length + (hasMore ? 1 : 0), // +1 for load-more sentinel
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => 80,
+    overscan: 5,
+  });
 
   // ─── Resizable split pane ────────────────────────────────────────
   const [leftWidth, setLeftWidth] = useState(380);
@@ -274,15 +442,6 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
   }, [leftWidth]);
-
-  // ─── Debounce search ────────────────────────────────────────────
-  useEffect(() => {
-    clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      setDebouncedSearch(searchText);
-    }, 300);
-    return () => clearTimeout(debounceRef.current);
-  }, [searchText]);
 
   // ─── Fetch specs ────────────────────────────────────────────────
   const fetchSpecs = useCallback(async (offset = 0, append = false) => {
@@ -384,7 +543,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
 
   const selectedSpec = specs.find(s => s.id === selectedId);
 
-  const allTags = Array.from(new Set(specs.flatMap(s => s.tags || []))).sort();
+  const allTags = useMemo(() => Array.from(new Set(specs.flatMap(s => s.tags || []))).sort(), [specs]);
 
   return (
     <div role="main" aria-label="Archive panel - search and browse archived specs" className="flex flex-col h-full bg-bg overflow-hidden">
@@ -479,7 +638,7 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
         >
           <div className="flex flex-col h-full bg-panel">
             {/* Results */}
-            <div className="flex-1 overflow-y-auto">
+            <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
               {loading ? (
                 <div aria-live="polite" className="flex items-center justify-center h-full text-muted text-sm">
                   <span className="sr-only">Loading...</span>
@@ -509,164 +668,65 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                   </div>
                 )
               ) : (
-                <div>
-                  {specs.map(spec => {
-                    const cfg = STATUS_CONFIG[spec.status];
-                    const tel = spec.runTelemetry;
-                    return (
-                      <button
-                        key={spec.id}
-                        onClick={() => setSelectedId(spec.id === selectedId ? null : spec.id)}
-                        aria-expanded={spec.id === selectedId}
-                        aria-label={`${spec.specName} - ${spec.status}`}
-                        className={`w-full text-left px-4 py-2.5 border-b border-border transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50 ${
-                          spec.id === selectedId ? 'bg-accent/10' : 'hover:bg-panel'
-                        } ${spec.status === 'completed' ? 'opacity-80' : ''}`}
-                      >
-                        {/* Row 1: Status dot + Spec name + Quick badge + Date + Chevron */}
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dotClass}`} />
-                          <span className="text-sm font-mono font-semibold text-text truncate flex-1">
-                            {spec.specName}
-                          </span>
-                          {spec.source === 'quick-run' && (
-                            <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-purple-500/15 text-purple-400">
-                              Quick
-                            </span>
-                          )}
-                          <span className="text-[10px] text-muted tabular-nums shrink-0">
-                            {formatDate(spec.generatedAt)}
-                          </span>
-                          <ChevronRight
-                            size={14}
-                            className={`shrink-0 text-muted transition-transform ${
-                              spec.id === selectedId ? 'rotate-90' : ''
-                            }`}
-                          />
-                        </div>
-
-                        {/* Row 2: Repo + Branch + Spacer + Outcome bar + Pass rate */}
-                        <div className="flex items-center gap-2 mb-1 ml-3.5 min-w-0">
-                          {spec.repoName && (
-                            <span className="text-[10px] text-muted font-mono truncate">
-                              {spec.repoName}
-                            </span>
-                          )}
-                          {spec.branchName && (
-                            <span className="flex items-center gap-0.5 text-[10px] text-muted font-mono truncate">
-                              <GitBranch className="w-2.5 h-2.5" />
-                              {spec.branchName.replace('feat/', '')}
-                            </span>
-                          )}
-                          {spec.forkedFrom && (
-                            <span className="flex items-center gap-0.5 text-[10px] text-accent font-mono">
-                              <GitFork className="w-2.5 h-2.5" />
-                              {spec.forkedFrom}
-                            </span>
-                          )}
-                          <div className="flex-1" />
-                          {tel ? (
-                            <div className="flex items-center gap-2 shrink-0">
-                              <div className="w-16">
-                                <StoryOutcomeBar outcomes={tel.storyOutcomes} storyCount={spec.storyCount} />
-                              </div>
-                              <span className="text-[10px] font-mono tabular-nums text-muted">
-                                {tel.storyOutcomes.pass}/{spec.storyCount}
-                              </span>
-                            </div>
-                          ) : (
-                            <span className="text-[10px] text-muted tabular-nums shrink-0">
-                              {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Row 3: Telemetry (if run data) or Tags + Review status */}
-                        {tel ? (
-                          <div className="flex items-center gap-3 ml-3.5 text-[10px] text-muted">
-                            {tel.durationSeconds != null && (
-                              <span className="font-mono tabular-nums">
-                                {formatDurationShort(tel.durationSeconds)}
-                              </span>
-                            )}
-                            {(tel.totalInputTokens != null || tel.totalOutputTokens != null) && (
-                              <span className="font-mono tabular-nums">
-                                {formatTokensCompact((tel.totalInputTokens ?? 0) + (tel.totalOutputTokens ?? 0))} tok
-                              </span>
-                            )}
-                            {tel.totalCostUsd != null && tel.totalCostUsd > 0 && (
-                              <span className="font-mono tabular-nums">
-                                {formatCostCompact(tel.totalCostUsd)}
-                              </span>
-                            )}
-                            <AgentBadge agentType={tel.agentType} agentModel={tel.agentModel} size="sm" />
-                            {spec.tags?.length > 0 && (
-                              <div className="flex-1 min-w-0 overflow-hidden">
-                                <TagChipsReadonly
-                                  tags={spec.tags}
-                                  onTagClick={tag => {
-                                    if (!tagFilter.includes(tag)) {
-                                      setTagFilter(prev => [...prev, tag]);
-                                    }
-                                  }}
-                                />
-                              </div>
+                <div
+                  style={{ height: virtualizer.getTotalSize(), position: 'relative' }}
+                >
+                  {virtualizer.getVirtualItems().map((vItem) => {
+                    // Last item = load-more sentinel
+                    if (vItem.index === specs.length) {
+                      return (
+                        <div
+                          key="load-more"
+                          ref={virtualizer.measureElement}
+                          data-index={vItem.index}
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            transform: `translateY(${vItem.start}px)`,
+                          }}
+                        >
+                          <div className="px-4 py-3 border-b border-border text-center">
+                            <p className="text-xs text-muted mb-2">
+                              Showing {specs.length} of {total} specs
+                            </p>
+                            {hasMore && (
+                              <LoadMoreSentinel onVisible={handleLoadMore} loading={loadingMore} />
                             )}
                           </div>
-                        ) : (
-                          <>
-                            {spec.tags?.length > 0 && (
-                              <div className="ml-3.5">
-                                <TagChipsReadonly
-                                  tags={spec.tags}
-                                  onTagClick={tag => {
-                                    if (!tagFilter.includes(tag)) {
-                                      setTagFilter(prev => [...prev, tag]);
-                                    }
-                                  }}
-                                />
-                              </div>
-                            )}
-                            {spec.reviewStatus && spec.reviewStatus !== 'draft' && (
-                              <div className="ml-3.5 mt-0.5">
-                                <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${
-                                  spec.reviewStatus === 'review_requested' ? 'bg-accent/15 text-accent' :
-                                  spec.reviewStatus === 'approved' ? 'bg-success/15 text-success' :
-                                  'bg-warning/15 text-warning'
-                                }`}>
-                                  {spec.reviewStatus === 'review_requested' ? 'Needs Review' :
-                                   spec.reviewStatus === 'approved' ? 'Review OK' : 'Changes Req.'}
-                                </span>
-                              </div>
-                            )}
-                          </>
-                        )}
+                        </div>
+                      );
+                    }
 
-                        {/* Reject reason */}
-                        {spec.status === 'rejected' && spec.rejectReason && (
-                          <p className="text-xs text-error/70 mt-1 ml-3.5 truncate">
-                            Reason: {spec.rejectReason}
-                          </p>
-                        )}
-                      </button>
+                    const spec = specs[vItem.index];
+                    return (
+                      <div
+                        key={spec.id}
+                        ref={virtualizer.measureElement}
+                        data-index={vItem.index}
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          transform: `translateY(${vItem.start}px)`,
+                        }}
+                      >
+                        <ArchiveSpecRow
+                          spec={spec}
+                          isSelected={spec.id === selectedId}
+                          tagFilter={tagFilter}
+                          onSelect={() => setSelectedId(spec.id === selectedId ? null : spec.id)}
+                          onTagClick={tag => {
+                            if (!tagFilter.includes(tag)) {
+                              setTagFilter(prev => [...prev, tag]);
+                            }
+                          }}
+                        />
+                      </div>
                     );
                   })}
-
-                  {/* Pagination footer */}
-                  <div className="px-4 py-3 border-b border-border text-center">
-                    <p className="text-xs text-muted mb-2">
-                      Showing {specs.length} of {total} specs
-                    </p>
-                    {hasMore && (
-                      <button
-                        onClick={handleLoadMore}
-                        disabled={loadingMore}
-                        className="px-4 py-1.5 text-xs font-medium rounded bg-panel border border-border text-text hover:bg-accent/10 transition-colors disabled:opacity-50"
-                      >
-                        {loadingMore ? 'Loading...' : 'Load more'}
-                      </button>
-                    )}
-                  </div>
                 </div>
               )}
             </div>

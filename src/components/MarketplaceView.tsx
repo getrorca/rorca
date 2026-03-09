@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useDebounce } from '../hooks/useDebounce';
 import {
   Star,
   Loader2,
@@ -236,6 +237,7 @@ function SkillsTab() {
   const [loadingSuggestions, setLoadingSuggestions] = useState(true);
 
   const [query, setQuery] = useState('');
+  const debouncedQuery = useDebounce(query, 300);
   const [searchResults, setSearchResults] = useState<SkillSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -245,7 +247,6 @@ function SkillsTab() {
   const [batchInstalling, setBatchInstalling] = useState(false);
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
 
-  const searchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const fetchInstalled = useCallback(async () => {
@@ -276,34 +277,38 @@ function SkillsTab() {
   }, [fetchInstalled, fetchSuggestions]);
 
   useEffect(() => {
-    if (searchRef.current) clearTimeout(searchRef.current);
-    const q = query.trim();
+    const q = debouncedQuery.trim();
     if (!q) {
       setSearchResults([]);
       setHasSearched(false);
       setSearchError(null);
       return;
     }
-    searchRef.current = setTimeout(async () => {
-      setSearching(true);
-      setSearchError(null);
+    let cancelled = false;
+    setSearching(true);
+    setSearchError(null);
+    (async () => {
       try {
         const data = await apiFetch<{ results: SkillSearchResult[]; total: number }>(
           '/api/skills/search',
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q, limit: 30 }) },
         );
-        setSearchResults(data.results ?? []);
-        setHasSearched(true);
+        if (!cancelled) {
+          setSearchResults(data.results ?? []);
+          setHasSearched(true);
+        }
       } catch (err) {
-        setSearchError(err instanceof Error ? err.message : 'Search failed');
-        setSearchResults([]);
-        setHasSearched(true);
+        if (!cancelled) {
+          setSearchError(err instanceof Error ? err.message : 'Search failed');
+          setSearchResults([]);
+          setHasSearched(true);
+        }
       } finally {
-        setSearching(false);
+        if (!cancelled) setSearching(false);
       }
-    }, 350);
-    return () => { if (searchRef.current) clearTimeout(searchRef.current); };
-  }, [query]);
+    })();
+    return () => { cancelled = true; };
+  }, [debouncedQuery]);
 
   const installSkill = useCallback(async (skillName: string) => {
     setInstallState(s => ({ ...s, [skillName]: 'installing' }));

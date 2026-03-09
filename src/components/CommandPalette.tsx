@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
 import { Search, ArrowRight, Clock, Command, Hammer, Trash2, Menu } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -146,6 +146,7 @@ function clearRecent() {
 
 export default function CommandPalette({ onNavigate, onClose, activePanel, activeRunId, onSendToForge }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
+  const deferredQuery = useDeferredValue(query);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -348,9 +349,9 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
   const contextKey = activeRunId != null ? 'run-view' : activePanel;
   const boostIds = CONTEXT_BOOSTS[contextKey] ?? [];
 
-  // Filter and rank results
+  // Filter and rank results (uses deferred query to keep input responsive)
   const { items: results, topScore } = useMemo(() => {
-    if (!query.trim()) {
+    if (!deferredQuery.trim()) {
       // Show drawer toggle first, then recents, then context-boosted, then remaining actions/panels
       const drawerItem = allItems.find((item) => item.id === 'action:toggle-drawer');
       const pinnedIds = new Set(drawerItem ? ['action:toggle-drawer'] : []);
@@ -375,9 +376,9 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
 
     const scored = allItems
       .map((item) => {
-        const labelMatch = fuzzyMatch(query, item.label);
-        const descMatch = item.description ? fuzzyMatch(query, item.description) : { match: false, score: 0 };
-        const idMatch = fuzzyMatch(query, item.id);
+        const labelMatch = fuzzyMatch(deferredQuery, item.label);
+        const descMatch = item.description ? fuzzyMatch(deferredQuery, item.description) : { match: false, score: 0 };
+        const idMatch = fuzzyMatch(deferredQuery, item.id);
         let bestScore = Math.max(labelMatch.score, descMatch.score * 0.7, idMatch.score * 0.5);
         // Context boost: +30 for items relevant to current screen
         if (boostIds.includes(item.id)) bestScore += 30;
@@ -391,7 +392,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       items: scored.map((r) => r.item),
       topScore: scored.length > 0 ? scored[0].score : 0,
     };
-  }, [query, allItems, boostIds]);
+  }, [deferredQuery, allItems, boostIds]);
 
   // Forge fallback: appears when query has 2+ words and no strong match
   const trimmedQuery = query.trim();
