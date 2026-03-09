@@ -32,6 +32,7 @@ const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'))
 const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
 const CommandPalette = lazy(() => import('./components/CommandPalette'));
+const KeyboardShortcutsPanel = lazy(() => import('./components/KeyboardShortcutsPanel'));
 
 // — Lazy-loaded panel components (each gets its own chunk) —
 // ULT-006: Only 5 primary panels + RunView + SpecReview + GitHubSettings
@@ -365,6 +366,7 @@ function AppLayout() {
   const location = useLocation();
   const { workspaceId } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showShortcutsOverlay, setShowShortcutsOverlay] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [queueCount, setQueueCount] = useState(0);
@@ -454,17 +456,21 @@ function AppLayout() {
     routerNavigate(`/settings/${tab}`);
   }, [routerNavigate]);
 
-  // ULT-006: Global keyboard shortcuts — 1-5 switch panels, mod+1-5 also works
+  // ULT-013: Global keyboard shortcuts — 1-5 switch panels, n=new spec, ?=shortcuts overlay
   const hotkeys = useMemo<HotkeyBinding[]>(() => [
     { key: 'mod+k', handler: () => setShowCommandPalette((prev) => !prev) },
-    { key: '?', handler: () => navigateToSettingsTab('shortcuts') },
-    { key: 'mod+/', handler: () => navigateToSettingsTab('shortcuts') },
+    { key: '?', handler: () => setShowShortcutsOverlay((prev) => !prev) },
+    { key: 'mod+/', handler: () => setShowShortcutsOverlay((prev) => !prev) },
     // Number keys 1-5 switch panels (when no input is focused — useHotkeys skips inputs)
     { key: '1', handler: () => handleNavigate('specs') },
     { key: '2', handler: () => handleNavigate('runs') },
     { key: '3', handler: () => handleNavigate('analytics') },
     { key: '4', handler: () => handleNavigate('direction') },
     { key: '5', handler: () => handleNavigate('settings') },
+    // n = New Spec (navigate to specs and trigger forge)
+    { key: 'n', handler: () => { handleSendToForge(''); handleNavigate('specs'); } },
+    // r = Run pipeline (navigate to runs)
+    { key: 'r', handler: () => handleNavigate('runs') },
     // Mod+1-5 also works
     { key: 'mod+1', handler: () => handleNavigate('specs') },
     { key: 'mod+2', handler: () => handleNavigate('runs') },
@@ -476,7 +482,12 @@ function AppLayout() {
     { key: 'mod+backspace', handler: () => { if (activePanel !== 'specs' && activePanel !== 'spec-review') handleNavigate('specs'); } },
     { key: 'mod+shift+n', handler: () => { handleSendToForge(''); handleNavigate('specs'); } },
     { key: 'mod+shift+r', handler: () => handleNavigate('runs') },
-  ], [handleNavigate, handleSendToForge, navigateToSettingsTab, activePanel]);
+    // Escape: close overlays in reverse order
+    { key: 'escape', handler: () => {
+      if (showCommandPalette) { setShowCommandPalette(false); return; }
+      if (showShortcutsOverlay) { setShowShortcutsOverlay(false); return; }
+    }, preventDefault: false },
+  ], [handleNavigate, handleSendToForge, activePanel, showCommandPalette, showShortcutsOverlay]);
 
   useHotkeys(hotkeys);
 
@@ -538,6 +549,12 @@ function AppLayout() {
               activeRunId={activeRunId}
               onSendToForge={handleSendToForge}
             />
+          </Suspense>
+        )}
+
+        {showShortcutsOverlay && (
+          <Suspense fallback={null}>
+            <KeyboardShortcutsPanel onClose={() => setShowShortcutsOverlay(false)} />
           </Suspense>
         )}
       </Shell>
