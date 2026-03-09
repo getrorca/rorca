@@ -12,26 +12,33 @@ const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
 
 /**
  * Maps every PanelId to its URL path segment.
- * Hub is the index route at '/'.
+ * ULT-006: 5 primary panels — Specs, Runs, Analytics, Direction, Settings.
+ * All legacy PanelIds redirect to their new primary panel.
  */
 export const PANEL_ROUTES: Record<PanelId, string> = {
-  // Index
-  hub: '/',
-  // Specs — consolidated panel
+  // ULT-006: Primary panels
   specs: '/specs',
+  runs: '/runs',
+  analytics: '/analytics',
+  direction: '/direction',
+  settings: '/settings',
+
+  // Run sub-view
+  'run-view': '/runs',
+
+  // Legacy aliases — all redirect to their parent primary panel
+  hub: '/runs',                    // Hub merged into Runs
   forge: '/specs',
   queue: '/specs',
   archive: '/specs',
-  marketplace: '/marketplace',
-  // Pipeline
-  pipeline: '/pipeline',
-  worktrees: '/worktrees',
-  compare: '/compare',
-  // Direction
-  stack: '/direction',
-  'team-direction': '/team-direction',
-  // Analytics — unified panel (ULT-005)
-  analytics: '/analytics',
+  marketplace: '/specs',           // Marketplace merged into Specs as tab
+  pipeline: '/runs',               // Pipeline → Runs
+  worktrees: '/runs',              // Worktrees only in RunView
+  compare: '/runs',                // Compare only from RunView
+  stack: '/direction',             // stack → direction
+  'team-direction': '/direction',
+  memory: '/direction',            // Memory → Direction tab
+  // Analytics legacy
   usage: '/analytics',
   costs: '/analytics',
   models: '/analytics',
@@ -40,39 +47,37 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   roi: '/analytics',
   finops: '/analytics',
   health: '/analytics',
-  // System — now inside Settings > System tab
+  // System → Settings
   'audit-log': '/settings/system',
   activity: '/settings/system',
   github: '/settings/github',
   'workspace-settings': '/settings/general',
-  settings: '/settings',
-  // CIE-005: Memory Ledger
-  memory: '/memory',
-  // Slide-over (also proper nested routes now)
+  // Slide-over
   'spec-review': '/specs',
 };
 
-/** Reverse lookup: URL path → PanelId */
-const PATH_TO_PANEL: Record<string, PanelId> = {};
-for (const [panel, path] of Object.entries(PANEL_ROUTES)) {
-  PATH_TO_PANEL[path] = panel as PanelId;
-}
-
-/** Resolve current URL path to a PanelId. Returns 'hub' for unknown paths. */
+/** Resolve current URL path to a PanelId. Returns 'specs' for unknown paths. */
 export function pathToPanelId(pathname: string): PanelId {
-  // ULT-004: RunView renders as full-width panel under Pipeline
-  if (/^\/runs\/\d+/.test(pathname)) return 'pipeline';
-  // Spec review slide-over resolves to hub
-  if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'hub';
-  // ULT-005: Analytics unified panel
+  // RunView renders as full-width panel under Runs
+  if (/^\/runs\/\d+/.test(pathname)) return 'runs';
+  // Spec review slide-over resolves to specs
+  if (/^\/specs\/[^/]+\/review/.test(pathname)) return 'specs';
+  // Analytics
   if (pathname === '/analytics') return 'analytics';
-  // FR-004: /settings/* nested routes all resolve to 'settings' panel
+  // Settings nested routes
   if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
-  // ULT-001: Consolidated specs panel
+  // Specs
   if (pathname === '/specs') return 'specs';
+  // Runs
+  if (pathname === '/runs') return 'runs';
+  // Direction
+  if (pathname === '/direction') return 'direction';
   // Legacy redirects
-  if (pathname === '/forge' || pathname === '/queue' || pathname === '/archive') return 'specs';
-  return PATH_TO_PANEL[pathname] ?? 'hub';
+  if (pathname === '/forge' || pathname === '/queue' || pathname === '/archive' || pathname === '/marketplace') return 'specs';
+  if (pathname === '/pipeline' || pathname === '/worktrees' || pathname === '/compare') return 'runs';
+  if (pathname === '/memory' || pathname === '/team-direction') return 'direction';
+  if (pathname === '/' || pathname === '') return 'specs';
+  return 'specs';
 }
 
 /**
@@ -84,7 +89,7 @@ export function useAppNavigate() {
 
   const navigateTo = useCallback(
     (panel: PanelId) => {
-      navigate(PANEL_ROUTES[panel] ?? '/');
+      navigate(PANEL_ROUTES[panel] ?? '/specs');
     },
     [navigate],
   );
@@ -103,7 +108,7 @@ export function useActivePanel(): PanelId {
 /**
  * FR-004: Derive the active settings tab from the route param.
  * Must be used inside a route with a :tab param (e.g. /settings/:tab).
- * Returns 'direction' as fallback for invalid/missing tab.
+ * Returns 'general' as fallback for invalid/missing tab.
  */
 export function useActiveSettingsTab(): SettingsTab {
   const { tab } = useParams<{ tab: string }>();

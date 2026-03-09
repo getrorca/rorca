@@ -3,11 +3,12 @@
 Spec: rorca-ultimate-ux
 Run ID: 10
 Started: 2026-03-09T07:50:33.681Z
-Last Updated: 2026-03-09T08:33:03.414Z
+Last Updated: 2026-03-09T08:43:33.215Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - ULT-001: Unified Spec Lifecycle Panel — Replace Forge + Queue + Archive — DONE (claude, 720s)
 - ULT-002: Fizzy-Inspired Collapsible Columns with Progress Indicators — DONE (claude, 302s)
 - ULT-003: Production Drag-and-Drop with Keyboard Accessibility — DONE (claude, 394s)
 - ULT-004: Unified Run Monitor — Merge Pipeline + RunView — DONE (claude, 404s)
 - ULT-005: Consolidated Analytics Dashboard — 8 Panels to 1 — DONE (claude, 662s)
+- ULT-006: 5-Item Sidebar Navigation — Kill the Clutter — DONE (claude, 616s)
