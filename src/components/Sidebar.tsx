@@ -1,11 +1,11 @@
 import { useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
-  Wand2, Layers, Activity, Settings,
+  Wand2, Layers, Settings,
   Search, PlayCircle, Compass,
   GitBranch, ArrowLeftRight,
-  Github, Rss, Users,
-  BarChart3, ScrollText, BookOpen, Store,
+  Users,
+  BarChart3, BookOpen, Store,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -88,9 +88,6 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Settings',
     items: [
       { id: 'settings', label: 'Settings', icon: Settings },
-      { id: 'audit-log', label: 'Audit Log', icon: ScrollText },
-      { id: 'activity', label: 'Activity Feed', icon: Rss },
-      { id: 'github', label: 'GitHub', icon: Github },
     ],
   },
 ];

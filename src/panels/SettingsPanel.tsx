@@ -5,12 +5,16 @@ import { useActiveSettingsTab } from '../routes';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export type SettingsTab =
-  // Workspace-scoped
-  | 'general' | 'direction' | 'context' | 'providers' | 'github' | 'env-vars' | 'pipeline' | 'hooks' | 'agents'
-  // Account-scoped
-  | 'shortcuts' | 'account' | 'billing'
-  // Aggregate tabs
-  | 'system';
+  // Workspace group
+  | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context'
+  // Execution group
+  | 'providers' | 'direction' | 'pipeline'
+  // Integrations group
+  | 'github' | 'slack' | 'linear' | 'vercel'
+  // Account group
+  | 'account' | 'billing' | 'shortcuts' | 'notifications'
+  // System group
+  | 'system' | 'api-keys' | 'developer';
 
 // ─── Lazy-loaded sub-components ──────────────────────────────────────────────
 
@@ -62,6 +66,22 @@ const SystemSection = lazy(() =>
   import('./settings/AccountSettingsTab').then((m) => ({ default: m.SystemSection })),
 );
 
+const NotificationsSection = lazy(() =>
+  import('./settings/AccountSettingsTab').then((m) => ({ default: m.NotificationsSection })),
+);
+
+const ApiKeysSection = lazy(() =>
+  import('./settings/ApiKeysSection'),
+);
+
+const DeveloperToolsSection = lazy(() =>
+  import('./settings/DeveloperToolsSection'),
+);
+
+const IntegrationPlaceholder = lazy(() =>
+  import('./settings/IntegrationPlaceholder'),
+);
+
 // ─── Loading fallback ────────────────────────────────────────────────────────
 
 function TabLoader() {
@@ -85,22 +105,30 @@ export default function SettingsPanel() {
     >
       <div className="p-4 sm:p-6 mx-auto w-full max-w-4xl">
         <Suspense fallback={<TabLoader />}>
-          {/* Workspace-scoped tabs */}
+          {/* Workspace group */}
           {activeTab === 'general' && <DirectionSettings.WsGeneralSection />}
-          {activeTab === 'direction' && <DirectionSettings.WsDirectionSection />}
-          {activeTab === 'context' && <DirectionSettings.WsContextSection />}
-          {activeTab === 'providers' && <ProviderSettingsTab />}
-          {activeTab === 'github' && <GitHubSettingsTab />}
           {activeTab === 'env-vars' && <DirectionSettings.WsEnvVarsSection />}
-          {activeTab === 'pipeline' && <DirectionSettings.WsPipelineSection />}
           {activeTab === 'hooks' && <DirectionSettings.WsHooksSection />}
           {activeTab === 'agents' && <DirectionSettings.WsAgentsSection />}
-          {/* Account-scoped tabs */}
+          {activeTab === 'context' && <DirectionSettings.WsContextSection />}
+          {/* Execution group */}
+          {activeTab === 'providers' && <ProviderSettingsTab />}
+          {activeTab === 'direction' && <DirectionSettings.WsDirectionSection />}
+          {activeTab === 'pipeline' && <DirectionSettings.WsPipelineSection />}
+          {/* Integrations group */}
+          {activeTab === 'github' && <GitHubSettingsTab />}
+          {activeTab === 'slack' && <IntegrationPlaceholder name="Slack" description="Get run notifications, approve specs via interactive buttons, and receive failure alerts — all in your team's Slack channels." />}
+          {activeTab === 'linear' && <IntegrationPlaceholder name="Linear" description="Import Linear issues as specs, sync story progress to sub-issues, and auto-update parent issues when runs complete." />}
+          {activeTab === 'vercel' && <IntegrationPlaceholder name="Vercel" description="Auto-deploy on run completion, get preview URLs in Run View, and promote to production with one click." />}
+          {/* Account group */}
           {activeTab === 'account' && <AccountSettingsTab />}
           {activeTab === 'billing' && <BillingSection />}
           {activeTab === 'shortcuts' && <ShortcutsSettingsTab />}
-          {/* Aggregate tabs */}
+          {activeTab === 'notifications' && <NotificationsSection />}
+          {/* System group */}
           {activeTab === 'system' && <SystemSection />}
+          {activeTab === 'api-keys' && <ApiKeysSection />}
+          {activeTab === 'developer' && <DeveloperToolsSection />}
         </Suspense>
       </div>
     </div>

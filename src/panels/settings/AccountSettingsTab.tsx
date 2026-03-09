@@ -380,7 +380,7 @@ function ProfileSection() {
 
 // ─── Notifications Section ───────────────────────────────────────────────────
 
-function NotificationsSection() {
+export function NotificationsSection() {
   const [prefs, setPrefs] = useState<NotificationPreferences>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
