@@ -99,9 +99,10 @@ interface SidebarProps {
   mobileOpen?: boolean;
   onMobileClose?: () => void;
   queueCount?: number;
+  activeRunCount?: number;
 }
 
-export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0 }: SidebarProps) {
+export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0, activeRunCount = 0 }: SidebarProps) {
   // Map toggle drawer event to Command Palette trigger for backwards compat
   useEffect(() => {
     const handler = () => {
@@ -158,6 +159,11 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
                     {item.id === 'specs' && queueCount > 0 && (
                       <span className="ml-auto shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-accent text-white text-[10px] font-bold px-1">
                         {queueCount > 99 ? '99+' : queueCount}
+                      </span>
+                    )}
+                    {item.id === 'pipeline' && activeRunCount > 0 && (
+                      <span className="ml-auto shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-blue-500 text-white text-[10px] font-bold px-1 animate-pulse">
+                        {activeRunCount}
                       </span>
                     )}
                   </>
