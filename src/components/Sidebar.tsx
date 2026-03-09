@@ -171,15 +171,16 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
         <button
           onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
           className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors min-h-[44px] sm:min-h-0"
+          aria-label="Search (⌘K)"
         >
-          <Search size={14} className="text-muted/70 shrink-0" />
+          <Search size={14} className="text-muted/70 shrink-0" aria-hidden="true" />
           <span className="flex-1 text-left truncate">Search...</span>
-          <span className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</span>
+          <kbd className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</kbd>
         </button>
       </div>
 
       {/* Main Navigation — 5 items */}
-      <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0">
+      <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0" role="list">
         <div className="space-y-[1px]">
           {SIDEBAR_ITEMS.map((item) => {
             const Icon = item.icon;
@@ -188,6 +189,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
                 key={item.id}
                 to={PANEL_ROUTES[item.id]}
                 end={false}
+                role="listitem"
                 onClick={(e) => {
                   e.preventDefault();
                   onNavigate(item.id);
@@ -225,7 +227,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
     return (
       <>
         <div className="fixed inset-0 bg-black/50 z-40" onClick={onMobileClose} />
-        <nav className="fixed top-0 left-0 bottom-0 z-50 animate-slideInLeft shadow-2xl w-[260px]">
+        <nav aria-label="Main navigation" className="fixed top-0 left-0 bottom-0 z-50 animate-slideInLeft shadow-2xl w-[260px]">
           {sidebarContent}
         </nav>
       </>
@@ -235,7 +237,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
   // ─── Mobile: bottom tab bar (5 icons + active indicator) ─────────────────
   if (breakpoint === 'mobile') {
     return (
-      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-panel border-t border-border flex items-center justify-around px-1 py-1 safe-area-bottom">
+      <nav aria-label="Main navigation" className="fixed bottom-0 left-0 right-0 z-40 bg-panel border-t border-border flex items-center justify-around px-1 py-1 safe-area-bottom">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
           return (
@@ -275,6 +277,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
   if (breakpoint === 'tablet') {
     return (
       <nav
+        aria-label="Main navigation"
         className="h-full bg-panel border-r border-border flex flex-col shrink-0 transition-all duration-200"
         style={{ width: tabletExpanded ? 200 : 48 }}
         onMouseEnter={() => setTabletExpanded(true)}
@@ -337,9 +340,10 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
           <button
             onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
             title="Search (⌘K)"
+            aria-label="Search (⌘K)"
             className="flex items-center justify-center min-w-[44px] min-h-[44px] rounded text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
           >
-            <Search size={18} />
+            <Search size={18} aria-hidden="true" />
           </button>
         </div>
       </nav>
@@ -348,6 +352,6 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
 
   // ─── Desktop: full sidebar (width controlled by ResizableSidebar parent) ──
   return (
-    <div className="flex h-full">{sidebarContent}</div>
+    <nav aria-label="Main navigation" className="flex h-full">{sidebarContent}</nav>
   );
 }
