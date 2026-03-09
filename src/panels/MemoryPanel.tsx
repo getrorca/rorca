@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { BookOpen, Plus, Trash2, Pencil, Search, Filter, Save, X, Archive, RotateCcw, Bot } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
-import AppHeader from '../components/AppHeader';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -305,15 +304,6 @@ export default function MemoryPanel() {
       aria-label="Memory Ledger"
       className="h-full flex flex-col overflow-hidden bg-bg"
     >
-      <AppHeader
-        breadcrumbs={
-          <div className="flex items-center gap-2">
-            <BookOpen size={14} className="text-muted" />
-            <span className="text-sm text-muted">Memory Ledger</span>
-          </div>
-        }
-      />
-
       <div className="h-full overflow-y-auto">
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-4">
 
