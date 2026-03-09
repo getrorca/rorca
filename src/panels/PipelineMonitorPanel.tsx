@@ -257,7 +257,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
           icon={Terminal}
           heading="No pipeline runs yet"
           subtext="Approve a spec from the Board, then click Run. Each story executes as an isolated subprocess with the full tool set."
-          action={{ label: 'Go to Specs', onClick: () => navigateTo('forge'), icon: ArrowRight }}
+          action={{ label: 'Go to Specs', onClick: () => navigateTo('specs'), icon: ArrowRight }}
         />
 
         {/* Queue section in empty state */}

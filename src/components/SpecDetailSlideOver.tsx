@@ -1,11 +1,6 @@
 /**
  * SpecDetailSlideOver — Single source of truth for spec review UI.
  *
- * Replaces:
- *   - SpecDetailView in SpecsPanel.tsx
- *   - Inline SpecPreview expansion in SpecForgePanelPage.tsx
- *   - SpecPreviewDrawer in ArchivePanel.tsx
- *
  * Slides in from the right (480px desktop, full-width mobile).
  * Tabs: Stories (default), History, Dependencies, Raw JSON.
  * Actions: Approve, Reject, Run, Fork, Export, Delete.
@@ -327,7 +322,7 @@ function SpecDetailContent({
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ specPath: `forge/specs/approved/${summary.id}.json`, workspaceId, autoWorktree, ...(options?.forceSequential ? { forceSequential: true } : {}) }) },
       );
       if (res.conflict) setRunState('conflict');
-      else { setRunState('success'); setTimeout(() => { onClose(); onNavigate?.('pipeline'); }, 1200); }
+      else { setRunState('success'); setTimeout(() => { onClose(); onNavigate?.('runs'); }, 1200); }
     } catch (err) { setRunError(err instanceof Error ? err.message : 'Failed to trigger run'); setRunState('error'); }
   };
 

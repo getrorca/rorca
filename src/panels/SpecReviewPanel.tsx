@@ -820,7 +820,7 @@ export default function SpecReviewPanel({
   }, [workspaceId, spec, specId, pipelineLoading, toast, onNavigateToRun]);
 
   const handleEdit = useCallback(() => {
-    onNavigate('forge');
+    onNavigate('specs');
   }, [onNavigate]);
 
   const handleDelete = useCallback(async () => {
@@ -1124,8 +1124,8 @@ export default function SpecReviewPanel({
             else if (dialogMode === 'reject') handleConfirmReject(reason);
           }}
           onCancel={() => setDialogMode(null)}
-          onGoToForge={() => { setDialogMode(null); onNavigate('forge'); }}
-          onTriggerRun={() => { setDialogMode(null); onNavigate('pipeline'); }}
+          onGoToForge={() => { setDialogMode(null); onNavigate('specs'); }}
+          onTriggerRun={() => { setDialogMode(null); onNavigate('runs'); }}
         />
       )}
 

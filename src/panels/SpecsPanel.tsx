@@ -2146,7 +2146,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                     <p className="text-xs text-muted whitespace-pre-wrap break-words leading-relaxed">
                       {layerData!.content!.length > 200 ? layerData!.content!.slice(0, 200) + '...' : layerData!.content}
                     </p>
-                    <button onClick={() => { setContextPopover(null); onNavigate?.('stack'); onClose(); }} className="text-[10px] text-accent hover:text-accent-hover transition-colors">View full &rarr;</button>
+                    <button onClick={() => { setContextPopover(null); onNavigate?.('direction'); onClose(); }} className="text-[10px] text-accent hover:text-accent-hover transition-colors">View full &rarr;</button>
                   </div>
                 )}
 
@@ -2163,7 +2163,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                       aria-label={`Add ${dot.label.toLowerCase()}`}
                       className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded text-text placeholder:text-muted/50 outline-none focus:border-accent transition-colors resize-none" autoFocus />
                     <div className="flex items-center justify-between">
-                      <button onClick={() => { setContextPopover(null); onNavigate?.('stack'); onClose(); }} className="text-[10px] text-accent hover:text-accent-hover transition-colors">Set up in Direction</button>
+                      <button onClick={() => { setContextPopover(null); onNavigate?.('direction'); onClose(); }} className="text-[10px] text-accent hover:text-accent-hover transition-colors">Set up in Direction</button>
                       <div className="flex gap-1.5">
                         <button onClick={() => setContextPopover(null)} className="px-2 py-1 text-[10px] text-muted hover:text-text rounded transition-colors">Cancel</button>
                         <button onClick={() => handleQuickDirectionSave(dot.layer)} disabled={!quickDirectionText.trim()}

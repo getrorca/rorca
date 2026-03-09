@@ -266,7 +266,7 @@ export default function WorkspaceWizard({
 
   const handleStartBuilding = () => {
     onComplete();
-    onNavigate('forge');
+    onNavigate('specs');
   };
 
   const handleCustomize = () => {

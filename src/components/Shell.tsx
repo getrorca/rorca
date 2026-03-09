@@ -129,7 +129,7 @@ export function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void 
 
   return (
     <button
-      onClick={() => activeRunId ? onNavigate?.('pipeline') : undefined}
+      onClick={() => activeRunId ? onNavigate?.('runs') : undefined}
       className={`flex items-center gap-2 px-3 py-1.5 min-h-[44px] sm:min-h-0 rounded text-sm font-medium transition-colors ${isDone
         ? 'text-green-600 bg-green-500/10 border border-green-500/30 hover:bg-green-500/20'
         : 'text-[var(--text)] bg-accent/10 border border-accent/30 hover:bg-accent/20'
