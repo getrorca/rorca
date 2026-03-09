@@ -1,0 +1,675 @@
+/**
+ * SpecDetailSlideOver — Single source of truth for spec review UI.
+ *
+ * Replaces:
+ *   - SpecDetailView in SpecsPanel.tsx
+ *   - Inline SpecPreview expansion in SpecForgePanelPage.tsx
+ *   - SpecPreviewDrawer in ArchivePanel.tsx
+ *
+ * Slides in from the right (480px desktop, full-width mobile).
+ * Tabs: Stories (default), History, Dependencies, Raw JSON.
+ * Actions: Approve, Reject, Run, Fork, Export, Delete.
+ */
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  X, Clock, CheckCircle2, XCircle, AlertCircle,
+  Download, Copy, Check, ChevronRight, Play, GitBranch, GitFork,
+  Loader2, Plus, Sparkles, Trash2, History,
+} from 'lucide-react';
+import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useAuth } from '../contexts/AuthContext';
+import { useGlobalToast } from '../contexts/ToastContext';
+import { apiFetch } from '../lib/apiFetch';
+import { StoryCard } from './StoryCard';
+import type { Story } from './StoryCard';
+import { InlineStoryEditor } from './InlineStoryEditor';
+import { StoryComments } from './StoryComments';
+import DependencyGraph from './DependencyGraph';
+import MermaidDiagram from './MermaidDiagram';
+import { SpecVersionHistory } from './SpecVersionHistory';
+import { TagChips } from './TagChips';
+import TriggerPopover from './TriggerPopover';
+import type { PanelId } from './Sidebar';
+
+/* ─── Types ───────────────────────────────────────────────────────── */
+
+type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
+type PreviewTab = 'stories' | 'history' | 'graph' | 'diagram' | 'json';
+
+export interface SpecSlideOverSummary {
+  id: string;
+  specName: string;
+  storyCount: number;
+  status: SpecStatus;
+  generatedAt: string;
+  approvedAt?: string;
+  rejectedAt?: string;
+  rejectReason?: string;
+  tags: string[];
+  model?: string;
+  reviewStatus?: string;
+  repoName?: string;
+  branchName?: string;
+}
+
+interface SpecDetailData {
+  title?: string;
+  userStories?: Story[];
+  stories?: Story[];
+  diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
+  mermaidDiagram?: string;
+  model?: string;
+  readinessPercent?: number;
+  [key: string]: unknown;
+}
+
+interface ArchiveResponse {
+  items: SpecSlideOverSummary[];
+  total: number;
+  hasMore: boolean;
+  cursor?: string;
+}
+
+/* ─── Status Config ───────────────────────────────────────────────── */
+
+const STATUS_CONFIG: Record<SpecStatus, { label: string; className: string }> = {
+  completed: { label: 'COMPLETED', className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' },
+  approved: { label: 'APPROVED', className: 'bg-success/15 text-success border-success/30' },
+  pending: { label: 'PENDING', className: 'bg-warning/15 text-warning border-warning/30' },
+  rejected: { label: 'REJECTED', className: 'bg-error/15 text-error border-error/30' },
+};
+
+/* ─── Helpers ─────────────────────────────────────────────────────── */
+
+function formatDate(iso: string): string {
+  try { return new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); }
+  catch { return iso; }
+}
+
+function extractDiagramText(spec: SpecDetailData): { text: string; type: 'mermaid' | 'ascii' } | null {
+  if (spec.mermaidDiagram && typeof spec.mermaidDiagram === 'string' && spec.mermaidDiagram.trim()) {
+    return { text: spec.mermaidDiagram, type: 'mermaid' };
+  }
+  if (!spec.diagrams) return null;
+  for (const value of Object.values(spec.diagrams)) {
+    if (typeof value === 'object' && value !== null) {
+      if (value.mermaid) return { text: value.mermaid, type: 'mermaid' };
+      if (value.ascii) return { text: value.ascii, type: 'ascii' };
+    }
+  }
+  return null;
+}
+
+/* ─── Props ───────────────────────────────────────────────────────── */
+
+export interface SpecDetailSlideOverProps {
+  isOpen: boolean;
+  specId: string | null;
+  initialSummary?: SpecSlideOverSummary | null;
+  onClose: () => void;
+  onNavigate?: (panel: PanelId) => void;
+  onNavigateToRun?: (runId: number) => void;
+  /** Called when spec is deleted so parent can remove it from lists */
+  onDeleted?: (specId: string) => void;
+  /** Called when tags change so parent can sync */
+  onTagsChange?: (specId: string, tags: string[]) => void;
+  /** Called when spec is approved so parent can update status */
+  onApproved?: (specId: string) => void;
+  /** Called when spec is rejected so parent can update */
+  onRejected?: (specId: string) => void;
+}
+
+/* ─── Main Component ──────────────────────────────────────────────── */
+
+export default function SpecDetailSlideOver({
+  isOpen,
+  specId,
+  initialSummary,
+  onClose,
+  onNavigate,
+  onNavigateToRun,
+  onDeleted,
+  onTagsChange,
+  onApproved,
+  onRejected,
+}: SpecDetailSlideOverProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Escape key
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
+  // Backdrop click
+  const handleBackdropClick = (e: React.MouseEvent) => {
+    if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+      onClose();
+    }
+  };
+
+  if (!isOpen || !specId) return null;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[100] flex justify-end"
+      onClick={handleBackdropClick}
+      aria-modal="true"
+      role="dialog"
+    >
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity" />
+
+      {/* Panel — 480px desktop, full-width mobile */}
+      <div
+        ref={panelRef}
+        className="relative flex flex-col w-full max-w-[480px] sm:max-w-[480px] h-full bg-bg border-l border-border animate-slideInRight shadow-[0_0_64px_rgba(0,0,0,0.8)]"
+      >
+        <SpecDetailContent
+          specId={specId}
+          initialSummary={initialSummary ?? null}
+          onClose={onClose}
+          onNavigate={onNavigate}
+          onNavigateToRun={onNavigateToRun}
+          onDeleted={onDeleted}
+          onTagsChange={onTagsChange}
+          onApproved={onApproved}
+          onRejected={onRejected}
+        />
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/* ─── Content (inner component, always mounted when open) ─────────── */
+
+function SpecDetailContent({
+  specId,
+  initialSummary,
+  onClose,
+  onNavigate,
+  onNavigateToRun,
+  onDeleted,
+  onTagsChange,
+  onApproved,
+  onRejected,
+}: {
+  specId: string;
+  initialSummary: SpecSlideOverSummary | null;
+  onClose: () => void;
+  onNavigate?: (panel: PanelId) => void;
+  onNavigateToRun?: (runId: number) => void;
+  onDeleted?: (specId: string) => void;
+  onTagsChange?: (specId: string, tags: string[]) => void;
+  onApproved?: (specId: string) => void;
+  onRejected?: (specId: string) => void;
+}) {
+  const { workspaceId } = useWorkspace();
+  const { user } = useAuth();
+  const toast = useGlobalToast();
+  const isFreePlan = !user?.plan || user.plan === 'free';
+
+  // Summary + detail
+  const [summary, setSummary] = useState<SpecSlideOverSummary | null>(initialSummary);
+  const [detail, setDetail] = useState<SpecDetailData | null>(null);
+  const [detailLoading, setDetailLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
+
+  // Stories
+  const [localStories, setLocalStories] = useState<Story[]>([]);
+
+  // Run state
+  const [runState, setRunState] = useState<'idle' | 'triggering' | 'conflict' | 'success' | 'error'>('idle');
+  const [runError, setRunError] = useState('');
+  const [showTriggerPopover, setShowTriggerPopover] = useState(false);
+
+  // Add stories
+  const [addState, setAddState] = useState<'idle' | 'form' | 'generating' | 'done' | 'error'>('idle');
+  const [addCount, setAddCount] = useState(3);
+  const [addBrief, setAddBrief] = useState('');
+  const [addError, setAddError] = useState('');
+
+  // Fork / Delete
+  const [forkState, setForkState] = useState<'idle' | 'forking' | 'done' | 'error'>('idle');
+  const [forkError, setForkError] = useState('');
+  const [forkId, setForkId] = useState('');
+  const [deleteState, setDeleteState] = useState<'idle' | 'confirm' | 'deleting'>('idle');
+
+  // Approve/Reject
+  const [actionLoading, setActionLoading] = useState(false);
+
+  // Focus trap ref
+  const firstFocusRef = useRef<HTMLButtonElement>(null);
+
+  // Auto-focus on mount
+  useEffect(() => {
+    firstFocusRef.current?.focus();
+  }, [specId]);
+
+  // Fetch detail + summary
+  useEffect(() => {
+    if (!specId || !workspaceId) return;
+    let cancelled = false;
+    setDetailLoading(true);
+
+    apiFetch<SpecDetailData>(`/api/specs/${specId}?workspaceId=${workspaceId}`)
+      .then(d => { if (!cancelled) setDetail(d); })
+      .catch(() => { if (!cancelled) setDetail(null); })
+      .finally(() => { if (!cancelled) setDetailLoading(false); });
+
+    // If no initial summary, fetch from archive
+    if (!initialSummary) {
+      apiFetch<ArchiveResponse>(`/api/specs/archive?workspaceId=${workspaceId}&q=${encodeURIComponent(specId)}&limit=1`)
+        .then(res => { if (!cancelled && res.items.length > 0) setSummary(res.items[0]); })
+        .catch(() => { /* ignore */ });
+    }
+
+    return () => { cancelled = true; };
+  }, [specId, workspaceId, initialSummary]);
+
+  // Sync stories from detail
+  useEffect(() => { setLocalStories(detail?.userStories ?? detail?.stories ?? []); }, [detail]);
+
+  // Reset tab on spec change
+  useEffect(() => { setActiveTab('stories'); }, [specId]);
+
+  /* ─── Actions ─────────────────────────────────────────────────────── */
+
+  const handleApprove = async () => {
+    if (!workspaceId) return;
+    setActionLoading(true);
+    try {
+      await apiFetch(`/api/specs/${specId}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) });
+      toast.show('Spec approved', 'success');
+      setSummary(prev => prev ? { ...prev, status: 'approved' as SpecStatus } : prev);
+      onApproved?.(specId);
+    } catch (err: unknown) { toast.show(err instanceof Error ? err.message : 'Approve failed', 'error'); }
+    finally { setActionLoading(false); }
+  };
+
+  const handleReject = async () => {
+    if (!workspaceId) return;
+    setActionLoading(true);
+    try {
+      await apiFetch(`/api/specs/${specId}/reject`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) });
+      toast.show('Spec rejected', 'success');
+      onRejected?.(specId);
+      onClose();
+    } catch (err: unknown) { toast.show(err instanceof Error ? err.message : 'Reject failed', 'error'); }
+    finally { setActionLoading(false); }
+  };
+
+  const handleToggleExclude = async (storyId: string) => {
+    if (!workspaceId) return;
+    const story = localStories.find(s => s.id === storyId);
+    if (!story) return;
+    const newExcluded = !story.excluded;
+    setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: newExcluded } : s));
+    try {
+      await apiFetch(`/api/specs/${specId}/stories/${storyId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId, excluded: newExcluded }) });
+    } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
+  };
+
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean }) => {
+    if (!workspaceId || !summary) return;
+    setShowTriggerPopover(false);
+    setRunState('triggering');
+    setRunError('');
+    try {
+      const res = await apiFetch<{ ok?: boolean; conflict?: boolean; activeRunId?: number; runId?: number }>(
+        '/api/pipeline/trigger',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ specPath: `forge/specs/approved/${summary.id}.json`, workspaceId, autoWorktree, ...(options?.forceSequential ? { forceSequential: true } : {}) }) },
+      );
+      if (res.conflict) setRunState('conflict');
+      else { setRunState('success'); setTimeout(() => { onClose(); onNavigate?.('pipeline'); }, 1200); }
+    } catch (err) { setRunError(err instanceof Error ? err.message : 'Failed to trigger run'); setRunState('error'); }
+  };
+
+  const handleExportJson = () => {
+    if (!detail) return;
+    const blob = new Blob([JSON.stringify(detail, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${specId}.json`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDelete = async () => {
+    if (!summary || !workspaceId) return;
+    setDeleteState('deleting');
+    try {
+      await apiFetch(`/api/specs/${summary.id}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) });
+      toast.show(`Spec "${summary.specName}" deleted`, 'success');
+      onDeleted?.(specId);
+      onClose();
+    } catch { setDeleteState('idle'); toast.show('Failed to delete spec', 'error'); }
+  };
+
+  const handleFork = async () => {
+    if (!workspaceId || !summary) return;
+    setForkState('forking');
+    setForkError('');
+    try {
+      const res = await apiFetch<{ ok: boolean; forkId: string }>(`/api/specs/${summary.id}/fork`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) });
+      if (res.ok) { setForkId(res.forkId); setForkState('done'); setTimeout(() => setForkState('idle'), 3000); }
+    } catch (err) { setForkError(err instanceof Error ? err.message : 'Failed to fork spec'); setForkState('error'); }
+  };
+
+  const handleAddStories = async () => {
+    if (!workspaceId || !summary) return;
+    setAddState('generating');
+    setAddError('');
+    try {
+      const res = await apiFetch<{ ok: boolean; addedCount: number }>(`/api/specs/${summary.id}/add-stories`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId, count: addCount, brief: addBrief || undefined }) });
+      if (res.ok) { setAddState('done'); setAddBrief(''); setTimeout(() => setAddState('idle'), 3000); }
+    } catch (err) { setAddError(err instanceof Error ? err.message : 'Failed to generate stories'); setAddState('error'); }
+  };
+
+  /* ─── Derived data ──────────────────────────────────────────────── */
+
+  const stories = localStories;
+  const diagram = detail ? extractDiagramText(detail) : null;
+  const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
+  const cfg = summary ? STATUS_CONFIG[summary.status] : null;
+  const isDraft = summary?.status === 'pending';
+  const canRun = summary?.status === 'approved' || summary?.status === 'completed';
+
+  const tabs: { id: PreviewTab; label: string; badge?: string; icon?: typeof History }[] = [
+    { id: 'stories', label: 'Stories', badge: `${stories.length}` },
+    { id: 'history', label: 'History', icon: History },
+    { id: 'graph', label: 'Graph' },
+    { id: 'diagram', label: 'Dependencies' },
+    { id: 'json', label: 'Raw JSON' },
+  ];
+
+  /* ─── Render ────────────────────────────────────────────────────── */
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-border shrink-0">
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2 min-w-0">
+            {cfg && (
+              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border shrink-0 ${cfg.className}`}>
+                {cfg.label}
+              </span>
+            )}
+            <h3 className="text-base font-mono font-semibold text-text truncate">
+              {summary?.specName ?? specId}
+            </h3>
+          </div>
+          <button ref={firstFocusRef} onClick={onClose} aria-label="Close spec detail" className="p-1 rounded text-muted hover:text-text hover:bg-panel transition-colors shrink-0">
+            <X size={16} />
+          </button>
+        </div>
+        {summary && (
+          <div className="flex items-center gap-3 text-xs text-muted">
+            <span className="flex items-center gap-1"><Clock size={10} />{formatDate(summary.generatedAt)}</span>
+            <span>{summary.storyCount} {summary.storyCount === 1 ? 'story' : 'stories'}</span>
+            {(detail?.model ?? summary.model) && (
+              <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-panel border border-border">
+                {detail?.model ?? summary.model}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Approve/Reject for pending specs */}
+        {isDraft && (
+          <div className="flex items-center gap-2 mt-2">
+            <button onClick={handleApprove} disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-success/15 text-success border border-success/30 hover:bg-success/25 transition-colors disabled:opacity-50">
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />} Approve
+            </button>
+            <button onClick={handleReject} disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors disabled:opacity-50">
+              <X size={12} /> Reject
+            </button>
+          </div>
+        )}
+
+        {/* Tags */}
+        {summary && workspaceId && (
+          <div className="mt-2">
+            <TagChips specId={specId} workspaceId={workspaceId} tags={summary.tags ?? []}
+              onTagsChange={(newTags) => {
+                setSummary(prev => prev ? { ...prev, tags: newTags } : prev);
+                onTagsChange?.(specId, newTags);
+              }} />
+          </div>
+        )}
+      </div>
+
+      {/* Content */}
+      {summary?.status === 'rejected' ? (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center p-8">
+            <XCircle size={48} className="text-error/30 mx-auto mb-3" />
+            <p className="text-sm text-muted mb-1">This spec was rejected</p>
+            {summary.rejectReason && <p className="text-xs text-error/70 mt-2">Reason: {summary.rejectReason}</p>}
+          </div>
+        </div>
+      ) : detailLoading ? (
+        <div className="flex-1 flex items-center justify-center text-muted text-sm">
+          <Loader2 size={16} className="animate-spin mr-2" />Loading spec...
+        </div>
+      ) : !detail ? (
+        <div className="flex-1 flex items-center justify-center text-muted text-sm">Failed to load spec detail</div>
+      ) : (
+        <>
+          {/* Tab strip */}
+          <div role="tablist" className="flex border-b border-border shrink-0 overflow-x-auto">
+            {tabs.map(tab => (
+              <button key={tab.id} role="tab" aria-selected={activeTab === tab.id} onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors border-b-2 whitespace-nowrap ${activeTab === tab.id ? 'text-text border-accent' : 'text-muted hover:text-text border-transparent'}`}>
+                {tab.icon && <tab.icon size={12} />}
+                {tab.label}
+                {tab.badge && tab.badge !== '0' && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-accent/15 text-accent">{tab.badge}</span>}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          <div role="tabpanel" className="flex-1 overflow-y-auto">
+            {activeTab === 'stories' && (
+              <StoriesTabContent stories={stories} specId={specId} workspaceId={workspaceId ?? ''}
+                onToggleExclude={summary?.status === 'approved' ? handleToggleExclude : undefined}
+                onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))} />
+            )}
+            {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
+            {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
+            {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
+            {activeTab === 'json' && <JsonTab spec={detail} specId={specId} />}
+          </div>
+        </>
+      )}
+
+      {/* Footer actions */}
+      {detail && (
+        <div className="px-4 py-3 border-t border-border shrink-0 bg-bg space-y-2">
+          {/* Run in Pipeline */}
+          {canRun && (
+            <div className="relative">
+              {runState === 'conflict' ? (
+                <div className="rounded border border-warning/30 bg-warning/10 p-3 space-y-2">
+                  <p className="text-xs text-warning font-medium">Active run in progress. Run in a new worktree?</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => handleRun(true)} className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90">
+                      <GitBranch size={12} /> Run in worktree
+                    </button>
+                    <button onClick={() => setRunState('idle')} className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text">Cancel</button>
+                  </div>
+                </div>
+              ) : runState === 'success' ? (
+                <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30">
+                  <Check size={14} /> Switching to Pipeline Monitor...
+                </div>
+              ) : (
+                <>
+                  {showTriggerPopover && !isFreePlan && (
+                    <TriggerPopover loading={runState === 'triggering'} onTrigger={handleRun} onClose={() => setShowTriggerPopover(false)}
+                      specPath={`forge/specs/approved/${summary!.id}.json`} workspaceId={workspaceId ?? undefined} />
+                  )}
+                  <button onClick={() => setShowTriggerPopover(true)} disabled={runState === 'triggering'}
+                    className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity">
+                    {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting run...</> : <><Play size={14} /> Run in Pipeline{deferredCount > 0 && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-white/20">{deferredCount} deferred</span>}</>}
+                  </button>
+                </>
+              )}
+              {runState === 'error' && <p className="text-xs text-error mt-1">{runError}</p>}
+            </div>
+          )}
+
+          {/* Add Stories */}
+          {summary?.status === 'approved' && (
+            <div>
+              {addState === 'idle' && (
+                <button onClick={() => setAddState('form')} className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors">
+                  <Plus size={14} /> Add More Stories
+                </button>
+              )}
+              {addState === 'form' && (
+                <div className="rounded border border-border bg-panel p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-muted shrink-0">Stories to add</label>
+                    <input type="number" min={1} max={10} value={addCount} onChange={e => setAddCount(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+                      className="w-16 px-2 py-1 text-xs font-mono rounded border border-border bg-bg text-text text-center" />
+                  </div>
+                  <textarea placeholder="Optional: describe what to focus on..." value={addBrief} onChange={e => setAddBrief(e.target.value)} rows={2}
+                    className="w-full px-2 py-1.5 text-xs rounded border border-border bg-bg text-text resize-none placeholder:text-muted" />
+                  <div className="flex gap-2">
+                    <button onClick={handleAddStories} className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90">
+                      <Sparkles size={12} /> Generate
+                    </button>
+                    <button onClick={() => { setAddState('idle'); setAddBrief(''); }} className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text">Cancel</button>
+                  </div>
+                </div>
+              )}
+              {addState === 'generating' && <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-muted"><Loader2 size={14} className="animate-spin" /> Generating stories...</div>}
+              {addState === 'done' && <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30"><Check size={14} /> Stories added</div>}
+              {addState === 'error' && <p className="text-xs text-error">{addError}</p>}
+            </div>
+          )}
+
+          {/* Export JSON */}
+          <button onClick={handleExportJson} className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors">
+            <Download size={14} /> Export JSON
+          </button>
+
+          {/* Fork */}
+          {forkState === 'done' ? (
+            <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30"><Check size={14} /> Forked as {forkId}</div>
+          ) : (
+            <button onClick={handleFork} disabled={forkState === 'forking'} className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 disabled:opacity-60">
+              {forkState === 'forking' ? <><Loader2 size={14} className="animate-spin" /> Forking...</> : <><GitFork size={14} /> Fork Spec</>}
+            </button>
+          )}
+          {forkState === 'error' && <p className="text-xs text-error">{forkError}</p>}
+
+          {/* Delete */}
+          {deleteState === 'confirm' ? (
+            <div className="rounded border border-error/30 bg-error/10 p-3 space-y-2">
+              <p className="text-xs text-error font-medium">Delete this spec? This cannot be undone.</p>
+              <div className="flex gap-2">
+                <button onClick={handleDelete} className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-error text-white hover:opacity-90"><Trash2 size={12} /> Yes, delete</button>
+                <button onClick={() => setDeleteState('idle')} className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setDeleteState('confirm')} disabled={deleteState === 'deleting'}
+              className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-error/30 text-error hover:bg-error/10 disabled:opacity-60">
+              {deleteState === 'deleting' ? <><Loader2 size={14} className="animate-spin" /> Deleting...</> : <><Trash2 size={14} /> Delete Spec</>}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Stories Tab Content ──────────────────────────────────────────── */
+
+function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onStoryUpdated }: {
+  stories: Story[];
+  specId: string;
+  workspaceId: string;
+  onToggleExclude?: (storyId: string) => void;
+  onStoryUpdated?: (story: Story) => void;
+}) {
+  const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
+  const [commentCounts, setCommentCounts] = useState<Record<string, number>>({});
+  const [commentsOpenFor, setCommentsOpenFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiFetch<{ counts: Record<string, number> }>(`/api/specs/${specId}/comments/counts`)
+      .then(data => setCommentCounts(data.counts)).catch(() => { });
+  }, [specId]);
+
+  if (stories.length === 0) {
+    return <div className="flex items-center justify-center h-full text-muted text-sm">No stories found in this spec</div>;
+  }
+
+  const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
+  const allStoryIds = new Set(stories.map(s => s.id));
+
+  return (
+    <div className="p-4 space-y-2">
+      <span className="text-xs text-muted">
+        {stories.length} {stories.length === 1 ? 'story' : 'stories'}
+        {deferredCount > 0 && <span className="ml-2 text-muted/60">&middot; {deferredCount} deferred</span>}
+      </span>
+      {stories.map(story =>
+        editingStoryId === story.id ? (
+          <InlineStoryEditor key={story.id} story={story} specId={specId} workspaceId={workspaceId}
+            onSave={(updated) => { onStoryUpdated?.(updated); setEditingStoryId(null); }}
+            onCancel={() => setEditingStoryId(null)} />
+        ) : (
+          <div key={story.id}>
+            <StoryCard story={story} allStoryIds={allStoryIds} onEdit={() => setEditingStoryId(story.id)}
+              onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
+              specId={specId} workspaceId={workspaceId}
+              commentCount={commentCounts[story.id] ?? 0}
+              onOpenComments={() => setCommentsOpenFor(commentsOpenFor === story.id ? null : story.id)} />
+            {commentsOpenFor === story.id && (
+              <StoryComments specId={specId} storyId={story.id} onClose={() => setCommentsOpenFor(null)}
+                onCountChange={(count) => setCommentCounts(prev => { const next = { ...prev }; if (count > 0) next[story.id] = count; else delete next[story.id]; return next; })} />
+            )}
+          </div>
+        ),
+      )}
+    </div>
+  );
+}
+
+/* ─── JSON Tab ─────────────────────────────────────────────────────── */
+
+function JsonTab({ spec, specId }: { spec: SpecDetailData; specId: string }) {
+  const [copied, setCopied] = useState(false);
+  const rawJson = JSON.stringify(spec, null, 2);
+
+  const handleCopy = useCallback(async () => {
+    await navigator.clipboard.writeText(rawJson);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [rawJson]);
+
+  return (
+    <div className="p-4">
+      <div className="relative">
+        <button onClick={handleCopy} className="absolute top-2 right-2 p-1.5 rounded bg-panel border border-border text-muted hover:text-text transition-colors z-10" title="Copy JSON">
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+        </button>
+        <pre className="p-4 text-xs font-mono bg-panel border border-border rounded overflow-x-auto text-text whitespace-pre max-h-[60vh] overflow-y-auto">
+          {rawJson}
+        </pre>
+      </div>
+    </div>
+  );
+}
