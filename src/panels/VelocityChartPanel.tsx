@@ -267,8 +267,14 @@ export default function VelocityChartPanel() {
             <Loader2 size={24} className="animate-spin" aria-label="Loading velocity data" />
           </div>
         ) : chartData.length === 0 ? (
-          <div className="flex items-center justify-center h-64 text-muted text-sm">
-            No story data for this period. Run some pipelines to see velocity.
+          <div className="flex flex-col items-center justify-center h-64">
+            <div className="flex flex-col items-center max-w-[400px] text-center">
+              <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+                <TrendingUp size={28} className="text-accent" />
+              </div>
+              <h3 className="text-base font-semibold text-[var(--text)] mb-1.5">No velocity data yet</h3>
+              <p className="text-sm text-muted leading-relaxed">Velocity charts appear after your first pipeline run. Run a spec to get started.</p>
+            </div>
           </div>
         ) : (
           <div className="min-h-[200px] h-80">

@@ -6,8 +6,9 @@ import {
   FileText, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
-  Store,
+  Store, Sparkles,
 } from 'lucide-react';
+import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
@@ -371,12 +372,14 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
             workspaceId={workspaceId}
             onSpecClick={handleSpecClick}
             onNavigate={onNavigate}
+            onNewSpec={() => setShowNewSpec(true)}
           />
         ) : viewMode === 'list' ? (
           <ListView
             workspaceId={workspaceId}
             onSpecClick={handleSpecClick}
             onNavigate={onNavigate}
+            onNewSpec={() => setShowNewSpec(true)}
           />
         ) : (
           <MarketplaceView />
@@ -550,10 +553,11 @@ function DeleteColumnDialog({ columnName, specCount, onConfirm, onCancel }: {
   );
 }
 
-function BoardView({ workspaceId, onSpecClick, onNavigate }: {
+function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   workspaceId: string;
   onSpecClick: (specId: string, summary?: ArchiveSpec) => void;
   onNavigate: (panel: PanelId) => void;
+  onNewSpec?: () => void;
 }) {
   const toast = useGlobalToast();
   const [kanban, setKanban] = useState<KanbanResponse>({ draft: [], inProgress: [], done: [] });
@@ -1190,13 +1194,12 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
 
   if (totalCount === 0 && customCols.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4 text-center">
-        <Inbox size={48} className="text-muted/40" />
-        <div>
-          <p className="text-base font-medium text-[var(--text)]">No specs yet</p>
-          <p className="text-sm text-muted mt-1">Create your first spec to get started</p>
-        </div>
-      </div>
+      <EmptyState
+        icon={Sparkles}
+        heading="No specs yet"
+        subtext="Create your first spec by clicking + New Spec. Describe what you want to build and Rorca will generate user stories automatically."
+        action={onNewSpec ? { label: 'New Spec', onClick: onNewSpec, icon: Plus } : undefined}
+      />
     );
   }
 
@@ -1577,10 +1580,19 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
                 {/* Column body */}
                 <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-2">
                   {specs.length === 0 ? (
-                    <div className={`flex flex-col items-center justify-center py-12 text-center ${isCustom ? 'border-2 border-dashed border-border rounded-lg' : ''}`}>
-                      <Icon size={32} className="text-muted/30 mb-2" />
-                      <p className="text-sm text-muted">{col.emptyMessage}</p>
-                    </div>
+                    isCustom ? (
+                      <div
+                        className="flex flex-col items-center justify-center py-12 text-center border-2 border-dashed rounded-lg mx-1"
+                        style={{ borderColor: `${col.color}40` }}
+                      >
+                        <p className="text-sm" style={{ color: `${col.color}66` }}>Drag specs here</p>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-12 text-center">
+                        <Icon size={32} className="text-muted/30 mb-2" />
+                        <p className="text-sm text-muted">{col.emptyMessage}</p>
+                      </div>
+                    )
                   ) : (
                     specs.map((spec) => renderCard(spec, col.key, col.color, isDraft))
                   )}
@@ -1610,10 +1622,11 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
    LIST VIEW — Searchable archive table
    ════════════════════════════════════════════════════════════════════ */
 
-function ListView({ workspaceId, onSpecClick, onNavigate }: {
+function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   workspaceId: string;
   onSpecClick: (specId: string, summary?: ArchiveSpec) => void;
   onNavigate: (panel: PanelId) => void;
+  onNewSpec?: () => void;
 }) {
   const [specs, setSpecs] = useState<ArchiveSpec[]>([]);
   const [total, setTotal] = useState(0);
@@ -1717,24 +1730,24 @@ function ListView({ workspaceId, onSpecClick, onNavigate }: {
         {loading ? (
           <div className="flex items-center justify-center h-full text-muted text-sm">Loading specs...</div>
         ) : specs.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
-              <Archive size={64} className="text-muted/40" strokeWidth={1.2} />
-              <div>
-                {debouncedSearch ? (
-                  <>
-                    <p className="text-sm font-medium text-text mb-1">No specs match &ldquo;{debouncedSearch}&rdquo;</p>
-                    <p className="text-xs text-muted">Try a different keyword</p>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-sm font-medium text-text mb-1">No specs generated yet</p>
-                    <p className="text-xs text-muted">Create your first spec</p>
-                  </>
-                )}
+          debouncedSearch ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
+                <Archive size={64} className="text-muted/40" strokeWidth={1.2} />
+                <div>
+                  <p className="text-sm font-medium text-text mb-1">No specs match &ldquo;{debouncedSearch}&rdquo;</p>
+                  <p className="text-xs text-muted">Try a different keyword</p>
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <EmptyState
+              icon={Sparkles}
+              heading="No specs yet"
+              subtext="Create your first spec by clicking + New Spec. Describe what you want to build and Rorca will generate user stories automatically."
+              action={onNewSpec ? { label: 'New Spec', onClick: onNewSpec, icon: Plus } : undefined}
+            />
+          )
         ) : (
           <div>
             {specs.map(spec => {

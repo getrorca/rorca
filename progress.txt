@@ -3,9 +3,9 @@
 Spec: rorca-ultimate-ux
 Run ID: 10
 Started: 2026-03-09T07:50:33.681Z
-Last Updated: 2026-03-09T10:39:11.038Z
+Last Updated: 2026-03-09T10:53:21.266Z
 
-## Completed Stories (15)
+## Completed Stories (16)
 - ULT-001: Unified Spec Lifecycle Panel — Replace Forge + Queue + Archive — DONE (claude, 720s)
 - ULT-002: Fizzy-Inspired Collapsible Columns with Progress Indicators — DONE (claude, 302s)
 - ULT-003: Production Drag-and-Drop with Keyboard Accessibility — DONE (claude, 394s)
@@ -21,3 +21,4 @@ Last Updated: 2026-03-09T10:39:11.038Z
 - ULT-013: Keyboard Navigation and Command Palette Update — DONE (claude, 517s)
 - ULT-014: Marketplace Tab in Specs Panel — Skills + Templates + Community — DONE (claude, 566s)
 - ULT-015: Activity Feed Consolidation — Merge Activity + Audit — DONE (claude, 574s)
+- ULT-016: Empty States and Onboarding Affordances — DONE (claude, 837s)

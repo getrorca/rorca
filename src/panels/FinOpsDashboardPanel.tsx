@@ -175,7 +175,19 @@ export default function FinOpsDashboardPanel() {
     );
   }
 
-  if (!data) return null;
+  if (!data) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full">
+        <div className="flex flex-col items-center max-w-[400px] text-center">
+          <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+            <DollarSign size={28} className="text-accent" />
+          </div>
+          <h3 className="text-base font-semibold text-[var(--text)] mb-1.5">No FinOps data yet</h3>
+          <p className="text-sm text-muted leading-relaxed">Cost analytics appear after your first pipeline run. Run a spec to get started.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full overflow-y-auto">

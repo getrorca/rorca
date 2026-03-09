@@ -401,12 +401,22 @@ export default function MemoryPanel() {
           <ul role="list" aria-label="Memory entries" className="space-y-2">
             {filtered.length === 0 ? (
               <li role="listitem" className="py-12 text-center">
-                <BookOpen size={24} className="mx-auto text-muted mb-3" />
-                <p className="text-sm text-muted">
-                  {entries.length === 0
-                    ? 'No memory entries yet. Add one manually or run a pipeline to auto-capture.'
-                    : 'No entries match your search.'}
-                </p>
+                {entries.length === 0 ? (
+                  <div className="flex flex-col items-center max-w-[400px] mx-auto">
+                    <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+                      <BookOpen size={28} className="text-accent" />
+                    </div>
+                    <h3 className="text-base font-semibold text-[var(--text)] mb-1.5">No memory entries yet</h3>
+                    <p className="text-sm text-muted leading-relaxed">
+                      Memory entries are created automatically as specs run. You can also add entries manually.
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <BookOpen size={24} className="mx-auto text-muted mb-3" />
+                    <p className="text-sm text-muted">No entries match your search.</p>
+                  </>
+                )}
               </li>
             ) : (
               filtered.map((entry, i) => (
