@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Clock, Inbox, ArrowRight, FileText, Play, CheckCircle2, Layers, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Clock, Inbox, ArrowRight, FileText, Play, CheckCircle2, Layers, AlertTriangle, RefreshCw, Check, X, Loader2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { relativeTime } from '../components/SpecReviewInline';
 import type { SpecSummary } from '../components/SpecReviewInline';
 import type { PanelId } from '../components/Sidebar';
@@ -19,61 +20,101 @@ interface KanbanSpecCardProps {
   passedCount?: number;
   onClick: () => void;
   column: 'draft' | 'in-progress' | 'done';
+  onApprove?: () => void;
+  onDeny?: () => void;
+  actionLoading?: 'approve' | 'deny' | null;
 }
 
-function KanbanSpecCard({ spec, passedCount, onClick, column }: KanbanSpecCardProps) {
+function KanbanSpecCard({ spec, passedCount, onClick, column, onApprove, onDeny, actionLoading }: KanbanSpecCardProps) {
   const total = spec.storyCount;
   const passed = passedCount ?? 0;
   const hasProgress = passedCount !== undefined && column !== 'draft';
   const progressPct = total > 0 ? Math.round((passed / total) * 100) : 0;
+  const isDraft = column === 'draft';
+  const isActioning = actionLoading !== null && actionLoading !== undefined;
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="w-full h-[120px] bg-panel border border-border rounded-lg p-3 text-left
-        flex flex-col justify-between overflow-hidden
-        transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
-        hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-    >
-      {/* Top: title + slug */}
-      <div className="min-w-0">
-        <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3]">
-          {slugToTitle(spec.id)}
-        </h3>
-      </div>
+    <div className="group relative">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={isActioning}
+        className="w-full h-[120px] bg-panel border border-border rounded-lg p-3 text-left
+          flex flex-col justify-between overflow-hidden
+          transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
+          hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
+          disabled:opacity-60 disabled:pointer-events-none"
+      >
+        {/* Top: title + slug */}
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3]">
+            {slugToTitle(spec.id)}
+          </h3>
+        </div>
 
-      {/* Bottom: badges + timestamp */}
-      <div className="flex items-center justify-between gap-2 mt-auto min-w-0">
-        {/* Story count badge */}
-        <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
-          <Layers size={10} />
-          {hasProgress
-            ? `${passed}/${total} stories`
-            : `${total} ${total === 1 ? 'story' : 'stories'}`}
-        </span>
+        {/* Bottom: badges + timestamp */}
+        <div className="flex items-center justify-between gap-2 mt-auto min-w-0">
+          {/* Story count badge */}
+          <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
+            <Layers size={10} />
+            {hasProgress
+              ? `${passed}/${total} stories`
+              : `${total} ${total === 1 ? 'story' : 'stories'}`}
+          </span>
 
-        {/* Timestamp */}
-        <span className="shrink-0 text-[11px] text-muted flex items-center gap-1">
-          <Clock size={10} />
-          {column === 'done' && spec.approvedAt
-            ? relativeTime(spec.approvedAt)
-            : relativeTime(spec.generatedAt)}
-        </span>
-      </div>
+          {/* Timestamp */}
+          <span className="shrink-0 text-[11px] text-muted flex items-center gap-1">
+            <Clock size={10} />
+            {column === 'done' && spec.approvedAt
+              ? relativeTime(spec.approvedAt)
+              : relativeTime(spec.generatedAt)}
+          </span>
+        </div>
 
-      {/* Progress bar (only for in-progress / done with data) */}
-      {hasProgress && (
-        <div className="w-full h-1 rounded-full bg-surface-200 mt-1.5 overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all duration-300 ${
-              progressPct === 100 ? 'bg-success' : 'bg-accent'
-            }`}
-            style={{ width: `${progressPct}%` }}
-          />
+        {/* Progress bar (only for in-progress / done with data) */}
+        {hasProgress && (
+          <div className="w-full h-1 rounded-full bg-surface-200 mt-1.5 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-300 ${
+                progressPct === 100 ? 'bg-success' : 'bg-accent'
+              }`}
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        )}
+      </button>
+
+      {/* Approve / Deny action buttons — Draft column only, shown on hover */}
+      {isDraft && (
+        <div className={`absolute top-2 right-2 flex items-center gap-1
+          ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}
+          transition-opacity duration-150`}
+        >
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onApprove?.(); }}
+            disabled={isActioning}
+            title="Approve spec"
+            className="p-1.5 rounded-md bg-success/15 text-success border border-success/30
+              hover:bg-success/25 transition-colors
+              disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {actionLoading === 'approve' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+          </button>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDeny?.(); }}
+            disabled={isActioning}
+            title="Deny spec"
+            className="p-1.5 rounded-md bg-error/15 text-error border border-error/30
+              hover:bg-error/25 transition-colors
+              disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {actionLoading === 'deny' ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />}
+          </button>
         </div>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -121,9 +162,12 @@ interface KanbanColumnProps {
   specs: SpecSummary[];
   onReviewClick: (specId: string) => void;
   storyProgress?: Record<string, number>;
+  onApprove?: (specId: string) => void;
+  onDeny?: (specId: string) => void;
+  actionLoadingMap?: Record<string, 'approve' | 'deny' | null>;
 }
 
-function KanbanColumn({ config, specs, onReviewClick, storyProgress }: KanbanColumnProps) {
+function KanbanColumn({ config, specs, onReviewClick, storyProgress, onApprove, onDeny, actionLoadingMap }: KanbanColumnProps) {
   const Icon = config.icon;
 
   return (
@@ -152,6 +196,9 @@ function KanbanColumn({ config, specs, onReviewClick, storyProgress }: KanbanCol
               passedCount={storyProgress?.[spec.id]}
               onClick={() => onReviewClick(spec.id)}
               column={config.key}
+              onApprove={onApprove ? () => onApprove(spec.id) : undefined}
+              onDeny={onDeny ? () => onDeny(spec.id) : undefined}
+              actionLoading={actionLoadingMap?.[spec.id] ?? null}
             />
           ))
         )}
@@ -203,11 +250,13 @@ function toSpecSummary(k: KanbanSpec, status: 'pending' | 'approved' | 'complete
 
 export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: QueuePanelProps) {
   const { workspaceId } = useWorkspace();
+  const toast = useGlobalToast();
   const [kanban, setKanban] = useState<KanbanResponse>({ draft: [], inProgress: [], done: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const hasLoadedOnce = useRef(false);
+  const [actionLoadingMap, setActionLoadingMap] = useState<Record<string, 'approve' | 'deny' | null>>({});
 
   const fetchKanban = useCallback(async () => {
     if (!workspaceId) { setKanban({ draft: [], inProgress: [], done: [] }); setLoading(false); setError(null); return; }
@@ -252,6 +301,42 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
       onNavigate('forge');
     }
   }, [onNavigateToSpecReview, onNavigate]);
+
+  const handleApprove = useCallback(async (specId: string) => {
+    if (!workspaceId) return;
+    setActionLoadingMap((prev) => ({ ...prev, [specId]: 'approve' }));
+    try {
+      await apiFetch(`/api/specs/${encodeURIComponent(specId)}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      toast.show(`Spec "${slugToTitle(specId)}" approved`, 'success');
+      fetchKanban();
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to approve spec', 'error');
+    } finally {
+      setActionLoadingMap((prev) => ({ ...prev, [specId]: null }));
+    }
+  }, [workspaceId, fetchKanban, toast]);
+
+  const handleDeny = useCallback(async (specId: string) => {
+    if (!workspaceId) return;
+    setActionLoadingMap((prev) => ({ ...prev, [specId]: 'deny' }));
+    try {
+      await apiFetch(`/api/specs/${encodeURIComponent(specId)}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      toast.show(`Spec "${slugToTitle(specId)}" denied`, 'success');
+      fetchKanban();
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to deny spec', 'error');
+    } finally {
+      setActionLoadingMap((prev) => ({ ...prev, [specId]: null }));
+    }
+  }, [workspaceId, fetchKanban, toast]);
 
   const draftSpecs = kanban.draft.map(k => toSpecSummary(k, 'pending'));
   const inProgressSpecs = kanban.inProgress.map(k => toSpecSummary(k, 'approved'));
@@ -347,6 +432,9 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
                   specs={colSpecs}
                   onReviewClick={handleReviewClick}
                   storyProgress={storyProgress}
+                  onApprove={col.key === 'draft' ? handleApprove : undefined}
+                  onDeny={col.key === 'draft' ? handleDeny : undefined}
+                  actionLoadingMap={col.key === 'draft' ? actionLoadingMap : undefined}
                 />
               );
             })}
