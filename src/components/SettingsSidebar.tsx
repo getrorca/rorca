@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import {
   Settings2, Layers, Route, Zap, Github, Variable, Play, Webhook, Users,
-  User, CreditCard, Keyboard, ArrowLeft, ScrollText,
+  User, CreditCard, Keyboard, ArrowLeft, ScrollText, ChevronRight,
+  Cpu, Key, Code2, Bell, Plug,
 } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
@@ -14,53 +16,124 @@ interface SidebarItem {
   id: SettingsTab;
   label: string;
   icon: typeof User;
+  badge?: string;
 }
 
-const WORKSPACE_ITEMS: SidebarItem[] = [
-  { id: 'general',   label: 'General',           icon: Settings2 },
-  { id: 'direction', label: 'Direction',          icon: Layers    },
-  { id: 'context',   label: 'Context',            icon: Route     },
-  { id: 'providers', label: 'Providers',          icon: Zap       },
-  { id: 'github',    label: 'GitHub',             icon: Github    },
-  { id: 'env-vars',  label: 'Env Vars',           icon: Variable  },
-  { id: 'pipeline',  label: 'Pipeline',           icon: Play      },
-  { id: 'hooks',     label: 'Hooks',              icon: Webhook   },
-  { id: 'agents',    label: 'Agents',             icon: Users     },
-  { id: 'system',    label: 'System',             icon: ScrollText },
+interface SettingsGroup {
+  id: string;
+  label: string;
+  items: SidebarItem[];
+}
+
+const SETTINGS_GROUPS: SettingsGroup[] = [
+  {
+    id: 'workspace',
+    label: 'Workspace',
+    items: [
+      { id: 'general',   label: 'General',         icon: Settings2 },
+      { id: 'env-vars',  label: 'Environment',     icon: Variable  },
+      { id: 'hooks',     label: 'Pipeline Hooks',  icon: Webhook   },
+      { id: 'agents',    label: 'Agent Profiles',  icon: Users     },
+      { id: 'context',   label: 'Context Routing', icon: Route     },
+    ],
+  },
+  {
+    id: 'execution',
+    label: 'Execution',
+    items: [
+      { id: 'providers', label: 'Providers & Models', icon: Zap    },
+      { id: 'direction', label: 'Direction',           icon: Layers },
+      { id: 'pipeline',  label: 'Pipeline Config',     icon: Play   },
+    ],
+  },
+  {
+    id: 'integrations',
+    label: 'Integrations',
+    items: [
+      { id: 'github',    label: 'GitHub',   icon: Github },
+      { id: 'slack',     label: 'Slack',    icon: Plug, badge: 'Soon' },
+      { id: 'linear',    label: 'Linear',   icon: Plug, badge: 'Soon' },
+      { id: 'vercel',    label: 'Vercel',   icon: Plug, badge: 'Soon' },
+    ],
+  },
+  {
+    id: 'account',
+    label: 'Account',
+    items: [
+      { id: 'account',   label: 'Profile',         icon: User       },
+      { id: 'billing',   label: 'Billing',         icon: CreditCard },
+      { id: 'shortcuts', label: 'Shortcuts',       icon: Keyboard   },
+      { id: 'notifications', label: 'Notifications', icon: Bell     },
+    ],
+  },
+  {
+    id: 'system',
+    label: 'System',
+    items: [
+      { id: 'system',    label: 'Audit & Activity', icon: ScrollText },
+      { id: 'api-keys',  label: 'API Keys',         icon: Key        },
+      { id: 'developer', label: 'Developer Tools',  icon: Code2      },
+    ],
+  },
 ];
 
-const ACCOUNT_ITEMS: SidebarItem[] = [
-  { id: 'shortcuts', label: 'Shortcuts',          icon: Keyboard  },
-  { id: 'account',   label: 'Account',            icon: User      },
-  { id: 'billing',   label: 'Billing',            icon: CreditCard },
-];
+function GroupSection({ group, defaultOpen }: { group: SettingsGroup; defaultOpen: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
 
-function NavItems({ items }: { items: SidebarItem[] }) {
   return (
-    <div className="space-y-[1px]">
-      {items.map((item) => {
-        const Icon = item.icon;
-        return (
-          <NavLink
-            key={item.id}
-            to={`/settings/${item.id}`}
-            className={({ isActive }) =>
-              `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] transition-colors ${
-                isActive
-                  ? 'text-[var(--text)] bg-surface-200 font-medium'
-                  : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
-              }`
+    <div className="mb-1">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-1.5 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted/70 hover:text-muted transition-colors"
+      >
+        <ChevronRight
+          size={10}
+          className={`transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
+        />
+        {group.label}
+      </button>
+      {open && (
+        <div className="space-y-[1px]">
+          {group.items.map((item) => {
+            const Icon = item.icon;
+            const isDisabled = !!item.badge;
+            if (isDisabled) {
+              return (
+                <div
+                  key={item.id}
+                  className="w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] text-muted/40 cursor-not-allowed"
+                >
+                  <Icon size={14} className="text-muted/30" />
+                  <span className="truncate flex-1">{item.label}</span>
+                  <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-surface-100 text-muted/50">
+                    {item.badge}
+                  </span>
+                </div>
+              );
             }
-          >
-            {({ isActive }) => (
-              <>
-                <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
-                <span className="truncate">{item.label}</span>
-              </>
-            )}
-          </NavLink>
-        );
-      })}
+            return (
+              <NavLink
+                key={item.id}
+                to={`/settings/${item.id}`}
+                className={({ isActive }) =>
+                  `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] transition-colors ${
+                    isActive
+                      ? 'text-[var(--text)] bg-surface-200 font-medium'
+                      : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
+                  }`
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
+                    <span className="truncate">{item.label}</span>
+                  </>
+                )}
+              </NavLink>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -80,23 +153,15 @@ export default function SettingsSidebar({ onNavigate }: SettingsSidebarProps) {
         </Link>
       </div>
 
-      {/* Settings Navigation */}
+      {/* Grouped Settings Navigation */}
       <div className="flex-1 overflow-y-auto pt-2 pb-6 min-h-0">
-        {/* WORKSPACE section */}
-        <div className="mb-3">
-          <div className="px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted/70">
-            Workspace
-          </div>
-          <NavItems items={WORKSPACE_ITEMS} />
-        </div>
-
-        {/* ACCOUNT section */}
-        <div>
-          <div className="px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted/70">
-            Account
-          </div>
-          <NavItems items={ACCOUNT_ITEMS} />
-        </div>
+        {SETTINGS_GROUPS.map((group) => (
+          <GroupSection
+            key={group.id}
+            group={group}
+            defaultOpen={true}
+          />
+        ))}
       </div>
     </div>
   );

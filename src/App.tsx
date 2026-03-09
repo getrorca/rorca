@@ -40,7 +40,7 @@ const RunsTabbedPanel = lazy(() => import('./panels/RunsTabbedPanel'));
 const DirectionTabbedPanel = lazy(() => import('./panels/DirectionTabbedPanel'));
 const AnalyticsPanel = lazy(() => import('./panels/AnalyticsPanel'));
 const SettingsPanel = lazy(() => import('./panels/SettingsPanel'));
-const GitHubSettingsPanel = lazy(() => import('./panels/GitHubSettingsPanel'));
+// GitHubSettingsPanel — now part of Settings > Integrations (loaded within SettingsPanel)
 const RunViewPanel = lazy(() => import('./panels/RunViewPanel'));
 const SpecReviewPanel = lazy(() => import('./panels/SpecReviewPanel'));
 
@@ -320,10 +320,10 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'completion': case 'roi': case 'finops': case 'health':
       return <AnalyticsPanel />;
 
-    // Settings
+    // Settings — all settings panels (including GitHub, Activity, Audit) are now within SettingsPanel
     case 'settings': case 'workspace-settings': case 'audit-log': case 'activity':
+    case 'github':
       return <SettingsPanel />;
-    case 'github': return <GitHubSettingsPanel />;
 
     // Legacy sub-panels — redirect to parent
     case 'worktrees': case 'compare':
