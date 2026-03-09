@@ -2,7 +2,7 @@
   "specId": "build a spec to turn the wake page into columns similar to fizzy.do: draft, in-progress, and done from left to right cards like kanban style and with the draft to have approve deny but also you can click on the card and it expands into the current card that says run pipeline, etc",
   "runId": 7,
   "startedAt": "2026-03-09T01:28:57.800Z",
-  "lastUpdatedAt": "2026-03-09T01:32:44.256Z",
+  "lastUpdatedAt": "2026-03-09T01:38:16.452Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-09T01:32:44.256Z",
       "agentType": "claude",
       "elapsedMs": 218936
+    },
+    {
+      "storyId": "US-002",
+      "title": "Create spec card component for Kanban view",
+      "status": "passed",
+      "startedAt": "2026-03-09T01:32:58.383Z",
+      "finishedAt": "2026-03-09T01:38:16.452Z",
+      "agentType": "claude",
+      "elapsedMs": 318069
     }
   ],
   "failedStories": [],
