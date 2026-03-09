@@ -5,7 +5,7 @@ import {
   Search, PlayCircle, Compass,
   GitBranch, ArrowLeftRight,
   Users,
-  BarChart3, BookOpen, Store,
+  BarChart3, BookOpen,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -56,7 +56,6 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Specs',
     items: [
       { id: 'specs', label: 'Specs', icon: Layers },
-      { id: 'marketplace', label: 'Skills Marketplace', icon: Store },
     ],
   },
   {

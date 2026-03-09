@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T10:19:43.244Z",
+  "lastUpdatedAt": "2026-03-09T10:29:23.198Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -120,6 +120,15 @@
       "finishedAt": "2026-03-09T10:19:43.243Z",
       "agentType": "claude",
       "elapsedMs": 517101
+    },
+    {
+      "storyId": "ULT-014",
+      "title": "Marketplace Tab in Specs Panel — Skills + Templates + Community",
+      "status": "passed",
+      "startedAt": "2026-03-09T10:19:56.827Z",
+      "finishedAt": "2026-03-09T10:29:23.197Z",
+      "agentType": "claude",
+      "elapsedMs": 566370
     }
   ],
   "failedStories": [],

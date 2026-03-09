@@ -6,6 +6,7 @@ import {
   FileText, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
+  Store,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -28,10 +29,11 @@ import type { GeneratedSpec } from './SpecForgeOutput';
 import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
+import MarketplaceView from '../components/MarketplaceView';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
-type ViewMode = 'board' | 'list';
+type ViewMode = 'board' | 'list' | 'marketplace';
 type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
 type StatusFilter = 'all' | SpecStatus;
 
@@ -319,23 +321,34 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         }
         actions={
           <div className="flex items-center gap-2">
-            {/* View mode toggle */}
+            {/* View mode toggle: Board | List | Marketplace */}
             <div className="flex bg-panel rounded-lg border border-border p-0.5">
               <button
                 onClick={() => setViewMode('board')}
                 aria-current={viewMode === 'board' ? 'page' : undefined}
                 title="Board view"
-                className={`p-1.5 rounded-md transition-colors ${viewMode === 'board' ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-[var(--text)]'}`}
+                className={`flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${viewMode === 'board' ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-[var(--text)]'}`}
               >
-                <LayoutGrid size={14} />
+                <LayoutGrid size={13} />
+                <span className="hidden sm:inline">Board</span>
               </button>
               <button
                 onClick={() => setViewMode('list')}
                 aria-current={viewMode === 'list' ? 'page' : undefined}
                 title="List view"
-                className={`p-1.5 rounded-md transition-colors ${viewMode === 'list' ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-[var(--text)]'}`}
+                className={`flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${viewMode === 'list' ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-[var(--text)]'}`}
               >
-                <List size={14} />
+                <List size={13} />
+                <span className="hidden sm:inline">List</span>
+              </button>
+              <button
+                onClick={() => setViewMode('marketplace')}
+                aria-current={viewMode === 'marketplace' ? 'page' : undefined}
+                title="Marketplace"
+                className={`flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${viewMode === 'marketplace' ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-[var(--text)]'}`}
+              >
+                <Store size={13} />
+                <span className="hidden sm:inline">Marketplace</span>
               </button>
             </div>
 
@@ -359,12 +372,14 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
             onSpecClick={handleSpecClick}
             onNavigate={onNavigate}
           />
-        ) : (
+        ) : viewMode === 'list' ? (
           <ListView
             workspaceId={workspaceId}
             onSpecClick={handleSpecClick}
             onNavigate={onNavigate}
           />
+        ) : (
+          <MarketplaceView />
         )}
       </div>
 
