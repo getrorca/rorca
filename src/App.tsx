@@ -16,12 +16,13 @@ import WorkspaceBootstrapBanner from './components/WorkspaceBootstrapBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
 import { apiFetch, onApiFetchError } from './lib/apiFetch';
 import {
-  GenericPanelSkeleton,
-  ForgeSkeleton,
-  PipelineSkeleton,
-  DirectionStackSkeleton,
-  SettingsSkeleton,
-} from './components/Skeleton';
+  BoardSkeleton,
+  ListSkeleton,
+  AnalyticsSkeleton,
+  DirectionSkeleton,
+  RunViewSkeleton,
+  SettingsFormSkeleton,
+} from './components/skeletons';
 import SlideOver from './components/SlideOver';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
@@ -62,7 +63,7 @@ function AuthGate() {
   const reviewMatch = location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
   if (reviewMatch) {
     return (
-      <Suspense fallback={<GenericPanelSkeleton />}>
+      <Suspense fallback={<BoardSkeleton />}>
         <PublicReviewPage token={reviewMatch[1]} />
       </Suspense>
     );
@@ -73,7 +74,7 @@ function AuthGate() {
       <NotificationProvider>
         <WorkspaceProvider>
           <Shell>
-            <GenericPanelSkeleton />
+            <BoardSkeleton />
           </Shell>
         </WorkspaceProvider>
       </NotificationProvider>
@@ -86,13 +87,13 @@ function AuthGate() {
     const token = params.get('token') || '';
     if (!token) {
       return (
-        <Suspense fallback={<GenericPanelSkeleton />}>
+        <Suspense fallback={<BoardSkeleton />}>
           <ForgotPasswordPage onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }} />
         </Suspense>
       );
     }
     return (
-      <Suspense fallback={<GenericPanelSkeleton />}>
+      <Suspense fallback={<BoardSkeleton />}>
         <ResetPasswordPage
           token={token}
           onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }}
@@ -189,7 +190,7 @@ function AppRoutes() {
   if (workspaces.length === 0) {
     return (
       <Shell>
-        <Suspense fallback={<GenericPanelSkeleton />}>
+        <Suspense fallback={<BoardSkeleton />}>
           <OnboardingWizard />
         </Suspense>
       </Shell>
@@ -247,21 +248,26 @@ function AppRoutes() {
   );
 }
 
-/** Returns the appropriate Suspense fallback skeleton for a given panel */
+/** Returns the appropriate Suspense fallback skeleton for a given panel.
+ *  ULT-017: Uses shimmer-based skeletons that match each panel's final layout shape. */
 function getPanelSkeleton(panel: PanelId) {
   switch (panel) {
     case 'specs': case 'forge': case 'queue': case 'archive': case 'marketplace':
-      return <ForgeSkeleton />;
-    case 'runs': case 'run-view': case 'hub': case 'pipeline':
-      return <PipelineSkeleton />;
+      return <BoardSkeleton />;
+    case 'runs': case 'hub': case 'pipeline':
+      return <ListSkeleton />;
+    case 'run-view':
+      return <RunViewSkeleton />;
     case 'direction': case 'stack': case 'team-direction': case 'memory':
-      return <DirectionStackSkeleton />;
+      return <DirectionSkeleton />;
     case 'analytics': case 'usage': case 'costs': case 'models':
     case 'velocity': case 'completion': case 'roi': case 'finops':
-    case 'health': return <GenericPanelSkeleton />;
+    case 'health':
+      return <AnalyticsSkeleton />;
     case 'settings': case 'workspace-settings': case 'audit-log': case 'activity':
-    case 'github': return <SettingsSkeleton />;
-    default: return <GenericPanelSkeleton />;
+    case 'github':
+      return <SettingsFormSkeleton />;
+    default: return <BoardSkeleton />;
   }
 }
 

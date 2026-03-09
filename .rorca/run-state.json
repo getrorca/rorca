@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T10:53:21.266Z",
+  "lastUpdatedAt": "2026-03-09T11:00:31.059Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -147,6 +147,15 @@
       "finishedAt": "2026-03-09T10:53:21.266Z",
       "agentType": "claude",
       "elapsedMs": 836662
+    },
+    {
+      "storyId": "ULT-017",
+      "title": "Loading States and Skeleton Screens",
+      "status": "passed",
+      "startedAt": "2026-03-09T10:53:34.743Z",
+      "finishedAt": "2026-03-09T11:00:31.059Z",
+      "agentType": "claude",
+      "elapsedMs": 416316
     }
   ],
   "failedStories": [],
