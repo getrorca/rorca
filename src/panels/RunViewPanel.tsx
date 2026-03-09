@@ -18,7 +18,7 @@ import CompareRunsPanel from './CompareRunsPanel';
 import WorktreesPanel from './WorktreesPanel';
 import FinOpsTab from '../components/FinOpsTab';
 import type { PanelId } from '../components/Sidebar';
-import { RunViewTerminalSkeleton } from '../components/Skeleton';
+import { RunViewSkeleton } from '../components/skeletons';
 import AppHeader from '../components/AppHeader';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -594,7 +594,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   }, [walEvents, handleTabChange]);
 
   if (loading) {
-    return <RunViewTerminalSkeleton />;
+    return <RunViewSkeleton />;
   }
 
   if (!run) {
