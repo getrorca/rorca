@@ -1,10 +1,9 @@
 # Run State Summary
 
-Spec: rorca-production-ready
-Run ID: 2
-Started: 2026-03-08T21:24:32.773Z
-Last Updated: 2026-03-08T21:33:24.640Z
+Spec: build a spec to turn the wake page into columns similar to fizzy.do: draft, in-progress, and done from left to right cards like kanban style and with the draft to have approve deny but also you can click on the card and it expands into the current card that says run pipeline, etc
+Run ID: 7
+Started: 2026-03-09T01:28:57.800Z
+Last Updated: 2026-03-09T01:32:44.256Z
 
-## Completed Stories (2)
-- PR-RQ-1: Run Execution Queue — Backend — DONE (claude, claude-opus-4-6, 87s)
-- PR-RQ-2: Run Execution Queue — Frontend — DONE (claude, claude-sonnet-4-6, 423s)
+## Completed Stories (1)
+- US-001: Create Kanban column layout structure — DONE (claude, 219s)
