@@ -4303,17 +4303,20 @@ router.get('/:specId', (req: Request, res: Response) => {
     const approvedFile = path.join(approvedDir, `${specId}.json`);
 
     let content: any;
+    let specStatus: 'pending' | 'approved' = 'pending';
     if (fs.existsSync(pendingFile)) {
       content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+      specStatus = 'pending';
     } else if (fs.existsSync(approvedFile)) {
       content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+      specStatus = 'approved';
     } else {
       res.status(404).json({ error: 'Spec not found' });
       return;
     }
 
     const stories: any[] = content.userStories ?? content.stories ?? [];
-    res.json({ ...content, readinessPercent: computeReadiness(stories) });
+    res.json({ ...content, _status: specStatus, readinessPercent: computeReadiness(stories) });
   } catch (error: any) {
     logger.error('[Specs] Get error:', error);
     res.status(500).json({ error: error.message });

@@ -12,8 +12,12 @@ import {
   AlertTriangle,
   GitBranch,
   Loader2,
+  Play,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import { ReadinessRing } from '../components/ReadinessRing';
 import { SpecConfirmDialog } from '../components/SpecConfirmDialog';
@@ -43,6 +47,7 @@ interface SpecDetail {
   stories?: Story[];
   model?: string;
   generatedAt?: string;
+  _status?: 'pending' | 'approved';
   [key: string]: unknown;
 }
 
@@ -567,6 +572,7 @@ export default function SpecReviewPanel({
   onNavigate: (panel: PanelId) => void;
 }) {
   const { workspaceId } = useWorkspace();
+  const toast = useGlobalToast();
   const [spec, setSpec] = useState<SpecDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -574,6 +580,7 @@ export default function SpecReviewPanel({
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
   const [dialogMode, setDialogMode] = useState<'approve' | 'reject' | 'post-approve' | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [complexityFilter, setComplexityFilter] = useState<ComplexityFilter>('all');
@@ -776,6 +783,35 @@ export default function SpecReviewPanel({
     }
   };
 
+  const handleRunPipeline = useCallback(() => {
+    onNavigate('pipeline');
+  }, [onNavigate]);
+
+  const handleEdit = useCallback(() => {
+    onNavigate('forge');
+  }, [onNavigate]);
+
+  const handleDelete = useCallback(async () => {
+    if (!workspaceId) return;
+    setDeleteLoading(true);
+    try {
+      await apiFetch(`/api/specs/${encodeURIComponent(specId)}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      toast.show('Spec deleted', 'success');
+      onBack();
+    } catch (err: any) {
+      toast.show(err?.message || 'Failed to delete spec', 'error');
+    } finally {
+      setDeleteLoading(false);
+    }
+  }, [workspaceId, specId, toast, onBack]);
+
+  const isPending = spec?._status === 'pending';
+  const isApproved = spec?._status === 'approved';
+
   // Loading / error / empty states
   if (!specId) {
     return (
@@ -955,44 +991,82 @@ export default function SpecReviewPanel({
       {/* ─── Action bar ──────────────────────────────────────────────── */}
       <div className="px-4 sm:px-6 py-3 border-t border-border shrink-0 bg-bg">
         <div className="max-w-3xl mx-auto flex items-center gap-3">
-          {/* Keyboard hint */}
-          <div className="hidden sm:flex items-center gap-2 text-[10px] text-muted flex-1">
-            <kbd className="px-1.5 py-0.5 rounded bg-panel border border-border font-mono">
-              ↑↓
-            </kbd>
-            navigate
-            <kbd className="px-1.5 py-0.5 rounded bg-panel border border-border font-mono">
-              ↵
-            </kbd>
-            expand
-            <kbd className="px-1.5 py-0.5 rounded bg-panel border border-border font-mono">
-              esc
-            </kbd>
-            collapse all
+          {/* Left: secondary actions */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleEdit}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-muted border border-border hover:text-text hover:border-accent/40 transition-colors"
+            >
+              <Pencil size={14} />
+              Edit
+            </button>
+            <button
+              onClick={handleDelete}
+              disabled={deleteLoading}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-muted border border-border hover:text-error hover:border-error/40 transition-colors disabled:opacity-50"
+            >
+              <Trash2 size={14} />
+              Delete
+            </button>
           </div>
+
+          {/* Right: primary actions */}
           <div className="flex items-center gap-2 ml-auto">
-            <button
-              onClick={() => setDialogMode('approve')}
-              disabled={actionLoading !== null}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
-            >
-              <CheckCircle2 size={14} />
-              Approve
-              <kbd className="ml-1 px-1 py-0.5 text-[10px] rounded bg-white/20 font-mono">
-                {mod}↵
-              </kbd>
-            </button>
-            <button
-              onClick={() => setDialogMode('reject')}
-              disabled={actionLoading !== null}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-error border border-error/40 hover:bg-error/10 transition-colors disabled:opacity-50"
-            >
-              <XCircle size={14} />
-              Reject
-              <kbd className="ml-1 px-1 py-0.5 text-[10px] rounded bg-error/15 font-mono">
-                {mod}⌫
-              </kbd>
-            </button>
+            {isApproved && (
+              <button
+                onClick={handleRunPipeline}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors"
+              >
+                <Play size={14} />
+                Run Pipeline
+              </button>
+            )}
+            {isPending && (
+              <>
+                <button
+                  onClick={() => setDialogMode('approve')}
+                  disabled={actionLoading !== null}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
+                >
+                  <CheckCircle2 size={14} />
+                  Approve
+                  <kbd className="ml-1 px-1 py-0.5 text-[10px] rounded bg-white/20 font-mono">
+                    {mod}↵
+                  </kbd>
+                </button>
+                <button
+                  onClick={() => setDialogMode('reject')}
+                  disabled={actionLoading !== null}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-error border border-error/40 hover:bg-error/10 transition-colors disabled:opacity-50"
+                >
+                  <XCircle size={14} />
+                  Reject
+                  <kbd className="ml-1 px-1 py-0.5 text-[10px] rounded bg-error/15 font-mono">
+                    {mod}⌫
+                  </kbd>
+                </button>
+              </>
+            )}
+            {!isPending && !isApproved && (
+              <>
+                <button
+                  onClick={() => setDialogMode('approve')}
+                  disabled={actionLoading !== null}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-success text-white hover:bg-success/90 transition-colors disabled:opacity-50"
+                >
+                  <CheckCircle2 size={14} />
+                  Approve
+                </button>
+                <button
+                  onClick={() => setDialogMode('reject')}
+                  disabled={actionLoading !== null}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-error border border-error/40 hover:bg-error/10 transition-colors disabled:opacity-50"
+                >
+                  <XCircle size={14} />
+                  Reject
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
