@@ -16,11 +16,23 @@
   .contain-layout {
     contain: layout style;
   }
+
+  /* iOS safe area padding for bottom tab bar */
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
 }
 
 @layer base {
+  html {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
   body {
     @apply bg-bg text-[var(--text)] antialiased;
+    overflow-x: hidden;
+    max-width: 100vw;
   }
 
   /* Global focus ring — visible on keyboard navigation, hidden on mouse clicks.
@@ -266,23 +278,115 @@
 }
 
 
-/* ─── ULT-002: Collapsible board columns — responsive ─────────────────── */
+/* ─── ULT-002 + ULT-012: Responsive board columns ─────────────────────── */
 
+/* Mobile: horizontal snap-scroll, each column = full viewport minus padding */
 @media (max-width: 639px) {
   .board-columns-container {
     flex-direction: row !important;
     overflow-x: auto;
     scroll-snap-type: x mandatory;
     -webkit-overflow-scrolling: touch;
+    scroll-padding-left: 16px;
   }
 
   .board-columns-container > * {
-    flex: 0 0 85vw !important;
-    min-width: 85vw !important;
-    max-width: 85vw !important;
-    width: 85vw !important;
-    scroll-snap-align: start;
+    flex: 0 0 calc(100vw - 32px) !important;
+    min-width: calc(100vw - 32px) !important;
+    max-width: calc(100vw - 32px) !important;
+    width: calc(100vw - 32px) !important;
+    scroll-snap-align: center;
     transition: none !important;
+  }
+
+  /* Kanban grid also becomes snap-scroll on mobile */
+  .kanban-grid {
+    display: flex !important;
+    grid-template-columns: none !important;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scroll-padding-left: 16px;
+  }
+
+  .kanban-grid > * {
+    flex: 0 0 calc(100vw - 32px) !important;
+    min-width: calc(100vw - 32px) !important;
+    max-width: calc(100vw - 32px) !important;
+    scroll-snap-align: center;
+    border-left: none !important;
+  }
+
+  /* Hide sidebar dividers on mobile — columns are snap-scrolled */
+  .kanban-grid .divide-x > * { border-left: none !important; }
+
+  /* Mobile: bottom tab bar padding for main content */
+  .main-content-mobile-pad {
+    padding-bottom: 64px;
+  }
+}
+
+/* Tablet: 2-column grid, remaining columns scroll horizontally */
+@media (min-width: 640px) and (max-width: 1023px) {
+  .board-columns-container {
+    flex-wrap: wrap !important;
+    overflow-x: auto;
+  }
+
+  .board-columns-container > * {
+    flex: 0 0 calc(50% - 1px) !important;
+    min-width: calc(50% - 1px) !important;
+    max-width: calc(50% - 1px) !important;
+  }
+
+  .kanban-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+    overflow-x: auto;
+  }
+}
+
+/* ─── ULT-012: Touch target enforcement ─────────────────────────────── */
+
+@media (pointer: coarse) {
+  /* All buttons and links get minimum 44x44px touch targets */
+  .touch-target {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Enlarge drop zones for touch drag-and-drop */
+  .drop-zone-touch {
+    min-height: 48px;
+  }
+
+  /* Action buttons always visible on touch (no hover-reveal) */
+  .touch-action-visible {
+    opacity: 1 !important;
+  }
+}
+
+/* ─── ULT-012: Swipe-to-close slide-over on mobile ─────────────────── */
+
+@keyframes slideUpFull {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up-full {
+  animation: slideUpFull 0.25s ease-out;
+}
+
+/* ─── ULT-012: Tablet sidebar rail ─────────────────────────────────── */
+
+@media (min-width: 640px) and (max-width: 1023px) {
+  .sidebar-tablet-rail {
+    width: 48px !important;
+    min-width: 48px !important;
+    max-width: 48px !important;
   }
 }
 

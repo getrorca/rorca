@@ -94,10 +94,12 @@ function KanbanSpecCard({ spec, passedCount, onClick, column, onApprove, onDeny,
         )}
       </button>
 
-      {/* Approve / Deny action buttons — Draft column only, shown on hover */}
+      {/* Approve / Deny action buttons — Draft column only.
+          Desktop: hover-reveal. Touch/mobile: always visible. */}
       {isDraft && (
         <div className={`absolute top-2 right-2 flex items-center gap-1
           ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}
+          touch-action-visible
           transition-opacity duration-150`}
         >
           <button
@@ -105,8 +107,8 @@ function KanbanSpecCard({ spec, passedCount, onClick, column, onApprove, onDeny,
             onClick={(e) => { e.stopPropagation(); onApprove?.(); }}
             disabled={isActioning}
             title="Approve spec"
-            className="p-1.5 rounded-md bg-success/15 text-success border border-success/30
-              hover:bg-success/25 transition-colors
+            className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 p-2 sm:p-1.5 rounded-md bg-success/15 text-success border border-success/30
+              hover:bg-success/25 transition-colors flex items-center justify-center
               disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {actionLoading === 'approve' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
@@ -116,8 +118,8 @@ function KanbanSpecCard({ spec, passedCount, onClick, column, onApprove, onDeny,
             onClick={(e) => { e.stopPropagation(); onDeny?.(); }}
             disabled={isActioning}
             title="Deny spec"
-            className="p-1.5 rounded-md bg-error/15 text-error border border-error/30
-              hover:bg-error/25 transition-colors
+            className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 p-2 sm:p-1.5 rounded-md bg-error/15 text-error border border-error/30
+              hover:bg-error/25 transition-colors flex items-center justify-center
               disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {actionLoading === 'deny' ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />}
@@ -447,9 +449,9 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
       {/* Kanban board */}
       <div className="flex-1 overflow-hidden min-h-0">
         {loading ? (
-          <div className="grid grid-cols-3 gap-0 h-full divide-x divide-border">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-0 h-full kanban-grid">
             {[0, 1, 2].map((col) => (
-              <div key={col} className="flex flex-col min-h-0">
+              <div key={col} className="flex flex-col min-h-0 border-l border-border first:border-l-0">
                 <div className="px-3 py-2.5 border-b border-border shrink-0">
                   <div className="h-5 w-24 bg-surface-100 rounded animate-pulse" />
                 </div>
@@ -463,7 +465,7 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
           </div>
         ) : error ? (
           /* Error state with retry */
-          <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4 text-center">
+          <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4 text-center px-4">
             <AlertTriangle size={48} className="text-warning/60" />
             <div>
               <p className="text-base font-medium text-[var(--text)]">Failed to load specs</p>
@@ -472,7 +474,7 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
             <button
               onClick={handleRetry}
               disabled={retrying}
-              className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
+              className="flex items-center gap-2 px-4 py-2 min-h-[44px] rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
             >
               <RefreshCw size={14} className={retrying ? 'animate-spin' : ''} />
               {retrying ? 'Retrying…' : 'Retry'}
@@ -480,7 +482,7 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
           </div>
         ) : totalCount === 0 ? (
           /* Full empty state */
-          <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4 text-center">
+          <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4 text-center px-4">
             <Inbox size={48} className="text-muted/40" />
             <div>
               <p className="text-base font-medium text-[var(--text)]">No specs awaiting review</p>
@@ -488,14 +490,14 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
             </div>
             <button
               onClick={() => onNavigate('forge')}
-              className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 min-h-[44px] rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors"
             >
               Go to Forge
               <ArrowRight size={14} />
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-3 gap-0 h-full divide-x divide-border">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-0 h-full kanban-grid scrollbar-none">
             {COLUMNS.map((col, idx) => {
               const colSpecs = idx === 0 ? draftSpecs : idx === 1 ? inProgressSpecs : doneSpecs;
               return (
