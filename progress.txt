@@ -3,11 +3,12 @@
 Spec: build a spec to turn the wake page into columns similar to fizzy.do: draft, in-progress, and done from left to right cards like kanban style and with the draft to have approve deny but also you can click on the card and it expands into the current card that says run pipeline, etc
 Run ID: 7
 Started: 2026-03-09T01:28:57.800Z
-Last Updated: 2026-03-09T01:50:23.836Z
+Last Updated: 2026-03-09T01:56:04.985Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - US-001: Create Kanban column layout structure — DONE (claude, 219s)
 - US-002: Create spec card component for Kanban view — DONE (claude, 318s)
 - US-003: Update queue route to fetch specs grouped by status — DONE (claude, 348s)
 - US-004: Wire spec cards to grouped API data — DONE (claude, 141s)
 - US-005: Add approve/deny actions to Draft column cards — DONE (claude, 196s)
+- US-006: Implement card click to expand into detail view — DONE (claude, 327s)
