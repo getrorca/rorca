@@ -15,9 +15,10 @@ const TABS: { id: RunsTab; label: string; icon: typeof Activity }[] = [
 
 interface RunsTabbedPanelProps {
   onNavigate: (panel: PanelId) => void;
+  onNavigateToRun?: (runId: number) => void;
 }
 
-export default function RunsTabbedPanel({ onNavigate }: RunsTabbedPanelProps) {
+export default function RunsTabbedPanel({ onNavigate, onNavigateToRun }: RunsTabbedPanelProps) {
   const [activeTab, setActiveTab] = useState<RunsTab>('active');
 
   return (
@@ -46,7 +47,7 @@ export default function RunsTabbedPanel({ onNavigate }: RunsTabbedPanelProps) {
 
       {/* Tab content */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        {activeTab === 'active' && <PipelineMonitorPanel />}
+        {activeTab === 'active' && <PipelineMonitorPanel onNavigateToRun={onNavigateToRun} />}
         {activeTab === 'worktrees' && <WorktreesPanel />}
         {activeTab === 'compare' && <CompareRunsPanel onBack={() => setActiveTab('active')} />}
       </div>
