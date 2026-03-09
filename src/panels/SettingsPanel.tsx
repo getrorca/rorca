@@ -10,7 +10,7 @@ export type SettingsTab =
   // Account-scoped
   | 'shortcuts' | 'account' | 'billing'
   // Aggregate tabs
-  | 'analytics' | 'system';
+  | 'system';
 
 // ─── Lazy-loaded sub-components ──────────────────────────────────────────────
 
@@ -58,10 +58,6 @@ const BillingSection = lazy(() =>
   import('./settings/AccountSettingsTab').then((m) => ({ default: m.BillingSection })),
 );
 
-const AnalyticsSection = lazy(() =>
-  import('./settings/AccountSettingsTab').then((m) => ({ default: m.AnalyticsSection })),
-);
-
 const SystemSection = lazy(() =>
   import('./settings/AccountSettingsTab').then((m) => ({ default: m.SystemSection })),
 );
@@ -104,7 +100,6 @@ export default function SettingsPanel() {
           {activeTab === 'billing' && <BillingSection />}
           {activeTab === 'shortcuts' && <ShortcutsSettingsTab />}
           {/* Aggregate tabs */}
-          {activeTab === 'analytics' && <AnalyticsSection />}
           {activeTab === 'system' && <SystemSection />}
         </Suspense>
       </div>

@@ -2,14 +2,6 @@ import { useState, useEffect } from 'react';
 import { User, Save, Loader2, Trash2, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, CheckCircle2, XCircle, Crown, Users, ChevronDown, ChevronUp, Download, ExternalLink, FileText, CreditCard, Shield, ScrollText, Rss, BarChart3 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, clearTokens } from '../../lib/apiFetch';
-import UsageDashboardPanel from '../UsageDashboardPanel';
-import CostBreakdownPanel from '../CostBreakdownPanel';
-import ModelComparisonPanel from '../ModelComparisonPanel';
-import VelocityChartPanel from '../VelocityChartPanel';
-import CompletionRatePanel from '../CompletionRatePanel';
-import RoiCalculatorPanel from '../RoiCalculatorPanel';
-import FinOpsDashboardPanel from '../FinOpsDashboardPanel';
-import HealthDashboardPanel from '../HealthDashboardPanel';
 import AuditLogPanel from '../AuditLogPanel';
 import ActivityFeedPanel from '../ActivityFeedPanel';
 
@@ -95,78 +87,6 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
           }`}
       />
     </button>
-  );
-}
-
-// ─── Analytics Section (embeds all 8 analytics panels) ────────────────────────
-
-type AnalyticsSubTab = 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'roi' | 'finops' | 'health';
-
-const ANALYTICS_SUBTABS: { id: AnalyticsSubTab; label: string }[] = [
-  { id: 'usage', label: 'Token Usage' },
-  { id: 'costs', label: 'Costs' },
-  { id: 'models', label: 'Models' },
-  { id: 'velocity', label: 'Velocity' },
-  { id: 'completion', label: 'Completion' },
-  { id: 'roi', label: 'ROI' },
-  { id: 'finops', label: 'FinOps' },
-  { id: 'health', label: 'Health' },
-];
-
-export function AnalyticsSection() {
-  const [activeSubTab, setActiveSubTab] = useState<AnalyticsSubTab>('usage');
-
-  return (
-    <div>
-      {/* Sub-tab pills */}
-      <div
-        role="tablist"
-        aria-label="Analytics sections"
-        className="flex flex-wrap gap-1 mb-4"
-      >
-        {ANALYTICS_SUBTABS.map((tab) => (
-          <button
-            key={tab.id}
-            role="tab"
-            aria-selected={activeSubTab === tab.id}
-            aria-controls={`analytics-panel-${tab.id}`}
-            id={`analytics-tab-${tab.id}`}
-            onClick={() => setActiveSubTab(tab.id)}
-            className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
-              activeSubTab === tab.id
-                ? 'bg-accent text-white'
-                : 'bg-surface-100 text-muted hover:text-text hover:bg-surface-200'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Sub-tab content */}
-      {ANALYTICS_SUBTABS.map((tab) => (
-        <div
-          key={tab.id}
-          id={`analytics-panel-${tab.id}`}
-          role="tabpanel"
-          aria-labelledby={`analytics-tab-${tab.id}`}
-          hidden={activeSubTab !== tab.id}
-        >
-          {activeSubTab === tab.id && (
-            <>
-              {tab.id === 'usage' && <UsageDashboardPanel />}
-              {tab.id === 'costs' && <CostBreakdownPanel />}
-              {tab.id === 'models' && <ModelComparisonPanel />}
-              {tab.id === 'velocity' && <VelocityChartPanel />}
-              {tab.id === 'completion' && <CompletionRatePanel />}
-              {tab.id === 'roi' && <RoiCalculatorPanel />}
-              {tab.id === 'finops' && <FinOpsDashboardPanel />}
-              {tab.id === 'health' && <HealthDashboardPanel />}
-            </>
-          )}
-        </div>
-      ))}
-    </div>
   );
 }
 
