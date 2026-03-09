@@ -382,9 +382,23 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   const [activeRunSpecs, setActiveRunSpecs] = useState<Set<string>>(new Set());
   const sseFetchTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  // Drag state
-  const [dragSpecId, setDragSpecId] = useState<string | null>(null);
-  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
+  // Drag state — refs for performance (no re-renders during drag)
+  const dragSpecIdRef = useRef<string | null>(null);
+  const dragFromColumnRef = useRef<string | null>(null);
+  const dragOverColumnRef = useRef<string | null>(null);
+  const dragLeaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const dragGhostRef = useRef<HTMLDivElement | null>(null);
+  const [dragRenderKey, setDragRenderKey] = useState(0); // single state bump for visual updates
+  // Touch drag refs
+  const touchDragTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const touchDragActiveRef = useRef(false);
+  const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const touchCloneRef = useRef<HTMLDivElement | null>(null);
+  // Keyboard focus tracking
+  const focusedCardRef = useRef<{ specId: string; columnKey: string } | null>(null);
+  // Optimistic kanban state for rollback
+  const [optimisticKanban, setOptimisticKanban] = useState<KanbanResponse | null>(null);
+  const effectiveKanban = optimisticKanban ?? kanban;
 
   // Column collapse state — persisted per workspace
   const collapseKey = `${COLLAPSE_KEY_PREFIX}${workspaceId}`;
@@ -481,49 +495,276 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     }
   }, [workspaceId, fetchKanban, toast]);
 
-  // Drag and drop handlers
-  const handleDragStart = useCallback((specId: string) => {
-    setDragSpecId(specId);
+  // aria-live announcer ref
+  const announceRef = useRef<HTMLDivElement | null>(null);
+  const announce = useCallback((msg: string) => {
+    if (announceRef.current) { announceRef.current.textContent = ''; requestAnimationFrame(() => { if (announceRef.current) announceRef.current.textContent = msg; }); }
   }, []);
+
+  // Column label helper
+  const columnLabel = useCallback((key: string) => BOARD_COLUMNS.find(c => c.key === key)?.label ?? key, []);
+
+  // Execute drop transition (source→target) with optimistic UI
+  const executeMove = useCallback(async (specId: string, sourceColumn: string, targetColumn: string) => {
+    if (sourceColumn === targetColumn) return;
+
+    // Determine the spec and build optimistic state
+    const sourceKey = sourceColumn === 'in-progress' ? 'inProgress' : sourceColumn as 'draft' | 'done';
+    const targetKey = targetColumn === 'in-progress' ? 'inProgress' : targetColumn as 'draft' | 'done';
+    const base = effectiveKanban;
+    const spec = (base[sourceKey] as KanbanSpec[]).find(s => s.id === specId);
+    if (!spec) return;
+
+    // Block moves TO done (read-only from pipeline completion)
+    if (targetColumn === 'done') {
+      toast.show('Done column is read-only — specs move here automatically on pipeline completion', 'error');
+      return;
+    }
+
+    // Optimistic update
+    const optimistic: KanbanResponse = {
+      draft: [...base.draft],
+      inProgress: [...base.inProgress],
+      done: [...base.done],
+    };
+    (optimistic[sourceKey] as KanbanSpec[]) = (optimistic[sourceKey] as KanbanSpec[]).filter(s => s.id !== specId);
+    (optimistic[targetKey] as KanbanSpec[]) = [...(optimistic[targetKey] as KanbanSpec[]), spec];
+    setOptimisticKanban(optimistic);
+
+    const specTitle = slugToTitle(specId);
+
+    try {
+      // draft → in-progress = approve
+      if (sourceColumn === 'draft' && targetColumn === 'in-progress') {
+        await apiFetch(`/api/specs/${encodeURIComponent(specId)}/approve`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        });
+        toast.show(`Spec "${specTitle}" approved`, 'success');
+      } else {
+        toast.show('Invalid move — only Draft → In Progress (approve) is supported', 'error');
+        setOptimisticKanban(null);
+        return;
+      }
+      announce(`Moved ${specTitle} from ${columnLabel(sourceColumn)} to ${columnLabel(targetColumn)}`);
+      fetchKanban();
+    } catch (err: any) {
+      toast.show(err?.message || 'Move failed — reverted', 'error');
+      setOptimisticKanban(null);
+    }
+  }, [effectiveKanban, workspaceId, toast, fetchKanban, announce, columnLabel]);
+
+  // Clean up ghost element
+  const cleanupGhost = useCallback(() => {
+    if (dragGhostRef.current) {
+      document.body.removeChild(dragGhostRef.current);
+      dragGhostRef.current = null;
+    }
+  }, []);
+
+  // Drag and drop handlers (HTML5 API, using refs for zero re-renders during drag)
+  const handleDragStart = useCallback((e: React.DragEvent, specId: string, columnKey: string) => {
+    dragSpecIdRef.current = specId;
+    dragFromColumnRef.current = columnKey;
+
+    // Set dataTransfer payload
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('application/json', JSON.stringify({ specId, fromColumnId: columnKey, fromColumnType: columnKey }));
+
+    // Custom drag ghost
+    const colDef = BOARD_COLUMNS.find(c => c.key === columnKey);
+    const ghost = document.createElement('div');
+    ghost.style.cssText = `position:fixed;top:-9999px;left:-9999px;padding:8px 14px;border-radius:8px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:13px;font-weight:600;border-left:3px solid ${colDef?.color ?? '#4f46e5'};box-shadow:0 4px 16px rgba(0,0,0,0.3);white-space:nowrap;pointer-events:none;z-index:99999;`;
+    ghost.textContent = slugToTitle(specId);
+    document.body.appendChild(ghost);
+    dragGhostRef.current = ghost;
+    e.dataTransfer.setDragImage(ghost, 10, 10);
+
+    // Apply opacity to source card via DOM (no re-render)
+    const target = e.currentTarget as HTMLElement;
+    requestAnimationFrame(() => { target.style.opacity = '0.5'; });
+
+    setDragRenderKey(k => k + 1);
+  }, []);
+
+  const handleDragEnd = useCallback((e: React.DragEvent) => {
+    // Restore source card opacity
+    (e.currentTarget as HTMLElement).style.opacity = '';
+    dragSpecIdRef.current = null;
+    dragFromColumnRef.current = null;
+    dragOverColumnRef.current = null;
+    clearTimeout(dragLeaveTimerRef.current);
+    cleanupGhost();
+    setDragRenderKey(k => k + 1);
+  }, [cleanupGhost]);
 
   const handleDragOver = useCallback((e: React.DragEvent, columnKey: string) => {
     e.preventDefault();
-    setDragOverColumn(columnKey);
+    e.dataTransfer.dropEffect = 'move';
+    clearTimeout(dragLeaveTimerRef.current);
+    if (dragOverColumnRef.current !== columnKey) {
+      dragOverColumnRef.current = columnKey;
+      setDragRenderKey(k => k + 1);
+    }
   }, []);
 
   const handleDragLeave = useCallback(() => {
-    setDragOverColumn(null);
+    // 50ms debounce to prevent flicker between child elements
+    clearTimeout(dragLeaveTimerRef.current);
+    dragLeaveTimerRef.current = setTimeout(() => {
+      dragOverColumnRef.current = null;
+      setDragRenderKey(k => k + 1);
+    }, 50);
   }, []);
 
-  const handleDrop = useCallback(async (targetColumn: string) => {
-    if (!dragSpecId || !workspaceId) { setDragSpecId(null); setDragOverColumn(null); return; }
+  const handleDrop = useCallback(async (e: React.DragEvent, targetColumn: string) => {
+    e.preventDefault();
+    clearTimeout(dragLeaveTimerRef.current);
+    const specId = dragSpecIdRef.current;
+    const sourceColumn = dragFromColumnRef.current;
+    dragSpecIdRef.current = null;
+    dragFromColumnRef.current = null;
+    dragOverColumnRef.current = null;
+    cleanupGhost();
+    setDragRenderKey(k => k + 1);
 
-    // Find which column the spec is currently in
-    let sourceColumn: string | null = null;
-    if (kanban.draft.some(k => k.id === dragSpecId)) sourceColumn = 'draft';
-    else if (kanban.inProgress.some(k => k.id === dragSpecId)) sourceColumn = 'in-progress';
-    else if (kanban.done.some(k => k.id === dragSpecId)) sourceColumn = 'done';
+    if (!specId || !sourceColumn || !workspaceId) return;
+    await executeMove(specId, sourceColumn, targetColumn);
+  }, [workspaceId, executeMove, cleanupGhost]);
 
-    setDragSpecId(null);
-    setDragOverColumn(null);
+  // Touch drag handlers (long-press 300ms to initiate)
+  const handleTouchStart = useCallback((e: React.TouchEvent, specId: string, columnKey: string) => {
+    const touch = e.touches[0];
+    touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+    touchDragActiveRef.current = false;
 
-    if (!sourceColumn || sourceColumn === targetColumn) return;
+    touchDragTimerRef.current = setTimeout(() => {
+      touchDragActiveRef.current = true;
+      dragSpecIdRef.current = specId;
+      dragFromColumnRef.current = columnKey;
 
-    // Only draft → in-progress (approve) is a valid transition
-    if (sourceColumn === 'draft' && targetColumn === 'in-progress') {
-      await handleApprove(dragSpecId);
-    } else {
-      toast.show('Invalid move — specs can only be dragged from Draft to In Progress (approve)', 'error');
+      // Create floating clone
+      const target = e.currentTarget as HTMLElement;
+      const rect = target.getBoundingClientRect();
+      const clone = document.createElement('div');
+      const colDef = BOARD_COLUMNS.find(c => c.key === columnKey);
+      clone.style.cssText = `position:fixed;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;padding:8px 14px;border-radius:8px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:13px;font-weight:600;border-left:3px solid ${colDef?.color ?? '#4f46e5'};box-shadow:0 8px 24px rgba(0,0,0,0.4);pointer-events:none;z-index:99999;opacity:0.9;`;
+      clone.textContent = slugToTitle(specId);
+      document.body.appendChild(clone);
+      touchCloneRef.current = clone;
+
+      target.style.opacity = '0.5';
+      setDragRenderKey(k => k + 1);
+    }, 300);
+  }, []);
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    if (!touchDragActiveRef.current) {
+      // If finger moved > 10px before 300ms, cancel long-press
+      if (touchStartPosRef.current) {
+        const touch = e.touches[0];
+        const dx = touch.clientX - touchStartPosRef.current.x;
+        const dy = touch.clientY - touchStartPosRef.current.y;
+        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+          clearTimeout(touchDragTimerRef.current);
+        }
+      }
+      return;
     }
-  }, [dragSpecId, workspaceId, kanban, handleApprove, toast]);
 
-  // Build story progress from kanban data
+    e.preventDefault();
+    const touch = e.touches[0];
+
+    // Move floating clone
+    if (touchCloneRef.current) {
+      touchCloneRef.current.style.top = `${touch.clientY - 20}px`;
+      touchCloneRef.current.style.left = `${touch.clientX - 20}px`;
+    }
+
+    // Detect which column is under the finger
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    if (el) {
+      const colEl = el.closest('[data-column-key]');
+      const key = colEl?.getAttribute('data-column-key') ?? null;
+      if (dragOverColumnRef.current !== key) {
+        dragOverColumnRef.current = key;
+        setDragRenderKey(k => k + 1);
+      }
+    }
+  }, []);
+
+  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
+    clearTimeout(touchDragTimerRef.current);
+    (e.currentTarget as HTMLElement).style.opacity = '';
+
+    if (touchDragActiveRef.current && dragSpecIdRef.current && dragFromColumnRef.current) {
+      const specId = dragSpecIdRef.current;
+      const sourceColumn = dragFromColumnRef.current;
+      const targetColumn = dragOverColumnRef.current;
+
+      dragSpecIdRef.current = null;
+      dragFromColumnRef.current = null;
+      dragOverColumnRef.current = null;
+      touchDragActiveRef.current = false;
+
+      if (touchCloneRef.current) {
+        document.body.removeChild(touchCloneRef.current);
+        touchCloneRef.current = null;
+      }
+      setDragRenderKey(k => k + 1);
+
+      if (targetColumn && targetColumn !== sourceColumn && workspaceId) {
+        executeMove(specId, sourceColumn, targetColumn);
+      }
+    } else {
+      touchDragActiveRef.current = false;
+      if (touchCloneRef.current) {
+        document.body.removeChild(touchCloneRef.current);
+        touchCloneRef.current = null;
+      }
+    }
+  }, [workspaceId, executeMove]);
+
+  // Keyboard card movement: Ctrl+ArrowLeft/Right moves card to adjacent column
+  const handleCardKeyDown = useCallback((e: React.KeyboardEvent, specId: string, columnKey: string) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onSpecClick(specId);
+      return;
+    }
+
+    if (!e.ctrlKey && !e.metaKey) return;
+    const colIdx = BOARD_COLUMNS.findIndex(c => c.key === columnKey);
+    if (colIdx === -1) return;
+
+    let targetIdx = -1;
+    if (e.key === 'ArrowRight' && colIdx < BOARD_COLUMNS.length - 1) targetIdx = colIdx + 1;
+    if (e.key === 'ArrowLeft' && colIdx > 0) targetIdx = colIdx - 1;
+    if (targetIdx === -1) return;
+
+    e.preventDefault();
+    const targetCol = BOARD_COLUMNS[targetIdx].key;
+    executeMove(specId, columnKey, targetCol);
+  }, [executeMove, onSpecClick]);
+
+  // Cleanup on unmount
+  useEffect(() => () => {
+    cleanupGhost();
+    clearTimeout(dragLeaveTimerRef.current);
+    clearTimeout(touchDragTimerRef.current);
+    if (touchCloneRef.current) { document.body.removeChild(touchCloneRef.current); touchCloneRef.current = null; }
+  }, [cleanupGhost]);
+
+  // Reset optimistic state when real kanban updates
+  useEffect(() => { setOptimisticKanban(null); }, [kanban]);
+
+  // Build story progress from effective (possibly optimistic) kanban data
   const storyProgress: Record<string, number> = {};
-  for (const k of [...kanban.inProgress, ...kanban.done]) {
+  for (const k of [...effectiveKanban.inProgress, ...effectiveKanban.done]) {
     if (k.passedStories !== undefined) storyProgress[k.id] = k.passedStories;
   }
 
-  const totalCount = kanban.draft.length + kanban.inProgress.length + kanban.done.length;
+  const totalCount = effectiveKanban.draft.length + effectiveKanban.inProgress.length + effectiveKanban.done.length;
 
   if (loading) {
     return (
@@ -597,9 +838,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   }
 
   const columnData: Record<string, KanbanSpec[]> = {
-    'draft': kanban.draft,
-    'in-progress': kanban.inProgress,
-    'done': kanban.done,
+    'draft': effectiveKanban.draft,
+    'in-progress': effectiveKanban.inProgress,
+    'done': effectiveKanban.done,
   };
 
   // Max card count across all columns — for progress bar height scaling
@@ -607,18 +848,21 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
 
   return (
     <div className="flex h-full board-columns-container">
+      {/* aria-live region for screen reader announcements */}
+      <div ref={announceRef} aria-live="assertive" aria-atomic="true" className="sr-only" />
+
       {BOARD_COLUMNS.map((col, colIdx) => {
         const specs = columnData[col.key] || [];
         const Icon = col.icon;
-        const isDragOver = dragOverColumn === col.key;
+        const isDragOver = dragOverColumnRef.current === col.key && dragSpecIdRef.current != null;
         const isCollapsed = !!collapsedColumns[col.key];
         const progressBarHeight = Math.min(50, (specs.length / maxCardCount) * 50); // vh, max 50
 
         return (
           <div
             key={col.key}
+            data-column-key={col.key}
             className={`flex flex-col min-h-0 transition-colors
-              ${isDragOver ? 'bg-accent/5' : ''}
               ${colIdx > 0 ? 'border-l border-border' : ''}`}
             style={{
               width: isCollapsed ? 40 : undefined,
@@ -627,10 +871,11 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
               flex: isCollapsed ? '0 0 40px' : '1 1 0%',
               transition: 'flex 300ms cubic-bezier(0.34, 1.56, 0.64, 1), width 300ms cubic-bezier(0.34, 1.56, 0.64, 1), min-width 300ms cubic-bezier(0.34, 1.56, 0.64, 1), max-width 300ms cubic-bezier(0.34, 1.56, 0.64, 1)',
               overflow: 'hidden',
+              ...(isDragOver && !isCollapsed ? { border: `2px dashed ${col.color}`, backgroundColor: `${col.color}26` } : {}),
             }}
             onDragOver={isCollapsed ? undefined : (e) => handleDragOver(e, col.key)}
             onDragLeave={isCollapsed ? undefined : handleDragLeave}
-            onDrop={isCollapsed ? undefined : () => handleDrop(col.key)}
+            onDrop={isCollapsed ? undefined : (e) => handleDrop(e, col.key)}
           >
             {isCollapsed ? (
               /* ─── Collapsed column ─── */
@@ -718,18 +963,26 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
 
                       return (
                         <div key={spec.id} className="group relative">
-                          <button
-                            type="button"
+                          {/* div[role=button][draggable] — no nested <button> to swallow drag events */}
+                          <div
+                            role="button"
+                            tabIndex={0}
                             draggable
-                            onDragStart={() => handleDragStart(spec.id)}
-                            onClick={() => onSpecClick(spec.id)}
-                            disabled={isActioning}
+                            aria-label={`${slugToTitle(spec.id)}, ${total} stories, in ${col.label} column. Ctrl+Arrow to move.`}
+                            onDragStart={(e) => handleDragStart(e, spec.id, col.key)}
+                            onDragEnd={handleDragEnd}
+                            onTouchStart={(e) => handleTouchStart(e, spec.id, col.key)}
+                            onTouchMove={handleTouchMove}
+                            onTouchEnd={handleTouchEnd}
+                            onKeyDown={(e) => handleCardKeyDown(e, spec.id, col.key)}
+                            onFocus={() => { focusedCardRef.current = { specId: spec.id, columnKey: col.key }; }}
+                            onClick={() => !isActioning && onSpecClick(spec.id)}
                             className={`w-full h-[120px] bg-panel border rounded-lg p-3 text-left
-                              flex flex-col justify-between overflow-hidden
+                              flex flex-col justify-between overflow-hidden cursor-grab select-none
                               transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
                               hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
-                              disabled:opacity-60 disabled:pointer-events-none
-                              ${dragSpecId === spec.id ? 'opacity-50 border-accent' : 'border-border'}`}
+                              ${isActioning ? 'opacity-60 pointer-events-none' : ''}
+                              border-border`}
                           >
                             <div className="min-w-0">
                               <div className="flex items-start gap-1.5">
@@ -764,7 +1017,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
                                 />
                               </div>
                             )}
-                          </button>
+                          </div>
 
                           {/* Approve / Deny actions — Draft column only */}
                           {isDraft && (
