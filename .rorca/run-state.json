@@ -1,80 +1,17 @@
 {
-  "specId": "build a spec to turn the wake page into columns similar to fizzy.do: draft, in-progress, and done from left to right cards like kanban style and with the draft to have approve deny but also you can click on the card and it expands into the current card that says run pipeline, etc",
-  "runId": 7,
-  "startedAt": "2026-03-09T01:28:57.800Z",
-  "lastUpdatedAt": "2026-03-09T02:02:10.864Z",
+  "specId": "rorca-ultimate-ux",
+  "runId": 10,
+  "startedAt": "2026-03-09T07:50:33.681Z",
+  "lastUpdatedAt": "2026-03-09T08:02:41.994Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Create Kanban column layout structure",
+      "storyId": "ULT-001",
+      "title": "Unified Spec Lifecycle Panel — Replace Forge + Queue + Archive",
       "status": "passed",
-      "startedAt": "2026-03-09T01:29:05.320Z",
-      "finishedAt": "2026-03-09T01:32:44.256Z",
+      "startedAt": "2026-03-09T07:50:41.836Z",
+      "finishedAt": "2026-03-09T08:02:41.994Z",
       "agentType": "claude",
-      "elapsedMs": 218936
-    },
-    {
-      "storyId": "US-002",
-      "title": "Create spec card component for Kanban view",
-      "status": "passed",
-      "startedAt": "2026-03-09T01:32:58.383Z",
-      "finishedAt": "2026-03-09T01:38:16.452Z",
-      "agentType": "claude",
-      "elapsedMs": 318069
-    },
-    {
-      "storyId": "US-003",
-      "title": "Update queue route to fetch specs grouped by status",
-      "status": "passed",
-      "startedAt": "2026-03-09T01:38:30.586Z",
-      "finishedAt": "2026-03-09T01:44:18.587Z",
-      "agentType": "claude",
-      "elapsedMs": 348001
-    },
-    {
-      "storyId": "US-004",
-      "title": "Wire spec cards to grouped API data",
-      "status": "passed",
-      "startedAt": "2026-03-09T01:44:33.237Z",
-      "finishedAt": "2026-03-09T01:46:54.265Z",
-      "agentType": "claude",
-      "elapsedMs": 141028
-    },
-    {
-      "storyId": "US-005",
-      "title": "Add approve/deny actions to Draft column cards",
-      "status": "passed",
-      "startedAt": "2026-03-09T01:47:07.932Z",
-      "finishedAt": "2026-03-09T01:50:23.836Z",
-      "agentType": "claude",
-      "elapsedMs": 195904
-    },
-    {
-      "storyId": "US-006",
-      "title": "Implement card click to expand into detail view",
-      "status": "passed",
-      "startedAt": "2026-03-09T01:50:37.915Z",
-      "finishedAt": "2026-03-09T01:56:04.985Z",
-      "agentType": "claude",
-      "elapsedMs": 327070
-    },
-    {
-      "storyId": "US-007",
-      "title": "Add Run Pipeline action to expanded card view",
-      "status": "passed",
-      "startedAt": "2026-03-09T01:56:19.114Z",
-      "finishedAt": "2026-03-09T01:59:12.077Z",
-      "agentType": "claude",
-      "elapsedMs": 172963
-    },
-    {
-      "storyId": "US-008",
-      "title": "Real-time column updates via SSE",
-      "status": "passed",
-      "startedAt": "2026-03-09T01:59:26.135Z",
-      "finishedAt": "2026-03-09T02:02:10.864Z",
-      "agentType": "claude",
-      "elapsedMs": 164729
+      "elapsedMs": 720158
     }
   ],
   "failedStories": [],
