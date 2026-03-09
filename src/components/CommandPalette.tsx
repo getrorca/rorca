@@ -322,9 +322,27 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       description: 'Configure workspace, environment variables, and hooks',
       action: () => { onNavigate('settings'); onClose(); },
     });
+    items.push({
+      id: 'action:approve-all',
+      label: 'Approve All Drafts',
+      category: 'action',
+      description: `Approve all ${specs.filter(s => s.status === 'pending').length} pending specs`,
+      action: () => {
+        const pending = specs.filter(s => s.status === 'pending');
+        if (pending.length === 0) return;
+        Promise.all(pending.map(s =>
+          apiFetch(`/api/specs/${encodeURIComponent(s.id)}/approve`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspaceId }),
+          }).catch(() => {})
+        ));
+        onNavigate('specs');
+        onClose();
+      },
+    });
 
     return items;
-  }, [specs, archiveSpecs, runs, onNavigate, onClose]);
+  }, [specs, archiveSpecs, runs, onNavigate, onClose, workspaceId]);
 
   // Determine context key for boosting
   const contextKey = activeRunId != null ? 'run-view' : activePanel;
