@@ -862,7 +862,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     e.dataTransfer.setData('text/plain', specId);
 
     const ghost = document.createElement('div');
-    ghost.style.cssText = `position:fixed;top:-9999px;left:-9999px;padding:8px 14px;border-radius:8px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:13px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 4px 16px rgba(0,0,0,0.3);white-space:nowrap;pointer-events:none;z-index:99999;`;
+    ghost.style.cssText = `position:fixed;top:-9999px;left:-9999px;padding:8px 14px;border-radius:8px;background:var(--surface-200);color:var(--text);font-size:13px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 4px 16px rgba(0,0,0,0.3);white-space:nowrap;pointer-events:none;z-index:99999;`;
     ghost.textContent = slugToTitle(specId);
     document.body.appendChild(ghost);
     dragGhostRef.current = ghost;
@@ -945,7 +945,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     e.dataTransfer.setData('text/plain', `col-${colId}`);
 
     const ghost = document.createElement('div');
-    ghost.style.cssText = `position:fixed;top:-9999px;left:-9999px;padding:6px 12px;border-radius:6px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:12px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 4px 16px rgba(0,0,0,0.3);pointer-events:none;z-index:99999;`;
+    ghost.style.cssText = `position:fixed;top:-9999px;left:-9999px;padding:6px 12px;border-radius:6px;background:var(--surface-200);color:var(--text);font-size:12px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 4px 16px rgba(0,0,0,0.3);pointer-events:none;z-index:99999;`;
     ghost.textContent = colName;
     document.body.appendChild(ghost);
     dragGhostRef.current = ghost;
@@ -978,7 +978,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
       const target = e.currentTarget as HTMLElement;
       const rect = target.getBoundingClientRect();
       const clone = document.createElement('div');
-      clone.style.cssText = `position:fixed;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;padding:8px 14px;border-radius:8px;background:var(--surface-100,#1e1e2e);color:var(--text,#e2e2e2);font-size:13px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 8px 24px rgba(0,0,0,0.4);pointer-events:none;z-index:99999;opacity:0.9;`;
+      clone.style.cssText = `position:fixed;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;padding:8px 14px;border-radius:8px;background:var(--surface-200);color:var(--text);font-size:13px;font-weight:600;border-left:3px solid ${colColor};box-shadow:0 8px 24px rgba(0,0,0,0.4);pointer-events:none;z-index:99999;opacity:0.9;`;
       clone.textContent = slugToTitle(specId);
       document.body.appendChild(clone);
       touchCloneRef.current = clone;
@@ -2209,7 +2209,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                 <label className="flex items-center gap-2 cursor-pointer group">
                   <button type="button" role="switch" aria-checked={overrideAgent} onClick={() => setOverrideAgent(o => !o)}
                     className={`relative w-8 h-[18px] rounded-full transition-colors ${overrideAgent ? 'bg-accent' : 'bg-border group-hover:bg-muted/40'}`}>
-                    <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${overrideAgent ? 'translate-x-[14px]' : ''}`} />
+                    <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-switch-knob transition-transform ${overrideAgent ? 'translate-x-[14px]' : ''}`} />
                   </button>
                   <span className="text-xs font-medium text-text">Override execution engine</span>
                 </label>

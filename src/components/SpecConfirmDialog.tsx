@@ -94,7 +94,7 @@ export function SpecConfirmDialog({
               >
                 <CheckCircle2 size={14} />
                 Approve
-                <kbd className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded bg-white/20 font-mono">
+                <kbd className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded bg-[var(--kbd-bg)] font-mono">
                   ↵
                 </kbd>
               </button>
@@ -145,7 +145,7 @@ export function SpecConfirmDialog({
               >
                 <XCircle size={14} />
                 Reject
-                <kbd className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded bg-white/20 font-mono">
+                <kbd className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded bg-[var(--kbd-bg)] font-mono">
                   {mod}↵
                 </kbd>
               </button>

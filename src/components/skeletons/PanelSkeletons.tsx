@@ -143,7 +143,7 @@ export function RunViewSkeleton() {
       {/* Content split */}
       <div className="flex-1 flex min-h-0">
         {/* Terminal area — 60% */}
-        <div className="flex-[3] bg-[#1e1e1e] p-4 space-y-2.5 overflow-hidden">
+        <div className="flex-[3] bg-terminal-bg p-4 space-y-2.5 overflow-hidden">
           {Array.from({ length: 12 }).map((_, i) => (
             <div
               key={i}

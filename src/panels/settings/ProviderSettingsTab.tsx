@@ -165,7 +165,7 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
         }`}
     >
       <span
-        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${checked ? 'left-[18px]' : 'left-0.5'
+        className={`absolute top-0.5 w-4 h-4 rounded-full bg-switch-knob transition-transform ${checked ? 'left-[18px]' : 'left-0.5'
           }`}
       />
     </button>
@@ -828,7 +828,7 @@ function ExecutionEngineSection() {
                 <button
                   onClick={handleCopilotConnect}
                   disabled={copilotLoading}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[#24292f] text-white rounded hover:bg-[#2f363d] transition-colors disabled:opacity-50"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-surface-200 text-text rounded hover:bg-border transition-colors disabled:opacity-50"
                 >
                   {copilotLoading ? <Loader2 size={12} className="animate-spin" /> : <Github size={12} />}
                   Sign in with GitHub

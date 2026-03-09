@@ -1088,7 +1088,7 @@ function ToggleSwitch({ checked, onChange, label }: { checked: boolean; onChange
       }`}
     >
       <span
-        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+        className={`absolute top-0.5 w-4 h-4 rounded-full bg-switch-knob transition-transform ${
           checked ? 'left-[18px]' : 'left-0.5'
         }`}
       />
