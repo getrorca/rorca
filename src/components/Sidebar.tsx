@@ -3,9 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Settings,
   Search, PlayCircle, Compass,
-  GitBranch, ArrowLeftRight,
-  Users,
-  BarChart3, BookOpen,
+  BarChart3,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -15,17 +13,11 @@ import { UserMenu } from './Shell';
 import { PANEL_ROUTES } from '../routes';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 
-// Primary panels shown in sidebar + legacy aliases that still compile everywhere
+// ULT-022: 5 primary panels + run-view + spec-review slide-over
 export type PanelId =
   | 'specs' | 'runs' | 'analytics' | 'direction' | 'settings'
-  // Run sub-view (RunViewPanel)
   | 'run-view'
-  // Legacy aliases — kept so consuming components compile without changes
-  | 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline'
-  | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity'
-  | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models'
-  | 'velocity' | 'completion' | 'health' | 'roi' | 'finops'
-  | 'workspace-settings' | 'spec-review' | 'memory';
+  | 'spec-review';
 
 interface NavItem {
   id: PanelId;
@@ -49,7 +41,7 @@ const SIDEBAR_ITEMS: NavItem[] = [
   { id: 'settings',  label: 'Settings',  icon: Settings },
 ];
 
-// Full panel list for CommandPalette deep-linking — kept so ⌘K can reach every panel.
+// ULT-022: Flat list matching the 5 sidebar items — CommandPalette uses NAV_ITEMS.
 export const NAV_SECTIONS: NavSection[] = [
   {
     id: 'specs',
@@ -63,8 +55,6 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Runs',
     items: [
       { id: 'runs', label: 'Runs', icon: PlayCircle },
-      { id: 'worktrees', label: 'Worktrees', icon: GitBranch },
-      { id: 'compare', label: 'Compare Runs', icon: ArrowLeftRight },
     ],
   },
   {
@@ -79,8 +69,6 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Direction',
     items: [
       { id: 'direction', label: 'Direction', icon: Compass },
-      { id: 'team-direction', label: 'Team Direction', icon: Users },
-      { id: 'memory', label: 'Memory Ledger', icon: BookOpen },
     ],
   },
   {
