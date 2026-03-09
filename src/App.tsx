@@ -509,7 +509,7 @@ function AppLayout() {
 
         <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromRun} hideHeader={true}>
           {reviewSpecId !== null && (
-            <SpecReviewPanel specId={reviewSpecId} onBack={navigateBackFromRun} onNavigate={handleNavigate} />
+            <SpecReviewPanel specId={reviewSpecId} onBack={navigateBackFromRun} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} />
           )}
         </SlideOver>
 
