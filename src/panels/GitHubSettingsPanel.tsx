@@ -387,7 +387,7 @@ export default function GitHubSettingsPanel() {
             </p>
             <a
               href={`${BASE_URL}/api/auth/github`}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded bg-[#24292f] text-white hover:bg-[#32383f] transition-colors"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded bg-surface-200 text-text hover:bg-border transition-colors"
             >
               <Github size={16} />
               Connect with GitHub
@@ -579,7 +579,7 @@ export default function GitHubSettingsPanel() {
                 }`}
               >
                 <span
-                  className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                  className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-switch-knob shadow-sm transition-transform ${
                     autoPrEnabled ? 'translate-x-4' : 'translate-x-0'
                   }`}
                 />

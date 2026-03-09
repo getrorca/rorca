@@ -519,7 +519,7 @@ function SpecDetailContent({
                   )}
                   <button onClick={() => setShowTriggerPopover(true)} disabled={runState === 'triggering'}
                     className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity">
-                    {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting run...</> : <><Play size={14} /> Run in Pipeline{deferredCount > 0 && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-white/20">{deferredCount} deferred</span>}</>}
+                    {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting run...</> : <><Play size={14} /> Run in Pipeline{deferredCount > 0 && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-[var(--kbd-bg)]">{deferredCount} deferred</span>}</>}
                   </button>
                 </>
               )}
