@@ -149,38 +149,13 @@ function GlobalErrorWiring() {
 
 /** Panel label for ErrorBoundary fallback */
 const PANEL_LABELS: Record<PanelId, string> = {
-  // ULT-006: Primary panels
   specs: 'Specs',
   runs: 'Runs',
   analytics: 'Analytics',
   direction: 'Direction',
   settings: 'Settings',
   'run-view': 'Run View',
-  // Legacy aliases
-  hub: 'Runs',
-  forge: 'Specs',
-  stack: 'Direction',
-  'team-direction': 'Direction',
-  queue: 'Specs',
-  pipeline: 'Runs',
-  worktrees: 'Runs',
-  compare: 'Runs',
-  archive: 'Specs',
-  marketplace: 'Specs',
-  usage: 'Analytics',
-  costs: 'Analytics',
-  models: 'Analytics',
-  velocity: 'Analytics',
-  completion: 'Analytics',
-  roi: 'Analytics',
-  finops: 'Analytics',
-  health: 'Analytics',
-  'audit-log': 'Settings',
-  activity: 'Settings',
-  github: 'Settings',
-  'workspace-settings': 'Settings',
   'spec-review': 'Spec Review',
-  memory: 'Direction',
 };
 
 /** Top-level route config — Shell layout wraps all panel routes */
@@ -252,20 +227,17 @@ function AppRoutes() {
  *  ULT-017: Uses shimmer-based skeletons that match each panel's final layout shape. */
 function getPanelSkeleton(panel: PanelId) {
   switch (panel) {
-    case 'specs': case 'forge': case 'queue': case 'archive': case 'marketplace':
+    case 'specs': case 'spec-review':
       return <BoardSkeleton />;
-    case 'runs': case 'hub': case 'pipeline':
+    case 'runs':
       return <ListSkeleton />;
     case 'run-view':
       return <RunViewSkeleton />;
-    case 'direction': case 'stack': case 'team-direction': case 'memory':
+    case 'direction':
       return <DirectionSkeleton />;
-    case 'analytics': case 'usage': case 'costs': case 'models':
-    case 'velocity': case 'completion': case 'roi': case 'finops':
-    case 'health':
+    case 'analytics':
       return <AnalyticsSkeleton />;
-    case 'settings': case 'workspace-settings': case 'audit-log': case 'activity':
-    case 'github':
+    case 'settings':
       return <SettingsFormSkeleton />;
     default: return <BoardSkeleton />;
   }
@@ -307,34 +279,23 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
   const { activeRunId, navigateBackFromRun } = useAppContentContext();
 
   switch (id) {
-    // ULT-006: Specs — consolidated Board + List + Marketplace tabs
-    case 'specs': case 'forge': case 'queue': case 'archive': case 'marketplace':
+    case 'specs':
       return <SpecsPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
 
-    // ULT-006: Runs — pipeline queue + run view
-    case 'runs': case 'hub': case 'pipeline':
+    case 'runs':
       if (activeRunId !== null) {
         return <RunViewPanel runId={activeRunId} onBack={navigateBackFromRun} onNavigate={onNavigate} />;
       }
       return <RunsTabbedPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} />;
 
-    // ULT-006: Direction — tabbed: Direction + Team + Memory + Rules
-    case 'direction': case 'stack': case 'team-direction': case 'memory':
+    case 'direction':
       return <DirectionTabbedPanel />;
 
-    // ULT-005: Analytics unified panel
-    case 'analytics': case 'usage': case 'costs': case 'models': case 'velocity':
-    case 'completion': case 'roi': case 'finops': case 'health':
+    case 'analytics':
       return <AnalyticsPanel />;
 
-    // Settings — all settings panels (including GitHub, Activity, Audit) are now within SettingsPanel
-    case 'settings': case 'workspace-settings': case 'audit-log': case 'activity':
-    case 'github':
+    case 'settings':
       return <SettingsPanel />;
-
-    // Legacy sub-panels — redirect to parent
-    case 'worktrees': case 'compare':
-      return <RunsTabbedPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} />;
 
     default: return null;
   }

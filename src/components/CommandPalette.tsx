@@ -117,9 +117,8 @@ const FORGE_FALLBACK_THRESHOLD = 80;
 
 /** Context-aware boost: maps active panel/context to command IDs that should rank higher */
 const CONTEXT_BOOSTS: Record<string, string[]> = {
-  // ULT-006: 5-panel context boosts
   specs: [
-    'action:new-spec', 'action:search-archive', 'action:review', 'panel:marketplace',
+    'action:new-spec', 'action:search-archive', 'action:review',
   ],
   runs: [
     'action:trigger-pipeline', 'action:view-active-run', 'panel:runs',
