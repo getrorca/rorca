@@ -216,6 +216,7 @@ router.get('/', (req, res) => {
   const pagination = parsePaginationParams(req, { limit: 30, maxLimit: 100 });
   const typeFilter = req.query.type ? String(req.query.type) : null;
   const workspaceFilter = req.query.workspaceId ? String(req.query.workspaceId) : null;
+  const fromFilter = req.query.from ? String(req.query.from) : null;
 
   // Build WHERE clause
   const conditions: string[] = [];
@@ -249,6 +250,11 @@ router.get('/', (req, res) => {
   if (workspaceFilter) {
     conditions.push('workspace_id = ?');
     params.push(workspaceFilter);
+  }
+
+  if (fromFilter) {
+    conditions.push('ts >= ?');
+    params.push(fromFilter);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

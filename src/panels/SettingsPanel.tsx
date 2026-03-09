@@ -62,8 +62,8 @@ const BillingSection = lazy(() =>
   import('./settings/AccountSettingsTab').then((m) => ({ default: m.BillingSection })),
 );
 
-const SystemSection = lazy(() =>
-  import('./settings/AccountSettingsTab').then((m) => ({ default: m.SystemSection })),
+const UnifiedActivitySection = lazy(() =>
+  import('./settings/UnifiedActivitySection').then((m) => ({ default: m.UnifiedActivitySection })),
 );
 
 const NotificationsSection = lazy(() =>
@@ -126,7 +126,7 @@ export default function SettingsPanel() {
           {activeTab === 'shortcuts' && <ShortcutsSettingsTab />}
           {activeTab === 'notifications' && <NotificationsSection />}
           {/* System group */}
-          {activeTab === 'system' && <SystemSection />}
+          {activeTab === 'system' && <UnifiedActivitySection />}
           {activeTab === 'api-keys' && <ApiKeysSection />}
           {activeTab === 'developer' && <DeveloperToolsSection />}
         </Suspense>
