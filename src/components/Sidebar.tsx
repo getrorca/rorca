@@ -4,8 +4,8 @@ import {
   Wand2, Layers, Activity, Archive, Settings,
   Search, LayoutDashboard, Store, Inbox,
   GitBranch, ArrowLeftRight,
-  Github, Rss, Users, Coins, DollarSign, Zap, TrendingUp,
-  BarChart3, HeartPulse, ScrollText, Calculator, BookOpen,
+  Github, Rss, Users,
+  BarChart3, ScrollText, BookOpen,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -14,7 +14,7 @@ import RorcaLogo from './RorcaLogo';
 import { UserMenu } from './Shell';
 import { PANEL_ROUTES } from '../routes';
 
-export type PanelId = 'hub' | 'specs' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory';
+export type PanelId = 'hub' | 'specs' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'analytics' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory';
 
 interface NavItem {
   id: PanelId;
@@ -36,7 +36,7 @@ const SIDEBAR_ITEMS: NavItem[] = [
   { id: 'pipeline', label: 'Dive', icon: Activity },
   { id: 'marketplace', label: 'Skills', icon: Store },
   { id: 'stack', label: 'Direction', icon: Layers },
-  { id: 'usage', label: 'Analytics', icon: BarChart3 },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
@@ -75,15 +75,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Settings',
     items: [
       { id: 'settings', label: 'Settings', icon: Settings },
-      // Analytics & System accessible via Settings sub-tabs and Command Palette
-      { id: 'usage', label: 'Token Usage', icon: Coins },
-      { id: 'costs', label: 'Cost Breakdown', icon: DollarSign },
-      { id: 'models', label: 'Model Comparison', icon: Zap },
-      { id: 'velocity', label: 'Velocity Chart', icon: TrendingUp },
-      { id: 'completion', label: 'Completion Rates', icon: BarChart3 },
-      { id: 'roi', label: 'ROI Calculator', icon: Calculator },
-      { id: 'finops', label: 'FinOps', icon: DollarSign },
-      { id: 'health', label: 'Health', icon: HeartPulse },
+      { id: 'analytics', label: 'Analytics', icon: BarChart3 },
       { id: 'audit-log', label: 'Audit Log', icon: ScrollText },
       { id: 'activity', label: 'Activity Feed', icon: Rss },
       { id: 'github', label: 'GitHub', icon: Github },

@@ -53,6 +53,7 @@ const CompareRunsPanel = lazy(() => import('./panels/CompareRunsPanel'));
 const DirectionTabbedPanel = lazy(() => import('./panels/DirectionTabbedPanel'));
 const TeamDirectionPanel = lazy(() => import('./panels/TeamDirectionPanel'));
 const MemoryPanel = lazy(() => import('./panels/MemoryPanel'));
+const AnalyticsPanel = lazy(() => import('./panels/AnalyticsPanel'));
 const SettingsPanel = lazy(() => import('./panels/SettingsPanel'));
 const GitHubSettingsPanel = lazy(() => import('./panels/GitHubSettingsPanel'));
 const RunViewPanel = lazy(() => import('./panels/RunViewPanel'));
@@ -172,6 +173,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
   compare: 'Compare Runs',
   archive: 'Wake',
   marketplace: 'Skills',
+  analytics: 'Analytics',
   usage: 'Token Usage',
   costs: 'Cost Breakdown',
   models: 'Model Comparison',
@@ -223,15 +225,17 @@ function AppRoutes() {
         <Route path="direction" element={<PanelRoute panel="stack" />} />
         <Route path="team-direction" element={<PanelRoute panel="team-direction" />} />
         <Route path="memory" element={<PanelRoute panel="memory" />} />
-        {/* Analytics — redirect to Settings > Analytics */}
-        <Route path="usage" element={<Navigate to="/settings/analytics" replace />} />
-        <Route path="costs" element={<Navigate to="/settings/analytics" replace />} />
-        <Route path="models" element={<Navigate to="/settings/analytics" replace />} />
-        <Route path="velocity" element={<Navigate to="/settings/analytics" replace />} />
-        <Route path="completion" element={<Navigate to="/settings/analytics" replace />} />
-        <Route path="roi" element={<Navigate to="/settings/analytics" replace />} />
-        <Route path="finops" element={<Navigate to="/settings/analytics" replace />} />
-        <Route path="health" element={<Navigate to="/settings/analytics" replace />} />
+        {/* ULT-005: Analytics — unified panel */}
+        <Route path="analytics" element={<PanelRoute panel="analytics" />} />
+        {/* Legacy analytics redirects */}
+        <Route path="usage" element={<Navigate to="/analytics" replace />} />
+        <Route path="costs" element={<Navigate to="/analytics" replace />} />
+        <Route path="models" element={<Navigate to="/analytics" replace />} />
+        <Route path="velocity" element={<Navigate to="/analytics" replace />} />
+        <Route path="completion" element={<Navigate to="/analytics" replace />} />
+        <Route path="roi" element={<Navigate to="/analytics" replace />} />
+        <Route path="finops" element={<Navigate to="/analytics" replace />} />
+        <Route path="health" element={<Navigate to="/analytics" replace />} />
         {/* System — redirect to Settings > System */}
         <Route path="audit-log" element={<Navigate to="/settings/system" replace />} />
         <Route path="activity" element={<Navigate to="/settings/system" replace />} />
@@ -266,9 +270,10 @@ function getPanelSkeleton(panel: PanelId) {
     case 'stack': return <DirectionStackSkeleton />;
     case 'team-direction': return <DirectionStackSkeleton />;
     case 'memory': return <MemorySkeleton />;
-    case 'settings': case 'workspace-settings': case 'usage': case 'costs':
-    case 'models': case 'velocity': case 'completion': case 'roi':
-    case 'finops': case 'health': case 'audit-log': case 'activity':
+    case 'analytics': case 'usage': case 'costs': case 'models':
+    case 'velocity': case 'completion': case 'roi': case 'finops':
+    case 'health': return <GenericPanelSkeleton />;
+    case 'settings': case 'workspace-settings': case 'audit-log': case 'activity':
     case 'github': return <SettingsSkeleton />;
     default: return <GenericPanelSkeleton />;
   }
@@ -328,11 +333,10 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'compare': return <CompareRunsPanel onBack={() => onNavigate('pipeline')} />;
     case 'archive': return <ArchivePanel onNavigate={onNavigate} />;
     case 'marketplace': return <TemplateMarketplacePanel />;
-    // Analytics and System panels are now inside Settings tabs — these cases
-    // are kept for CommandPalette navigation compatibility but redirect via router
-    case 'usage': case 'costs': case 'models': case 'velocity':
+    // ULT-005: Analytics unified panel
+    case 'analytics': case 'usage': case 'costs': case 'models': case 'velocity':
     case 'completion': case 'roi': case 'finops': case 'health':
-      return <SettingsPanel />;
+      return <AnalyticsPanel />;
     case 'audit-log': case 'activity':
       return <SettingsPanel />;
     case 'github': return <GitHubSettingsPanel />;
