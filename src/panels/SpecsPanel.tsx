@@ -17,6 +17,7 @@ import type { PanelId } from '../components/Sidebar';
 import { TagChipsReadonly, TagChips } from '../components/TagChips';
 import AppHeader from '../components/AppHeader';
 import AgentBadge from '../components/AgentBadge';
+import { SkeletonColumn } from '../components/skeletons';
 import SlideOver from '../components/SlideOver';
 import SpecDetailSlideOver from '../components/SpecDetailSlideOver';
 import type { SpecSlideOverSummary } from '../components/SpecDetailSlideOver';
@@ -1155,19 +1156,10 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
   if (loading) {
     return (
-      <div className="flex h-full">
-        {[0, 1, 2].map((col) => (
-          <div key={col} className={`flex flex-col min-h-0 flex-1 ${col > 0 ? 'border-l border-border' : ''}`}>
-            <div className="px-3 py-2.5 border-b border-border shrink-0">
-              <div className="h-5 w-24 bg-surface-100 rounded animate-pulse" />
-            </div>
-            <div className="flex-1 p-3 space-y-2">
-              {[1, 2].map((i) => (
-                <div key={i} className="bg-panel border border-border rounded-lg h-[120px] animate-pulse" />
-              ))}
-            </div>
-          </div>
-        ))}
+      <div className="flex h-full gap-4 p-4">
+        <SkeletonColumn cards={3} className="flex-1" />
+        <SkeletonColumn cards={2} className="flex-1" />
+        <SkeletonColumn cards={4} className="flex-1" />
       </div>
     );
   }
@@ -1728,7 +1720,16 @@ function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
       {/* List */}
       <div className="flex-1 overflow-y-auto">
         {loading ? (
-          <div className="flex items-center justify-center h-full text-muted text-sm">Loading specs...</div>
+          <div className="p-4 space-y-2">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-4 px-4 py-3 border border-border rounded-lg">
+                <div className="skeleton-shimmer rounded h-4 w-2/5" />
+                <div className="skeleton-shimmer rounded h-3 w-1/5" />
+                <div className="flex-1" />
+                <div className="skeleton-shimmer rounded-full h-5 w-16" />
+              </div>
+            ))}
+          </div>
         ) : specs.length === 0 ? (
           debouncedSearch ? (
             <div className="flex items-center justify-center h-full">

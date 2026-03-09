@@ -12,6 +12,7 @@ const config: Config = {
         accent: 'var(--accent)',
         'accent-hover': 'var(--accent-hover)',
         muted: 'var(--text-muted)',
+        skeleton: 'var(--skeleton)',
         success: 'var(--success)',
         warning: 'var(--warning)',
         error: 'var(--error)',
