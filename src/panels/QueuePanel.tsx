@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Clock, Inbox, ArrowRight, FileText, Play, CheckCircle2, Layers } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Clock, Inbox, ArrowRight, FileText, Play, CheckCircle2, Layers, AlertTriangle, RefreshCw } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { relativeTime } from '../components/SpecReviewInline';
@@ -205,23 +205,41 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
   const { workspaceId } = useWorkspace();
   const [kanban, setKanban] = useState<KanbanResponse>({ draft: [], inProgress: [], done: [] });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const hasLoadedOnce = useRef(false);
 
   const fetchKanban = useCallback(async () => {
-    if (!workspaceId) { setKanban({ draft: [], inProgress: [], done: [] }); setLoading(false); return; }
+    if (!workspaceId) { setKanban({ draft: [], inProgress: [], done: [] }); setLoading(false); setError(null); return; }
     try {
       const res = await apiFetch<KanbanResponse>(
         `/api/specs/kanban?workspaceId=${workspaceId}`
       );
       setKanban(res);
-    } catch {
-      // Silently fail — no toast spam on background poll
+      setError(null);
+      hasLoadedOnce.current = true;
+    } catch (err: any) {
+      // Only show error UI if we haven't loaded data yet — background poll failures are silent
+      if (!hasLoadedOnce.current) {
+        setError(err?.message || 'Failed to load specs');
+      }
     } finally {
       setLoading(false);
+      setRetrying(false);
     }
   }, [workspaceId]);
 
-  useEffect(() => {
+  const handleRetry = useCallback(() => {
+    setRetrying(true);
+    setError(null);
     setLoading(true);
+    fetchKanban();
+  }, [fetchKanban]);
+
+  useEffect(() => {
+    hasLoadedOnce.current = false;
+    setLoading(true);
+    setError(null);
     fetchKanban();
     const interval = setInterval(fetchKanban, 10_000);
     return () => clearInterval(interval);
@@ -284,6 +302,23 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
                 </div>
               </div>
             ))}
+          </div>
+        ) : error ? (
+          /* Error state with retry */
+          <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4 text-center">
+            <AlertTriangle size={48} className="text-warning/60" />
+            <div>
+              <p className="text-base font-medium text-[var(--text)]">Failed to load specs</p>
+              <p className="text-sm text-muted mt-1">{error}</p>
+            </div>
+            <button
+              onClick={handleRetry}
+              disabled={retrying}
+              className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={retrying ? 'animate-spin' : ''} />
+              {retrying ? 'Retrying…' : 'Retry'}
+            </button>
           </div>
         ) : totalCount === 0 ? (
           /* Full empty state */
