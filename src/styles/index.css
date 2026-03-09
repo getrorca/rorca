@@ -491,6 +491,16 @@
   animation: slideInFromTopRight 350ms ease-out forwards;
 }
 
+/* ULT-019: Toast slide-in from right */
+@keyframes toastSlideIn {
+  from { opacity: 0; transform: translateX(1rem); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.animate-toast-slide-in {
+  animation: toastSlideIn 200ms ease-out forwards;
+}
+
 .animate-slide-to-recent {
   animation: slideToRecent 400ms ease-out forwards;
 }
