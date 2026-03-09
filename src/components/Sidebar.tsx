@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Settings,
@@ -13,6 +13,7 @@ import NotificationBell from './NotificationBell';
 import RorcaLogo from './RorcaLogo';
 import { UserMenu } from './Shell';
 import { PANEL_ROUTES } from '../routes';
+import { useBreakpoint } from '../hooks/useBreakpoint';
 
 // Primary panels shown in sidebar + legacy aliases that still compile everywhere
 export type PanelId =
@@ -105,6 +106,9 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0, activeRunCount = 0, healthColor }: SidebarProps) {
+  const breakpoint = useBreakpoint();
+  const [tabletExpanded, setTabletExpanded] = useState(false);
+
   // Map toggle drawer event to Command Palette trigger for backwards compat
   useEffect(() => {
     const handler = () => {
@@ -136,6 +140,25 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
     return null;
   };
 
+  /** Renders a compact badge dot positioned over an icon (for rail / tab bar) */
+  const renderIconBadge = (item: NavItem) => {
+    if (item.id === 'specs' && queueCount > 0) {
+      return (
+        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-accent text-white text-[8px] font-bold px-0.5">
+          {queueCount > 99 ? '99+' : queueCount}
+        </span>
+      );
+    }
+    if (item.id === 'runs' && activeRunCount > 0) {
+      return (
+        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-blue-500 text-white text-[8px] font-bold px-0.5 animate-pulse">
+          {activeRunCount}
+        </span>
+      );
+    }
+    return null;
+  };
+
   const sidebarContent = (
     <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
       {/* Top Section: Logo, Workspace & Search */}
@@ -148,7 +171,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
 
         <button
           onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
-          className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
+          className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors min-h-[44px] sm:min-h-0"
         >
           <Search size={14} className="text-muted/70 shrink-0" />
           <span className="flex-1 text-left truncate">Search...</span>
@@ -199,48 +222,133 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
   );
 
   // Mobile: overlay sidebar + bottom tab bar
-  if (mobileOpen) {
+  if (mobileOpen && breakpoint === 'mobile') {
     return (
       <>
-        <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={onMobileClose} />
-        <nav className="fixed top-0 left-0 bottom-0 z-50 animate-slideInLeft shadow-2xl md:hidden w-[260px]">
+        <div className="fixed inset-0 bg-black/50 z-40" onClick={onMobileClose} />
+        <nav className="fixed top-0 left-0 bottom-0 z-50 animate-slideInLeft shadow-2xl w-[260px]">
           {sidebarContent}
         </nav>
       </>
     );
   }
 
-  // Desktop render — width is controlled by ResizableSidebar parent
-  return (
-    <>
-      {/* Desktop sidebar */}
-      <div className="hidden md:flex h-full">{sidebarContent}</div>
-      {/* Mobile bottom tab bar */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-panel border-t border-border flex items-center justify-around px-1 py-1 safe-area-bottom">
+  // ─── Mobile: bottom tab bar (5 icons + active indicator) ─────────────────
+  if (breakpoint === 'mobile') {
+    return (
+      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-panel border-t border-border flex items-center justify-around px-1 py-1 safe-area-bottom">
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon;
           return (
-            <button
+            <NavLink
               key={item.id}
-              onClick={() => onNavigate(item.id)}
-              className="flex flex-col items-center gap-0.5 px-2 py-1 rounded text-[10px] text-muted hover:text-[var(--text)] transition-colors relative"
+              to={PANEL_ROUTES[item.id]}
+              end={false}
+              onClick={(e) => {
+                e.preventDefault();
+                onNavigate(item.id);
+              }}
+              className={({ isActive }) =>
+                `flex flex-col items-center justify-center gap-0.5 min-w-[44px] min-h-[44px] px-2 py-1 rounded text-[10px] transition-colors relative
+                ${isActive ? 'text-accent' : 'text-muted'}`
+              }
             >
-              <Icon size={18} />
-              <span className="truncate">{item.label}</span>
-              {item.id === 'specs' && queueCount > 0 && (
-                <span className="absolute -top-0.5 right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-accent text-white text-[8px] font-bold px-0.5">
-                  {queueCount > 99 ? '99+' : queueCount}
-                </span>
+              {({ isActive }) => (
+                <>
+                  <span className="relative">
+                    <Icon size={20} />
+                    {renderIconBadge(item)}
+                  </span>
+                  <span className="truncate">{item.label}</span>
+                  {isActive && (
+                    <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-4 h-0.5 rounded-full bg-accent" />
+                  )}
+                </>
               )}
-              {item.id === 'runs' && activeRunCount > 0 && (
-                <span className="absolute -top-0.5 right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-blue-500 text-white text-[8px] font-bold px-0.5 animate-pulse">
-                  {activeRunCount}
-                </span>
-              )}
-            </button>
+            </NavLink>
           );
         })}
       </nav>
-    </>
+    );
+  }
+
+  // ─── Tablet: collapsed rail (48px, icons only), expandable on hover/click ─
+  if (breakpoint === 'tablet') {
+    return (
+      <nav
+        className="h-full bg-panel border-r border-border flex flex-col shrink-0 transition-all duration-200"
+        style={{ width: tabletExpanded ? 200 : 48 }}
+        onMouseEnter={() => setTabletExpanded(true)}
+        onMouseLeave={() => setTabletExpanded(false)}
+      >
+        {/* Logo */}
+        <div className="flex items-center justify-center h-12 border-b border-border shrink-0">
+          <RorcaLogo size={20} variant="gradient" />
+          {tabletExpanded && (
+            <span className="ml-2 font-mono font-bold text-[var(--text)] text-sm tracking-tight">rorca</span>
+          )}
+        </div>
+
+        {/* Nav items */}
+        <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0">
+          <div className="space-y-1">
+            {SIDEBAR_ITEMS.map((item) => {
+              const Icon = item.icon;
+              return (
+                <NavLink
+                  key={item.id}
+                  to={PANEL_ROUTES[item.id]}
+                  end={false}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onNavigate(item.id);
+                  }}
+                  title={tabletExpanded ? undefined : item.label}
+                  className={({ isActive }) =>
+                    `flex items-center gap-2 mx-1 rounded transition-colors relative min-h-[44px]
+                    ${tabletExpanded ? 'px-3' : 'justify-center px-0'}
+                    ${isActive
+                      ? 'text-[var(--text)] bg-surface-200 font-medium'
+                      : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
+                    }`
+                  }
+                >
+                  {({ isActive }) => (
+                    <>
+                      <span className="relative shrink-0">
+                        <Icon size={18} className={isActive ? 'text-accent' : 'text-muted/70'} />
+                        {!tabletExpanded && renderIconBadge(item)}
+                      </span>
+                      {tabletExpanded && (
+                        <>
+                          <span className="truncate flex-1 text-[13px]">{item.label}</span>
+                          {renderBadge(item)}
+                        </>
+                      )}
+                    </>
+                  )}
+                </NavLink>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Bottom: search trigger */}
+        <div className="border-t border-border p-1 shrink-0 flex flex-col items-center gap-1">
+          <button
+            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
+            title="Search (⌘K)"
+            className="flex items-center justify-center min-w-[44px] min-h-[44px] rounded text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
+          >
+            <Search size={18} />
+          </button>
+        </div>
+      </nav>
+    );
+  }
+
+  // ─── Desktop: full sidebar (width controlled by ResizableSidebar parent) ──
+  return (
+    <div className="flex h-full">{sidebarContent}</div>
   );
 }
