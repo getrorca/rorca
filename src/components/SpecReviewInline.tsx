@@ -45,7 +45,7 @@ export interface SpecSummary {
   id: string;
   specName: string;
   storyCount: number;
-  status: 'pending' | 'approved';
+  status: 'pending' | 'approved' | 'completed';
   generatedAt: string;
   approvedAt?: string;
   readinessPercent?: number;
