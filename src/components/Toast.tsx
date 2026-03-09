@@ -75,9 +75,10 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
       className={`flex items-start gap-2.5 px-4 py-3 rounded-lg shadow-lg border text-sm font-medium max-w-sm backdrop-blur-sm transition-all duration-150 ${config.colorClass} ${
         exiting ? 'opacity-0 translate-x-4' : 'animate-toast-slide-in'
       }`}
-      role="alert"
+      role={toast.type === 'error' ? 'alert' : 'status'}
+      aria-atomic="true"
     >
-      <Icon size={16} className="shrink-0 mt-0.5" />
+      <Icon size={16} className="shrink-0 mt-0.5" aria-hidden="true" />
       <div className="flex-1 min-w-0">
         <p className="break-words">{toast.message}</p>
         {(toast.action || toast.type === 'error') && (
@@ -96,8 +97,9 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
                 onClick={handleCopyError}
                 className="text-xs opacity-60 hover:opacity-100 transition-opacity flex items-center gap-1"
                 title="Copy error message"
+                aria-label="Copy error message"
               >
-                <Copy size={10} />
+                <Copy size={10} aria-hidden="true" />
                 Copy
               </button>
             )}
@@ -127,7 +129,7 @@ export function ToastContainer({
   if (visible.length === 0) return null;
 
   return (
-    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2" aria-live="polite">
+    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2" aria-live="assertive" aria-atomic="false">
       {visible.map((toast) => (
         <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />
       ))}

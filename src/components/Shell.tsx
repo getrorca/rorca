@@ -135,6 +135,7 @@ export function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void 
         : 'text-[var(--text)] bg-accent/10 border border-accent/30 hover:bg-accent/20'
         }`}
       title={isDone ? 'Run completed' : 'View active run'}
+      aria-label={isDone ? `Run completed: ${label}` : `Active run: ${label}`}
     >
       {isDone ? (
         <span className="relative flex h-2.5 w-2.5">
@@ -147,7 +148,7 @@ export function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void 
         </span>
       )}
       <span className="font-mono tabular-nums">{label}</span>
-      {isDone && <Check size={14} className="text-green-500" />}
+      {isDone && <Check size={14} className="text-green-500" aria-hidden="true" />}
     </button>
   );
 }
@@ -177,19 +178,21 @@ export function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="fixed right-3 top-14 sm:absolute sm:right-0 sm:top-auto sm:mt-1 w-48 bg-panel border border-border rounded shadow-lg z-50">
+          <div role="menu" aria-label="User menu" className="fixed right-3 top-14 sm:absolute sm:right-0 sm:top-auto sm:mt-1 w-48 bg-panel border border-border rounded shadow-lg z-50">
             <div className="px-3 py-2 border-b border-border">
               <p className="text-sm text-[var(--text)] truncate">{user.displayName}</p>
               <p className="text-xs text-muted truncate">{user.email}</p>
             </div>
             <button
+              role="menuitem"
               onClick={() => { setOpen(false); onNavigate?.('settings'); }}
               className="w-full text-left px-3 py-2 text-sm text-muted hover:bg-bg hover:text-[var(--text)] transition-colors flex items-center gap-2"
             >
-              <Settings size={14} />
+              <Settings size={14} aria-hidden="true" />
               Settings
             </button>
             <button
+              role="menuitem"
               onClick={() => { setOpen(false); logout(); }}
               className="w-full text-left px-3 py-2 text-sm text-muted hover:bg-bg hover:text-[var(--text)] transition-colors"
             >
@@ -280,7 +283,7 @@ export default function Shell({ sidebar, header, children, onMenuToggle, showMen
 
         {/* Network offline persistent banner */}
         {offline && (
-          <div className="flex items-center justify-center gap-2 px-4 py-2 bg-warning/10 border-b border-warning/30 text-warning text-xs font-medium">
+          <div role="alert" className="flex items-center justify-center gap-2 px-4 py-2 bg-warning/10 border-b border-warning/30 text-warning text-xs font-medium">
             <NetworkIndicator offline={offline} />
             <span>Connection lost — retrying…</span>
           </div>

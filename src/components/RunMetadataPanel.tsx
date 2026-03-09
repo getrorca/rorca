@@ -94,8 +94,9 @@ function CopyButton({ text }: { text: string }) {
       onClick={handleCopy}
       className="p-0.5 rounded hover:bg-bg transition-colors text-muted hover:text-[var(--text)]"
       title="Copy to clipboard"
+      aria-label="Copy to clipboard"
     >
-      {copied ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} />}
+      {copied ? <Check size={11} className="text-emerald-500" aria-hidden="true" /> : <Copy size={11} aria-hidden="true" />}
     </button>
   );
 }

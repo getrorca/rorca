@@ -53,10 +53,11 @@ export default function AnalyticsPanel() {
   const [activeTab, setActiveTab] = useState<AnalyticsTab>('overview');
 
   return (
-    <div className="flex flex-col h-full overflow-hidden" role="main" aria-label="Analytics dashboard">
+    <div className="flex flex-col h-full overflow-hidden" aria-label="Analytics dashboard">
+      <h1 className="sr-only">Analytics</h1>
       {/* Tab bar */}
       <div className="shrink-0 border-b border-border bg-panel">
-        <div className="flex items-center gap-1 px-4 pt-3 pb-0">
+        <div className="flex items-center gap-1 px-4 pt-3 pb-0" role="tablist" aria-label="Analytics tabs">
           {TABS.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -74,7 +75,7 @@ export default function AnalyticsPanel() {
                     : 'border-transparent text-muted hover:text-[var(--text)] hover:bg-surface-100'
                 }`}
               >
-                <Icon size={14} />
+                <Icon size={14} aria-hidden="true" />
                 {tab.label}
               </button>
             );

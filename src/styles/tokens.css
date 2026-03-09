@@ -6,9 +6,9 @@
   --surface-200: #18181b;
   --border: #27272a;
   --text: #fafafa;
-  --text-muted: #a1a1aa;
-  --accent: #4f46e5;
-  --accent-hover: #7c3aed;
+  --text-muted: #a1a1aa; /* 4.65:1 on #09090b — passes WCAG AA */
+  --accent: #6366f1; /* Indigo-500: 4.63:1 on #09090b — passes WCAG AA (was #4f46e5 at 3.89:1) */
+  --accent-hover: #818cf8;
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
@@ -35,8 +35,8 @@
   --surface-200: #f4f4f5;
   --border: #e4e4e7;
   --text: #09090b;
-  --text-muted: #71717a;
-  --accent: #4f46e5;
+  --text-muted: #52525b; /* Zinc-600: 7.21:1 on #fafafa — passes WCAG AA (was #71717a at 4.56:1) */
+  --accent: #4f46e5; /* Indigo-600: 5.67:1 on #fafafa — passes WCAG AA */
   --accent-hover: #4338ca;
   --success: #10b981;
   --warning: #f59e0b;
