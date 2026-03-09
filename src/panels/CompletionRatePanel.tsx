@@ -321,13 +321,13 @@ export default function CompletionRatePanel() {
             <Loader2 size={24} className="animate-spin" aria-label="Loading completion rate data" />
           </div>
         ) : chartData.length === 0 ? (
-          <div className="flex items-center justify-center h-64">
-            <div className="flex flex-col items-center text-center max-w-md px-6">
-              <BarChart3 size={48} className="text-[var(--text-muted)] opacity-40 mb-4" />
-              <h3 className="text-lg font-semibold text-[var(--text)] mb-2">No completion data yet</h3>
-              <p className="text-sm text-[var(--text-muted)]">
-                Run some pipelines to see pass rates broken down by story complexity and tag.
-              </p>
+          <div className="flex flex-col items-center justify-center h-64">
+            <div className="flex flex-col items-center max-w-[400px] text-center">
+              <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+                <BarChart3 size={28} className="text-accent" />
+              </div>
+              <h3 className="text-base font-semibold text-[var(--text)] mb-1.5">No completion data yet</h3>
+              <p className="text-sm text-muted leading-relaxed">Completion rates appear after your first pipeline run. Run a spec to see pass rates.</p>
             </div>
           </div>
         ) : (

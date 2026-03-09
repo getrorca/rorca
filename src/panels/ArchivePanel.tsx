@@ -27,6 +27,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
+import EmptyState from '../components/EmptyState';
 import TriggerPopover from '../components/TriggerPopover';
 import PricingModal from '../components/PricingModal';
 import { StoryCard } from '../components/StoryCard';
@@ -485,30 +486,28 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
                   Loading specs...
                 </div>
               ) : specs.length === 0 ? (
-                <div aria-live="polite" className="flex items-center justify-center h-full">
-                  <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
-                    <Archive size={64} className="text-muted/40" strokeWidth={1.2} />
-                    <div>
-                      {debouncedSearch ? (
-                        <>
-                          <p className="text-sm font-medium text-text mb-1">
-                            No specs match &ldquo;{debouncedSearch}&rdquo;
-                          </p>
-                          <p className="text-xs text-muted">Try a different keyword</p>
-                        </>
-                      ) : (
-                        <>
-                          <p className="text-sm font-medium text-text mb-1">
-                            No specs generated yet
-                          </p>
-                          <p className="text-xs text-muted">
-                            Create your first in Spec Forge
-                          </p>
-                        </>
-                      )}
+                debouncedSearch ? (
+                  <div aria-live="polite" className="flex items-center justify-center h-full">
+                    <div className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-border rounded-lg max-w-xs text-center">
+                      <Archive size={64} className="text-muted/40" strokeWidth={1.2} />
+                      <div>
+                        <p className="text-sm font-medium text-text mb-1">
+                          No specs match &ldquo;{debouncedSearch}&rdquo;
+                        </p>
+                        <p className="text-xs text-muted">Try a different keyword</p>
+                      </div>
                     </div>
                   </div>
-                </div>
+                ) : (
+                  <div aria-live="polite">
+                    <EmptyState
+                      icon={Archive}
+                      heading="No archived specs"
+                      subtext="Specs appear here after pipeline runs complete. Create a spec in Forge and run it to see results."
+                      action={{ label: 'Go to Forge', onClick: () => onNavigate('forge'), icon: Sparkles }}
+                    />
+                  </div>
+                )
               ) : (
                 <div>
                   {specs.map(spec => {
