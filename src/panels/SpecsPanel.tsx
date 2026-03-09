@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   Search, X, Clock, CheckCircle2, XCircle, AlertCircle,
-  Download, Copy, Check, ChevronRight, Play, GitBranch, GitFork,
+  Download, Copy, Check, ChevronRight, ChevronLeft, Play, GitBranch, GitFork,
   Loader2, Plus, Sparkles, Upload, ExternalLink, History, Trash2,
   Globe, FileText, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
@@ -134,6 +134,7 @@ interface DirectionAllResponse {
 
 const PAGE_SIZE = 20;
 const VIEW_MODE_KEY = 'rorca:specs:viewMode';
+const COLLAPSE_KEY_PREFIX = 'rorca:specs:collapsed:';
 
 const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
   { id: 'all', label: 'All Specs' },
@@ -151,9 +152,9 @@ const STATUS_CONFIG: Record<SpecStatus, { label: string; icon: typeof CheckCircl
 };
 
 const BOARD_COLUMNS = [
-  { key: 'draft' as const, label: 'Draft', icon: FileText, emptyMessage: 'No draft specs', accentClass: 'bg-muted/15 text-muted', iconClass: 'text-muted', headerBg: '' },
-  { key: 'in-progress' as const, label: 'In Progress', icon: Play, emptyMessage: 'No specs in progress', accentClass: 'bg-accent/15 text-accent', iconClass: 'text-accent', headerBg: '' },
-  { key: 'done' as const, label: 'Done', icon: CheckCircle2, emptyMessage: 'No completed specs', accentClass: 'bg-success/15 text-success', iconClass: 'text-success', headerBg: '' },
+  { key: 'draft' as const, label: 'Draft', icon: FileText, emptyMessage: 'No draft specs', accentClass: 'bg-muted/15 text-muted', iconClass: 'text-muted', headerBg: '', color: '#71717a' },
+  { key: 'in-progress' as const, label: 'In Progress', icon: Play, emptyMessage: 'No specs in progress', accentClass: 'bg-accent/15 text-accent', iconClass: 'text-accent', headerBg: '', color: '#4f46e5' },
+  { key: 'done' as const, label: 'Done', icon: CheckCircle2, emptyMessage: 'No completed specs', accentClass: 'bg-success/15 text-success', iconClass: 'text-success', headerBg: '', color: '#10b981' },
 ];
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
@@ -385,6 +386,23 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   const [dragSpecId, setDragSpecId] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
 
+  // Column collapse state — persisted per workspace
+  const collapseKey = `${COLLAPSE_KEY_PREFIX}${workspaceId}`;
+  const [collapsedColumns, setCollapsedColumns] = useState<Record<string, boolean>>(() => {
+    try {
+      const stored = localStorage.getItem(collapseKey);
+      return stored ? JSON.parse(stored) : {};
+    } catch { return {}; }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(collapseKey, JSON.stringify(collapsedColumns)); } catch { /* quota */ }
+  }, [collapseKey, collapsedColumns]);
+
+  const toggleCollapse = useCallback((columnKey: string) => {
+    setCollapsedColumns(prev => ({ ...prev, [columnKey]: !prev[columnKey] }));
+  }, []);
+
   const fetchKanban = useCallback(async () => {
     if (!workspaceId) { setKanban({ draft: [], inProgress: [], done: [] }); setLoading(false); setError(null); return; }
     try {
@@ -509,19 +527,39 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
 
   if (loading) {
     return (
-      <div className="grid grid-cols-3 gap-0 h-full divide-x divide-border">
-        {[0, 1, 2].map((col) => (
-          <div key={col} className="flex flex-col min-h-0">
-            <div className="px-3 py-2.5 border-b border-border shrink-0">
-              <div className="h-5 w-24 bg-surface-100 rounded animate-pulse" />
+      <div className="flex h-full">
+        {[0, 1, 2].map((col) => {
+          const isCollapsed = !!collapsedColumns[BOARD_COLUMNS[col].key];
+          return (
+            <div
+              key={col}
+              className={`flex flex-col min-h-0 ${col > 0 ? 'border-l border-border' : ''}`}
+              style={{
+                flex: isCollapsed ? '0 0 40px' : '1 1 0%',
+                minWidth: isCollapsed ? 40 : 280,
+                maxWidth: isCollapsed ? 40 : undefined,
+              }}
+            >
+              {isCollapsed ? (
+                <div className="flex flex-col items-center pt-3 gap-2">
+                  <div className="w-2 h-2 rounded-full bg-surface-100 animate-pulse" />
+                  <div className="h-3 w-3 bg-surface-100 rounded animate-pulse" />
+                </div>
+              ) : (
+                <>
+                  <div className="px-3 py-2.5 border-b border-border shrink-0">
+                    <div className="h-5 w-24 bg-surface-100 rounded animate-pulse" />
+                  </div>
+                  <div className="flex-1 p-3 space-y-2">
+                    {[1, 2].map((i) => (
+                      <div key={i} className="bg-panel border border-border rounded-lg h-[120px] animate-pulse" />
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
-            <div className="flex-1 p-3 space-y-2">
-              {[1, 2].map((i) => (
-                <div key={i} className="bg-panel border border-border rounded-lg h-[120px] animate-pulse" />
-              ))}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
   }
@@ -564,116 +602,190 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     'done': kanban.done,
   };
 
+  // Max card count across all columns — for progress bar height scaling
+  const maxCardCount = Math.max(1, ...BOARD_COLUMNS.map(c => (columnData[c.key] || []).length));
+
   return (
-    <div className="grid grid-cols-3 gap-0 h-full divide-x divide-border">
-      {BOARD_COLUMNS.map((col) => {
+    <div className="flex h-full board-columns-container">
+      {BOARD_COLUMNS.map((col, colIdx) => {
         const specs = columnData[col.key] || [];
         const Icon = col.icon;
         const isDragOver = dragOverColumn === col.key;
+        const isCollapsed = !!collapsedColumns[col.key];
+        const progressBarHeight = Math.min(50, (specs.length / maxCardCount) * 50); // vh, max 50
 
         return (
           <div
             key={col.key}
-            className={`flex flex-col min-h-0 min-w-0 transition-colors ${isDragOver ? 'bg-accent/5' : ''}`}
-            onDragOver={(e) => handleDragOver(e, col.key)}
-            onDragLeave={handleDragLeave}
-            onDrop={() => handleDrop(col.key)}
+            className={`flex flex-col min-h-0 transition-colors
+              ${isDragOver ? 'bg-accent/5' : ''}
+              ${colIdx > 0 ? 'border-l border-border' : ''}`}
+            style={{
+              width: isCollapsed ? 40 : undefined,
+              minWidth: isCollapsed ? 40 : 280,
+              maxWidth: isCollapsed ? 40 : undefined,
+              flex: isCollapsed ? '0 0 40px' : '1 1 0%',
+              transition: 'flex 300ms cubic-bezier(0.34, 1.56, 0.64, 1), width 300ms cubic-bezier(0.34, 1.56, 0.64, 1), min-width 300ms cubic-bezier(0.34, 1.56, 0.64, 1), max-width 300ms cubic-bezier(0.34, 1.56, 0.64, 1)',
+              overflow: 'hidden',
+            }}
+            onDragOver={isCollapsed ? undefined : (e) => handleDragOver(e, col.key)}
+            onDragLeave={isCollapsed ? undefined : handleDragLeave}
+            onDrop={isCollapsed ? undefined : () => handleDrop(col.key)}
           >
-            {/* Column header */}
-            <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border shrink-0">
-              <Icon size={14} className={col.iconClass} />
-              <span className="text-sm font-medium text-[var(--text)]">{col.label}</span>
-              <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-full ${col.accentClass}`}>
-                {specs.length}
-              </span>
-            </div>
+            {isCollapsed ? (
+              /* ─── Collapsed column ─── */
+              <div
+                role="button"
+                tabIndex={0}
+                aria-label={`Expand ${col.label} column (${specs.length} specs)`}
+                onClick={() => toggleCollapse(col.key)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(col.key); } }}
+                className="flex flex-col items-center h-full cursor-pointer hover:bg-surface-100/50 transition-colors select-none"
+                style={{ width: 40 }}
+              >
+                {/* Color dot */}
+                <div className="shrink-0 mt-3 mb-1.5 w-2 h-2 rounded-full" style={{ backgroundColor: col.color }} />
 
-            {/* Column body */}
-            <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-2">
-              {specs.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <Icon size={32} className="text-muted/30 mb-2" />
-                  <p className="text-sm text-muted">{col.emptyMessage}</p>
+                {/* Count badge */}
+                <span className={`shrink-0 text-[10px] font-semibold px-1 py-0.5 rounded ${col.accentClass}`}>
+                  {specs.length}
+                </span>
+
+                {/* Vertical label */}
+                <span
+                  className="text-[11px] font-medium text-muted mt-3 whitespace-nowrap"
+                  style={{ writingMode: 'vertical-rl', textOrientation: 'mixed' }}
+                >
+                  {col.label}
+                </span>
+
+                {/* Progress bar — height proportional to card count */}
+                {specs.length > 0 && (
+                  <div
+                    className="mt-auto mb-3 w-1 rounded-full overflow-hidden"
+                    style={{ height: `${progressBarHeight}vh` }}
+                  >
+                    <div
+                      className="w-full h-full rounded-full"
+                      style={{
+                        background: `linear-gradient(to bottom, ${col.color}, color-mix(in srgb, ${col.color} 20%, transparent))`,
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* Expand chevron */}
+                <ChevronRight size={12} className="shrink-0 text-muted/50 mb-2" />
+              </div>
+            ) : (
+              /* ─── Expanded column ─── */
+              <>
+                {/* Column header */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Collapse ${col.label} column`}
+                  onClick={() => toggleCollapse(col.key)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(col.key); } }}
+                  className="flex items-center gap-2 px-3 py-2.5 border-b border-border shrink-0 cursor-pointer hover:bg-surface-100/30 transition-colors select-none"
+                >
+                  <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: col.color }} />
+                  <Icon size={14} className={col.iconClass} />
+                  <span className="text-sm font-medium text-[var(--text)]">{col.label}</span>
+                  <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-full ${col.accentClass}`}>
+                    {specs.length}
+                  </span>
+                  <ChevronLeft size={12} className="ml-auto text-muted/40 shrink-0" />
                 </div>
-              ) : (
-                specs.map((spec) => {
-                  const total = spec.storyCount;
-                  const passed = storyProgress[spec.id] ?? 0;
-                  const hasProgress = storyProgress[spec.id] !== undefined && col.key !== 'draft';
-                  const progressPct = total > 0 ? Math.round((passed / total) * 100) : 0;
-                  const isDraft = col.key === 'draft';
-                  const actionLoading = actionLoadingMap[spec.id] ?? null;
-                  const isActioning = actionLoading !== null;
-                  const hasActiveRun = activeRunSpecs.has(spec.id);
 
-                  return (
-                    <div key={spec.id} className="group relative">
-                      <button
-                        type="button"
-                        draggable
-                        onDragStart={() => handleDragStart(spec.id)}
-                        onClick={() => onSpecClick(spec.id)}
-                        disabled={isActioning}
-                        className={`w-full h-[120px] bg-panel border rounded-lg p-3 text-left
-                          flex flex-col justify-between overflow-hidden
-                          transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
-                          hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
-                          disabled:opacity-60 disabled:pointer-events-none
-                          ${dragSpecId === spec.id ? 'opacity-50 border-accent' : 'border-border'}`}
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-start gap-1.5">
-                            <GripVertical size={12} className="text-muted/30 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-                            <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
-                              {slugToTitle(spec.id)}
-                            </h3>
-                            {hasActiveRun && (
-                              <span className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30 animate-pulse">
-                                <Play size={8} className="fill-current" /> Running
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2 mt-auto min-w-0">
-                          <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
-                            <Layers size={10} />
-                            {hasProgress ? `${passed}/${total} stories` : `${total} ${total === 1 ? 'story' : 'stories'}`}
-                          </span>
-                          <span className="shrink-0 text-[11px] text-muted flex items-center gap-1">
-                            <Clock size={10} />
-                            {col.key === 'done' && spec.approvedAt ? relativeTime(spec.approvedAt) : relativeTime(spec.generatedAt)}
-                          </span>
-                        </div>
-
-                        {hasProgress && (
-                          <div className="w-full h-1 rounded-full bg-surface-200 mt-1.5 overflow-hidden">
-                            <div
-                              className={`h-full rounded-full transition-all duration-300 ${progressPct === 100 ? 'bg-success' : 'bg-accent'}`}
-                              style={{ width: `${progressPct}%` }}
-                            />
-                          </div>
-                        )}
-                      </button>
-
-                      {/* Approve / Deny actions — Draft column only */}
-                      {isDraft && (
-                        <div className={`absolute top-2 right-2 flex items-center gap-1 ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity duration-150`}>
-                          <button type="button" onClick={(e) => { e.stopPropagation(); handleApprove(spec.id); }} disabled={isActioning} title="Approve spec"
-                            className="p-1.5 rounded-md bg-success/15 text-success border border-success/30 hover:bg-success/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                            {actionLoading === 'approve' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                          </button>
-                          <button type="button" onClick={(e) => { e.stopPropagation(); handleDeny(spec.id); }} disabled={isActioning} title="Deny spec"
-                            className="p-1.5 rounded-md bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                            {actionLoading === 'deny' ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />}
-                          </button>
-                        </div>
-                      )}
+                {/* Column body */}
+                <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-2">
+                  {specs.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                      <Icon size={32} className="text-muted/30 mb-2" />
+                      <p className="text-sm text-muted">{col.emptyMessage}</p>
                     </div>
-                  );
-                })
-              )}
-            </div>
+                  ) : (
+                    specs.map((spec) => {
+                      const total = spec.storyCount;
+                      const passed = storyProgress[spec.id] ?? 0;
+                      const hasProgress = storyProgress[spec.id] !== undefined && col.key !== 'draft';
+                      const progressPct = total > 0 ? Math.round((passed / total) * 100) : 0;
+                      const isDraft = col.key === 'draft';
+                      const actionLoading = actionLoadingMap[spec.id] ?? null;
+                      const isActioning = actionLoading !== null;
+                      const hasActiveRun = activeRunSpecs.has(spec.id);
+
+                      return (
+                        <div key={spec.id} className="group relative">
+                          <button
+                            type="button"
+                            draggable
+                            onDragStart={() => handleDragStart(spec.id)}
+                            onClick={() => onSpecClick(spec.id)}
+                            disabled={isActioning}
+                            className={`w-full h-[120px] bg-panel border rounded-lg p-3 text-left
+                              flex flex-col justify-between overflow-hidden
+                              transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
+                              hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
+                              disabled:opacity-60 disabled:pointer-events-none
+                              ${dragSpecId === spec.id ? 'opacity-50 border-accent' : 'border-border'}`}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-start gap-1.5">
+                                <GripVertical size={12} className="text-muted/30 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
+                                  {slugToTitle(spec.id)}
+                                </h3>
+                                {hasActiveRun && (
+                                  <span className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30 animate-pulse">
+                                    <Play size={8} className="fill-current" /> Running
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 mt-auto min-w-0">
+                              <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
+                                <Layers size={10} />
+                                {hasProgress ? `${passed}/${total} stories` : `${total} ${total === 1 ? 'story' : 'stories'}`}
+                              </span>
+                              <span className="shrink-0 text-[11px] text-muted flex items-center gap-1">
+                                <Clock size={10} />
+                                {col.key === 'done' && spec.approvedAt ? relativeTime(spec.approvedAt) : relativeTime(spec.generatedAt)}
+                              </span>
+                            </div>
+
+                            {hasProgress && (
+                              <div className="w-full h-1 rounded-full bg-surface-200 mt-1.5 overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-300 ${progressPct === 100 ? 'bg-success' : 'bg-accent'}`}
+                                  style={{ width: `${progressPct}%` }}
+                                />
+                              </div>
+                            )}
+                          </button>
+
+                          {/* Approve / Deny actions — Draft column only */}
+                          {isDraft && (
+                            <div className={`absolute top-2 right-2 flex items-center gap-1 ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity duration-150`}>
+                              <button type="button" onClick={(e) => { e.stopPropagation(); handleApprove(spec.id); }} disabled={isActioning} title="Approve spec"
+                                className="p-1.5 rounded-md bg-success/15 text-success border border-success/30 hover:bg-success/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                                {actionLoading === 'approve' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                              </button>
+                              <button type="button" onClick={(e) => { e.stopPropagation(); handleDeny(spec.id); }} disabled={isActioning} title="Deny spec"
+                                className="p-1.5 rounded-md bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                                {actionLoading === 'deny' ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </>
+            )}
           </div>
         );
       })}
