@@ -1,14 +1,13 @@
 import { createContext, useContext, useCallback, useRef, useState, type ReactNode } from 'react';
-import { ToastContainer } from '../components/Toast';
+import { ToastContainer, type ToastType, type ToastAction, type Toast } from '../components/Toast';
 
-interface Toast {
-  id: number;
-  message: string;
-  type: 'success' | 'error';
+interface ShowOptions {
+  action?: ToastAction;
+  persistent?: boolean;
 }
 
 interface ToastContextValue {
-  show: (message: string, type?: 'success' | 'error') => void;
+  show: (message: string, type?: ToastType, options?: ShowOptions) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -23,12 +22,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(0);
 
-  const show = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+  const show = useCallback((message: string, type: ToastType = 'success', options?: ShowOptions) => {
     const id = nextId.current++;
-    setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 5000);
+    const toast: Toast = {
+      id,
+      message,
+      type,
+      action: options?.action,
+      persistent: options?.persistent,
+    };
+    setToasts((prev) => [...prev, toast]);
   }, []);
 
   const dismiss = useCallback((id: number) => {

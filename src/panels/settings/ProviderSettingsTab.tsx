@@ -8,6 +8,7 @@ import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../../contexts/ThemeContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { useWalSSE } from '../../hooks/useWalSSE';
+import { useGlobalToast } from '../../contexts/ToastContext';
 import OpenCodeSetupGuide from '../../components/OpenCodeSetupGuide';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -472,6 +473,7 @@ function CodexAuthStatus() {
 // ─── Execution Engine Section (OC-009) ───────────────────────────────────────
 
 function ExecutionEngineSection() {
+  const toast = useGlobalToast();
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [models, setModels] = useState<OpenCodeModelEntry[]>([]);
   const [grouped, setGrouped] = useState<Record<string, OpenCodeModelEntry[]>>({});
@@ -556,9 +558,12 @@ function ExecutionEngineSection() {
         agentModel: result.agentModel,
       } : prev);
       setSaved(true);
+      toast.show('Execution engine saved', 'success');
       setTimeout(() => setSaved(false), 2000);
     } catch (err: any) {
-      setError(err.message || 'Failed to save configuration');
+      const msg = err.message || 'Failed to save configuration';
+      setError(msg);
+      toast.show(`Failed to save: ${msg}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -985,6 +990,7 @@ function ExecutionEngineSection() {
 // ─── Providers Section ──────────────────────────────────────────────────────
 
 function ProvidersSection() {
+  const toast = useGlobalToast();
   const { workspaceId } = useWorkspace();
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
@@ -1044,9 +1050,12 @@ function ProvidersSection() {
       setAddBaseUrl('');
       setAddLabel('');
       setAddingFor(null);
+      toast.show('API key added', 'success');
       fetchData();
     } catch (err: any) {
-      setAddError(err.message || 'Failed to add key');
+      const msg = err.message || 'Failed to add key';
+      setAddError(msg);
+      toast.show(msg, 'error');
     } finally {
       setAdding(false);
     }
@@ -1055,9 +1064,10 @@ function ProvidersSection() {
   const removeKey = async (id: string) => {
     try {
       await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
+      toast.show('API key removed', 'success');
       fetchData();
     } catch {
-      // silent
+      toast.show('Failed to remove API key', 'error');
     }
   };
 
@@ -1433,6 +1443,7 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
 }
 
 function DisplaySection() {
+  const toast = useGlobalToast();
   const { mode, setMode } = useTheme();
   const { workspaceId } = useWorkspace();
   const [settings, setSettings] = useState<DisplaySettings | null>(null);
@@ -1489,9 +1500,10 @@ function DisplaySection() {
       });
       setSettings(prev => prev ? { ...prev, defaultModel, itemsPerPage } : prev);
       setSaved(true);
+      toast.show('Display settings saved', 'success');
       setTimeout(() => setSaved(false), 2000);
     } catch {
-      // silent
+      toast.show('Failed to save display settings', 'error');
     } finally {
       setSaving(false);
     }
