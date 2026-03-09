@@ -214,9 +214,14 @@ export default function RoiCalculatorPanel() {
             <Loader2 className="animate-spin text-muted" size={28} aria-label="Loading ROI data" />
           </div>
         ) : !data ? (
-          <div className="flex flex-col items-center justify-center h-64 text-muted text-sm gap-2">
-            <Calculator size={32} className="opacity-40" />
-            <p>Unable to load ROI data.</p>
+          <div className="flex flex-col items-center justify-center h-64">
+            <div className="flex flex-col items-center max-w-[400px] text-center">
+              <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+                <Calculator size={28} className="text-accent" />
+              </div>
+              <h3 className="text-base font-semibold text-[var(--text)] mb-1.5">No ROI data yet</h3>
+              <p className="text-sm text-muted leading-relaxed">ROI calculations appear after your first pipeline run. Run a spec to get started.</p>
+            </div>
           </div>
         ) : (
           <>

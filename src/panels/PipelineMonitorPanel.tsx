@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Play, Terminal, Clock, ChevronRight, Copy, Check, List, XCircle, Loader2 } from 'lucide-react';
+import { Play, Terminal, Clock, ChevronRight, Copy, Check, List, XCircle, Loader2, Sparkles, ArrowRight } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
@@ -10,6 +10,8 @@ import RunQueueSection, { QueueEntry } from '../components/RunQueueSection';
 import SpecPickerModal from '../components/SpecPickerModal';
 import AgentBadge from '../components/AgentBadge';
 import AppHeader from '../components/AppHeader';
+import EmptyState from '../components/EmptyState';
+import { useAppNavigate } from '../routes';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -90,6 +92,7 @@ interface PipelineMonitorPanelProps {
 
 export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonitorPanelProps) {
   const { workspaceId } = useWorkspace();
+  const navigateTo = useAppNavigate();
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [showStartHelp, setShowStartHelp] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -250,34 +253,12 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   if (runs.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full">
-        <div className="text-center max-w-md space-y-3">
-          <Terminal className="w-10 h-10 mx-auto text-[var(--text-muted)]" />
-          <p className="text-[var(--text-muted)] text-sm leading-relaxed">
-            No pipeline runs yet. Approve a spec in Forge, then run it from the Pipeline.
-          </p>
-          <button
-            onClick={() => setShowStartHelp(!showStartHelp)}
-            className="px-3 py-1.5 text-xs font-medium bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white rounded transition-colors"
-          >
-            <Play className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
-            Start New Run
-          </button>
-          {showStartHelp && (
-            <div className="mt-3 p-3 rounded bg-[var(--surface)] border border-[var(--border)] text-left">
-              <p className="text-xs text-[var(--text-muted)] mb-2">
-                Copy this command and paste it in your terminal:
-              </p>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 text-xs font-mono bg-[var(--bg)] px-2 py-1 rounded text-[var(--text)]">
-                  ./forge/run-loop.sh
-                </code>
-                <button onClick={handleCopyCommand} className="p-1 rounded hover:bg-[var(--border)] transition-colors">
-                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 text-[var(--text-muted)]" />}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+        <EmptyState
+          icon={Terminal}
+          heading="No pipeline runs yet"
+          subtext="Approve a spec from the Board, then click Run. Each story executes as an isolated subprocess with the full tool set."
+          action={{ label: 'Go to Specs', onClick: () => navigateTo('forge'), icon: ArrowRight }}
+        />
 
         {/* Queue section in empty state */}
         <div className="w-full max-w-md mt-6 rounded-lg border border-[var(--border)] bg-[var(--surface)]">

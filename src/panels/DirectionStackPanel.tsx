@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Store, Trash2, ExternalLink } from 'lucide-react';
+import { Store, Trash2, ExternalLink, Compass } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useDirectionLayer } from '../hooks/useDirectionLayer';
 import { apiFetch } from '../lib/apiFetch';
@@ -434,25 +434,37 @@ export default function DirectionStackPanel() {
           <SkillsList workspaceId={workspaceId} />
         ) : (
           <>
-            {/* First-run banner */}
-            {showFirstRunBanner && (
-              <div className="flex items-center justify-between px-3 py-2.5 bg-accent/5 border-b border-accent/20">
-                <div className="text-xs text-text">
-                  <span className="mr-1">&#10022;</span>
-                  This workspace has no context yet. Answer a few questions and AI will set up your direction.
-                </div>
-                <div className="flex items-center gap-2 ml-3 shrink-0">
-                  <button
-                    onClick={() => setShowAISetup(true)}
-                    className="px-2.5 py-1 text-xs font-medium bg-accent hover:bg-[var(--accent-hover)] text-white rounded transition-colors"
-                  >
-                    Setup with AI &rarr;
-                  </button>
+            {/* First-run empty state */}
+            {showFirstRunBanner && !scanResult && (
+              <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
+                <div className="flex flex-col items-center max-w-[400px]">
+                  <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
+                    <Compass size={28} className="text-accent" />
+                  </div>
+                  <h3 className="text-base font-semibold text-[var(--text)] mb-1.5">No direction configured</h3>
+                  <p className="text-sm text-muted leading-relaxed mb-4">
+                    Click Scan Repo to auto-generate direction from your codebase, or set it up with an AI wizard.
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={handleScanRepo}
+                      disabled={isScanning}
+                      className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
+                    >
+                      {isScanning ? 'Scanning...' : 'Scan Repo'}
+                    </button>
+                    <button
+                      onClick={() => setShowAISetup(true)}
+                      className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg border border-border text-text hover:bg-surface-200 transition-colors"
+                    >
+                      AI Setup
+                    </button>
+                  </div>
                   <button
                     onClick={handleDismissBanner}
-                    className="text-xs text-muted hover:text-text transition-colors"
+                    className="mt-4 text-xs text-muted hover:text-text transition-colors"
                   >
-                    &#10005;
+                    I&#39;ll configure manually
                   </button>
                 </div>
               </div>

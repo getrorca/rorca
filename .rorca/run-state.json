@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T10:39:11.038Z",
+  "lastUpdatedAt": "2026-03-09T10:53:21.266Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -138,6 +138,15 @@
       "finishedAt": "2026-03-09T10:39:11.038Z",
       "agentType": "claude",
       "elapsedMs": 574344
+    },
+    {
+      "storyId": "ULT-016",
+      "title": "Empty States and Onboarding Affordances",
+      "status": "passed",
+      "startedAt": "2026-03-09T10:39:24.604Z",
+      "finishedAt": "2026-03-09T10:53:21.266Z",
+      "agentType": "claude",
+      "elapsedMs": 836662
     }
   ],
   "failedStories": [],
