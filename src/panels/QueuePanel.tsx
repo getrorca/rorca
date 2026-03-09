@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Clock, CheckCircle, XCircle, Eye, Inbox, ArrowRight } from 'lucide-react';
+import { Clock, CheckCircle, XCircle, Eye, Inbox, ArrowRight, FileText, Play, CheckCircle2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
@@ -26,9 +26,10 @@ interface SpecCardProps {
   workspaceId: string;
   onReviewClick: (specId: string) => void;
   onRemove: (specId: string) => void;
+  column: 'draft' | 'in-progress' | 'done';
 }
 
-function SpecCard({ spec, workspaceId, onReviewClick, onRemove }: SpecCardProps) {
+function SpecCard({ spec, workspaceId, onReviewClick, onRemove, column }: SpecCardProps) {
   const { show: showToast } = useGlobalToast();
   const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
   const [rejecting, setRejecting] = useState(false);
@@ -89,39 +90,38 @@ function SpecCard({ spec, workspaceId, onReviewClick, onRemove }: SpecCardProps)
       className={`bg-panel border border-border rounded-lg overflow-hidden transition-all duration-300 ${removing ? 'opacity-0 scale-95' : 'opacity-100 scale-100'}`}
     >
       {/* Card header */}
-      <div className="p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <h3 className="text-sm font-semibold text-[var(--text)] truncate">
-              {slugToTitle(spec.id)}
-            </h3>
-            <p className="text-xs text-muted mt-0.5 truncate">{spec.id}</p>
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
-            {/* Story count badge */}
-            <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
-              {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
+      <div className="p-3">
+        <h3 className="text-sm font-semibold text-[var(--text)] truncate">
+          {slugToTitle(spec.id)}
+        </h3>
+        <p className="text-xs text-muted mt-0.5 truncate">{spec.id}</p>
+
+        <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+          {/* Story count badge */}
+          <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
+            {spec.storyCount} {spec.storyCount === 1 ? 'story' : 'stories'}
+          </span>
+          {/* Review status badge */}
+          {reviewStatusLabel(spec.reviewStatus) && (
+            <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-surface-100 text-muted border border-border">
+              {reviewStatusLabel(spec.reviewStatus)}
             </span>
-            {/* Review status badge */}
-            {reviewStatusLabel(spec.reviewStatus) && (
-              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-surface-100 text-muted border border-border">
-                {reviewStatusLabel(spec.reviewStatus)}
-              </span>
-            )}
-          </div>
+          )}
         </div>
 
         {/* Timestamp */}
         <p className="text-xs text-muted mt-2 flex items-center gap-1">
           <Clock size={11} />
-          Generated {relativeTime(spec.generatedAt)}
+          {column === 'done' && spec.approvedAt
+            ? `Completed ${relativeTime(spec.approvedAt)}`
+            : `Generated ${relativeTime(spec.generatedAt)}`}
         </p>
       </div>
 
       {/* Reject reason input (shown inline when rejecting) */}
       {rejecting && (
         <div
-          className="px-4 pb-3 space-y-2"
+          className="px-3 pb-3 space-y-2"
           onClick={(e) => e.stopPropagation()}
         >
           <textarea
@@ -151,9 +151,9 @@ function SpecCard({ spec, workspaceId, onReviewClick, onRemove }: SpecCardProps)
         </div>
       )}
 
-      {/* Action buttons */}
-      {!rejecting && (
-        <div className="px-4 pb-4 flex gap-2">
+      {/* Action buttons — only show for draft column */}
+      {column === 'draft' && !rejecting && (
+        <div className="px-3 pb-3 flex gap-2">
           <button
             onClick={(e) => { e.stopPropagation(); onReviewClick(spec.id); }}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-border text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
@@ -179,9 +179,108 @@ function SpecCard({ spec, workspaceId, onReviewClick, onRemove }: SpecCardProps)
           </button>
         </div>
       )}
+
+      {/* View button for in-progress and done columns */}
+      {column !== 'draft' && (
+        <div className="px-3 pb-3">
+          <button
+            onClick={(e) => { e.stopPropagation(); onReviewClick(spec.id); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-border text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
+          >
+            <Eye size={13} />
+            View
+          </button>
+        </div>
+      )}
     </div>
   );
 }
+
+/* ─── Column Component ──────────────────────────────────────────── */
+
+interface ColumnConfig {
+  key: 'draft' | 'in-progress' | 'done';
+  label: string;
+  icon: React.ElementType;
+  emptyMessage: string;
+  accentClass: string;
+  iconClass: string;
+}
+
+const COLUMNS: ColumnConfig[] = [
+  {
+    key: 'draft',
+    label: 'Draft',
+    icon: FileText,
+    emptyMessage: 'No draft specs',
+    accentClass: 'bg-muted/15 text-muted',
+    iconClass: 'text-muted',
+  },
+  {
+    key: 'in-progress',
+    label: 'In Progress',
+    icon: Play,
+    emptyMessage: 'No specs in progress',
+    accentClass: 'bg-accent/15 text-accent',
+    iconClass: 'text-accent',
+  },
+  {
+    key: 'done',
+    label: 'Done',
+    icon: CheckCircle2,
+    emptyMessage: 'No completed specs',
+    accentClass: 'bg-success/15 text-success',
+    iconClass: 'text-success',
+  },
+];
+
+interface KanbanColumnProps {
+  config: ColumnConfig;
+  specs: SpecSummary[];
+  workspaceId: string;
+  onReviewClick: (specId: string) => void;
+  onRemove: (specId: string) => void;
+}
+
+function KanbanColumn({ config, specs, workspaceId, onReviewClick, onRemove }: KanbanColumnProps) {
+  const Icon = config.icon;
+
+  return (
+    <div className="flex flex-col min-h-0 min-w-0">
+      {/* Column header */}
+      <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border shrink-0">
+        <Icon size={14} className={config.iconClass} />
+        <span className="text-sm font-medium text-[var(--text)]">{config.label}</span>
+        <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-full ${config.accentClass}`}>
+          {specs.length}
+        </span>
+      </div>
+
+      {/* Column body */}
+      <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-3">
+        {specs.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <Icon size={32} className="text-muted/30 mb-2" />
+            <p className="text-sm text-muted">{config.emptyMessage}</p>
+          </div>
+        ) : (
+          specs.map((spec) => (
+            <SpecCard
+              key={spec.id}
+              spec={spec}
+              workspaceId={workspaceId}
+              onReviewClick={onReviewClick}
+              onRemove={onRemove}
+              column={config.key}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Main Panel ────────────────────────────────────────────────── */
 
 interface QueuePanelProps {
   onNavigate: (panel: PanelId) => void;
@@ -197,9 +296,9 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
     if (!workspaceId) { setSpecs([]); setLoading(false); return; }
     try {
       const res = await apiFetch<{ items: SpecSummary[]; total: number }>(
-        `/api/specs?workspaceId=${workspaceId}&status=pending`
+        `/api/specs?workspaceId=${workspaceId}&status=all`
       );
-      // Sort newest first
+      // Sort newest first within each group
       const sorted = [...res.items].sort(
         (a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
       );
@@ -222,26 +321,61 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
     setSpecs((prev) => prev.filter((s) => s.id !== specId));
   }, []);
 
+  const handleReviewClick = useCallback((specId: string) => {
+    if (onNavigateToSpecReview) {
+      onNavigateToSpecReview(specId);
+    } else {
+      onNavigate('forge');
+    }
+  }, [onNavigateToSpecReview, onNavigate]);
+
+  // Bucket specs into columns
+  const draftSpecs = specs.filter((s) => s.status === 'pending');
+  const inProgressSpecs = specs.filter((s) => s.status === 'approved');
+  const doneSpecs = specs.filter((s) => s.status === 'completed');
+
+  const totalCount = specs.length;
+
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-border shrink-0">
-        <h1 className="text-lg font-semibold text-[var(--text)]">Review Queue</h1>
-        <p className="text-sm text-muted mt-0.5">
-          {loading ? 'Loading…' : `${specs.length} spec${specs.length === 1 ? '' : 's'} awaiting review`}
-        </p>
+      <div className="px-6 py-4 border-b border-border shrink-0 flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-[var(--text)]">Review Queue</h1>
+          <p className="text-sm text-muted mt-0.5">
+            {loading ? 'Loading…' : `${totalCount} spec${totalCount === 1 ? '' : 's'} across all stages`}
+          </p>
+        </div>
+        {!loading && totalCount === 0 && (
+          <button
+            onClick={() => onNavigate('forge')}
+            className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 transition-colors"
+          >
+            Go to Forge
+            <ArrowRight size={14} />
+          </button>
+        )}
       </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto min-h-0 p-6">
+      {/* Kanban board */}
+      <div className="flex-1 overflow-hidden min-h-0">
         {loading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="bg-panel border border-border rounded-lg h-32 animate-pulse" />
+          <div className="grid grid-cols-3 gap-0 h-full divide-x divide-border">
+            {[0, 1, 2].map((col) => (
+              <div key={col} className="flex flex-col min-h-0">
+                <div className="px-3 py-2.5 border-b border-border shrink-0">
+                  <div className="h-5 w-24 bg-surface-100 rounded animate-pulse" />
+                </div>
+                <div className="flex-1 p-3 space-y-3">
+                  {[1, 2].map((i) => (
+                    <div key={i} className="bg-panel border border-border rounded-lg h-28 animate-pulse" />
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
-        ) : specs.length === 0 ? (
-          /* Empty state */
+        ) : totalCount === 0 ? (
+          /* Full empty state */
           <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4 text-center">
             <Inbox size={48} className="text-muted/40" />
             <div>
@@ -257,16 +391,20 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {specs.map((spec) => (
-              <SpecCard
-                key={spec.id}
-                spec={spec}
-                workspaceId={workspaceId!}
-                onReviewClick={(id) => onNavigateToSpecReview ? onNavigateToSpecReview(id) : onNavigate('forge')}
-                onRemove={handleRemove}
-              />
-            ))}
+          <div className="grid grid-cols-3 gap-0 h-full divide-x divide-border">
+            {COLUMNS.map((col, idx) => {
+              const colSpecs = idx === 0 ? draftSpecs : idx === 1 ? inProgressSpecs : doneSpecs;
+              return (
+                <KanbanColumn
+                  key={col.key}
+                  config={col}
+                  specs={colSpecs}
+                  workspaceId={workspaceId!}
+                  onReviewClick={handleReviewClick}
+                  onRemove={handleRemove}
+                />
+              );
+            })}
           </div>
         )}
       </div>
