@@ -6,6 +6,7 @@ import AddWorkspaceModal from '../components/AddWorkspaceModal';
 // TriggerPopover removed — Ready-to-Run cards now trigger directly
 import { ToastContainer, useToast } from '../components/Toast';
 import { HubSkeleton } from '../components/Skeleton';
+import { BoardSkeleton } from '../components/skeletons';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useWalSSE } from '../hooks/useWalSSE';
