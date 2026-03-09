@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, memo } from 'react';
+import { useDebounce } from '../../hooks/useDebounce';
 import {
   Clock,
   FileText,
@@ -300,6 +301,7 @@ export function UnifiedActivitySection() {
   const [activeTypes, setActiveTypes] = useState<Set<string>>(new Set());
   const [timeRange, setTimeRange] = useState<TimeRange>('7d');
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery, 300);
 
   // Expanded item
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -330,7 +332,7 @@ export function UnifiedActivitySection() {
       // Use activity API for enriched data, WAL API as fallback for raw/system scope
       const fromDate = timeRangeToISO(timeRange);
 
-      if (scope === 'system' || searchQuery) {
+      if (scope === 'system' || debouncedSearchQuery) {
         // Use WAL endpoint for system events or when searching (it has full-text search)
         const params = new URLSearchParams({
           limit: String(PAGE_SIZE),
@@ -339,7 +341,7 @@ export function UnifiedActivitySection() {
         });
         if (fromDate) params.set('from', fromDate);
         if (workspaceId && scope === 'workspace') params.set('workspace_id', workspaceId);
-        if (searchQuery) params.set('q', searchQuery);
+        if (debouncedSearchQuery) params.set('q', debouncedSearchQuery);
 
         // For system scope, filter to system event types server-side
         if (scope === 'system' && SYSTEM_EVENTS.length > 0) {
@@ -399,7 +401,7 @@ export function UnifiedActivitySection() {
       setLoadingMore(false);
       initialLoadDone.current = true;
     }
-  }, [scope, activeTypes, timeRange, searchQuery, workspaceId]);
+  }, [scope, activeTypes, timeRange, debouncedSearchQuery, workspaceId]);
 
   // Fetch on filter change
   useEffect(() => {
@@ -620,7 +622,7 @@ export function UnifiedActivitySection() {
 
 /* ─── Feed Item Row ──────────────────────────────────────────────── */
 
-function FeedItemRow({
+const FeedItemRow = memo(function FeedItemRow({
   item,
   isExpanded,
   isNew,
@@ -657,6 +659,7 @@ function FeedItemRow({
               <img
                 src={item.actor.avatarUrl}
                 alt={item.actor.name}
+                loading="lazy"
                 className="w-5 h-5 rounded-full shrink-0 mt-0.5"
               />
             ) : (
@@ -746,4 +749,4 @@ function FeedItemRow({
       )}
     </div>
   );
-}
+});

@@ -25,6 +25,7 @@ export function AssigneeAvatar({ assignee, size = 'sm' }: { assignee: Assignee; 
       <img
         src={assignee.avatarUrl}
         alt={assignee.displayName}
+        loading="lazy"
         className={`${dim} rounded-full object-cover`}
         title={assignee.displayName}
       />

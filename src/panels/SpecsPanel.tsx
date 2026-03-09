@@ -1,4 +1,6 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
+import { useDebounce } from '../hooks/useDebounce';
+import { useLazyVisible } from '../hooks/useLazyVisible';
 import {
   Search, X, Clock, CheckCircle2, XCircle, AlertCircle,
   Check, ChevronRight, ChevronLeft, Play, GitBranch, GitFork,
@@ -236,6 +238,16 @@ function formatCostCompact(n: number): string {
   if (n >= 1) return `$${n.toFixed(2)}`;
   if (n >= 0.01) return `$${n.toFixed(3)}`;
   return `$${n.toFixed(4)}`;
+}
+
+/** Board card wrapper that uses IntersectionObserver to defer rendering of off-screen cards. */
+function LazyBoardCard({ children, height }: { children: React.ReactNode; height: number }) {
+  const [ref, visible] = useLazyVisible<HTMLDivElement>();
+  return (
+    <div ref={ref} style={visible ? undefined : { minHeight: height }}>
+      {visible ? children : null}
+    </div>
+  );
 }
 
 function StoryOutcomeBar({ outcomes, storyCount }: { outcomes: RunTelemetry['storyOutcomes']; storyCount: number }) {
@@ -1586,7 +1598,11 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
                       </div>
                     )
                   ) : (
-                    specs.map((spec) => renderCard(spec, col.key, col.color, isDraft))
+                    specs.map((spec) => (
+                      <LazyBoardCard key={spec.id} height={compactMode ? 36 : 120}>
+                        {renderCard(spec, col.key, col.color, isDraft)}
+                      </LazyBoardCard>
+                    ))
                   )}
                 </div>
               </>
@@ -1628,17 +1644,9 @@ function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   const [error, setError] = useState('');
 
   const [searchText, setSearchText] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const debouncedSearch = useDebounce(searchText, 300);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [tagFilter, setTagFilter] = useState<string[]>([]);
-
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
-
-  useEffect(() => {
-    clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => setDebouncedSearch(searchText), 300);
-    return () => clearTimeout(debounceRef.current);
-  }, [searchText]);
 
   const fetchSpecs = useCallback(async (offset = 0, append = false) => {
     if (!workspaceId) return;
@@ -1666,7 +1674,7 @@ function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
   useEffect(() => { fetchSpecs(0, false); }, [fetchSpecs]);
 
-  const allTags = Array.from(new Set(specs.flatMap(s => s.tags || []))).sort();
+  const allTags = useMemo(() => Array.from(new Set(specs.flatMap(s => s.tags || []))).sort(), [specs]);
 
   if (error && !loading) {
     return (

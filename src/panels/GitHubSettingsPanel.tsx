@@ -303,6 +303,7 @@ export default function GitHubSettingsPanel() {
               <img
                 src={account.avatarUrl}
                 alt={account.username}
+                loading="lazy"
                 className="w-10 h-10 rounded-full border border-border"
               />
               <div className="flex-1 min-w-0">
