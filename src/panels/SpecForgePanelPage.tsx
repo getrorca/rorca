@@ -7,14 +7,12 @@ import SpecForgeProgress from '../components/SpecForgeProgress';
 import SpecForgePreview from '../components/SpecForgePreview';
 import TemplatePickerModal from '../components/TemplatePickerModal';
 import AppHeader from '../components/AppHeader';
-import { SpecPreview, REVIEW_STATUS_CONFIG, relativeTime } from '../components/SpecReviewInline';
-import type { SpecSummary, SpecDetail, ReviewStatus } from '../components/SpecReviewInline';
-import { SpecConfirmDialog } from '../components/SpecConfirmDialog';
+import { REVIEW_STATUS_CONFIG, relativeTime } from '../components/SpecReviewInline';
+import type { SpecSummary, ReviewStatus } from '../components/SpecReviewInline';
+import SpecDetailSlideOver from '../components/SpecDetailSlideOver';
 import { ReadinessRing } from '../components/ReadinessRing';
 import { TagChipsReadonly } from '../components/TagChips';
 import { AssigneeAvatar } from '../components/AssigneeDropdown';
-import type { Assignee } from '../components/AssigneeDropdown';
-import { useHotkeys } from '../hooks/useHotkeys';
 
 import { ChevronRight, ChevronDown, Clock, Plus, Inbox } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
@@ -229,25 +227,9 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
   const [pendingSpecs, setPendingSpecs] = useState<SpecSummary[]>([]);
   const [pendingLoading, setPendingLoading] = useState(true);
   const [selectedSpecId, setSelectedSpecId] = useState<string | null>(null);
-  const [specDetail, setSpecDetail] = useState<SpecDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'stories' | 'graph' | 'diagram' | 'json'>('stories');
-  const [rejectingId, setRejectingId] = useState<string | null>(null);
-  const [rejectReason, setRejectReason] = useState('');
-  const [actionLoading, setActionLoading] = useState(false);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>('all');
-  const [reviewingId, setReviewingId] = useState<string | null>(null);
-  const [reviewComment, setReviewComment] = useState('');
-  const [dialogMode, setDialogMode] = useState<'approve' | 'reject' | 'post-approve' | null>(null);
-  const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
   // Track whether the brief/create area is expanded vs collapsed
   const [createExpanded, setCreateExpanded] = useState(!showPending);
-
-  // ⌘↩ approve, ⌘⌫ reject — only when a spec is selected
-  useHotkeys(useMemo(() => [
-    { key: 'mod+enter', handler: () => { if (selectedSpecId && !dialogMode) setDialogMode('approve'); } },
-    { key: 'mod+backspace', handler: () => { if (selectedSpecId && !dialogMode) setDialogMode('reject'); } },
-  ], [selectedSpecId, dialogMode]));
 
   // Fetch direction layers for context health dots
   useEffect(() => {
@@ -493,170 +475,24 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
   useEffect(() => { fetchPendingSpecs(); }, [fetchPendingSpecs]);
 
-  // Fetch spec detail when selected
-  useEffect(() => {
-    if (!selectedSpecId || !workspaceId) {
-      setSpecDetail(null);
-      return;
-    }
-    let cancelled = false;
-    setDetailLoading(true);
-    apiFetch<SpecDetail>(`/api/specs/${selectedSpecId}?workspaceId=${workspaceId}`)
-      .then((detail) => {
-        if (!cancelled) {
-          setSpecDetail(detail);
-          setActiveTab('stories');
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setSpecDetail(null);
-      })
-      .finally(() => {
-        if (!cancelled) setDetailLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [selectedSpecId, workspaceId]);
+  // ─── Slide-over callbacks ──────────────────────────────────────────
+  const handleSlideOverClose = useCallback(() => {
+    setSelectedSpecId(null);
+  }, []);
 
-  // ─── Spec actions (approve, reject, review) ──────────────────────
-  const handleApprove = async (specId: string) => {
-    if (hasUnsavedEdits) {
-      if (!window.confirm('You have unsaved story edits. Approve without saving?')) return;
-      setHasUnsavedEdits(false);
-    }
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${specId}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
-      });
-      showToast('Spec approved', 'success');
-      if (selectedSpecId === specId) {
-        setSelectedSpecId(null);
-        setSpecDetail(null);
-      }
-      await fetchPendingSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Approve failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
+  const handleSlideOverApproved = useCallback((_specId: string) => {
+    setSelectedSpecId(null);
+    fetchPendingSpecs();
+  }, [fetchPendingSpecs]);
 
-  const handleDialogApprove = async () => {
-    if (!selectedSpecId) return;
-    if (hasUnsavedEdits) {
-      if (!window.confirm('You have unsaved story edits. Approve without saving?')) return;
-      setHasUnsavedEdits(false);
-    }
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${selectedSpecId}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
-      });
-      showToast('Spec approved', 'success');
-      setDialogMode('post-approve');
-      await fetchPendingSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Approve failed', 'error');
-      setDialogMode(null);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleDialogReject = async (reason?: string) => {
-    if (!selectedSpecId) return;
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${selectedSpecId}/reject`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, reason: reason || undefined }),
-      });
-      showToast('Spec rejected', 'success');
-      setDialogMode(null);
-      setSelectedSpecId(null);
-      setSpecDetail(null);
-      await fetchPendingSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Reject failed', 'error');
-      setDialogMode(null);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleReject = async (specId: string) => {
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${specId}/reject`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, reason: rejectReason || undefined }),
-      });
-      showToast('Spec rejected', 'success');
-      setRejectingId(null);
-      setRejectReason('');
-      if (selectedSpecId === specId) {
-        setSelectedSpecId(null);
-        setSpecDetail(null);
-      }
-      await fetchPendingSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Reject failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleRequestReview = async (specId: string) => {
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${specId}/request-review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
-      });
-      showToast('Review requested', 'success');
-      await fetchPendingSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Request review failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleReview = async (specId: string, action: 'approve' | 'request_changes') => {
-    setActionLoading(true);
-    try {
-      await apiFetch(`/api/specs/${specId}/review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, action, comment: reviewComment || undefined }),
-      });
-      showToast(action === 'approve' ? 'Review approved' : 'Changes requested', 'success');
-      setReviewingId(null);
-      setReviewComment('');
-      if (selectedSpecId === specId) {
-        setSelectedSpecId(null);
-        setSpecDetail(null);
-      }
-      await fetchPendingSpecs();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Review failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
+  const handleSlideOverRejected = useCallback((_specId: string) => {
+    setSelectedSpecId(null);
+    fetchPendingSpecs();
+  }, [fetchPendingSpecs]);
 
   const filteredPending = reviewFilter === 'all'
     ? pendingSpecs
     : pendingSpecs.filter(s => (s.reviewStatus ?? 'draft') === reviewFilter);
-
-  const selectedSpec = filteredPending.find((s) => s.id === selectedSpecId);
 
   // When showPending prop changes and pending specs exist, collapse the create area
   useEffect(() => {
@@ -715,79 +551,6 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
 
       {forgeMode === 'batch' ? (
         <BatchForge />
-      ) : selectedSpecId ? (
-        /* ─── Expanded spec review (full panel) ──────────────────────── */
-        <div className="flex flex-col flex-1 min-h-0">
-          {/* Back bar */}
-          <div className="flex items-center gap-3 px-4 py-2 border-b border-border shrink-0 bg-panel">
-            <button
-              onClick={() => {
-                if (hasUnsavedEdits) {
-                  if (!window.confirm('You have unsaved story edits. Discard them?')) return;
-                  setHasUnsavedEdits(false);
-                }
-                setSelectedSpecId(null);
-                setSpecDetail(null);
-                setRejectingId(null);
-                setRejectReason('');
-                setReviewingId(null);
-                setReviewComment('');
-              }}
-              className="text-xs text-accent hover:text-accent-hover transition-colors"
-            >
-              &larr; Back to Forge
-            </button>
-            <span className="text-sm font-mono text-text truncate">{selectedSpecId}</span>
-          </div>
-          <div className="flex-1 overflow-hidden">
-            {detailLoading ? (
-              <div className="flex items-center justify-center h-full text-muted text-sm">Loading spec...</div>
-            ) : specDetail && selectedSpec ? (
-              <SpecPreview
-                spec={specDetail}
-                summary={selectedSpec}
-                activeTab={activeTab}
-                onTabChange={setActiveTab}
-                rejectingId={rejectingId}
-                rejectReason={rejectReason}
-                actionLoading={actionLoading}
-                onRejectReasonChange={setRejectReason}
-                onStartReject={() => setRejectingId(selectedSpecId)}
-                onCancelReject={() => { setRejectingId(null); setRejectReason(''); }}
-                onConfirmReject={() => handleReject(selectedSpecId)}
-                onApprove={() => handleApprove(selectedSpecId)}
-                onRequestReview={() => handleRequestReview(selectedSpecId)}
-                reviewingId={reviewingId}
-                reviewComment={reviewComment}
-                onReviewCommentChange={setReviewComment}
-                onStartReview={() => setReviewingId(selectedSpecId)}
-                onCancelReview={() => { setReviewingId(null); setReviewComment(''); }}
-                onConfirmReview={(action) => handleReview(selectedSpecId, action)}
-                workspaceId={workspaceId}
-                onAssignSpec={(a) => setPendingSpecs(prev => prev.map(s => s.id === selectedSpecId ? { ...s, assignee: a ?? undefined } : s))}
-                onDirtyChange={setHasUnsavedEdits}
-              />
-            ) : (
-              <div className="flex items-center justify-center h-full text-muted text-sm">Spec not found</div>
-            )}
-          </div>
-
-          {/* Keyboard-triggered confirmation dialog */}
-          {dialogMode && selectedSpecId && (
-            <SpecConfirmDialog
-              mode={dialogMode}
-              specName={selectedSpec?.specName ?? selectedSpecId}
-              loading={actionLoading}
-              onConfirm={(reason) => {
-                if (dialogMode === 'approve') handleDialogApprove();
-                else if (dialogMode === 'reject') handleDialogReject(reason);
-              }}
-              onCancel={() => setDialogMode(null)}
-              onGoToForge={() => { setDialogMode(null); setSelectedSpecId(null); setSpecDetail(null); }}
-              onTriggerRun={() => { setDialogMode(null); setSelectedSpecId(null); setSpecDetail(null); }}
-            />
-          )}
-        </div>
       ) : (
         /* ─── Main Forge view: Create + Pending ──────────────────────── */
         <div className="flex-1 overflow-y-auto">
@@ -1272,13 +1035,7 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
                     {filteredPending.map((spec) => (
                       <button
                         key={spec.id}
-                        onClick={() => {
-                          if (hasUnsavedEdits && spec.id !== selectedSpecId) {
-                            if (!window.confirm('You have unsaved story edits. Discard them?')) return;
-                            setHasUnsavedEdits(false);
-                          }
-                          setSelectedSpecId(spec.id);
-                        }}
+                        onClick={() => setSelectedSpecId(spec.id)}
                         aria-label={`Review spec: ${spec.id} - ${spec.storyCount} ${spec.storyCount === 1 ? 'story' : 'stories'}`}
                         className="w-full text-left px-4 py-3 bg-panel border border-border rounded-lg hover:border-accent/30 transition-colors group focus:outline-none focus:ring-2 focus:ring-accent/50"
                       >
@@ -1351,6 +1108,16 @@ export default function SpecForgePanelPage({ onNavigate, onNavigateToRun, initia
           }}
         />
       )}
+
+      {/* Spec Detail Slide-Over */}
+      <SpecDetailSlideOver
+        isOpen={selectedSpecId !== null}
+        specId={selectedSpecId}
+        onClose={handleSlideOverClose}
+        onNavigate={onNavigate}
+        onApproved={handleSlideOverApproved}
+        onRejected={handleSlideOverRejected}
+      />
     </div>
   );
 }
