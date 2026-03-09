@@ -3,6 +3,7 @@ import { Clock, Inbox, ArrowRight, FileText, Play, CheckCircle2, Layers, AlertTr
 import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
+import { useWalSSE } from '../hooks/useWalSSE';
 import { relativeTime } from '../components/SpecReviewInline';
 import type { SpecSummary } from '../components/SpecReviewInline';
 import type { PanelId } from '../components/Sidebar';
@@ -23,9 +24,10 @@ interface KanbanSpecCardProps {
   onApprove?: () => void;
   onDeny?: () => void;
   actionLoading?: 'approve' | 'deny' | null;
+  hasActiveRun?: boolean;
 }
 
-function KanbanSpecCard({ spec, passedCount, onClick, column, onApprove, onDeny, actionLoading }: KanbanSpecCardProps) {
+function KanbanSpecCard({ spec, passedCount, onClick, column, onApprove, onDeny, actionLoading, hasActiveRun }: KanbanSpecCardProps) {
   const total = spec.storyCount;
   const passed = passedCount ?? 0;
   const hasProgress = passedCount !== undefined && column !== 'draft';
@@ -45,11 +47,19 @@ function KanbanSpecCard({ spec, passedCount, onClick, column, onApprove, onDeny,
           hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
           disabled:opacity-60 disabled:pointer-events-none"
       >
-        {/* Top: title + slug */}
+        {/* Top: title + active run badge */}
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3]">
-            {slugToTitle(spec.id)}
-          </h3>
+          <div className="flex items-start gap-1.5">
+            <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
+              {slugToTitle(spec.id)}
+            </h3>
+            {hasActiveRun && (
+              <span className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30 animate-pulse">
+                <Play size={8} className="fill-current" />
+                Running
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Bottom: badges + timestamp */}
@@ -165,9 +175,10 @@ interface KanbanColumnProps {
   onApprove?: (specId: string) => void;
   onDeny?: (specId: string) => void;
   actionLoadingMap?: Record<string, 'approve' | 'deny' | null>;
+  activeRunSpecs?: Set<string>;
 }
 
-function KanbanColumn({ config, specs, onReviewClick, storyProgress, onApprove, onDeny, actionLoadingMap }: KanbanColumnProps) {
+function KanbanColumn({ config, specs, onReviewClick, storyProgress, onApprove, onDeny, actionLoadingMap, activeRunSpecs }: KanbanColumnProps) {
   const Icon = config.icon;
 
   return (
@@ -199,6 +210,7 @@ function KanbanColumn({ config, specs, onReviewClick, storyProgress, onApprove, 
               onApprove={onApprove ? () => onApprove(spec.id) : undefined}
               onDeny={onDeny ? () => onDeny(spec.id) : undefined}
               actionLoading={actionLoadingMap?.[spec.id] ?? null}
+              hasActiveRun={activeRunSpecs?.has(spec.id)}
             />
           ))
         )}
@@ -293,6 +305,67 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
     const interval = setInterval(fetchKanban, 10_000);
     return () => clearInterval(interval);
   }, [fetchKanban]);
+
+  // SSE: react to WAL events that affect kanban column placement
+  const [activeRunSpecs, setActiveRunSpecs] = useState<Set<string>>(new Set());
+  const sseFetchTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  /** Debounced re-fetch — coalesces rapid SSE bursts into a single API call */
+  const debouncedFetchKanban = useCallback(() => {
+    clearTimeout(sseFetchTimer.current);
+    sseFetchTimer.current = setTimeout(() => fetchKanban(), 300);
+  }, [fetchKanban]);
+
+  // Clean up debounce timer on unmount
+  useEffect(() => () => clearTimeout(sseFetchTimer.current), []);
+
+  useWalSSE((event) => {
+    // Only process events for the current workspace
+    if (workspaceId && event.workspace_id && event.workspace_id !== String(workspaceId)) return;
+
+    const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'spec_rejected', 'story_passed', 'story_failed'];
+    if (!KANBAN_EVENTS.includes(event.event_type)) return;
+
+    switch (event.event_type) {
+      case 'spec_approved':
+        // Card moves from Draft → In Progress
+        debouncedFetchKanban();
+        break;
+
+      case 'run_started': {
+        // Mark spec as having an active run (for badge display)
+        const specId = event.spec_id;
+        if (specId) {
+          setActiveRunSpecs((prev) => new Set(prev).add(specId));
+        }
+        debouncedFetchKanban();
+        break;
+      }
+
+      case 'run_finished':
+        // Card moves from In Progress → Done — clear active badge
+        if (event.spec_id) {
+          setActiveRunSpecs((prev) => {
+            const next = new Set(prev);
+            next.delete(event.spec_id!);
+            return next;
+          });
+        }
+        debouncedFetchKanban();
+        break;
+
+      case 'spec_rejected':
+        // Card removed from Draft
+        debouncedFetchKanban();
+        break;
+
+      case 'story_passed':
+      case 'story_failed':
+        // Story progress changed — update progress bars
+        debouncedFetchKanban();
+        break;
+    }
+  });
 
   const handleReviewClick = useCallback((specId: string) => {
     if (onNavigateToSpecReview) {
@@ -435,6 +508,7 @@ export default function QueuePanel({ onNavigate, onNavigateToSpecReview }: Queue
                   onApprove={col.key === 'draft' ? handleApprove : undefined}
                   onDeny={col.key === 'draft' ? handleDeny : undefined}
                   actionLoadingMap={col.key === 'draft' ? actionLoadingMap : undefined}
+                  activeRunSpecs={activeRunSpecs}
                 />
               );
             })}
