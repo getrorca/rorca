@@ -5,7 +5,7 @@ import {
   Loader2, Plus, ExternalLink,
   FileText, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
-  GripVertical, Trash2, Palette,
+  GripVertical, Trash2, Palette, Pencil, AlignJustify,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -92,7 +92,9 @@ interface KanbanSpec {
   reviewStatus: string;
   storyTitles?: string[];
   passedStories?: number;
+  failedStories?: number;
   activeRunId?: number;
+  model?: string;
 }
 
 interface CustomColumnData {
@@ -126,7 +128,33 @@ interface DirectionAllResponse {
 
 const PAGE_SIZE = 20;
 const VIEW_MODE_KEY = 'rorca:specs:viewMode';
+const COMPACT_MODE_KEY = 'rorca:specs:compactMode';
 const COLLAPSE_KEY_PREFIX = 'rorca:specs:collapsed:';
+
+/** Short model display name from full model string */
+function modelShortName(model?: string): string | null {
+  if (!model) return null;
+  // "claude-sonnet-4-5-20250929" → "sonnet-4-5"
+  // "claude-opus-4-6" → "opus-4-6"
+  // "openai/gpt-4o" → "gpt-4o"
+  const last = model.split('/').pop() ?? model;
+  return last
+    .replace(/^claude-/, '')
+    .replace(/-\d{8,}$/, '');
+}
+
+/** Provider color class for model badge */
+function modelColorClass(model?: string): string {
+  if (!model) return 'bg-zinc-500/15 text-zinc-400 border-zinc-500/30';
+  const m = model.toLowerCase();
+  if (m.includes('claude') || m.includes('anthropic') || m.includes('opus') || m.includes('sonnet') || m.includes('haiku'))
+    return 'bg-purple-500/15 text-purple-400 border-purple-500/30';
+  if (m.includes('openai') || m.includes('gpt') || m.includes('o3') || m.includes('o1'))
+    return 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30';
+  if (m.includes('google') || m.includes('gemini'))
+    return 'bg-blue-500/15 text-blue-400 border-blue-500/30';
+  return 'bg-zinc-500/15 text-zinc-400 border-zinc-500/30';
+}
 
 const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
   { id: 'all', label: 'All Specs' },
@@ -542,6 +570,14 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   const [optimisticKanban, setOptimisticKanban] = useState<KanbanResponse | null>(null);
   const effectiveKanban = optimisticKanban ?? kanban;
 
+  // Compact mode — reduce cards to title-only single line
+  const [compactMode, setCompactMode] = useState(() => {
+    try { return localStorage.getItem(COMPACT_MODE_KEY) === 'true'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(COMPACT_MODE_KEY, String(compactMode)); } catch { /* quota */ }
+  }, [compactMode]);
+
   // Custom column management state
   const [editingColumnId, setEditingColumnId] = useState<number | null>(null);
   const [editingColumnName, setEditingColumnName] = useState('');
@@ -812,12 +848,13 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     e.dataTransfer.setDragImage(ghost, 10, 10);
 
     const target = e.currentTarget as HTMLElement;
-    requestAnimationFrame(() => { target.style.opacity = '0.5'; });
+    requestAnimationFrame(() => { target.style.opacity = '0.5'; target.style.transform = 'scale(0.98)'; });
     setDragRenderKey(k => k + 1);
   }, []);
 
   const handleDragEnd = useCallback((e: React.DragEvent) => {
     (e.currentTarget as HTMLElement).style.opacity = '';
+    (e.currentTarget as HTMLElement).style.transform = '';
     dragSpecIdRef.current = null;
     dragFromColumnRef.current = null;
     dragOverColumnRef.current = null;
@@ -1011,14 +1048,20 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
 
   // Build story progress from all column data
   const storyProgress: Record<string, number> = {};
+  const storyFailures: Record<string, number> = {};
   for (const k of [...effectiveKanban.inProgress, ...effectiveKanban.done]) {
     if (k.passedStories !== undefined) storyProgress[k.id] = k.passedStories;
+    if (k.failedStories !== undefined) storyFailures[k.id] = k.failedStories;
   }
   for (const cc of (effectiveKanban.customColumns || [])) {
     for (const s of cc.specs) {
       if (s.passedStories !== undefined) storyProgress[s.id] = s.passedStories;
+      if (s.failedStories !== undefined) storyFailures[s.id] = s.failedStories;
     }
   }
+
+  // Click vs drag distinction — track mousedown position
+  const mouseDownPosRef = useRef<{ x: number; y: number } | null>(null);
 
   const customCols = effectiveKanban.customColumns || [];
   const customSpecCount = customCols.reduce((n, c) => n + c.specs.length, 0);
@@ -1112,16 +1155,82 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
     );
   }
 
+  // Tag overflow popover state
+  const [tagPopoverSpecId, setTagPopoverSpecId] = useState<string | null>(null);
+
+  // Status icon for card
+  const statusIcon = (colKey: string, colColor: string, hasActiveRun: boolean) => {
+    if (hasActiveRun) return <Play size={10} className="fill-accent text-accent" />;
+    if (colKey === 'draft') return <Pencil size={10} className="text-muted" />;
+    if (colKey === 'done') return <CheckCircle2 size={10} className="text-success" />;
+    if (colKey === 'in-progress') return <Play size={10} className="text-accent" />;
+    // Custom column — colored dot
+    return <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: colColor }} />;
+  };
+
   // Render a spec card (shared between all columns)
   const renderCard = (spec: KanbanSpec, colKey: string, colColor: string, isDraft: boolean) => {
     const total = spec.storyCount;
     const passed = storyProgress[spec.id] ?? 0;
+    const failed = storyFailures[spec.id] ?? 0;
+    const pending = total - passed - failed;
     const hasProgress = storyProgress[spec.id] !== undefined && colKey !== 'draft';
-    const progressPct = total > 0 ? Math.round((passed / total) * 100) : 0;
     const actionLoading = actionLoadingMap[spec.id] ?? null;
     const isActioning = actionLoading !== null;
     const hasActiveRun = activeRunSpecs.has(spec.id);
+    const modelName = modelShortName(spec.model);
+    const tags = spec.tags || [];
+    const visibleTags = tags.slice(0, 2);
+    const overflowCount = tags.length - 2;
 
+    // Click vs drag: only fire click if mouse moved < 5px
+    const handleMouseDown = (e: React.MouseEvent) => {
+      mouseDownPosRef.current = { x: e.clientX, y: e.clientY };
+    };
+    const handleClick = (e: React.MouseEvent) => {
+      if (isActioning) return;
+      if (mouseDownPosRef.current) {
+        const dx = e.clientX - mouseDownPosRef.current.x;
+        const dy = e.clientY - mouseDownPosRef.current.y;
+        if (Math.sqrt(dx * dx + dy * dy) > 5) return; // was a drag, not a click
+      }
+      onSpecClick(spec.id);
+    };
+
+    // ── Compact mode: title-only single line ──
+    if (compactMode) {
+      return (
+        <div key={spec.id} className="group relative">
+          <div
+            role="button"
+            tabIndex={0}
+            draggable
+            aria-label={`${slugToTitle(spec.id)}, ${total} stories. Ctrl+Arrow to move.`}
+            onDragStart={(e) => handleDragStart(e, spec.id, colKey, colColor)}
+            onDragEnd={handleDragEnd}
+            onTouchStart={(e) => handleTouchStart(e, spec.id, colKey, colColor)}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+            onKeyDown={(e) => handleCardKeyDown(e, spec.id, colKey)}
+            onFocus={() => { focusedCardRef.current = { specId: spec.id, columnKey: colKey }; }}
+            onMouseDown={handleMouseDown}
+            onClick={handleClick}
+            className={`w-full bg-panel border rounded-md px-2.5 py-1.5 text-left
+              flex items-center gap-2 overflow-hidden cursor-grab select-none
+              transition-all duration-150 hover:shadow-sm hover:shadow-black/10
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
+              ${isActioning ? 'opacity-60 pointer-events-none' : ''} border-border`}
+            style={{ borderLeftWidth: 3, borderLeftColor: colColor }}
+          >
+            {statusIcon(colKey, colColor, hasActiveRun)}
+            <span className="text-[13px] font-medium text-[var(--text)] truncate flex-1">{slugToTitle(spec.id)}</span>
+            <span className="shrink-0 text-[10px] text-muted">{total}s</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Full card mode ──
     return (
       <div key={spec.id} className="group relative">
         <div
@@ -1136,17 +1245,26 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
           onTouchEnd={handleTouchEnd}
           onKeyDown={(e) => handleCardKeyDown(e, spec.id, colKey)}
           onFocus={() => { focusedCardRef.current = { specId: spec.id, columnKey: colKey }; }}
-          onClick={() => !isActioning && onSpecClick(spec.id)}
-          className={`w-full h-[120px] bg-panel border rounded-lg p-3 text-left
-            flex flex-col justify-between overflow-hidden cursor-grab select-none
-            transition-all duration-150 hover:shadow-md hover:shadow-black/20 hover:border-accent/40
-            hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
+          onMouseDown={handleMouseDown}
+          onClick={handleClick}
+          className={`w-full bg-panel border rounded-lg p-3 text-left
+            flex flex-col gap-2 overflow-hidden cursor-grab select-none
+            transition-all duration-150
+            hover:shadow-md hover:shadow-black/20 hover:scale-[1.02] hover:-translate-y-0.5
+            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
             ${isActioning ? 'opacity-60 pointer-events-none' : ''} border-border`}
+          style={{
+            borderLeftWidth: 3,
+            borderLeftColor: colColor,
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.backgroundColor = `${colColor}0d`; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.backgroundColor = ''; }}
         >
+          {/* Row 1: Status icon + Title + Running badge */}
           <div className="min-w-0">
             <div className="flex items-start gap-1.5">
-              <GripVertical size={12} className="text-muted/30 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-              <h3 className="text-sm font-semibold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
+              <span className="shrink-0 mt-0.5">{statusIcon(colKey, colColor, hasActiveRun)}</span>
+              <h3 className="text-[14px] font-bold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
                 {slugToTitle(spec.id)}
               </h3>
               {hasActiveRun && (
@@ -1156,25 +1274,87 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
               )}
             </div>
           </div>
-          <div className="flex items-center justify-between gap-2 mt-auto min-w-0">
-            <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20">
-              <Layers size={10} />
-              {hasProgress ? `${passed}/${total} stories` : `${total} ${total === 1 ? 'story' : 'stories'}`}
+
+          {/* Row 2: Segmented story progress bar */}
+          {hasProgress ? (
+            <div
+              className="w-full h-1 rounded-full bg-surface-200 overflow-hidden flex"
+              title={`${passed} passed, ${failed} failed, ${pending} pending`}
+            >
+              {passed > 0 && (
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-300"
+                  style={{ width: `${(passed / total) * 100}%` }}
+                />
+              )}
+              {failed > 0 && (
+                <div
+                  className="h-full bg-red-500 transition-all duration-300"
+                  style={{ width: `${(failed / total) * 100}%` }}
+                />
+              )}
+              {pending > 0 && (
+                <div
+                  className="h-full bg-zinc-600 transition-all duration-300"
+                  style={{ width: `${(pending / total) * 100}%` }}
+                />
+              )}
+            </div>
+          ) : (
+            <div className="w-full h-1 rounded-full bg-surface-200 overflow-hidden">
+              <div className="h-full bg-zinc-600 w-full" />
+            </div>
+          )}
+
+          {/* Row 3: Model badge + time-ago + tag pills */}
+          <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+            {modelName && (
+              <span className={`shrink-0 inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border ${modelColorClass(spec.model)}`}>
+                {modelName}
+              </span>
+            )}
+            <span className="shrink-0 text-[10px] text-muted flex items-center gap-0.5">
+              <Clock size={9} />
+              {relativeTime(spec.approvedAt || spec.generatedAt)}
             </span>
-            <span className="shrink-0 text-[11px] text-muted flex items-center gap-1">
-              <Clock size={10} />
-              {relativeTime(spec.generatedAt)}
-            </span>
+            {visibleTags.map(tag => (
+              <span
+                key={tag}
+                className="shrink-0 inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20 truncate max-w-[80px]"
+                title={tag}
+              >
+                {tag}
+              </span>
+            ))}
+            {overflowCount > 0 && (
+              <span
+                role="button"
+                tabIndex={0}
+                className="shrink-0 inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-surface-100 text-muted border border-border cursor-pointer hover:text-[var(--text)] transition-colors"
+                onClick={(e) => { e.stopPropagation(); setTagPopoverSpecId(tagPopoverSpecId === spec.id ? null : spec.id); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); setTagPopoverSpecId(tagPopoverSpecId === spec.id ? null : spec.id); } }}
+              >
+                +{overflowCount}
+              </span>
+            )}
           </div>
-          {hasProgress && (
-            <div className="w-full h-1 rounded-full bg-surface-200 mt-1.5 overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all duration-300 ${progressPct === 100 ? 'bg-success' : 'bg-accent'}`}
-                style={{ width: `${progressPct}%` }}
-              />
+
+          {/* Tag overflow popover */}
+          {tagPopoverSpecId === spec.id && tags.length > 2 && (
+            <div className="flex flex-wrap gap-1 p-2 bg-surface-100 rounded-md border border-border -mt-1">
+              {tags.map(tag => (
+                <span
+                  key={tag}
+                  className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent/10 text-accent border border-accent/20"
+                >
+                  {tag}
+                </span>
+              ))}
             </div>
           )}
         </div>
+
+        {/* Approve / Deny action buttons — Draft column only, shown on hover */}
         {isDraft && (
           <div className={`absolute top-2 right-2 flex items-center gap-1 ${isActioning ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity duration-150`}>
             <button type="button" onClick={(e) => { e.stopPropagation(); handleApprove(spec.id); }} disabled={isActioning} title="Approve spec"
@@ -1192,7 +1372,20 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
   };
 
   return (
-    <div className="flex h-full board-columns-container">
+    <div className="flex flex-col h-full">
+      {/* Board header — compact toggle */}
+      <div className="flex items-center justify-end px-3 py-1.5 border-b border-border shrink-0">
+        <button
+          onClick={() => setCompactMode(!compactMode)}
+          title={compactMode ? 'Detailed cards' : 'Compact cards'}
+          className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition-colors
+            ${compactMode ? 'bg-accent/15 text-accent border border-accent/30' : 'text-muted hover:text-[var(--text)] border border-transparent hover:border-border'}`}
+        >
+          {compactMode ? <LayoutGrid size={12} /> : <AlignJustify size={12} />}
+          {compactMode ? 'Detailed' : 'Compact'}
+        </button>
+      </div>
+      <div className="flex flex-1 min-h-0 board-columns-container">
       <div ref={announceRef} aria-live="assertive" aria-atomic="true" className="sr-only" />
 
       {allColumns.map((col, colIdx) => {
@@ -1225,7 +1418,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
               flex: isCollapsed ? '0 0 40px' : '1 1 0%',
               transition: 'flex 300ms cubic-bezier(0.34, 1.56, 0.64, 1), width 300ms, min-width 300ms, max-width 300ms',
               overflow: 'hidden',
-              ...(isDragOver && !isCollapsed ? { border: `2px dashed ${col.color}`, backgroundColor: `${col.color}26` } : {}),
+              ...(isDragOver && !isCollapsed ? { border: `2px dashed ${col.color}`, backgroundColor: `${col.color}0d`, boxShadow: `inset 0 0 20px ${col.color}15` } : {}),
             }}
             onDragOver={isCollapsed ? undefined : (e) => handleDragOver(e, col.key)}
             onDragLeave={isCollapsed ? undefined : handleDragLeave}
@@ -1356,6 +1549,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate }: {
           onCancel={() => setDeleteDialog(null)}
         />
       )}
+      </div>
     </div>
   );
 }
