@@ -266,6 +266,26 @@
 }
 
 
+/* ─── ULT-002: Collapsible board columns — responsive ─────────────────── */
+
+@media (max-width: 639px) {
+  .board-columns-container {
+    flex-direction: row !important;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .board-columns-container > * {
+    flex: 0 0 85vw !important;
+    min-width: 85vw !important;
+    max-width: 85vw !important;
+    width: 85vw !important;
+    scroll-snap-align: start;
+    transition: none !important;
+  }
+}
+
 @keyframes slideInFromTopRight {
   from {
     opacity: 0;
