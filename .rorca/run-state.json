@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T09:49:51.465Z",
+  "lastUpdatedAt": "2026-03-09T09:59:22.633Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -93,6 +93,15 @@
       "finishedAt": "2026-03-09T09:49:51.464Z",
       "agentType": "claude",
       "elapsedMs": 1747566
+    },
+    {
+      "storyId": "ULT-011",
+      "title": "Spec Card Redesign — Rich Information Density",
+      "status": "passed",
+      "startedAt": "2026-03-09T09:50:05.086Z",
+      "finishedAt": "2026-03-09T09:59:22.633Z",
+      "agentType": "claude",
+      "elapsedMs": 557547
     }
   ],
   "failedStories": [],
