@@ -61,7 +61,7 @@ function SkillsList({ workspaceId }: { workspaceId: string }) {
             {skills.length} skill{skills.length !== 1 ? 's' : ''} installed
           </p>
           <button
-            onClick={() => navigateTo('marketplace')}
+            onClick={() => navigateTo('specs')}
             className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-accent hover:text-[var(--accent-hover)] transition-colors rounded"
           >
             <Store size={11} />
@@ -75,7 +75,7 @@ function SkillsList({ workspaceId }: { workspaceId: string }) {
             <Store size={24} className="mx-auto text-muted mb-3" />
             <p className="text-sm text-muted mb-3">No skills installed yet.</p>
             <button
-              onClick={() => navigateTo('marketplace')}
+              onClick={() => navigateTo('specs')}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded hover:bg-accent/90 transition-colors"
             >
               <Store size={12} />

@@ -211,7 +211,7 @@ export default function SpecForgePreview({
         if (res.runId && onNavigateToRun) {
           onNavigateToRun(res.runId);
         } else if (onNavigate) {
-          onNavigate('pipeline');
+          onNavigate('runs');
         }
       }
     } catch (err) {
@@ -418,7 +418,7 @@ export default function SpecForgePreview({
                   </div>
                   {!hasDirection && (
                     <button
-                      onClick={() => onNavigate?.('stack')}
+                      onClick={() => onNavigate?.('direction')}
                       className="text-xs text-accent hover:text-accent-hover transition-colors"
                     >
                       Configure Direction Stack
@@ -438,7 +438,7 @@ export default function SpecForgePreview({
           );
         })() : (
           <button
-            onClick={() => onNavigate?.('stack')}
+            onClick={() => onNavigate?.('direction')}
             className="flex items-center gap-1.5 text-xs text-warning/70 hover:text-warning transition-colors"
           >
             <Layers size={12} />

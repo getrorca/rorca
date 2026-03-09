@@ -76,7 +76,7 @@ export function renderWithProviders(
  * Usage:
  * ```tsx
  * mockApiResponse('/api/workspaces', { workspaces: [createMockWorkspace()] });
- * renderWithProviders(<HubPanel onNavigate={vi.fn()} />);
+ * renderWithProviders(<SpecsPanel onNavigate={vi.fn()} />);
  * ```
  */
 export function mockApiResponse(urlPattern: string | RegExp, data: unknown, status = 200): void {
@@ -206,7 +206,7 @@ export function createMockRun(overrides: Partial<MockRun> = {}): MockRun {
  * Usage:
  * ```tsx
  * const router = mockRouter();
- * renderWithProviders(<HubPanel onNavigate={router.onNavigate} />);
+ * renderWithProviders(<SpecsPanel onNavigate={router.onNavigate} />);
  * await userEvent.click(getByText('Settings'));
  * expect(router.onNavigate).toHaveBeenCalledWith('settings');
  * ```
