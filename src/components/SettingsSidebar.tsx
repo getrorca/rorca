@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import {
   Settings2, Layers, Route, Zap, Github, Variable, Play, Webhook, Users,
-  User, CreditCard, Keyboard, ArrowLeft, ScrollText, ChevronRight,
-  Cpu, Key, Code2, Bell, Plug,
+  User, CreditCard, Keyboard, ArrowLeft, ChevronRight,
+  Cpu, Key, Code2, Bell, Plug, Rss,
 } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
@@ -70,7 +70,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     id: 'system',
     label: 'System',
     items: [
-      { id: 'system',    label: 'Audit & Activity', icon: ScrollText },
+      { id: 'system',    label: 'Activity',           icon: Rss        },
       { id: 'api-keys',  label: 'API Keys',         icon: Key        },
       { id: 'developer', label: 'Developer Tools',  icon: Code2      },
     ],
