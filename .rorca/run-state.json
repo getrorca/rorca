@@ -2,7 +2,7 @@
   "specId": "rorca-ultimate-ux",
   "runId": 10,
   "startedAt": "2026-03-09T07:50:33.681Z",
-  "lastUpdatedAt": "2026-03-09T08:14:49.602Z",
+  "lastUpdatedAt": "2026-03-09T08:21:47.482Z",
   "completedStories": [
     {
       "storyId": "ULT-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-09T08:14:49.602Z",
       "agentType": "claude",
       "elapsedMs": 393956
+    },
+    {
+      "storyId": "ULT-004",
+      "title": "Unified Run Monitor — Merge Pipeline + RunView",
+      "status": "passed",
+      "startedAt": "2026-03-09T08:15:03.715Z",
+      "finishedAt": "2026-03-09T08:21:47.482Z",
+      "agentType": "claude",
+      "elapsedMs": 403767
     }
   ],
   "failedStories": [],

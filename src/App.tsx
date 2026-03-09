@@ -240,8 +240,9 @@ function AppRoutes() {
         {/* FR-004: Settings with nested sub-tab routes */}
         <Route path="settings" element={<Navigate to="/settings/general" replace />} />
         <Route path="settings/:tab" element={<PanelRoute panel="settings" />} />
-        {/* Slide-over nested routes — render Hub underneath, SlideOver opens on top */}
-        <Route path="runs/:runId" element={<PanelRoute panel="hub" />} />
+        {/* Run view — full-width panel (ULT-004) */}
+        <Route path="runs/:runId" element={<PanelRoute panel="pipeline" />} />
+        {/* Spec review — slide-over on top of hub */}
         <Route path="specs/:specId/review" element={<PanelRoute panel="hub" />} />
         {/* Catch-all — redirect to hub */}
         <Route path="*" element={<Navigate to="/" replace />} />
@@ -306,6 +307,8 @@ interface ActivePanelProps {
 }
 
 function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed }: ActivePanelProps) {
+  const { activeRunId, navigateBackFromRun } = useAppContentContext();
+
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
     case 'specs': return <SpecsPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
@@ -315,8 +318,12 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'team-direction': return <TeamDirectionPanel />;
     case 'memory': return <MemoryPanel />;
     case 'queue': return <QueuePanel onNavigate={onNavigate} onNavigateToSpecReview={onNavigateToSpecReview} />;
-    // Runs tabbed panel — embeds Pipeline Monitor, Worktrees, Compare
-    case 'pipeline': return <RunsTabbedPanel onNavigate={onNavigate} />;
+    // ULT-004: Pipeline — if activeRunId is set, show RunViewPanel full-width; otherwise show queue/history
+    case 'pipeline':
+      if (activeRunId !== null) {
+        return <RunViewPanel runId={activeRunId} onBack={navigateBackFromRun} onNavigate={onNavigate} />;
+      }
+      return <RunsTabbedPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} />;
     case 'worktrees': return <WorktreesPanel />;
     case 'compare': return <CompareRunsPanel onBack={() => onNavigate('pipeline')} />;
     case 'archive': return <ArchivePanel onNavigate={onNavigate} />;
@@ -371,6 +378,7 @@ function AppLayout() {
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [queueCount, setQueueCount] = useState(0);
   const [pendingSpecsCount, setPendingSpecsCount] = useState(0);
+  const [activeRunCount, setActiveRunCount] = useState(0);
 
   // Derive activeRunId from URL path /runs/:runId
   const runMatch = location.pathname.match(/^\/runs\/(\d+)/);
@@ -409,12 +417,28 @@ function AppLayout() {
     return () => clearInterval(interval);
   }, [workspaceId]);
 
+  // ULT-004: Poll active run count every 10s for Pipeline sidebar badge
+  useEffect(() => {
+    if (!workspaceId) { setActiveRunCount(0); return; }
+    const fetchActiveRuns = () => {
+      apiFetch<{ items: Array<{ status: string }>; total: number }>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
+        .then((data) => {
+          const count = data.items.filter(r => r.status === 'running' || r.status === 'paused').length;
+          setActiveRunCount(count);
+        })
+        .catch(() => setActiveRunCount(0));
+    };
+    fetchActiveRuns();
+    const interval = setInterval(fetchActiveRuns, 10_000);
+    return () => clearInterval(interval);
+  }, [workspaceId]);
+
   const navigateToRun = useCallback((runId: number) => {
     routerNavigate(`/runs/${runId}`);
   }, [routerNavigate]);
 
   const navigateBackFromRun = useCallback(() => {
-    routerNavigate(-1);
+    routerNavigate('/pipeline');
   }, [routerNavigate]);
 
   const navigateToSpecReview = useCallback((specId: string) => {
@@ -457,8 +481,6 @@ function AppLayout() {
 
   useHotkeys(hotkeys);
 
-  const showRunView = activeRunId !== null;
-
   const contextValue = useMemo<AppContentContextValue>(() => ({
     navigateToRun,
     navigateBackFromRun,
@@ -484,6 +506,7 @@ function AppLayout() {
                 mobileOpen={mobileNavOpen}
                 onMobileClose={() => setMobileNavOpen(false)}
                 queueCount={pendingSpecsCount}
+                activeRunCount={activeRunCount}
               />
             )}
           </ResizableSidebar>
@@ -501,18 +524,6 @@ function AppLayout() {
         <Outlet />
 
         {/* Slide-over Overlays */}
-        <SlideOver isOpen={showRunView} onClose={navigateBackFromRun} hideHeader={true}>
-          {showRunView && (
-            <Suspense fallback={<RunViewTerminalSkeleton />}>
-              <RunViewPanel
-                runId={activeRunId}
-                onBack={navigateBackFromRun}
-                onNavigate={handleNavigate}
-              />
-            </Suspense>
-          )}
-        </SlideOver>
-
         <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromRun} hideHeader={true}>
           {reviewSpecId !== null && (
             <SpecReviewPanel specId={reviewSpecId} onBack={navigateBackFromRun} onNavigate={handleNavigate} onNavigateToRun={navigateToRun} />
