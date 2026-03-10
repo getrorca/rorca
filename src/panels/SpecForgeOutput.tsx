@@ -33,6 +33,10 @@ export interface ContextSummary {
   gitMemory: boolean;
   estimatedTokens: number;
   modelContextWindow: number;
+  vectorHits?: number;
+  graphHits?: number;
+  retrievalTier?: 'cache' | 'search' | 'hybrid';
+  retrievalLatencyMs?: number;
 }
 
 export interface GeneratedSpec {
