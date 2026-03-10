@@ -21,9 +21,22 @@ import { db } from '../db/index';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export type SkillCategory =
+  | 'Frontend'
+  | 'Backend'
+  | 'Testing'
+  | 'DevOps'
+  | 'Security'
+  | 'Database'
+  | 'Workflow'
+  | 'Adversarial'
+  | 'General';
+
 export interface SkillMetadata {
   name: string;
   description: string;
+  category?: string;
+  tags?: string[];
 }
 
 export interface Skill {
@@ -53,6 +66,44 @@ export function parseFrontmatter(content: string): { yaml: string; body: string 
   const match = content.match(FRONTMATTER_RE);
   if (!match) return null;
   return { yaml: match[1], body: match[2] };
+}
+
+// ─── Auto-Categorization ────────────────────────────────────────────────────
+
+const CATEGORY_PATTERNS: Array<{ pattern: RegExp; category: SkillCategory }> = [
+  { pattern: /react|vue|angular|css|tailwind|frontend|ui|component|svelte|next\.?js/i, category: 'Frontend' },
+  { pattern: /api|server|express|backend|database|sql|prisma|graphql|rest/i, category: 'Backend' },
+  { pattern: /test|jest|vitest|playwright|cypress|qa|mocha|chai/i, category: 'Testing' },
+  { pattern: /docker|deploy|ci|cd|devops|cloud|kubernetes|terraform|aws|gcp|azure/i, category: 'DevOps' },
+  { pattern: /security|auth|xss|csrf|injection|redteam|white-hat|owasp|encrypt/i, category: 'Security' },
+  { pattern: /adversarial|assumption|devil|advocate|challenge|red.?team/i, category: 'Adversarial' },
+  { pattern: /workflow|orchestrat|build|compile|bundl|lint|format/i, category: 'Workflow' },
+];
+
+/**
+ * Auto-categorize a skill based on its name and description.
+ * Returns the first matching category, or 'General' if none match.
+ */
+export function inferCategory(name: string, description: string): SkillCategory {
+  const text = `${name} ${description}`;
+  for (const { pattern, category } of CATEGORY_PATTERNS) {
+    if (pattern.test(text)) return category;
+  }
+  return 'General';
+}
+
+/**
+ * Parse a tags value from YAML frontmatter.
+ * Accepts: YAML array, comma-separated string, or single string.
+ */
+function parseTags(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter((t): t is string => typeof t === 'string').map(t => t.trim()).filter(Boolean);
+  }
+  if (typeof raw === 'string') {
+    return raw.split(',').map(t => t.trim()).filter(Boolean);
+  }
+  return [];
 }
 
 // ─── SkillRegistry ──────────────────────────────────────────────────────────
@@ -116,18 +167,25 @@ export class SkillRegistry {
     }
 
     // Merge DB-persisted skills (don't overwrite filesystem-discovered ones)
-    const dbSkills = db.prepare('SELECT name, description, source, content FROM installed_skills').all() as {
+    const dbSkills = db.prepare('SELECT name, description, source, content, category, tags FROM installed_skills').all() as {
       name: string;
       description: string;
       source: string;
       content: string;
+      category: string | null;
+      tags: string | null;
     }[];
 
     for (const row of dbSkills) {
       const key = row.name.toLowerCase();
       if (!this.byName.has(key)) {
+        const category = row.category || inferCategory(row.name, row.description);
+        let tags: string[] = [];
+        if (row.tags) {
+          try { tags = JSON.parse(row.tags); } catch { tags = []; }
+        }
         const skill: Skill = {
-          metadata: { name: row.name, description: row.description },
+          metadata: { name: row.name, description: row.description, category, tags },
           promptText: row.content,
           filePath: '',
           source: row.source || 'db',
@@ -145,8 +203,10 @@ export class SkillRegistry {
    * If a skill with the same name exists, it's updated.
    */
   install(name: string, content: string, source: string = 'user'): Skill {
-    // Parse frontmatter to extract description
+    // Parse frontmatter to extract description, category, tags
     let description = '';
+    let category = '';
+    let tags: string[] = [];
     let promptText = content;
 
     const parsed = parseFrontmatter(content);
@@ -160,6 +220,10 @@ export class SkillRegistry {
           if (typeof rawYaml['name'] === 'string') {
             name = rawYaml['name'];
           }
+          if (typeof rawYaml['category'] === 'string') {
+            category = rawYaml['category'].trim();
+          }
+          tags = parseTags(rawYaml['tags']);
         }
       } catch {
         // YAML parse failure — use raw content as prompt text
@@ -167,18 +231,27 @@ export class SkillRegistry {
       promptText = parsed.body.trim();
     }
 
+    // Auto-categorize if no explicit category in frontmatter
+    if (!category) {
+      category = inferCategory(name, description);
+    }
+
+    const tagsJson = JSON.stringify(tags);
+
     db.prepare(`
-      INSERT INTO installed_skills (name, description, source, content, updated_at)
-      VALUES (?, ?, ?, ?, datetime('now'))
+      INSERT INTO installed_skills (name, description, source, content, category, tags, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(name) DO UPDATE SET
         description = excluded.description,
         source = excluded.source,
         content = excluded.content,
+        category = excluded.category,
+        tags = excluded.tags,
         updated_at = datetime('now')
-    `).run(name, description, source, content);
+    `).run(name, description, source, content, category, tagsJson);
 
     const skill: Skill = {
-      metadata: { name, description },
+      metadata: { name, description, category, tags },
       promptText,
       filePath: '',
       source,
@@ -249,7 +322,7 @@ export class SkillRegistry {
       // No frontmatter — use filename as name, no description
       const name = path.basename(filePath, '.md');
       const skill: Skill = {
-        metadata: { name, description: '' },
+        metadata: { name, description: '', category: inferCategory(name, ''), tags: [] },
         promptText: content.trim(),
         filePath,
         source,
@@ -286,9 +359,11 @@ export class SkillRegistry {
       ? raw['name'].trim()
       : path.basename(filePath, '.md');
     const description = typeof raw['description'] === 'string' ? raw['description'].trim() : '';
+    const category = typeof raw['category'] === 'string' ? raw['category'].trim() : inferCategory(name, description);
+    const tags = parseTags(raw['tags']);
 
     const skill: Skill = {
-      metadata: { name, description },
+      metadata: { name, description, category, tags },
       promptText: parsed.body.trim(),
       filePath,
       source,
