@@ -2,7 +2,7 @@
   "specId": "rorca-curated-skills-library",
   "runId": 14,
   "startedAt": "2026-03-10T02:18:43.908Z",
-  "lastUpdatedAt": "2026-03-10T02:27:43.762Z",
+  "lastUpdatedAt": "2026-03-10T02:32:41.792Z",
   "completedStories": [
     {
       "storyId": "SL-002",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-10T02:27:43.762Z",
       "agentType": "claude",
       "elapsedMs": 329902
+    },
+    {
+      "storyId": "SL-001",
+      "title": "GitHub Repository Skill Browser API",
+      "status": "passed",
+      "startedAt": "2026-03-10T02:27:57.542Z",
+      "finishedAt": "2026-03-10T02:32:41.791Z",
+      "agentType": "claude",
+      "elapsedMs": 284249
     }
   ],
   "failedStories": [],
