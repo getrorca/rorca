@@ -160,10 +160,10 @@ export default function SpecDetailSlideOver({
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity" />
 
-      {/* Panel — 480px desktop, full-width mobile */}
+      {/* Panel — 800px desktop, full-width mobile */}
       <div
         ref={panelRef}
-        className="relative flex flex-col w-full max-w-[480px] sm:max-w-[480px] h-full bg-bg border-l border-border animate-slideInRight shadow-[0_0_64px_rgba(0,0,0,0.8)]"
+        className="relative flex flex-col w-full max-w-[800px] h-full bg-bg border-l border-border animate-slideInRight shadow-[0_0_64px_rgba(0,0,0,0.8)]"
       >
         <SpecDetailContent
           specId={specId}
@@ -220,9 +220,11 @@ function SpecDetailContent({
   const [localStories, setLocalStories] = useState<Story[]>([]);
 
   // Run state
-  const [runState, setRunState] = useState<'idle' | 'triggering' | 'conflict' | 'success' | 'error'>('idle');
+  const [runState, setRunState] = useState<'idle' | 'triggering' | 'conflict' | 'queued' | 'success' | 'error'>('idle');
+  const [queuePosition, setQueuePosition] = useState(0);
   const [runError, setRunError] = useState('');
   const [showTriggerPopover, setShowTriggerPopover] = useState(false);
+  const [hasActiveRun, setHasActiveRun] = useState(false);
 
   // Add stories
   const [addState, setAddState] = useState<'idle' | 'form' | 'generating' | 'done' | 'error'>('idle');
@@ -274,6 +276,14 @@ function SpecDetailContent({
   // Reset tab on spec change
   useEffect(() => { setActiveTab('stories'); }, [specId]);
 
+  // Check if workspace has an active run (so we can show Queue button upfront)
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<{ items: Array<{ status: string }> }>(`/api/pipeline/runs?workspaceId=${workspaceId}&limit=5`)
+      .then(res => setHasActiveRun(res.items?.some(r => r.status === 'running' || r.status === 'paused') ?? false))
+      .catch(() => { /* ignore */ });
+  }, [workspaceId]);
+
   /* ─── Actions ─────────────────────────────────────────────────────── */
 
   const handleApprove = async () => {
@@ -311,17 +321,22 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
     setRunError('');
     try {
-      const res = await apiFetch<{ ok?: boolean; conflict?: boolean; activeRunId?: number; runId?: number }>(
+      const res = await apiFetch<{ ok?: boolean; conflict?: boolean; activeRunId?: number; runId?: number; queued?: boolean; position?: number }>(
         '/api/pipeline/trigger',
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ specPath: `forge/specs/approved/${summary.id}.json`, workspaceId, autoWorktree, ...(options?.forceSequential ? { forceSequential: true } : {}) }) },
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          specPath: `forge/specs/approved/${summary.id}.json`, workspaceId, autoWorktree,
+          ...(options?.forceSequential ? { forceSequential: true } : {}),
+          ...(options?.queue ? { queue: true } : {}),
+        }) },
       );
       if (res.conflict) setRunState('conflict');
+      else if (res.queued) { setQueuePosition(res.position ?? 1); setRunState('queued'); setTimeout(() => { onClose(); onNavigate?.('runs'); }, 2000); }
       else { setRunState('success'); setTimeout(() => { onClose(); onNavigate?.('runs'); }, 1200); }
     } catch (err) { setRunError(err instanceof Error ? err.message : 'Failed to trigger run'); setRunState('error'); }
   };
@@ -492,15 +507,9 @@ function SpecDetailContent({
           {/* Run in Pipeline */}
           {canRun && (
             <div className="relative">
-              {runState === 'conflict' ? (
-                <div className="rounded border border-warning/30 bg-warning/10 p-3 space-y-2">
-                  <p className="text-xs text-warning font-medium">Active run in progress. Run in a new worktree?</p>
-                  <div className="flex gap-2">
-                    <button onClick={() => handleRun(true)} className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium bg-accent text-white hover:opacity-90">
-                      <GitBranch size={12} /> Run in worktree
-                    </button>
-                    <button onClick={() => setRunState('idle')} className="px-3 py-1.5 rounded text-xs font-medium bg-panel border border-border text-muted hover:text-text">Cancel</button>
-                  </div>
+              {runState === 'queued' ? (
+                <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                  <Clock size={14} /> Queued at position {queuePosition} — switching to Runs...
                 </div>
               ) : runState === 'success' ? (
                 <div className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-success/15 text-success border border-success/30">
@@ -512,10 +521,27 @@ function SpecDetailContent({
                     <TriggerPopover loading={runState === 'triggering'} onTrigger={handleRun} onClose={() => setShowTriggerPopover(false)}
                       specPath={`forge/specs/approved/${summary!.id}.json`} workspaceId={workspaceId ?? undefined} />
                   )}
-                  <button onClick={() => setShowTriggerPopover(true)} disabled={runState === 'triggering'}
-                    className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity">
-                    {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting run...</> : <><Play size={14} /> Run in Pipeline{deferredCount > 0 && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-[var(--kbd-bg)]">{deferredCount} deferred</span>}</>}
-                  </button>
+                  {hasActiveRun && runState !== 'triggering' && (
+                    <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 mb-2 flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                      <span className="text-xs text-amber-300 flex-1">A run is active in this workspace</span>
+                    </div>
+                  )}
+                  <div className={hasActiveRun ? 'flex gap-2' : ''}>
+                    <button onClick={() => setShowTriggerPopover(true)} disabled={runState === 'triggering'}
+                      className={`flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity ${hasActiveRun ? 'flex-1' : 'w-full'}`}>
+                      {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting...</> : <><Play size={14} /> {hasActiveRun ? 'Run Now' : 'Run in Pipeline'}{deferredCount > 0 && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-[var(--kbd-bg)]">{deferredCount} deferred</span>}</>}
+                    </button>
+                    {hasActiveRun && (
+                      <button
+                        onClick={() => handleRun(false, { queue: true })}
+                        disabled={runState === 'triggering'}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-60 transition-colors"
+                      >
+                        <Clock size={14} /> Queue Next
+                      </button>
+                    )}
+                  </div>
                 </>
               )}
               {runState === 'error' && <p className="text-xs text-error mt-1">{runError}</p>}

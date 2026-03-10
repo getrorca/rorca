@@ -9,7 +9,7 @@ import { db } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
-import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-client';
+import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
@@ -1626,6 +1626,38 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       },
     };
 
+    // 14b. Build contextSummary for transparency card
+    const skillNamesList = catalogs.skillCatalog
+      ? catalogs.skillCatalog.split('\n').map(l => l.split(':')[0]?.trim()).filter(Boolean)
+      : [];
+    const memoryEntryCount = catalogs.memoryMd
+      ? (catalogs.memoryMd.match(/^## \d{4}-\d{2}-\d{2}/gm) || []).length
+      : 0;
+    // Estimate total prompt tokens: direction stack + catalog sections + prompt chrome
+    const catalogTokens = Math.ceil(
+      (catalogs.skillCatalog.length + catalogs.personaCatalog.length +
+       catalogs.memoryMd.length + catalogs.agentsMd.length + templateContext.length) / 4
+    );
+    const estimatedTokens = synthResult.meta.totalTokens + catalogTokens;
+    const modelInfo = getModelInfo(resolvedModel);
+    const modelContextWindow = modelInfo?.contextWindow ?? 200000;
+
+    const contextSummary = {
+      directionLayers: {
+        l1: synthResult.meta.standards,
+        l2: { present: synthResult.meta.conventions, domain: domain || null },
+        l3: synthResult.meta.project,
+      },
+      skills: skillNamesList,
+      memoryEntries: memoryEntryCount,
+      agentsMd: !!catalogs.agentsMd,
+      template: templateId || null,
+      schemaSnapshot: synthResult.meta.schema,
+      gitMemory: synthResult.meta.memory,
+      estimatedTokens,
+      modelContextWindow,
+    };
+
     // 15. Write spec to workspace directory
     let specPath: string;
     let diagramsPath: string;
@@ -1659,6 +1691,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       specPath,
       diagramsPath,
       contextUsed,
+      contextSummary,
       ...(multiPass ? {
         multiPass: true,
         passCount: 6,

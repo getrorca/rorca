@@ -623,6 +623,12 @@ export function runMigrations() {
     db.pragma('foreign_keys = ON');
   }
 
+  // Ensure direction_layers unique index exists (required for ON CONFLICT upsert in PUT /api/direction)
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_direction_layers_unique
+      ON direction_layers(layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''));
+  `);
+
   // CA-004: Add forked_from column to convention_packs (for pack fork tracking)
   const cpCols = db.prepare(`PRAGMA table_info(convention_packs)`).all() as Array<{ name: string }>;
   if (cpCols.length > 0 && !cpCols.some(c => c.name === 'forked_from')) {
