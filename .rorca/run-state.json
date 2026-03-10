@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-wiring",
   "runId": 28,
   "startedAt": "2026-03-10T22:49:18.582Z",
-  "lastUpdatedAt": "2026-03-10T22:59:08.530Z",
+  "lastUpdatedAt": "2026-03-10T23:03:57.429Z",
   "completedStories": [
     {
       "storyId": "SW-001",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-10T22:59:08.529Z",
       "agentType": "claude",
       "elapsedMs": 214779
+    },
+    {
+      "storyId": "SW-003",
+      "title": "Wire retrieveContext() into Spec Generation Prompt",
+      "status": "passed",
+      "startedAt": "2026-03-10T22:59:32.157Z",
+      "finishedAt": "2026-03-10T23:03:57.429Z",
+      "agentType": "claude",
+      "elapsedMs": 265272
     }
   ],
   "failedStories": [],

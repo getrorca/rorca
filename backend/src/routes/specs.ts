@@ -21,6 +21,7 @@ import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
 import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
+import { retrieveContext } from '../lib/memory-router';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 
 const BRIEF_STOP_WORDS = new Set([
@@ -725,6 +726,29 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     });
     const synthesized = synthResult.text;
 
+    // 6a. Semantic retrieval via memory-router (CAG/RAG + knowledge graph)
+    let semanticGraphSection = '';
+    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+    try {
+      const retrieved = await retrieveContext(Number(workspaceId), brief, {
+        maxTokens: 16000,
+        includeGraph: true,
+      });
+      if (retrieved.graphSection) {
+        semanticGraphSection = retrieved.graphSection;
+      }
+      retrievalMeta = {
+        cagHits: retrieved.meta.cagHits,
+        ragHits: retrieved.meta.ragHits,
+        graphHits: retrieved.meta.graphHits,
+        latencyMs: retrieved.meta.latencyMs,
+        tier: retrieved.meta.tier,
+      };
+    } catch (err) {
+      // Graph/embeddings unavailable — fall through to plaintext context
+      logger.warn({ err, workspaceId }, '[Specs] retrieveContext failed — using plaintext context only');
+    }
+
     // 6b. Fetch template if templateId provided
     let templateContext = '';
     if (templateId) {
@@ -780,6 +804,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       gitMemory: synthResult.meta.memory,
       estimatedTokens,
       modelContextWindow,
+      ...(retrievalMeta ? {
+        vectorHits: retrievalMeta.ragHits,
+        graphHits: retrievalMeta.graphHits,
+        retrievalTier: retrievalMeta.tier,
+        retrievalLatencyMs: retrievalMeta.latencyMs,
+      } : {}),
     };
 
     /** Build a structured error response for spec generation failures. */
@@ -869,6 +899,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       '=== END INSTRUCTIONS ===',
       '',
       synthesized,
+      ...(semanticGraphSection ? [
+        '',
+        '=== KNOWLEDGE GRAPH CONTEXT ===',
+        semanticGraphSection,
+        '=== END KNOWLEDGE GRAPH CONTEXT ===',
+        '',
+      ] : []),
       ...catalogSections,
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
