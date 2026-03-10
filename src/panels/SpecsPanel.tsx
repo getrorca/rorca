@@ -103,6 +103,8 @@ interface KanbanSpec {
   passedStories?: number;
   failedStories?: number;
   activeRunId?: number;
+  activeRunStatus?: 'running' | 'queued';
+  queuePosition?: number;
   model?: string;
 }
 
@@ -585,7 +587,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   const [retrying, setRetrying] = useState(false);
   const hasLoadedOnce = useRef(false);
   const [actionLoadingMap, setActionLoadingMap] = useState<Record<string, 'approve' | 'deny' | null>>({});
-  const [activeRunSpecs, setActiveRunSpecs] = useState<Set<string>>(new Set());
+  const [activeRunSpecs, setActiveRunSpecs] = useState<Map<string, 'running' | 'queued'>>(new Map());
   const sseFetchTimer = useRef<ReturnType<typeof setTimeout>>();
 
   // Drag state — refs for performance (no re-renders during drag)
@@ -645,6 +647,12 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     try {
       const res = await apiFetch<KanbanResponse>(`/api/specs/kanban?workspaceId=${workspaceId}`);
       setKanban(res);
+      // Sync active run statuses from kanban response
+      const runStatuses = new Map<string, 'running' | 'queued'>();
+      for (const spec of res.inProgress) {
+        if (spec.activeRunId) runStatuses.set(spec.id, spec.activeRunStatus ?? 'running');
+      }
+      setActiveRunSpecs(runStatuses);
       setError(null);
       hasLoadedOnce.current = true;
     } catch (err: any) {
@@ -676,10 +684,10 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'spec_rejected', 'story_passed', 'story_failed'];
     if (!KANBAN_EVENTS.includes(event.event_type)) return;
     if (event.event_type === 'run_started' && event.spec_id) {
-      setActiveRunSpecs((prev) => new Set(prev).add(event.spec_id!));
+      setActiveRunSpecs((prev) => new Map(prev).set(event.spec_id!, 'running'));
     }
     if (event.event_type === 'run_finished' && event.spec_id) {
-      setActiveRunSpecs((prev) => { const next = new Set(prev); next.delete(event.spec_id!); return next; });
+      setActiveRunSpecs((prev) => { const next = new Map(prev); next.delete(event.spec_id!); return next; });
     }
     debouncedFetchKanban();
   });
@@ -1311,7 +1319,8 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   }
 
   // Status icon for card
-  const statusIcon = (colKey: string, colColor: string, hasActiveRun: boolean) => {
+  const statusIcon = (colKey: string, colColor: string, hasActiveRun: boolean, isQueued: boolean) => {
+    if (hasActiveRun && isQueued) return <Clock size={10} className="text-amber-400" />;
     if (hasActiveRun) return <Play size={10} className="fill-accent text-accent" />;
     if (colKey === 'draft') return <Pencil size={10} className="text-muted" />;
     if (colKey === 'done') return <CheckCircle2 size={10} className="text-success" />;
@@ -1329,7 +1338,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     const hasProgress = storyProgress[spec.id] !== undefined && colKey !== 'draft';
     const actionLoading = actionLoadingMap[spec.id] ?? null;
     const isActioning = actionLoading !== null;
-    const hasActiveRun = activeRunSpecs.has(spec.id);
+    const runStatus = activeRunSpecs.get(spec.id);
+    const hasActiveRun = runStatus !== undefined;
+    const isQueued = runStatus === 'queued';
     const modelName = modelShortName(spec.model);
     const tags = spec.tags || [];
     const visibleTags = tags.slice(0, 2);
@@ -1378,7 +1389,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
               ${isActioning ? 'opacity-60 pointer-events-none' : ''} border-border`}
             style={{ borderLeftWidth: 3, borderLeftColor: colColor }}
           >
-            {statusIcon(colKey, colColor, hasActiveRun)}
+            {statusIcon(colKey, colColor, hasActiveRun, isQueued)}
             <span className="text-[13px] font-medium text-[var(--text)] truncate flex-1">{slugToTitle(spec.id)}</span>
             <span className="shrink-0 text-[10px] text-muted">{total}s</span>
           </div>
@@ -1422,13 +1433,13 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
           {/* Row 1: Status icon + Title + Running badge */}
           <div className="min-w-0">
             <div className="flex items-start gap-1.5">
-              <span className="shrink-0 mt-0.5">{statusIcon(colKey, colColor, hasActiveRun)}</span>
+              <span className="shrink-0 mt-0.5">{statusIcon(colKey, colColor, hasActiveRun, isQueued)}</span>
               <h3 className="text-[14px] font-bold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
                 {slugToTitle(spec.id)}
               </h3>
               {hasActiveRun && (
-                <span className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30 animate-pulse">
-                  <Play size={8} className="fill-current" /> Running
+                <span className={`shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${isQueued ? 'bg-amber-400/15 text-amber-400 border-amber-400/30' : 'bg-accent/15 text-accent border-accent/30 animate-pulse'}`}>
+                  {isQueued ? <><Clock size={8} /> Queued{spec.queuePosition ? ` #${spec.queuePosition}` : ''}</> : <><Play size={8} className="fill-current" /> Running</>}
                 </span>
               )}
             </div>

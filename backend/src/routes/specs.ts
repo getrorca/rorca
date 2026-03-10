@@ -668,6 +668,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
   let resolvedModel = 'unknown';
   let usedProvider = 'unknown';
   let precomputedContextSummary: Record<string, unknown> | undefined;
+  const genStartTime = Date.now();
+  let genSlug = 'unknown';
 
   try {
     const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
@@ -926,6 +928,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const slug = title
       ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
       : briefToSlug(brief);
+    genSlug = slug;
 
     if (multiPass) {
       // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
@@ -1770,6 +1773,17 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       multiPass,
     }));
 
+    // 12b. Persist generation log
+    db.prepare(
+      `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'completed')`
+    ).run(
+      slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+      Date.now() - genStartTime,
+      tokenUsage.inputTokens, tokenUsage.outputTokens,
+      JSON.stringify(precomputedContextSummary ?? {}),
+    );
+
     // 13. Snapshot existing spec as a version if regenerating same slug
     const { pendingDir: genPendingDir, approvedDir: genApprovedDir } = specsDirs(workspace.path as string);
     const existingPending = path.join(genPendingDir, `${slug}.json`);
@@ -1846,6 +1860,21 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       const ctxWindow = (precomputedContextSummary as any).modelContextWindow ?? 200000;
       suggestion = `The prompt exceeds the model's context window. Current: ~${Math.round(estTokens / 1000)}K tokens, max: ~${Math.round(ctxWindow / 1000)}K. Reduce direction stack content or remove skills.`;
     }
+
+    // Persist failed generation log
+    try {
+      db.prepare(
+        `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, error, error_category, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'failed')`
+      ).run(
+        genSlug, resolvedModel,
+        typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+        Date.now() - genStartTime,
+        JSON.stringify(precomputedContextSummary ?? {}),
+        error.message, category,
+      );
+    } catch { /* best-effort logging */ }
+
     res.status(500).json({
       error: error.message,
       category,
@@ -2555,6 +2584,8 @@ interface KanbanSpec {
   passedStories?: number;
   failedStories?: number;
   activeRunId?: number;
+  activeRunStatus?: 'running' | 'queued';
+  queuePosition?: number;
   model?: string;
 }
 
@@ -2618,15 +2649,15 @@ router.get('/kanban', (req: Request, res: Response) => {
 
     // Detect active runs and completed runs per spec
     const runs = db.prepare(
-      `SELECT id, spec_path, status FROM pipeline_runs WHERE workspace_id = ? ORDER BY id DESC`
-    ).all(workspaceId) as { id: number; spec_path: string; status: string }[];
+      `SELECT id, spec_path, status, queue_position FROM pipeline_runs WHERE workspace_id = ? ORDER BY id DESC`
+    ).all(workspaceId) as { id: number; spec_path: string; status: string; queue_position: number | null }[];
 
-    const activeRunBySlug = new Map<string, number>();
+    const activeRunBySlug = new Map<string, { id: number; status: 'running' | 'queued'; queuePosition?: number }>();
     const completedSlugs = new Set<string>();
     for (const run of runs) {
       const slug = run.spec_path.replace(/^.*\//, '').replace(/\.json$/, '');
       if ((run.status === 'running' || run.status === 'queued') && !activeRunBySlug.has(slug)) {
-        activeRunBySlug.set(slug, run.id);
+        activeRunBySlug.set(slug, { id: run.id, status: run.status as 'running' | 'queued', queuePosition: run.queue_position ?? undefined });
       }
       if (run.status === 'done' || run.status === 'completed') {
         completedSlugs.add(slug);
@@ -2668,19 +2699,19 @@ router.get('/kanban', (req: Request, res: Response) => {
     const done: KanbanSpec[] = [];
 
     for (const spec of approvedSpecs) {
-      const activeRunId = activeRunBySlug.get(spec.id);
+      const activeRun = activeRunBySlug.get(spec.id);
       const isCompleted = completedSlugs.has(spec.id);
       const passed = storyProgress.get(spec.id);
 
       const failed = storyFailed.get(spec.id);
-      if (isCompleted && !activeRunId) {
+      if (isCompleted && !activeRun) {
         done.push({ ...spec, passedStories: passed, failedStories: failed });
       } else {
         inProgress.push({
           ...spec,
           passedStories: passed,
           failedStories: failed,
-          ...(activeRunId ? { activeRunId } : {}),
+          ...(activeRun ? { activeRunId: activeRun.id, activeRunStatus: activeRun.status, ...(activeRun.queuePosition ? { queuePosition: activeRun.queuePosition } : {}) } : {}),
         });
       }
     }
@@ -4956,6 +4987,55 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
   }
 });
 
+// ─── LST-004: GET /:specId/generation-log — Retrieve generation log(s) ──────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/generation-log:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get generation log for a spec
+ *     operationId: getSpecGenerationLog
+ *     description: Returns the most recent generation log for this spec slug, or all logs if ?all=true.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: all
+ *         schema: { type: string }
+ *         description: If "true", returns all generation logs for this spec
+ *     responses:
+ *       200:
+ *         description: Generation log(s)
+ *       404:
+ *         description: No generation log found
+ */
+router.get('/:specId/generation-log', (req: Request, res: Response) => {
+  const { specId } = req.params;
+  const all = req.query.all === 'true';
+
+  if (all) {
+    const logs = db.prepare(
+      `SELECT * FROM spec_generation_logs WHERE spec_slug = ? ORDER BY created_at DESC`
+    ).all(specId);
+    res.json({ logs });
+    return;
+  }
+
+  const log = db.prepare(
+    `SELECT * FROM spec_generation_logs WHERE spec_slug = ? ORDER BY created_at DESC LIMIT 1`
+  ).get(specId);
+
+  if (!log) {
+    res.status(404).json({ error: 'No generation log found' });
+    return;
+  }
+
+  res.json(log);
+});
+
 // ─── DELETE /:specId — Hard-delete a spec (any status) ──────────────────────
 
 /**
@@ -5020,6 +5100,9 @@ router.delete('/:specId', (req: Request, res: Response) => {
       res.status(404).json({ error: `Spec '${specId}' not found` });
       return;
     }
+
+    // Clean up generation logs for this spec
+    db.prepare(`DELETE FROM spec_generation_logs WHERE spec_slug = ?`).run(specId);
 
     db.prepare(
       `INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_deleted', ?, 'user', ?)`
