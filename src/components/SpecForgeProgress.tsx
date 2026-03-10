@@ -90,13 +90,6 @@ const MULTI_PASS_STAGES: StageConfig[] = [
   { id: 'pass6', label: 'Pass 6: Spec Verifier', icon: ClipboardCheckIcon },
 ];
 
-const STAGE_TRANSITIONS: Record<GenerationStage, number> = {
-  analyzing: 0,
-  context: 2500,
-  generating: 6000,
-  validating: 0,
-};
-
 function formatElapsed(ms: number): string {
   const secs = Math.floor(ms / 1000);
   if (secs < 60) return `${secs}s`;
@@ -330,9 +323,13 @@ interface SpecForgeProgressProps {
   onRetry?: () => void;
   /** Open model picker for retry with different model */
   onRetryWithModel?: () => void;
+  /** Model used for generation (displayed as badge) */
+  model?: string;
+  /** Provider used for generation */
+  provider?: string;
 }
 
-export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, multiPass, specSlug, onRetry, onRetryWithModel }: SpecForgeProgressProps) {
+export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, multiPass, specSlug, onRetry, onRetryWithModel, model, provider }: SpecForgeProgressProps) {
   const stages = multiPass ? MULTI_PASS_STAGES : SINGLE_PASS_STAGES;
 
   // Single-pass: simulated index-based stage tracking
@@ -340,6 +337,7 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
   const [stageStartTimes, setStageStartTimes] = useState<Record<string, number>>({});
   const [elapsed, setElapsed] = useState<Record<string, number>>({});
   const [completedPasses, setCompletedPasses] = useState<Set<string>>(new Set());
+  const [totalElapsed, setTotalElapsed] = useState(0);
   const startTimeRef = useRef(Date.now());
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const sseRef = useRef<EventSource | null>(null);
@@ -390,11 +388,12 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
     }
   });
 
-  // Tick elapsed times
+  // Tick elapsed times + total wall clock
   useEffect(() => {
     if (!isActive) return;
     timerRef.current = setInterval(() => {
       const now = Date.now();
+      setTotalElapsed(now - startTimeRef.current);
       setElapsed((prev) => {
         const next = { ...prev };
         const startTime = stageStartTimes[currentStage];
@@ -431,12 +430,15 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
     });
   }, [multiPass, stages, stageStartTimes]);
 
-  // Single-pass: timer-based transitions
+  // Single-pass: advance to 'context' immediately (context assembly is synchronous on the backend),
+  // then to 'generating' 2s later (LLM is now processing). No fake delays.
   useEffect(() => {
     if (!isActive || multiPass) return;
-    const t1 = setTimeout(() => advanceStage('context'), STAGE_TRANSITIONS.context);
-    const t2 = setTimeout(() => advanceStage('generating'), STAGE_TRANSITIONS.generating);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
+    // Context assembly happens instantly on backend — advance right away
+    advanceStage('context');
+    // After 2s the LLM is processing — this is a real minimum (POST fires, backend assembles context ~instantly)
+    const t = setTimeout(() => advanceStage('generating'), 2000);
+    return () => clearTimeout(t);
   }, [isActive, multiPass, advanceStage]);
 
   // When API call completes (single-pass: jump to validating; multi-pass: mark all done)
@@ -451,11 +453,33 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
 
   const currentIdx = stages.findIndex((s) => s.id === currentStage);
 
+  const totalSecs = Math.floor(totalElapsed / 1000);
+
   return (
     <div className="space-y-3">
-      {multiPass && (
-        <div className="text-xs text-accent font-medium px-1">6-Pass Pipeline</div>
-      )}
+      {/* Header: model badge + elapsed time */}
+      <div className="flex items-center justify-between px-1">
+        <div className="flex items-center gap-2">
+          {multiPass && (
+            <span className="text-xs text-accent font-medium">6-Pass Pipeline</span>
+          )}
+          {model && (
+            <span className="inline-flex items-center gap-1.5 text-xs bg-surface border border-border rounded-full px-2.5 py-0.5">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3 h-3 text-accent">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+              </svg>
+              <span className="font-medium text-text">{model}</span>
+              {provider && <span className="text-muted">({provider})</span>}
+            </span>
+          )}
+        </div>
+        {isActive && (
+          <span className="text-xs font-mono tabular-nums text-muted">
+            {formatElapsed(totalElapsed)}
+          </span>
+        )}
+      </div>
+
       <div
         className="rounded-lg border border-border bg-panel/50 overflow-hidden"
         role="progressbar"
@@ -492,7 +516,7 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
                 {isCompleted ? <CheckIcon /> : stage.icon}
               </div>
 
-              {/* Label */}
+              {/* Label — show model name in "Generating" stage */}
               <span className={`text-sm flex-1 transition-colors duration-300 ${
                 isCompleted
                   ? 'text-muted'
@@ -500,7 +524,7 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
                     ? 'text-text font-medium'
                     : 'text-muted/40'
               }`}>
-                {stage.label}
+                {stage.id === 'generating' && model ? `Calling ${model}...` : stage.label}
               </span>
 
               {/* Elapsed time */}
@@ -523,6 +547,24 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
           );
         })}
       </div>
+
+      {/* Indeterminate progress bar when generating */}
+      {isActive && currentStage === 'generating' && !apiDone && (
+        <div className="h-0.5 w-full bg-border/30 rounded-full overflow-hidden">
+          <div className="h-full w-1/3 bg-accent rounded-full animate-[shimmer_1.5s_ease-in-out_infinite]"
+            style={{ animation: 'shimmer 1.5s ease-in-out infinite' }}
+          />
+          <style>{`@keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }`}</style>
+        </div>
+      )}
+
+      {/* Reassurance messages for long generations */}
+      {isActive && !error && totalSecs > 90 && totalSecs <= 180 && (
+        <p className="text-xs text-muted px-1">Complex specs take longer — still working...</p>
+      )}
+      {isActive && !error && totalSecs > 180 && (
+        <p className="text-xs text-amber-400 px-1">This is taking unusually long. You can cancel and retry with a simpler brief.</p>
+      )}
 
       {/* Error state — structured error card */}
       {error && (
