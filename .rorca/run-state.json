@@ -2,7 +2,7 @@
   "specId": "rorca-distribution",
   "runId": 26,
   "startedAt": "2026-03-10T22:02:11.346Z",
-  "lastUpdatedAt": "2026-03-10T22:07:23.414Z",
+  "lastUpdatedAt": "2026-03-10T22:10:00.370Z",
   "completedStories": [
     {
       "storyId": "DIST-006",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-10T22:07:23.413Z",
       "agentType": "claude",
       "elapsedMs": 216908
+    },
+    {
+      "storyId": "DIST-008",
+      "title": "Install Script (curl | sh)",
+      "status": "passed",
+      "startedAt": "2026-03-10T22:07:46.018Z",
+      "finishedAt": "2026-03-10T22:10:00.370Z",
+      "agentType": "claude",
+      "elapsedMs": 134352
     }
   ],
   "failedStories": [],
