@@ -20,6 +20,7 @@ import {
   Layers,
   ChevronRight,
   AlertTriangle,
+  Upload,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { renderMarkdown } from '../lib/renderMarkdown';
@@ -110,6 +111,8 @@ interface SkillSummary {
   description: string;
   source: string;
   filePath: string;
+  category?: string;
+  tags?: string[];
 }
 
 /* ─── Helpers ──────────────────────────────────────────────────── */
@@ -153,7 +156,7 @@ const TABS: { id: MarketplaceTab; label: string; icon: typeof Package }[] = [
   { id: 'packs', label: 'Convention Packs', icon: Package },
 ];
 
-export default function MarketplaceView() {
+export default function MarketplaceView({ activeSpecId }: { activeSpecId?: string }) {
   const [activeTab, setActiveTab] = useState<MarketplaceTab>('skills');
 
   return (
@@ -180,7 +183,7 @@ export default function MarketplaceView() {
 
       {/* Tab content */}
       <div className="flex-1 overflow-hidden">
-        {activeTab === 'skills' && <SkillsTab />}
+        {activeTab === 'skills' && <SkillsTab activeSpecId={activeSpecId} />}
         {activeTab === 'templates' && <TemplatesTab />}
         {activeTab === 'packs' && <PacksTab />}
       </div>
@@ -189,27 +192,51 @@ export default function MarketplaceView() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   SKILLS TAB — search-engine-style skills.sh browser
+   SKILLS TAB — curated skills library + three source sub-tabs
    ═══════════════════════════════════════════════════════════════════ */
 
-type SkillCategory = 'All' | 'Frontend' | 'Backend' | 'Testing' | 'DevOps' | 'Security' | 'Database';
+type SkillCategory = 'All' | 'Frontend' | 'Backend' | 'Testing' | 'DevOps' | 'Security' | 'Adversarial' | 'Workflow' | 'General';
+
+const SKILL_CATEGORIES: SkillCategory[] = ['All', 'Frontend', 'Backend', 'Testing', 'DevOps', 'Security', 'Adversarial', 'Workflow', 'General'];
+
+const CATEGORY_COLORS: Record<Exclude<SkillCategory, 'All'>, string> = {
+  Frontend: 'bg-blue-500/15 text-blue-400',
+  Backend: 'bg-green-500/15 text-green-400',
+  Testing: 'bg-amber-500/15 text-amber-400',
+  DevOps: 'bg-purple-500/15 text-purple-400',
+  Security: 'bg-red-500/15 text-red-400',
+  Adversarial: 'bg-pink-500/15 text-pink-400',
+  Workflow: 'bg-cyan-500/15 text-cyan-400',
+  General: 'bg-zinc-500/15 text-zinc-400',
+};
 
 const SKILL_CATEGORY_KEYWORDS: Record<Exclude<SkillCategory, 'All'>, string[]> = {
   Frontend: ['react', 'vue', 'angular', 'svelte', 'css', 'tailwind', 'frontend', 'ui', 'component', 'next', 'nuxt', 'astro'],
-  Backend: ['node', 'express', 'api', 'server', 'backend', 'rest', 'graphql', 'fastify', 'nest', 'hono'],
+  Backend: ['node', 'express', 'api', 'server', 'backend', 'rest', 'graphql', 'fastify', 'nest', 'hono', 'database', 'sql', 'postgres', 'mysql', 'sqlite', 'prisma', 'drizzle', 'redis', 'mongo', 'migration', 'schema'],
   Testing: ['test', 'jest', 'vitest', 'playwright', 'cypress', 'testing', 'coverage', 'e2e', 'unit', 'qa'],
   DevOps: ['docker', 'ci', 'cd', 'deploy', 'kubernetes', 'terraform', 'aws', 'gcp', 'azure', 'devops', 'pipeline', 'github-actions'],
   Security: ['security', 'auth', 'oauth', 'jwt', 'encryption', 'vulnerability', 'cors', 'csrf', 'xss', 'sanitize'],
-  Database: ['database', 'sql', 'postgres', 'mysql', 'sqlite', 'prisma', 'drizzle', 'redis', 'mongo', 'migration', 'schema'],
+  Adversarial: ['adversarial', 'assumption', 'devil', 'red-team', 'attack', 'challenge'],
+  Workflow: ['workflow', 'orchestration', 'build', 'compile', 'lint', 'format', 'git'],
+  General: [],
 };
 
-const SKILL_CATEGORIES: SkillCategory[] = ['All', 'Frontend', 'Backend', 'Testing', 'DevOps', 'Security', 'Database'];
-
-function skillMatchesCategory(skill: { name: string; description?: string | null }, category: SkillCategory): boolean {
-  if (category === 'All') return true;
-  const keywords = SKILL_CATEGORY_KEYWORDS[category];
+function inferSkillCategory(skill: { name: string; description?: string | null; category?: string | null }): Exclude<SkillCategory, 'All'> {
+  if (skill.category) {
+    const cat = skill.category as Exclude<SkillCategory, 'All'>;
+    if (CATEGORY_COLORS[cat]) return cat;
+  }
   const haystack = `${skill.name} ${skill.description ?? ''}`.toLowerCase();
-  return keywords.some(kw => haystack.includes(kw));
+  for (const cat of Object.keys(SKILL_CATEGORY_KEYWORDS) as Exclude<SkillCategory, 'All'>[]) {
+    if (cat === 'General') continue;
+    if (SKILL_CATEGORY_KEYWORDS[cat].some(kw => haystack.includes(kw))) return cat;
+  }
+  return 'General';
+}
+
+function skillMatchesCategory(skill: { name: string; description?: string | null; category?: string | null }, category: SkillCategory): boolean {
+  if (category === 'All') return true;
+  return inferSkillCategory(skill) === category;
 }
 
 interface SkillSearchResult {
@@ -225,29 +252,44 @@ interface SkillSuggestion {
   installed: boolean;
 }
 
-function SkillsTab() {
+interface GitHubSkillResult {
+  name: string;
+  description: string;
+  path: string;
+  installed: boolean;
+}
+
+type SkillSourceTab = 'skills-sh' | 'github' | 'custom';
+
+const SOURCE_TABS: { id: SkillSourceTab; label: string; icon: typeof Star }[] = [
+  { id: 'skills-sh', label: 'skills.sh', icon: Star },
+  { id: 'github', label: 'GitHub Repos', icon: GitFork },
+  { id: 'custom', label: 'Custom', icon: FileText },
+];
+
+function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
   const { workspaceId } = useWorkspace();
   const toast = useGlobalToast();
+
+  // Category filter
   const [activeCategory, setActiveCategory] = useState<SkillCategory>('All');
 
+  // Installed skills
   const [installedSkills, setInstalledSkills] = useState<SkillSummary[]>([]);
   const [loadingInstalled, setLoadingInstalled] = useState(true);
 
-  const [suggestions, setSuggestions] = useState<SkillSuggestion[]>([]);
-  const [loadingSuggestions, setLoadingSuggestions] = useState(true);
+  // Source sub-tab
+  const [sourceTab, setSourceTab] = useState<SkillSourceTab>('skills-sh');
 
-  const [query, setQuery] = useState('');
-  const debouncedQuery = useDebounce(query, 300);
-  const [searchResults, setSearchResults] = useState<SkillSearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [hasSearched, setHasSearched] = useState(false);
+  // Remove all confirmation
+  const [confirmRemoveAll, setConfirmRemoveAll] = useState(false);
+  const [removingAll, setRemovingAll] = useState(false);
 
+  // Match & Inject state
+  const [matchingSkills, setMatchingSkills] = useState(false);
+
+  // Install tracking (shared across sub-tabs)
   const [installState, setInstallState] = useState<Record<string, 'installing' | 'done' | 'error'>>({});
-  const [batchInstalling, setBatchInstalling] = useState(false);
-  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
-
-  const inputRef = useRef<HTMLInputElement>(null);
 
   const fetchInstalled = useCallback(async () => {
     setLoadingInstalled(true);
@@ -260,6 +302,314 @@ function SkillsTab() {
     }
   }, [workspaceId]);
 
+  useEffect(() => { fetchInstalled(); }, [fetchInstalled]);
+
+  const installedNames = useMemo(() => new Set(installedSkills.map(s => s.name.toLowerCase())), [installedSkills]);
+
+  const isInstalled = useCallback((name: string) =>
+    installedNames.has(name.toLowerCase()) || installState[name] === 'done',
+  [installedNames, installState]);
+
+  const removeSkill = useCallback(async (skillName: string) => {
+    try {
+      await apiFetch(`/api/skills/${encodeURIComponent(skillName)}`, { method: 'DELETE' });
+      toast.show(`Skill "${skillName}" removed`, 'success');
+      await fetchInstalled();
+    } catch { /* silent */ }
+  }, [fetchInstalled, toast]);
+
+  const handleRemoveAll = useCallback(async () => {
+    if (installedSkills.length === 0) return;
+    setRemovingAll(true);
+    try {
+      await apiFetch('/api/skills/bulk-remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ names: installedSkills.map(s => s.name), workspaceId }),
+      });
+      toast.show(`${installedSkills.length} skills removed`, 'success');
+      await fetchInstalled();
+    } catch { /* silent */ } finally {
+      setRemovingAll(false);
+      setConfirmRemoveAll(false);
+    }
+  }, [installedSkills, workspaceId, fetchInstalled, toast]);
+
+  const handleMatchInject = useCallback(async () => {
+    if (!activeSpecId) return;
+    setMatchingSkills(true);
+    try {
+      await apiFetch(`/api/specs/${activeSpecId}/match-skills`, { method: 'POST' });
+      toast.show('Skills matched and injected', 'success');
+    } catch (err) {
+      toast.show(err instanceof Error ? err.message : 'Match failed', 'error');
+    } finally {
+      setMatchingSkills(false);
+    }
+  }, [activeSpecId, toast]);
+
+  const handleExport = useCallback(async () => {
+    try {
+      const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
+      const data = await apiFetch<{ skills: unknown[]; exportedAt: string }>(`/api/skills/export${params}`);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'skills-export.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.show('Skills exported', 'success');
+    } catch { /* silent */ }
+  }, [workspaceId, toast]);
+
+  const filteredInstalled = useMemo(() =>
+    installedSkills.filter(s => skillMatchesCategory(s, activeCategory)),
+  [installedSkills, activeCategory]);
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="flex-1 overflow-y-auto">
+        {/* ── Top Section: Your Skills Library ── */}
+        <div className="px-5 pt-5 pb-4 border-b border-border">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Wrench size={15} className="text-accent" />
+              <h2 className="text-sm font-semibold text-[var(--text)]">Your Skills Library</h2>
+              {!loadingInstalled && (
+                <span className="text-xs text-muted">{installedSkills.length} skills installed</span>
+              )}
+              {loadingInstalled && <Loader2 size={12} className="animate-spin text-muted" />}
+            </div>
+          </div>
+
+          {/* Action bar */}
+          <div className="flex items-center gap-2 mb-3">
+            <button
+              onClick={handleMatchInject}
+              disabled={!activeSpecId || matchingSkills}
+              title={!activeSpecId ? 'Generate a spec first to match skills' : 'Match & inject skills for active spec'}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {matchingSkills ? <Loader2 size={13} className="animate-spin" /> : <Wrench size={13} />}
+              Match & Inject
+            </button>
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted hover:text-[var(--text)] border border-border rounded transition-colors"
+            >
+              <Download size={13} />
+              Export
+            </button>
+            {installedSkills.length > 0 && (
+              <button
+                onClick={() => setConfirmRemoveAll(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/20 rounded transition-colors"
+              >
+                <Trash2 size={13} />
+                Remove All
+              </button>
+            )}
+          </div>
+
+          {/* Category filter pills */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+            {SKILL_CATEGORIES.map(cat => (
+              <button
+                key={cat}
+                onClick={() => setActiveCategory(cat)}
+                className={`px-3 py-1 text-xs rounded-full whitespace-nowrap transition-colors ${
+                  activeCategory === cat
+                    ? 'bg-accent/20 text-accent'
+                    : 'bg-surface-100 text-muted hover:text-[var(--text)]'
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+
+          {/* Installed skills grid */}
+          <div className="mt-3">
+            {!loadingInstalled && installedSkills.length === 0 ? (
+              <div className="flex flex-col items-center py-8 text-center">
+                <Wrench size={32} className="text-muted opacity-30 mb-2" />
+                <p className="text-sm font-medium text-muted mb-1">No skills installed yet</p>
+                <p className="text-xs text-muted/60 mb-4">Browse skills.sh, add from a GitHub repo, or paste your own</p>
+                <div className="flex items-center gap-2">
+                  {SOURCE_TABS.map(({ id, label, icon: Icon }) => (
+                    <button
+                      key={id}
+                      onClick={() => setSourceTab(id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-accent border border-accent/30 rounded hover:bg-accent/10 transition-colors"
+                    >
+                      <Icon size={12} />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {filteredInstalled.map(skill => {
+                  const cat = inferSkillCategory(skill);
+                  const colorClass = CATEGORY_COLORS[cat];
+                  const sourceLabel = skill.source.startsWith('github:')
+                    ? skill.source
+                    : skill.source === 'skills.sh' || skill.source === 'db' || skill.source === 'rorca-skills' || skill.source === 'claude-skills'
+                      ? 'skills.sh'
+                      : skill.source === 'user'
+                        ? 'custom'
+                        : skill.source;
+                  return (
+                    <div
+                      key={skill.name}
+                      className="flex items-start gap-2 p-2.5 rounded-lg border border-border bg-panel hover:border-border/80 transition-colors group"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-sm font-semibold text-[var(--text)]">{skill.name}</span>
+                          <span className={`px-1 py-0.5 text-[10px] font-mono rounded ${colorClass}`}>{cat}</span>
+                          <span className="px-1 py-0.5 text-[10px] font-mono rounded bg-zinc-500/10 text-zinc-400">{sourceLabel}</span>
+                        </div>
+                        {skill.description && (
+                          <p className="text-xs text-muted mt-0.5 line-clamp-2">{skill.description}</p>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => removeSkill(skill.name)}
+                        className="shrink-0 mt-0.5 text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all"
+                        title="Remove skill"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── Bottom Section: Add Skills ── */}
+        <div className="px-5 pt-4 pb-5">
+          {/* Source sub-tab pills */}
+          <div className="flex items-center gap-1.5 mb-4">
+            {SOURCE_TABS.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setSourceTab(id)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full transition-colors ${
+                  sourceTab === id
+                    ? 'bg-accent text-white'
+                    : 'bg-surface-100 text-muted hover:text-[var(--text)]'
+                }`}
+              >
+                <Icon size={13} />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Sub-tab content */}
+          {sourceTab === 'skills-sh' && (
+            <SkillsShSubTab
+              isInstalled={isInstalled}
+              installState={installState}
+              setInstallState={setInstallState}
+              workspaceId={workspaceId}
+              fetchInstalled={fetchInstalled}
+              toast={toast}
+            />
+          )}
+          {sourceTab === 'github' && (
+            <GitHubSubTab
+              isInstalled={isInstalled}
+              installState={installState}
+              setInstallState={setInstallState}
+              workspaceId={workspaceId}
+              fetchInstalled={fetchInstalled}
+              toast={toast}
+            />
+          )}
+          {sourceTab === 'custom' && (
+            <CustomSubTab
+              workspaceId={workspaceId}
+              fetchInstalled={fetchInstalled}
+              toast={toast}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Remove All confirmation dialog */}
+      {confirmRemoveAll && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-panel border border-border rounded-lg p-4 w-96 shadow-xl">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+                <Trash2 size={16} className="text-red-500" />
+                Remove All Skills
+              </h3>
+              <button onClick={() => setConfirmRemoveAll(false)} className="text-muted hover:text-[var(--text)]">
+                <X size={16} />
+              </button>
+            </div>
+            <p className="text-sm text-[var(--text)] mb-2">
+              Remove all {installedSkills.length} installed skills?
+            </p>
+            <p className="text-xs text-muted mb-4">
+              This will delete skill files from .rorca/skills/ and .claude/skills/ and remove them from the database.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmRemoveAll(false)}
+                className="px-3 py-1.5 text-xs text-muted hover:text-[var(--text)] rounded border border-border"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRemoveAll}
+                disabled={removingAll}
+                className="px-3 py-1.5 text-xs font-medium bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
+              >
+                {removingAll ? <Loader2 size={12} className="animate-spin" /> : 'Remove All'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Sub-Tab 1: skills.sh ─────────────────────────────────────── */
+
+function SkillsShSubTab({
+  isInstalled, installState, setInstallState, workspaceId, fetchInstalled, toast,
+}: {
+  isInstalled: (name: string) => boolean;
+  installState: Record<string, 'installing' | 'done' | 'error'>;
+  setInstallState: React.Dispatch<React.SetStateAction<Record<string, 'installing' | 'done' | 'error'>>>;
+  workspaceId: string | null;
+  fetchInstalled: () => Promise<void>;
+  toast: ReturnType<typeof useGlobalToast>;
+}) {
+  const [query, setQuery] = useState('');
+  const debouncedQuery = useDebounce(query, 300);
+  const [searchResults, setSearchResults] = useState<SkillSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Suggestions
+  const [suggestions, setSuggestions] = useState<SkillSuggestion[]>([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(true);
+  const [batchInstalling, setBatchInstalling] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
+
   const fetchSuggestions = useCallback(async () => {
     setLoadingSuggestions(true);
     try {
@@ -271,10 +621,7 @@ function SkillsTab() {
     }
   }, [workspaceId]);
 
-  useEffect(() => {
-    fetchInstalled();
-    fetchSuggestions();
-  }, [fetchInstalled, fetchSuggestions]);
+  useEffect(() => { fetchSuggestions(); }, [fetchSuggestions]);
 
   useEffect(() => {
     const q = debouncedQuery.trim();
@@ -319,23 +666,12 @@ function SkillsTab() {
         body: JSON.stringify({ name: skillName, workspaceId }),
       });
       setInstallState(s => ({ ...s, [skillName]: 'done' }));
+      toast.show(`Skill "${skillName}" installed`, 'success');
       await fetchInstalled();
     } catch {
       setInstallState(s => ({ ...s, [skillName]: 'error' }));
     }
-  }, [workspaceId, fetchInstalled]);
-
-  const removeSkill = useCallback(async (skillName: string) => {
-    try {
-      await apiFetch(`/api/skills/${encodeURIComponent(skillName)}`, { method: 'DELETE' });
-      await fetchInstalled();
-    } catch { /* silent */ }
-  }, [fetchInstalled]);
-
-  const installedNames = new Set(installedSkills.map(s => s.name.toLowerCase()));
-
-  const isInstalled = (name: string) =>
-    installedNames.has(name.toLowerCase()) || installState[name] === 'done';
+  }, [workspaceId, fetchInstalled, setInstallState, toast]);
 
   const uninstalledSuggestions = suggestions.filter(s => {
     const name = s.skill.replace(/\.md$/, '');
@@ -374,231 +710,587 @@ function SkillsTab() {
     setBatchInstalling(false);
 
     if (failCount === 0) {
-      toast.show(`All ${toInstall.length} skills installed`, 'success');
+      toast.show(`${toInstall.length} skills installed`, 'success');
     } else {
       toast.show(`${toInstall.length - failCount} of ${toInstall.length} skills installed`, 'success');
     }
-  }, [uninstalledSuggestions, batchInstalling, workspaceId, fetchInstalled, fetchSuggestions, toast]);
+  }, [uninstalledSuggestions, batchInstalling, workspaceId, fetchInstalled, fetchSuggestions, setInstallState, toast]);
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="space-y-4">
       {/* Search bar */}
-      <div className="px-5 pt-5 pb-4 border-b border-border shrink-0">
-        <div className="relative">
-          <div className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none">
-            {searching
-              ? <Loader2 size={15} className="animate-spin text-muted" />
-              : <svg className="w-4 h-4 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-            }
-          </div>
-          <input
-            ref={inputRef}
-            type="text"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search skills.sh — react, testing, stripe, sqlite…"
-            className="w-full pl-9 pr-9 py-2.5 text-sm bg-bg border border-border rounded-lg text-[var(--text)] placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors"
-          />
-          {query && (
-            <button
-              onClick={() => { setQuery(''); inputRef.current?.focus(); }}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-[var(--text)] transition-colors"
-            >
-              <X size={14} />
-            </button>
-          )}
+      <div className="relative">
+        <div className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none">
+          {searching
+            ? <Loader2 size={15} className="animate-spin text-muted" />
+            : <svg className="w-4 h-4 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+          }
         </div>
-        {query && !searching && (
-          <p className="mt-1.5 text-xs text-muted/60">
-            {hasSearched && searchResults.length > 0
-              ? `${searchResults.length} results from skills.sh`
-              : hasSearched && !searchError
-                ? 'No results found'
-                : ''}
-          </p>
+        <input
+          ref={inputRef}
+          type="text"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search skills.sh — react, testing, stripe, sqlite…"
+          className="w-full pl-9 pr-9 py-2.5 text-sm bg-bg border border-border rounded-lg text-[var(--text)] placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors"
+        />
+        {query && (
+          <button
+            onClick={() => { setQuery(''); inputRef.current?.focus(); }}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-[var(--text)] transition-colors"
+          >
+            <X size={14} />
+          </button>
         )}
       </div>
 
-      {/* Category filter chips (shown when not searching) */}
-      {!query.trim() && (
-        <div className="px-5 py-2 shrink-0 overflow-x-auto border-b border-border/50">
-          <div className="flex items-center gap-1.5">
-            {SKILL_CATEGORIES.map(cat => (
-              <button
-                key={cat}
-                onClick={() => setActiveCategory(cat)}
-                className={`px-3 py-1 text-xs rounded-full whitespace-nowrap transition-colors ${
-                  activeCategory === cat
-                    ? 'bg-accent text-white'
-                    : 'bg-surface-100 text-muted hover:text-[var(--text)]'
-                }`}
-              >
-                {cat}
-              </button>
-            ))}
-          </div>
-        </div>
+      {query.trim() && !searching && hasSearched && (
+        <p className="text-xs text-muted/60">
+          {searchResults.length > 0
+            ? `${searchResults.length} results from skills.sh`
+            : !searchError ? 'No results found' : ''}
+        </p>
       )}
 
-      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6">
-        {/* Search results */}
-        {query.trim() ? (
-          <div>
-            {searchError && (
-              <div className="flex items-center gap-2 p-3 rounded-lg border border-red-500/20 bg-red-500/5 text-red-400 text-sm">
-                <AlertTriangle size={14} className="shrink-0" />
-                <span>{searchError}</span>
-              </div>
-            )}
-            {!searchError && hasSearched && searchResults.length === 0 && !searching && (
-              <div className="py-12 text-center text-muted text-sm">
-                <Wrench size={28} className="mx-auto mb-2 opacity-40" />
-                <p>No skills found for &ldquo;{query}&rdquo;</p>
-              </div>
-            )}
-            {searchResults.length > 0 && (
-              <div className="space-y-2">
-                {searchResults.map(result => (
-                  <SkillRegistryCard
-                    key={result.name}
-                    name={result.name}
-                    description={result.description}
-                    author={result.author}
-                    badge={null}
-                    installed={isInstalled(result.name)}
-                    installing={installState[result.name] === 'installing'}
-                    installError={installState[result.name] === 'error'}
-                    onInstall={() => installSkill(result.name)}
-                    onRemove={() => removeSkill(result.name)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        ) : (
-          <>
-            {/* Install All Recommended banner */}
-            {!loadingSuggestions && uninstalledSuggestions.length > 0 && (
-              <div className="rounded-lg border border-accent/20 bg-accent/5 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-[var(--text)]">
-                      {batchInstalling
-                        ? `Installing ${batchProgress.current} of ${batchProgress.total}…`
-                        : `${uninstalledSuggestions.length} skill${uninstalledSuggestions.length !== 1 ? 's' : ''} recommended for your stack`
-                      }
-                    </p>
-                    {detectedTechs.length > 0 && !batchInstalling && (
-                      <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                        {detectedTechs.slice(0, 8).map(tech => (
-                          <span key={tech} className="px-1.5 py-0.5 text-[10px] rounded bg-accent/10 text-accent font-medium">
-                            {tech}
-                          </span>
-                        ))}
-                        {detectedTechs.length > 8 && (
-                          <span className="text-[10px] text-muted">+{detectedTechs.length - 8}</span>
-                        )}
-                      </div>
-                    )}
-                    {batchInstalling && (
-                      <div className="mt-2 h-1 w-full rounded-full bg-border overflow-hidden">
-                        <div
-                          className="h-full bg-accent rounded-full transition-all duration-300"
-                          style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    onClick={installAllRecommended}
-                    disabled={batchInstalling}
-                    className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
-                  >
+      {/* Search results */}
+      {query.trim() ? (
+        <div>
+          {searchError && (
+            <div className="flex items-center gap-2 p-3 rounded-lg border border-red-500/20 bg-red-500/5 text-red-400 text-sm">
+              <AlertTriangle size={14} className="shrink-0" />
+              <span>{searchError}</span>
+            </div>
+          )}
+          {!searchError && hasSearched && searchResults.length === 0 && !searching && (
+            <div className="py-8 text-center text-muted text-sm">
+              <Wrench size={28} className="mx-auto mb-2 opacity-40" />
+              <p>No skills found for &ldquo;{query}&rdquo;</p>
+            </div>
+          )}
+          {searchResults.length > 0 && (
+            <div className="space-y-2">
+              {searchResults.map(result => (
+                <SkillRegistryCard
+                  key={result.name}
+                  name={result.name}
+                  description={result.description}
+                  author={result.author}
+                  badge={null}
+                  installed={isInstalled(result.name)}
+                  installing={installState[result.name] === 'installing'}
+                  installError={installState[result.name] === 'error'}
+                  onInstall={() => installSkill(result.name)}
+                  onRemove={() => {}}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Install All Recommended banner */}
+          {!loadingSuggestions && uninstalledSuggestions.length > 0 && (
+            <div className="rounded-lg border border-accent/20 bg-accent/5 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-[var(--text)]">
                     {batchInstalling
-                      ? <Loader2 size={13} className="animate-spin" />
-                      : <Download size={13} />
+                      ? `Installing ${batchProgress.current} of ${batchProgress.total}…`
+                      : `${uninstalledSuggestions.length} skill${uninstalledSuggestions.length !== 1 ? 's' : ''} recommended for your stack`
                     }
-                    {batchInstalling ? 'Installing…' : 'Install All'}
-                  </button>
+                  </p>
+                  {detectedTechs.length > 0 && !batchInstalling && (
+                    <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                      {detectedTechs.slice(0, 8).map(tech => (
+                        <span key={tech} className="px-1.5 py-0.5 text-[10px] rounded bg-accent/10 text-accent font-medium">
+                          {tech}
+                        </span>
+                      ))}
+                      {detectedTechs.length > 8 && (
+                        <span className="text-[10px] text-muted">+{detectedTechs.length - 8}</span>
+                      )}
+                    </div>
+                  )}
+                  {batchInstalling && (
+                    <div className="mt-2 h-1 w-full rounded-full bg-border overflow-hidden">
+                      <div
+                        className="h-full bg-accent rounded-full transition-all duration-300"
+                        style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                      />
+                    </div>
+                  )}
                 </div>
+                <button
+                  onClick={installAllRecommended}
+                  disabled={batchInstalling}
+                  className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
+                >
+                  {batchInstalling
+                    ? <Loader2 size={13} className="animate-spin" />
+                    : <Download size={13} />
+                  }
+                  {batchInstalling ? 'Installing…' : 'Install All'}
+                </button>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Suggested for your stack */}
+          {/* Suggested for your stack */}
+          {suggestions.length > 0 && (
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <TrendingUp size={13} className="text-accent" />
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">Suggested for your stack</h2>
                 {loadingSuggestions && <Loader2 size={12} className="animate-spin text-muted" />}
               </div>
-              {!loadingSuggestions && suggestions.length === 0 && (
-                <p className="text-xs text-muted/60 py-2">No stack detected — open a workspace with a package.json to get suggestions.</p>
-              )}
-              {suggestions.length > 0 && (
-                <div className="space-y-2">
-                  {suggestions.map(s => {
-                    const name = s.skill.replace(/\.md$/, '');
-                    return (
-                      <SkillRegistryCard
-                        key={name}
-                        name={name}
-                        description={`Detected via: ${s.triggeredBy.join(', ')}`}
-                        author=""
-                        badge="suggested"
-                        installed={s.installed || isInstalled(name)}
-                        installing={installState[name] === 'installing'}
-                        installError={installState[name] === 'error'}
-                        onInstall={() => installSkill(name)}
-                        onRemove={() => removeSkill(name)}
-                      />
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Installed skills */}
-            <div>
-              <div className="flex items-center gap-2 mb-3">
-                <Check size={13} className="text-green-400" />
-                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">Installed</h2>
-                {loadingInstalled
-                  ? <Loader2 size={12} className="animate-spin text-muted" />
-                  : <span className="text-xs text-muted/60">({installedSkills.length})</span>
-                }
-              </div>
-              {!loadingInstalled && installedSkills.length === 0 && (
-                <p className="text-xs text-muted/60 py-2">No skills installed yet. Search above to install from skills.sh.</p>
-              )}
-              {installedSkills.filter(s => skillMatchesCategory(s, activeCategory)).length > 0 && (
-                <div className="space-y-2">
-                  {installedSkills.filter(s => skillMatchesCategory(s, activeCategory)).map(skill => (
+              <div className="space-y-2">
+                {suggestions.map(s => {
+                  const name = s.skill.replace(/\.md$/, '');
+                  return (
                     <SkillRegistryCard
-                      key={skill.name}
-                      name={skill.name}
-                      description={skill.description}
+                      key={name}
+                      name={name}
+                      description={`Detected via: ${s.triggeredBy.join(', ')}`}
                       author=""
-                      badge={skill.source.startsWith('pack:') ? skill.source.replace('pack:', '') : skill.source}
-                      installed={true}
-                      installing={false}
-                      installError={false}
-                      onInstall={() => {}}
-                      onRemove={() => removeSkill(skill.name)}
+                      badge="suggested"
+                      installed={s.installed || isInstalled(name)}
+                      installing={installState[name] === 'installing'}
+                      installError={installState[name] === 'error'}
+                      onInstall={() => installSkill(name)}
+                      onRemove={() => {}}
                     />
-                  ))}
-                </div>
-              )}
+                  );
+                })}
+              </div>
             </div>
-          </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ─── Sub-Tab 2: GitHub Repos ──────────────────────────────────── */
+
+function GitHubSubTab({
+  isInstalled, installState, setInstallState, workspaceId, fetchInstalled, toast,
+}: {
+  isInstalled: (name: string) => boolean;
+  installState: Record<string, 'installing' | 'done' | 'error'>;
+  setInstallState: React.Dispatch<React.SetStateAction<Record<string, 'installing' | 'done' | 'error'>>>;
+  workspaceId: string | null;
+  fetchInstalled: () => Promise<void>;
+  toast: ReturnType<typeof useGlobalToast>;
+}) {
+  const [repoUrl, setRepoUrl] = useState('');
+  const [browsing, setBrowsing] = useState(false);
+  const [browseError, setBrowseError] = useState<string | null>(null);
+  const [browseResults, setBrowseResults] = useState<{ repo: string; skills: GitHubSkillResult[] } | null>(null);
+  const [bulkInstalling, setBulkInstalling] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
+
+  const handleBrowse = useCallback(async () => {
+    const url = repoUrl.trim();
+    if (!url) return;
+    setBrowsing(true);
+    setBrowseError(null);
+    try {
+      const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
+      const data = await apiFetch<{ repo: string; branch: string; skills: GitHubSkillResult[] }>(
+        `/api/skills/browse-github${params}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repoUrl: url }) },
+      );
+      setBrowseResults({ repo: data.repo, skills: data.skills });
+    } catch (err) {
+      setBrowseError(err instanceof Error ? err.message : 'Failed to browse repository');
+    } finally {
+      setBrowsing(false);
+    }
+  }, [repoUrl, workspaceId]);
+
+  const installFromGitHub = useCallback(async (skill: GitHubSkillResult) => {
+    if (!browseResults) return;
+    setInstallState(s => ({ ...s, [skill.name]: 'installing' }));
+    try {
+      await apiFetch('/api/skills/install-from-github', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: browseResults.repo, skillPath: skill.path, workspaceId }),
+      });
+      setInstallState(s => ({ ...s, [skill.name]: 'done' }));
+      toast.show(`Skill "${skill.name}" installed`, 'success');
+      // Update installed status in browse results without refetch
+      setBrowseResults(prev => prev ? {
+        ...prev,
+        skills: prev.skills.map(s => s.name === skill.name ? { ...s, installed: true } : s),
+      } : prev);
+      await fetchInstalled();
+    } catch {
+      setInstallState(s => ({ ...s, [skill.name]: 'error' }));
+    }
+  }, [browseResults, workspaceId, fetchInstalled, setInstallState, toast]);
+
+  const uninstalledSkills = browseResults?.skills.filter(s => !s.installed && !isInstalled(s.name)) ?? [];
+
+  const handleInstallAll = useCallback(async () => {
+    if (!browseResults || uninstalledSkills.length === 0) return;
+    setBulkInstalling(true);
+    setBulkProgress({ current: 0, total: uninstalledSkills.length });
+
+    const skills = uninstalledSkills.map(s => ({
+      name: s.name,
+      source: 'github' as const,
+      repoUrl: browseResults.repo,
+      skillPath: s.path,
+    }));
+
+    try {
+      // Use bulk-install endpoint
+      const data = await apiFetch<{ installed: number; failed: { name: string; error: string }[]; total: number }>(
+        '/api/skills/bulk-install',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ skills, workspaceId }),
+        },
+      );
+      setBulkProgress({ current: data.total, total: data.total });
+
+      // Update local state
+      const installedNames = new Set(skills.map(s => s.name).filter(n => !data.failed.some(f => f.name === n)));
+      setBrowseResults(prev => prev ? {
+        ...prev,
+        skills: prev.skills.map(s => installedNames.has(s.name) ? { ...s, installed: true } : s),
+      } : prev);
+      for (const name of installedNames) {
+        setInstallState(s => ({ ...s, [name]: 'done' }));
+      }
+      for (const f of data.failed) {
+        setInstallState(s => ({ ...s, [f.name]: 'error' }));
+      }
+
+      toast.show(`${data.installed} skills installed`, 'success');
+      await fetchInstalled();
+    } catch (err) {
+      toast.show(err instanceof Error ? err.message : 'Bulk install failed', 'error');
+    } finally {
+      setBulkInstalling(false);
+    }
+  }, [browseResults, uninstalledSkills, workspaceId, fetchInstalled, setInstallState, toast]);
+
+  return (
+    <div className="space-y-4">
+      {/* Repo URL input */}
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={repoUrl}
+          onChange={e => setRepoUrl(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && handleBrowse()}
+          placeholder="Enter repo URL (e.g., wojons/skills)"
+          className="flex-1 px-3 py-2.5 text-sm bg-bg border border-border rounded-lg text-[var(--text)] placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors"
+        />
+        <button
+          onClick={handleBrowse}
+          disabled={browsing || !repoUrl.trim()}
+          className="flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded-lg transition-colors disabled:opacity-50"
+        >
+          {browsing ? <Loader2 size={13} className="animate-spin" /> : <GitFork size={13} />}
+          Browse
+        </button>
+      </div>
+
+      {/* Error */}
+      {browseError && (
+        <div className="flex items-center gap-2 p-3 rounded-lg border border-red-500/20 bg-red-500/5 text-red-400 text-xs">
+          <AlertTriangle size={14} className="shrink-0" />
+          <span>{browseError}</span>
+        </div>
+      )}
+
+      {/* Loading */}
+      {browsing && (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 size={20} className="animate-spin text-muted mr-2" />
+          <span className="text-sm text-muted">Browsing repository…</span>
+        </div>
+      )}
+
+      {/* Results */}
+      {browseResults && !browsing && (
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs text-muted">
+              {browseResults.skills.length} skill{browseResults.skills.length !== 1 ? 's' : ''} found in <span className="font-mono text-accent">{browseResults.repo}</span>
+            </p>
+            {uninstalledSkills.length >= 2 && (
+              <button
+                onClick={handleInstallAll}
+                disabled={bulkInstalling}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
+              >
+                {bulkInstalling
+                  ? <>
+                      <Loader2 size={13} className="animate-spin" />
+                      {bulkProgress.current}/{bulkProgress.total} installing…
+                    </>
+                  : <>
+                      <Download size={13} />
+                      Install All ({uninstalledSkills.length})
+                    </>
+                }
+              </button>
+            )}
+          </div>
+          <div className="space-y-2">
+            {browseResults.skills.map(skill => {
+              const installed = skill.installed || isInstalled(skill.name) || installState[skill.name] === 'done';
+              return (
+                <div
+                  key={skill.path}
+                  className={`flex items-start gap-3 p-3 rounded-lg border transition-colors ${
+                    installed ? 'border-green-500/25 bg-green-500/5' : 'border-border bg-panel'
+                  }`}
+                >
+                  <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
+                  <div className="min-w-0 flex-1">
+                    <span className="text-sm font-medium text-[var(--text)]">{skill.name}</span>
+                    {skill.description && <p className="text-xs text-muted mt-0.5 line-clamp-2">{skill.description}</p>}
+                    <p className="text-[10px] text-muted/50 font-mono mt-0.5">{skill.path}</p>
+                  </div>
+                  <div className="shrink-0">
+                    {installed ? (
+                      <span className="flex items-center gap-1 px-2 py-1 text-xs text-green-400">
+                        <Check size={12} /> Installed
+                      </span>
+                    ) : installState[skill.name] === 'installing' ? (
+                      <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
+                        <Loader2 size={12} className="animate-spin" /> Installing…
+                      </div>
+                    ) : installState[skill.name] === 'error' ? (
+                      <button
+                        onClick={() => installFromGitHub(skill)}
+                        className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:bg-red-500/10 rounded transition-colors"
+                      >
+                        <AlertTriangle size={12} /> Retry
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => installFromGitHub(skill)}
+                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors"
+                      >
+                        <Download size={12} /> Install
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Sub-Tab 3: Custom ────────────────────────────────────────── */
+
+function CustomSubTab({
+  workspaceId, fetchInstalled, toast,
+}: {
+  workspaceId: string | null;
+  fetchInstalled: () => Promise<void>;
+  toast: ReturnType<typeof useGlobalToast>;
+}) {
+  // Paste option
+  const [pasteContent, setPasteContent] = useState('');
+  const [pasteName, setPasteName] = useState('');
+  const [showNameInput, setShowNameInput] = useState(false);
+  const [pasteInstalling, setPasteInstalling] = useState(false);
+  const [pasteError, setPasteError] = useState<string | null>(null);
+
+  // Upload option
+  const [uploadContent, setUploadContent] = useState<string | null>(null);
+  const [uploadName, setUploadName] = useState('');
+  const [uploadInstalling, setUploadInstalling] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const parseFrontmatterName = (content: string): string | null => {
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!match) return null;
+    const nameMatch = match[1].match(/^name:\s*(.+)$/m);
+    return nameMatch ? nameMatch[1].trim().replace(/^["']|["']$/g, '') : null;
+  };
+
+  const handlePasteInstall = useCallback(async () => {
+    if (!pasteContent.trim()) return;
+
+    const fmName = parseFrontmatterName(pasteContent);
+    if (!fmName && !pasteName.trim()) {
+      setShowNameInput(true);
+      return;
+    }
+
+    const name = fmName || pasteName.trim();
+    setPasteInstalling(true);
+    setPasteError(null);
+    try {
+      await apiFetch('/api/skills/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, content: pasteContent, source: 'user' }),
+      });
+      toast.show(`Skill "${name}" installed`, 'success');
+      if (!fmName) {
+        toast.show('Skill installed without frontmatter — name derived from input', 'warning');
+      }
+      setPasteContent('');
+      setPasteName('');
+      setShowNameInput(false);
+      await fetchInstalled();
+    } catch (err) {
+      setPasteError(err instanceof Error ? err.message : 'Install failed');
+    } finally {
+      setPasteInstalling(false);
+    }
+  }, [pasteContent, pasteName, fetchInstalled, toast]);
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const fileName = file.name.replace(/\.md$/, '');
+    const reader = new FileReader();
+    reader.onload = () => {
+      const content = reader.result as string;
+      setUploadContent(content);
+      const fmName = parseFrontmatterName(content);
+      setUploadName(fmName || fileName);
+    };
+    reader.readAsText(file);
+    // Reset input so re-selecting same file triggers change
+    e.target.value = '';
+  }, []);
+
+  const handleUploadInstall = useCallback(async () => {
+    if (!uploadContent || !uploadName.trim()) return;
+    setUploadInstalling(true);
+    setUploadError(null);
+    try {
+      const fmName = parseFrontmatterName(uploadContent);
+      await apiFetch('/api/skills/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: uploadName.trim(), content: uploadContent, source: 'user' }),
+      });
+      toast.show(`Skill "${uploadName.trim()}" installed`, 'success');
+      if (!fmName) {
+        toast.show('Skill installed without frontmatter — name derived from filename', 'warning');
+      }
+      setUploadContent(null);
+      setUploadName('');
+      await fetchInstalled();
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Install failed');
+    } finally {
+      setUploadInstalling(false);
+    }
+  }, [uploadContent, uploadName, fetchInstalled, toast]);
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Option A: Paste */}
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">Paste Markdown</h3>
+        {showNameInput && (
+          <input
+            type="text"
+            value={pasteName}
+            onChange={e => setPasteName(e.target.value)}
+            placeholder="Enter skill name (no frontmatter detected)"
+            className="w-full px-3 py-2 text-sm bg-bg border border-amber-500/30 rounded-lg text-[var(--text)] placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
+          />
+        )}
+        <textarea
+          value={pasteContent}
+          onChange={e => setPasteContent(e.target.value)}
+          placeholder="Paste SKILL.md content here..."
+          className="w-full min-h-[200px] px-3 py-2.5 font-mono text-xs bg-bg border border-border rounded-lg text-[var(--text)] placeholder:text-muted/50 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors resize-y"
+        />
+        {pasteError && (
+          <p className="text-red-400 text-xs">{pasteError}</p>
+        )}
+        <button
+          onClick={handlePasteInstall}
+          disabled={pasteInstalling || !pasteContent.trim()}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
+        >
+          {pasteInstalling ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+          Install
+        </button>
+      </div>
+
+      {/* Option B: Upload */}
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">Upload File</h3>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".md"
+          onChange={handleFileSelect}
+          className="hidden"
+        />
+        {!uploadContent ? (
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full min-h-[200px] flex flex-col items-center justify-center gap-2 border-2 border-dashed border-border rounded-lg hover:border-accent/50 hover:bg-accent/5 transition-colors cursor-pointer"
+          >
+            <Upload size={24} className="text-muted" />
+            <span className="text-sm text-muted">Upload .md file</span>
+            <span className="text-[10px] text-muted/50">Accepts .md files only</span>
+          </button>
+        ) : (
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={uploadName}
+              onChange={e => setUploadName(e.target.value)}
+              placeholder="Skill name"
+              className="w-full px-3 py-2 text-sm bg-bg border border-border rounded-lg text-[var(--text)] placeholder:text-muted/50 outline-none focus:border-accent transition-colors"
+            />
+            <pre className="w-full min-h-[160px] max-h-[200px] overflow-y-auto px-3 py-2.5 font-mono text-xs bg-bg border border-border rounded-lg text-muted">
+              {uploadContent}
+            </pre>
+            {uploadError && (
+              <p className="text-red-400 text-xs">{uploadError}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleUploadInstall}
+                disabled={uploadInstalling || !uploadName.trim()}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
+              >
+                {uploadInstalling ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                Install
+              </button>
+              <button
+                onClick={() => { setUploadContent(null); setUploadName(''); setUploadError(null); }}
+                className="px-3 py-1.5 text-xs text-muted hover:text-[var(--text)] border border-border rounded transition-colors"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>
   );
 }
 
-/* ─── Skill Registry Card ──────────────────────────────────────── */
+/* ─── Skill Registry Card (shared) ────────────────────────────── */
 
 interface SkillContentCache {
   content: string;
