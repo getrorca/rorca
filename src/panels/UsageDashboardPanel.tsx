@@ -215,8 +215,8 @@ export default function UsageDashboardPanel() {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <SummaryCard
                 label="Total Tokens"
-                value={formatTokens(data.totals.total_input_tokens + data.totals.total_output_tokens)}
-                sub={`${formatTokens(data.totals.total_input_tokens)} in / ${formatTokens(data.totals.total_output_tokens)} out`}
+                value={formatTokens(Number(data.totals.total_input_tokens) + Number(data.totals.total_output_tokens))}
+                sub={`${formatTokens(Number(data.totals.total_input_tokens))} in / ${formatTokens(Number(data.totals.total_output_tokens))} out`}
               />
               <SummaryCard
                 label="Total Cost"
@@ -232,8 +232,8 @@ export default function UsageDashboardPanel() {
               />
               <SummaryCard
                 label="Input / Output Ratio"
-                value={data.totals.total_output_tokens > 0
-                  ? `${(data.totals.total_input_tokens / data.totals.total_output_tokens).toFixed(1)}x`
+                value={Number(data.totals.total_output_tokens) > 0
+                  ? `${(Number(data.totals.total_input_tokens) / Number(data.totals.total_output_tokens)).toFixed(1)}x`
                   : 'N/A'}
                 sub="input tokens per output"
               />

@@ -18,7 +18,8 @@ export interface AgentProfileRow {
 function formatProfile(row: AgentProfileRow) {
   return {
     ...row,
-    allowed_tools: JSON.parse(row.allowed_tools) as string[],
+    // pg driver returns jsonb columns as parsed JS objects, not strings
+    allowed_tools: (Array.isArray(row.allowed_tools) ? row.allowed_tools : JSON.parse(row.allowed_tools as unknown as string)) as string[],
     is_active: !!row.is_active,
   };
 }
@@ -94,7 +95,7 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/active', async (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   const profile = await queryOne<AgentProfileRow>(
-    'SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = 1 LIMIT 1',
+    'SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1',
     [workspaceId]
   );
   res.json({ profile: profile ? formatProfile(profile) : null });
@@ -156,7 +157,7 @@ router.post('/', async (req: Request, res: Response) => {
 
   // If setting this profile as active, deactivate others first
   if (is_active) {
-    await execute('UPDATE agent_profiles SET is_active = 0 WHERE workspace_id = $1', [workspaceId]);
+    await execute('UPDATE agent_profiles SET is_active = false WHERE workspace_id = $1', [workspaceId]);
   }
 
   try {
@@ -246,7 +247,7 @@ router.put('/:profileId', async (req: Request, res: Response) => {
 
   // If activating this profile, deactivate others first
   if (is_active) {
-    await execute('UPDATE agent_profiles SET is_active = 0 WHERE workspace_id = $1', [req.params.id]);
+    await execute('UPDATE agent_profiles SET is_active = false WHERE workspace_id = $1', [req.params.id]);
   }
 
   const newName = name !== undefined ? name : existing.name;

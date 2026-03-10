@@ -828,18 +828,19 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
       return;
     }
 
-    // Block moves TO done (read-only from pipeline completion)
-    if (targetColumn === 'done') {
-      toast.show('Done column is read-only — specs move here automatically on pipeline completion', 'error');
-      return;
-    }
-
     // Handle custom column assignments
     const isCustomSource = sourceColumn.startsWith('custom-');
     const isCustomTarget = targetColumn.startsWith('custom-');
 
     if (isCustomSource || isCustomTarget) {
-      // Assign/unassign spec to custom column
+      // Unmark done if coming from done
+      if (sourceColumn === 'done') {
+        await apiFetch(`/api/specs/${encodeURIComponent(specId)}/unmark-done`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        });
+      }
+      // Mark done if going to done (custom-to-done not typical but handle anyway)
       const targetColumnId = isCustomTarget ? Number(targetColumn.replace('custom-', '')) : null;
       try {
         await apiFetch('/api/specs/kanban/columns/assign', {
@@ -875,24 +876,46 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     const specTitle = slugToTitle(specId);
 
     try {
-      if (sourceColumn === 'draft' && targetColumn === 'in-progress') {
-        // Draft → In Progress = Approve
+      if (targetColumn === 'done') {
+        // Any → Done: approve if in draft first, then mark done
+        if (sourceColumn === 'draft') {
+          await apiFetch(`/api/specs/${encodeURIComponent(specId)}/approve`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspaceId }),
+          });
+        }
+        await apiFetch(`/api/specs/${encodeURIComponent(specId)}/mark-done`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        });
+        toast.show(`Spec "${specTitle}" marked done`, 'success');
+      } else if (sourceColumn === 'done') {
+        // Done → any: unmark done first
+        await apiFetch(`/api/specs/${encodeURIComponent(specId)}/unmark-done`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        });
+        if (targetColumn === 'draft') {
+          await apiFetch(`/api/specs/${encodeURIComponent(specId)}/reject`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspaceId }),
+          });
+          toast.show(`Spec "${specTitle}" moved to Draft`, 'success');
+        } else {
+          toast.show(`Spec "${specTitle}" reopened`, 'success');
+        }
+      } else if (sourceColumn === 'draft' && targetColumn === 'in-progress') {
         await apiFetch(`/api/specs/${encodeURIComponent(specId)}/approve`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspaceId }),
         });
         toast.show(`Spec "${specTitle}" approved`, 'success');
       } else if (sourceColumn === 'in-progress' && targetColumn === 'draft') {
-        // In Progress → Draft = Reject (move back to draft)
         await apiFetch(`/api/specs/${encodeURIComponent(specId)}/reject`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspaceId }),
         });
         toast.show(`Spec "${specTitle}" moved back to Draft`, 'success');
-      } else {
-        toast.show('Invalid move — drag between Draft and In Progress to approve/reject', 'error');
-        setOptimisticKanban(null);
-        return;
       }
       announce(`Moved ${specTitle}`);
       fetchKanban();

@@ -1,0 +1,302 @@
+{
+  "title": "Create a test that will an e2e audit of the UX architecture to ensure everything flows smoothly",
+  "generatedAt": "2026-03-10T05:53:14.578Z",
+  "model": "claude-sonnet-4-5-20250929",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "E2E test infrastructure setup",
+      "description": "Set up Playwright test infrastructure with TypeScript configuration, base test helpers, and authentication context for testing the full Rorca UX flow. Configure test workspace registration and seed data utilities.",
+      "acceptanceCriteria": [
+        "Playwright installed with TypeScript config in project root",
+        "playwright.config.ts configured with base URL localhost:5210 and headless/headed modes",
+        "Base test helper file created with workspace registration and cleanup utilities",
+        "Authentication context setup for bypassing login (aligns with commented-out authRequired middleware)",
+        "Seed data utility created for creating test specs, runs, and direction layers"
+      ],
+      "dependsOn": [],
+      "complexity": 3,
+      "suggestedSkills": [
+        {
+          "name": "journey-tester",
+          "relevance": 9,
+          "reason": "This story sets up the E2E testing infrastructure that journey-tester skill describes — autonomous persona-based testing with navigation and iteration patterns"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "frontend",
+        "backend"
+      ],
+      "passes": false
+    },
+    {
+      "id": "US-002",
+      "title": "Specs panel navigation and kanban board interaction test",
+      "description": "E2E test for Specs panel (default view): verify Board/List/Marketplace tab switching, kanban column rendering (Draft/In Progress/Done), drag-and-drop approval/rejection, compact mode toggle, and keyboard navigation (j/k/h/l). Test active run status indicators (running vs queued).",
+      "acceptanceCriteria": [
+        "Test navigates to root route / and verifies SpecsPanel renders with Board view active",
+        "Test switches between Board, List, and Marketplace tabs and verifies content changes",
+        "Test verifies kanban columns render with correct spec cards (Draft, In Progress, Done)",
+        "Test drags spec card from Draft to In Progress column and verifies approval action triggers",
+        "Test verifies running specs show green Play icon + pulsing 'Running' badge",
+        "Test verifies queued specs show amber Clock icon + static 'Queued #N' badge",
+        "Test toggles compact mode and verifies card layout changes",
+        "Test uses keyboard navigation (j/k to move between cards, h/l to move between columns, Enter to open slide-over)"
+      ],
+      "dependsOn": [
+        "US-001"
+      ],
+      "complexity": 4,
+      "suggestedSkills": [
+        {
+          "name": "journey-tester",
+          "relevance": 10,
+          "reason": "Core E2E testing of kanban interaction flows — exactly what journey-tester is designed for with navigation, interaction, and state verification"
+        },
+        {
+          "name": "react-review",
+          "relevance": 6,
+          "reason": "Reviewing React component behavior under test — helps identify state management issues and render edge cases"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "frontend",
+        "ux-designer"
+      ],
+      "passes": false
+    },
+    {
+      "id": "US-003",
+      "title": "Spec detail slide-over deep linking and tab navigation test",
+      "description": "E2E test for SpecDetailSlideOver: verify 800px width, tab navigation (Stories/History/Graph/Diagram/JSON/Context), action buttons (Approve/Reject/Run/Fork/Export/Delete), and deep linking via spec card click. Test context tab shows generation log.",
+      "acceptanceCriteria": [
+        "Test clicks spec card in kanban board and verifies SpecDetailSlideOver opens at 800px width",
+        "Test verifies all tabs render: Stories, History, Graph, Diagram, JSON, Context",
+        "Test switches between tabs and verifies content changes (e.g., Context tab shows spec_generation_logs data)",
+        "Test clicks Approve button and verifies spec moves from pending/ to approved/ directory",
+        "Test clicks Run button and verifies pipeline trigger POST /api/pipeline/trigger",
+        "Test clicks Delete button and verifies spec removed from UI and file system",
+        "Test closes slide-over via X button or Escape key and verifies kanban board still visible"
+      ],
+      "dependsOn": [
+        "US-001",
+        "US-002"
+      ],
+      "complexity": 4,
+      "suggestedSkills": [
+        {
+          "name": "journey-tester",
+          "relevance": 9,
+          "reason": "Testing modal navigation, deep linking, and action button flows — journey-tester excels at multi-step UI verification"
+        },
+        {
+          "name": "react-review",
+          "relevance": 5,
+          "reason": "Slide-over is a complex React component with multiple tabs and state transitions — review helps catch render bugs"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "frontend",
+        "ux-designer"
+      ],
+      "passes": false
+    },
+    {
+      "id": "US-004",
+      "title": "Runs panel and run view terminal flow test",
+      "description": "E2E test for Runs panel (/runs) and Run View (/runs/:runId): verify run history table, click-through to full-screen terminal view, xterm.js rendering, story list sidebar, real-time SSE updates (story_started/story_passed), and skills tab rendering.",
+      "acceptanceCriteria": [
+        "Test navigates to /runs and verifies run history table renders with recent runs",
+        "Test clicks run row and verifies navigation to /runs/:runId with full-screen terminal",
+        "Test verifies xterm.js terminal renders with SSH-like output from GET /api/pipeline/runs/:runId/output SSE",
+        "Test verifies story list sidebar shows all stories with real-time status updates (pending/running/passed/failed/skipped)",
+        "Test verifies SSE connection to /api/pipeline/stream updates story statuses in real-time",
+        "Test verifies Skills tab renders in run view with active skills for the run"
+      ],
+      "dependsOn": [
+        "US-001"
+      ],
+      "complexity": 5,
+      "suggestedSkills": [
+        {
+          "name": "journey-tester",
+          "relevance": 10,
+          "reason": "Complex real-time flow testing with SSE events, terminal rendering, and asynchronous state updates — journey-tester's iteration-until-success pattern is essential"
+        },
+        {
+          "name": "workflow-orchestrator",
+          "relevance": 7,
+          "reason": "Testing subprocess→SSE→terminal flow matches workflow-orchestrator's buffer management and real-time coordination patterns"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "frontend",
+        "backend",
+        "sre"
+      ],
+      "passes": false
+    },
+    {
+      "id": "US-005",
+      "title": "Analytics panel dashboard rendering test",
+      "description": "E2E test for Analytics panel (/analytics): verify token usage charts (recharts), cost breakdown, velocity metrics, ROI widget, and health score display. Test data fetching from GET /api/analytics and chart interactivity.",
+      "acceptanceCriteria": [
+        "Test navigates to /analytics and verifies panel renders without errors",
+        "Test verifies token usage chart (recharts) renders with data from GET /api/analytics",
+        "Test verifies cost breakdown section shows per-model and per-run costs",
+        "Test verifies velocity metrics display (stories/day, runs/week)",
+        "Test verifies ROI widget shows realized savings (if OpenCode cascading data exists)",
+        "Test verifies health score widget displays workspace health percentage",
+        "Test hovers over chart data points and verifies tooltips render"
+      ],
+      "dependsOn": [
+        "US-001"
+      ],
+      "complexity": 3,
+      "suggestedSkills": [
+        {
+          "name": "journey-tester",
+          "relevance": 7,
+          "reason": "Testing dashboard rendering and chart interactivity — journey-tester handles visual verification and data validation"
+        },
+        {
+          "name": "react-review",
+          "relevance": 6,
+          "reason": "Analytics panel uses recharts and framer-motion — react-review ensures performance best practices for chart rendering"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "frontend",
+        "ux-designer"
+      ],
+      "passes": false
+    },
+    {
+      "id": "US-006",
+      "title": "Direction Stack editor and CLAUDE.md sync test",
+      "description": "E2E test for Direction panel (/direction): verify L1-L5 layer editing, CLAUDE.md bi-directional sync, Memory ledger rendering, and Team Direction tab. Test isDirty detection and save flow.",
+      "acceptanceCriteria": [
+        "Test navigates to /direction and verifies Direction Stack editor renders with L1-L5 layers",
+        "Test edits L3 (Project) layer content and verifies isDirty state activates Save button",
+        "Test clicks Save and verifies PUT /api/direction request updates direction_layers table",
+        "Test verifies CLAUDE.md file in workspace root syncs with direction stack changes",
+        "Test navigates to Memory tab and verifies MEMORY.md ledger entries render",
+        "Test navigates to Team Direction tab and verifies team_direction_layers data renders"
+      ],
+      "dependsOn": [
+        "US-001"
+      ],
+      "complexity": 4,
+      "suggestedSkills": [
+        {
+          "name": "journey-tester",
+          "relevance": 8,
+          "reason": "Testing bi-directional file sync and multi-tab editor flow — journey-tester validates state consistency across filesystem and UI"
+        },
+        {
+          "name": "rorca",
+          "relevance": 9,
+          "reason": "Direction stack is core to Rorca's identity — rorca skill provides deep context for testing this critical workflow"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "backend",
+        "architect"
+      ],
+      "passes": false
+    },
+    {
+      "id": "US-007",
+      "title": "Settings panel multi-tab navigation and config persistence test",
+      "description": "E2E test for Settings panel (/settings/:tab): verify 17 sub-tab navigation, ContextRoutingSettings visual/JSON editor, provider key vault, hooks config, and settings persistence via PUT requests.",
+      "acceptanceCriteria": [
+        "Test navigates to /settings/general and verifies general settings tab renders",
+        "Test cycles through all 17 settings tabs (general, env-vars, hooks, agents, context, providers, etc.) and verifies each renders without error",
+        "Test navigates to /settings/context and verifies ContextRoutingSettings visual editor renders with directory tree",
+        "Test toggles ContextRoutingSettings from visual to JSON mode and verifies raw config.json displays",
+        "Test edits context routing rule priority in visual mode and verifies Save triggers PUT /api/workspaces/:id/rorca-config",
+        "Test navigates to /settings/providers and adds API key to vault, verifies encrypted storage",
+        "Test navigates to /settings/hooks and adds pre-run hook, verifies POST /api/pipeline/hooks"
+      ],
+      "dependsOn": [
+        "US-001"
+      ],
+      "complexity": 5,
+      "suggestedSkills": [
+        {
+          "name": "journey-tester",
+          "relevance": 9,
+          "reason": "Testing 17-tab settings panel with complex visual/JSON editor toggle — journey-tester's persistence and iteration is critical"
+        },
+        {
+          "name": "rorca",
+          "relevance": 8,
+          "reason": "Settings panel configures core Rorca orchestration behavior — rorca skill ensures deep understanding of .rorca/config.json structure"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "frontend",
+        "backend",
+        "ux-designer"
+      ],
+      "passes": false
+    },
+    {
+      "id": "US-008",
+      "title": "Command palette and keyboard shortcut flow test",
+      "description": "E2E test for CommandPalette (Cmd+K): verify fuzzy search, navigation actions (New Spec, View Runs, Settings), context-aware commands, and keyboard shortcuts. Test dark mode toggle and workspace switching.",
+      "acceptanceCriteria": [
+        "Test triggers command palette via Cmd+K and verifies modal opens",
+        "Test types 'new spec' and verifies fuzzy match shows 'New Spec' command",
+        "Test selects 'New Spec' command and verifies navigation to Spec Forge",
+        "Test triggers Cmd+K again and types 'dark' to toggle dark mode, verifies theme switch",
+        "Test types 'runs' and selects 'View Runs', verifies navigation to /runs",
+        "Test verifies context-aware commands appear based on active panel (e.g., 'Approve Spec' only when spec is selected)",
+        "Test uses arrow keys and Enter to navigate command palette results"
+      ],
+      "dependsOn": [
+        "US-001",
+        "US-002"
+      ],
+      "complexity": 3,
+      "suggestedSkills": [
+        {
+          "name": "journey-tester",
+          "relevance": 8,
+          "reason": "Testing keyboard-driven navigation and context-aware command filtering — journey-tester excels at interaction flow verification"
+        },
+        {
+          "name": "react-review",
+          "relevance": 5,
+          "reason": "Command palette uses cmdk library with complex filtering logic — react-review ensures performance and edge case handling"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "frontend",
+        "ux-designer"
+      ],
+      "passes": false
+    }
+  ],
+  "mermaidDiagram": "graph TD\n  US-001[\"E2E test infrastructure setup\"]\n  US-002[\"Specs panel navigation and kanban board interaction test\"]\n  US-003[\"Spec detail slide-over deep linking and tab navigation test\"]\n  US-004[\"Runs panel and run view terminal flow test\"]\n  US-005[\"Analytics panel dashboard rendering test\"]\n  US-006[\"Direction Stack editor and CLAUDE.md sync test\"]\n  US-007[\"Settings panel multi-tab navigation and config persistence test\"]\n  US-008[\"Command palette and keyboard shortcut flow test\"]\n  US-001 --> US-002\n  US-001 --> US-003\n  US-001 --> US-004\n  US-001 --> US-005\n  US-001 --> US-006\n  US-001 --> US-007\n  US-001 --> US-008\n  US-002 --> US-003\n  US-002 --> US-008",
+  "contextUsed": {
+    "text": "=== GLOBAL STANDARDS (L1) ===\ntest: true\n\n=== PROJECT CONTEXT (L3) ===\nname: rorca\ntype: web-app\nstack:\n  - React 18\n  - TypeScript\n  - Vite\n  - Tailwind CSS\n  - Express.js\n  - SQLite (better-sqlite3)\n  - xterm.js\n  - react-router-dom\n  - framer-motion\n  - recharts\n  - mermaid\n  - monaco-editor\npurpose: |\n  Rorca is an AI spec orchestration platform for autonomous software development.\n  It generates structured specs from plain-English briefs, manages approval workflows,\n  and executes user stories via Claude CLI, OpenCode, or Codex with real-time monitoring.\nkey_modules:\n  - \"src/panels/ — React UI panels (Specs, Runs, Analytics, Direction, Settings)\"\n  - \"src/components/ — Shared UI components (Sidebar, Shell, RunTerminal, CommandPalette)\"\n  - \"backend/src/routes/ — Express API endpoints (32 route files)\"\n  - \"backend/src/lib/execution-engine.ts — Ralph Loop subprocess orchestration\"\n  - \"backend/src/lib/direction-stack.ts — 5-layer context synthesis\"\n  - \"backend/src/lib/llm-client.ts — LLM provider abstraction\"\n  - \"backend/src/lib/context-router.ts — Dynamic context payload compiler\"\n  - \"backend/src/lib/sse-hub.ts — Centralized pub/sub for WAL events\"\n  - \"backend/src/db/ — SQLite migrations and schema bootstrap\"\n  - \"backend/src/mcp/server.ts — MCP stdio server (5 tools)\"\n  - \"forge/specs/ — Spec JSON files (pending/, approved/)\"\nconstraints:\n  - \"SQLite is synchronous (better-sqlite3) — no async DB calls\"\n  - \"Backend has no hot-reload — restart required after changes\"\n  - \"Spec id is filename slug, specName is human-readable title\"\n  - \"All spec paths: forge/specs/approved/<slug>.json or forge/specs/pending/<slug>.json\"\n  - \"WAL events table uses 'ts' column, NOT 'created_at'\"\n  - \"Auth middleware is intentionally bypassed globally (local single-user tool)\"\ndeployment_target: \"Self-hosted (npm install + npm run dev) or Docker Compose\"\nintegrations:\n  - GitHub (OAuth, webhooks, PR creation)\n  - Linear (issue sync)\n  - Vercel (deploy triggers)\n  - Slack (notifications)\n\n=== SPEC BRIEF (L4) ===\nCreate a test that will an e2e audit of the UX architecture to ensure everything flows smoothly",
+    "meta": {
+      "standards": true,
+      "conventions": false,
+      "project": true,
+      "memory": false,
+      "schema": false,
+      "totalTokens": 533,
+      "scopesMatched": []
+    }
+  }
+}

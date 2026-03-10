@@ -145,10 +145,79 @@ function extractStoryId(message: string): string | null {
 
 // ─── Tab content placeholders ───────────────────────────────────────────────
 
-function TabPlaceholder({ label }: { label: string }) {
+// ─── Stories List Tab ───────────────────────────────────────────────────────
+
+function StoriesListTab({ dbStories, specStories, liveStatuses }: {
+  dbStories: StoryResultSeed[];
+  specStories: { id: string; title: string }[];
+  liveStatuses: Map<string, DerivedStatus>;
+}) {
+  // Merge spec story titles with db results and live statuses
+  const titleMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of specStories) m.set(s.id, s.title);
+    return m;
+  }, [specStories]);
+
+  const rows = useMemo(() => {
+    // Start from spec stories order if available, else db order
+    const ids = specStories.length > 0
+      ? specStories.map(s => s.id)
+      : dbStories.map(s => s.story_id);
+    return ids.map(id => {
+      const db = dbStories.find(s => s.story_id === id);
+      const live = liveStatuses.get(id);
+      const status = live?.status ?? (db ? (db.status === 'pass' ? 'passed' : db.status === 'fail' ? 'failed' : db.status) : 'pending');
+      const elapsed = live?.elapsed ?? (db?.elapsed_seconds != null ? `${db.elapsed_seconds}s` : null);
+      return { id, title: titleMap.get(id) ?? id, status, elapsed };
+    });
+  }, [specStories, dbStories, liveStatuses, titleMap]);
+
+  const STATUS_STYLES: Record<string, { dot: string; label: string }> = {
+    passed:  { dot: 'bg-emerald-500', label: 'Passed' },
+    failed:  { dot: 'bg-red-500',     label: 'Failed' },
+    running: { dot: 'bg-blue-500 animate-pulse', label: 'Running' },
+    skipped: { dot: 'bg-gray-400',    label: 'Skipped' },
+    pending: { dot: 'bg-gray-600',    label: 'Pending' },
+    skip:    { dot: 'bg-gray-400',    label: 'Skipped' },
+    pass:    { dot: 'bg-emerald-500', label: 'Passed' },
+    fail:    { dot: 'bg-red-500',     label: 'Failed' },
+  };
+
+  if (rows.length === 0) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-muted text-sm">
+        No stories found for this run
+      </div>
+    );
+  }
+
+  const passed = rows.filter(r => r.status === 'passed' || r.status === 'pass').length;
+  const failed = rows.filter(r => r.status === 'failed' || r.status === 'fail').length;
+
   return (
-    <div className="flex-1 flex items-center justify-center text-muted text-sm">
-      {label} tab — coming in a future story
+    <div className="flex-1 flex flex-col min-h-0">
+      <div className="shrink-0 px-4 py-2 border-b border-border text-xs text-muted flex items-center gap-3">
+        <span>{rows.length} stories</span>
+        {passed > 0 && <span className="text-emerald-500">{passed} passed</span>}
+        {failed > 0 && <span className="text-red-500">{failed} failed</span>}
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        {rows.map((row, i) => {
+          const style = STATUS_STYLES[row.status] ?? STATUS_STYLES.pending;
+          return (
+            <div key={row.id} className={`flex items-center gap-3 px-4 py-2.5 text-sm ${i % 2 === 0 ? 'bg-transparent' : 'bg-panel/30'}`}>
+              <span className={`shrink-0 w-2 h-2 rounded-full ${style.dot}`} />
+              <span className="font-mono text-xs text-muted shrink-0 w-[72px]">{row.id}</span>
+              <span className="flex-1 truncate min-w-0">{row.title}</span>
+              {row.elapsed && <span className="text-xs text-muted shrink-0">{row.elapsed}</span>}
+              <span className={`text-xs shrink-0 ${row.status === 'passed' || row.status === 'pass' ? 'text-emerald-500' : row.status === 'failed' || row.status === 'fail' ? 'text-red-500' : row.status === 'running' ? 'text-blue-500' : 'text-muted'}`}>
+                {style.label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -339,6 +408,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
   const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
   const [contextComparison, setContextComparison] = useState<ContextComparisonData | null>(null);
   const [totalStories, setTotalStories] = useState(0);
+  const [dbStories, setDbStories] = useState<StoryResultSeed[]>([]);
+  const [specStories, setSpecStories] = useState<{ id: string; title: string }[]>([]);
   // Seed from story_results on initial load so graph colors are correct for in-progress/historical runs
   const [seedStatuses, setSeedStatuses] = useState<Map<string, DerivedStatus>>(new Map());
 
@@ -411,7 +482,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
       if (data.specModel !== undefined) setSpecModel(data.specModel);
       if (data.tokenSummary) setTokenSummary(data.tokenSummary);
       if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
-      if (data.specStories) setTotalStories(data.specStories.length);
+      if (data.specStories) { setTotalStories(data.specStories.length); setSpecStories(data.specStories); }
+      if (data.stories) setDbStories(data.stories);
       // Seed graph colors from DB story results so nodes aren't all grey on load
       if (data.stories?.length) {
         const seed = new Map<string, DerivedStatus>();
@@ -647,7 +719,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
           />
         );
       case 'stories':
-        return <TabPlaceholder label="Stories" />;
+        return <StoriesListTab dbStories={dbStories} specStories={specStories} liveStatuses={liveStatuses} />;
       case 'graph':
         if (isMobile) {
           return (
