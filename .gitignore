@@ -14,5 +14,6 @@ progress.txt
 
 # Bun binary build artifacts
 bin/.generated/
+build/
 rorca
 .rorca-results.jsonl
