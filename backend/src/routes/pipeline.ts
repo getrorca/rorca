@@ -31,6 +31,7 @@ import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type Fall
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
+import { synthesizeRunMemory } from '../lib/auto-memory';
 import { logger } from '../lib/logger';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
@@ -1637,6 +1638,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       // FR-005: Mark spec as completed when run succeeds
       if (status === 'done') markSpecCompleted(specPath);
 
+      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
+      synthesizeRunMemory(runId, workspaceId).catch(() => {});
+
       // Run post-run hooks with RUN_STATUS and RUN_ID env vars
       const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
       const postRunResults = await runHooks(workspaceId, 'post_run', cwd, postRunEnv);
@@ -2293,6 +2297,9 @@ router.post('/quick-run', async (req: Request, res: Response) => {
 
       // FR-005: Mark spec as completed when run succeeds
       if (status === 'done') markSpecCompleted(relativeSpecPath);
+
+      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
+      synthesizeRunMemory(runId, workspaceId).catch(() => {});
 
       const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
       const postRunResults = await runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
@@ -3150,6 +3157,9 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
 
       // FR-005: Mark spec as completed when retry succeeds
       if (finalStatus === 'done') markSpecCompleted(originalRun.spec_path);
+
+      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
+      synthesizeRunMemory(newRunId, originalRun.workspace_id).catch(() => {});
 
       const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [originalRun.workspace_id, JSON.stringify({
         run_id: newRunId,

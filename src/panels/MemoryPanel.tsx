@@ -15,7 +15,7 @@ interface MemoryEntry {
   lineNumber?: number;
 }
 
-const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha'] as const;
+const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha', 'Run Synthesis'] as const;
 
 const CATEGORY_COLORS: Record<string, string> = {
   Architecture: 'bg-blue-500/10 text-blue-500',
@@ -24,6 +24,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   Decision: 'bg-amber-500/10 text-amber-500',
   Pattern: 'bg-emerald-500/10 text-emerald-500',
   Gotcha: 'bg-orange-500/10 text-orange-500',
+  'Run Synthesis': 'bg-cyan-500/10 text-cyan-500',
 };
 
 // ─── Entry Card ─────────────────────────────────────────────────────────────
