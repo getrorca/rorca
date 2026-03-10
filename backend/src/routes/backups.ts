@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { createBackup, listBackups, pruneOldBackups } from '../lib/backup';
-import { backfillAll, isBackfillRunning, getQueueStats } from '../lib/embedding-pipeline';
+import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts } from '../lib/embedding-pipeline';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -137,7 +137,7 @@ router.post('/embed-all', async (req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Get embedding backfill status
  *     operationId: getBackfillStatus
- *     description: Returns current embedding queue depth, processed count, failed count, and whether a backfill is in progress.
+ *     description: Returns current embedding queue depth, processed count, failed count, whether a backfill is in progress, and total embedding counts by source type.
  *     responses:
  *       200:
  *         description: Backfill status
@@ -150,12 +150,18 @@ router.post('/embed-all', async (req: Request, res: Response) => {
  *                 queueDepth: { type: integer }
  *                 processed: { type: integer }
  *                 failed: { type: integer }
+ *                 embeddingCount: { type: integer }
+ *                 specCount: { type: integer }
+ *                 storyCount: { type: integer }
+ *                 memoryCount: { type: integer }
  */
-router.get('/embed-all/status', (_req: Request, res: Response) => {
+router.get('/embed-all/status', async (_req: Request, res: Response) => {
   const stats = getQueueStats();
+  const counts = await getEmbeddingCounts();
   res.json({
     running: isBackfillRunning(),
     ...stats,
+    ...counts,
   });
 });
 

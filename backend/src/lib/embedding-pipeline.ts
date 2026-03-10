@@ -398,6 +398,32 @@ export function getQueueStats(): QueueStats {
   };
 }
 
+export async function getEmbeddingCounts(): Promise<{
+  embeddingCount: number;
+  specCount: number;
+  storyCount: number;
+  memoryCount: number;
+}> {
+  const row = await queryOne<{
+    embedding_count: string;
+    spec_count: string;
+    story_count: string;
+    memory_count: string;
+  }>(`SELECT
+        COUNT(*) AS embedding_count,
+        COUNT(*) FILTER (WHERE source_type = 'spec') AS spec_count,
+        COUNT(*) FILTER (WHERE source_type = 'story') AS story_count,
+        COUNT(*) FILTER (WHERE source_type = 'memory') AS memory_count
+      FROM embeddings`);
+
+  return {
+    embeddingCount: parseInt(row?.embedding_count || '0', 10),
+    specCount: parseInt(row?.spec_count || '0', 10),
+    storyCount: parseInt(row?.story_count || '0', 10),
+    memoryCount: parseInt(row?.memory_count || '0', 10),
+  };
+}
+
 export function enqueueJob(job: EmbedJob): void {
   jobQueue.push({ ...job, retries: job.retries ?? 0 });
   logger.info({ sourceType: job.sourceType, sourceId: job.sourceId, queueDepth: jobQueue.length },
@@ -694,7 +720,10 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
     const pathMod = await import('path');
 
     for (const ws of workspaces) {
-      // 1. Embed approved specs and their stories
+      // Track spec slugs seen on disk so we can detect spec_versions-only specs later
+      const seenSpecSlugs = new Set<string>();
+
+      // 1. Embed approved specs and their stories from filesystem
       const approvedDir = pathMod.join(ws.path, 'forge', 'specs', 'approved');
       if (fs.existsSync(approvedDir)) {
         const specFiles = fs.readdirSync(approvedDir).filter((f: string) => f.endsWith('.json'));
@@ -703,6 +732,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
             const specPath = pathMod.join(approvedDir, file);
             const specJson = JSON.parse(fs.readFileSync(specPath, 'utf-8'));
             const specId = file.replace('.json', '');
+            seenSpecSlugs.add(specId);
             const stories: Array<{ id: string; title: string; description: string; acceptanceCriteria?: string[] }> =
               specJson.userStories || [];
 
@@ -744,6 +774,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
             const specPath = pathMod.join(pendingDir, file);
             const specJson = JSON.parse(fs.readFileSync(specPath, 'utf-8'));
             const specId = file.replace('.json', '');
+            seenSpecSlugs.add(specId);
 
             const specText = prepareText('spec', [specJson.title || specId, specJson.brief || ''].join('\n'));
             const specHash = computeHash(specText);
@@ -760,7 +791,49 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
         }
       }
 
-      // 3. Embed memory entries from MEMORY.md
+      // 3. Fallback: embed specs from spec_versions DB that are NOT on disk
+      try {
+        const dbSpecs = await query<{ spec_slug: string; content_json: string }>(
+          `SELECT DISTINCT ON (spec_slug) spec_slug, content_json::text as content_json
+           FROM spec_versions ORDER BY spec_slug, version DESC`
+        );
+        for (const row of dbSpecs) {
+          if (seenSpecSlugs.has(row.spec_slug)) continue; // Already processed from disk
+          try {
+            const specJson = typeof row.content_json === 'string' ? JSON.parse(row.content_json) : row.content_json;
+            const stories: Array<{ id: string; title: string; description: string; acceptanceCriteria?: string[] }> =
+              specJson.userStories || [];
+
+            const specText = prepareText('spec', [specJson.title || row.spec_slug, specJson.brief || '', `${stories.length} stories`].join('\n'));
+            const specHash = computeHash(specText);
+            const specStale = await isStale(ws.id, 'spec', row.spec_slug, specHash);
+            if (specStale) {
+              enqueueJob({ workspaceId: ws.id, sourceType: 'spec', sourceId: row.spec_slug, text: specText });
+              queued++;
+            } else {
+              skippedStale++;
+            }
+
+            for (const story of stories) {
+              const storyText = prepareText('story', [story.title, story.description, ...(story.acceptanceCriteria || [])].join('\n'));
+              const storyHash = computeHash(storyText);
+              const storyStale = await isStale(ws.id, 'story', story.id, storyHash);
+              if (storyStale) {
+                enqueueJob({ workspaceId: ws.id, sourceType: 'story', sourceId: story.id, text: storyText });
+                queued++;
+              } else {
+                skippedStale++;
+              }
+            }
+          } catch {
+            // Skip invalid spec_versions rows
+          }
+        }
+      } catch {
+        // spec_versions table may not exist in older installations — skip gracefully
+      }
+
+      // 4. Embed memory entries from MEMORY.md
       const memoryPath = pathMod.join(ws.path, 'MEMORY.md');
       if (fs.existsSync(memoryPath)) {
         const memoryContent = fs.readFileSync(memoryPath, 'utf-8');
@@ -779,6 +852,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
       }
     }
 
+    logger.info({ queued, skippedStale }, '[Embeddings] Backfill complete: %d jobs queued, %d skipped (unchanged)', queued, skippedStale);
     return { queued, skippedStale };
   } finally {
     // Mark backfill as complete once all jobs are queued (not processed)
