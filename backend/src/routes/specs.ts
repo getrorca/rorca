@@ -20,6 +20,7 @@ import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
 import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
+import { hybridSearch } from '../lib/search';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -3164,16 +3165,25 @@ router.get('/archive', async (req: Request, res: Response) => {
       if (branch && branch !== 'HEAD') currentBranch = branch;
     } catch { /* not a git repo or git unavailable */ }
 
-    // Determine matching slugs via FTS or collect all
+    // PG-008: Determine matching slugs via hybrid search (keyword + semantic) or collect all
     let matchingSlugs: Set<string> | null = null;
     if (q) {
-      // Use Postgres tsvector @@ plainto_tsquery for full-text search (replaces SQLite FTS5 MATCH)
+      const hybridResults = await hybridSearch(q, {
+        sourceTypes: ['archive'],
+        workspaceId,
+        limit: 100,
+      });
+      matchingSlugs = new Set(hybridResults.map(r => r.sourceId));
+
+      // Fallback: also include pure FTS matches to catch anything hybrid might miss
       const ftsRows = await query<{ spec_slug: string }>(
         `SELECT spec_slug FROM spec_search_index
          WHERE workspace_id = $1 AND search_vector @@ plainto_tsquery('english', $2)`,
         [workspaceId, q]
       );
-      matchingSlugs = new Set(ftsRows.map(r => r.spec_slug));
+      for (const row of ftsRows) {
+        matchingSlugs.add(row.spec_slug);
+      }
     }
 
     const allSpecs: ArchiveSpecSummary[] = [];
