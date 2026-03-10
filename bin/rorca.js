@@ -97,7 +97,7 @@ function runInit() {
 // ────────────────────────────────────────────────────────────────
 // start: launch Express backend + open browser
 // ────────────────────────────────────────────────────────────────
-function runStart(startArgs) {
+async function runStart(startArgs) {
     // Parse options
     const portIdx = startArgs.indexOf('--port');
     const port = portIdx !== -1 && startArgs[portIdx + 1] ? startArgs[portIdx + 1] : '3030';
@@ -113,7 +113,19 @@ function runStart(startArgs) {
         mkdirSync(rorcaHome, { recursive: true });
         console.log(`Created config directory: ${rorcaHome}`);
     }
-    const dbPath = join(rorcaHome, 'rorca.db');
+    const databaseUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5432/rorca';
+    // Check Postgres reachability before starting
+    try {
+        const { Pool: PgPool } = await import('pg');
+        const testPool = new PgPool({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
+        await testPool.query('SELECT 1');
+        await testPool.end();
+    }
+    catch {
+        console.error('Cannot connect to PostgreSQL. Run: docker compose up -d db');
+        console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
+        process.exit(1);
+    }
     // Auto-build frontend if dist/ is missing
     const rootDir = join(__dirname, '..');
     const distDir = join(rootDir, 'dist');
@@ -130,7 +142,7 @@ function runStart(startArgs) {
     const env = {
         ...process.env,
         PORT: String(portNum),
-        DB_PATH: dbPath,
+        DATABASE_URL: databaseUrl,
         RORCA_SERVE_STATIC: '1',
         RORCA_STATIC_DIR: distDir,
         RORCA_HOME: rorcaHome,

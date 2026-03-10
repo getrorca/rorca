@@ -8,7 +8,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { queryOne, query } from '../db/index';
 import {
   loadAgentsMd,
   parseAgentsMd,
@@ -21,8 +21,8 @@ const router = Router();
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function getWorkspacePath(workspaceId: string): string | null {
-  const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined;
+async function getWorkspacePath(workspaceId: string): Promise<string | null> {
+  const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
   return ws?.path ?? null;
 }
 
@@ -65,11 +65,11 @@ function getWorkspacePath(workspaceId: string): string | null {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const result = loadAgentsMd(wsPath);
@@ -127,11 +127,11 @@ router.get('/', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId or invalid roles structure" }
  *       404: { description: "Workspace not found" }
  */
-router.put('/', (req: Request, res: Response) => {
+router.put('/', async (req: Request, res: Response) => {
   const { workspaceId, roles, raw } = req.body;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const agentsPath = path.join(wsPath, 'AGENTS.md');
@@ -195,11 +195,11 @@ router.put('/', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.post('/generate', (req: Request, res: Response) => {
+router.post('/generate', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const content = generateAgentsMd(wsPath);
@@ -254,7 +254,7 @@ router.post('/generate', (req: Request, res: Response) => {
  *                 total: { type: integer }
  *       400: { description: "Missing workspaceId" }
  */
-router.get('/violations', (req: Request, res: Response) => {
+router.get('/violations', async (req: Request, res: Response) => {
   const { workspaceId, runId, limit } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
@@ -263,28 +263,30 @@ router.get('/violations', (req: Request, res: Response) => {
   let sql = `
     SELECT id, event_type, payload, ts
     FROM wal_events
-    WHERE workspace_id = ? AND event_type = 'story_violation'
+    WHERE workspace_id = $1 AND event_type = 'story_violation'
   `;
   const params: (string | number)[] = [workspaceId as string];
+  let paramIndex = 2;
 
   if (runId) {
-    sql += ` AND json_extract(payload, '$.run_id') = ?`;
-    params.push(parseInt(runId as string, 10));
+    sql += ` AND payload->>'run_id' = $${paramIndex}`;
+    params.push(String(parseInt(runId as string, 10)));
+    paramIndex++;
   }
 
-  sql += ` ORDER BY ts DESC LIMIT ?`;
+  sql += ` ORDER BY ts DESC LIMIT $${paramIndex}`;
   params.push(maxResults);
 
-  const rows = db.prepare(sql).all(...params) as Array<{
+  const rows = await query<{
     id: number;
     event_type: string;
     payload: string;
     ts: string;
-  }>;
+  }>(sql, params);
 
   const violations = rows.map(row => ({
     id: row.id,
-    ...JSON.parse(row.payload),
+    ...JSON.parse(typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload)),
     created_at: row.ts,
   }));
 

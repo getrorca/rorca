@@ -65,7 +65,8 @@ if (!existsSync(rorchHome)) {
   console.log(`Created config directory: ${rorchHome}`);
 }
 
-const dbPath = join(rorchHome, 'rorca.db');
+// ─── Check Postgres reachability ───
+const databaseUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5432/rorca';
 
 // ─── Auto-build frontend if dist/ is missing ───
 const distDir = join(__dirname, 'dist');
@@ -81,12 +82,12 @@ if (!existsSync(join(distDir, 'index.html'))) {
 
 // ─── Start the server ───
 console.log(`Starting Rorca on port ${portNum}...`);
-console.log(`Database: ${dbPath}`);
+console.log(`Database: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
 
 const env = {
   ...process.env,
   PORT: String(portNum),
-  DB_PATH: dbPath,
+  DATABASE_URL: databaseUrl,
   RORCA_SERVE_STATIC: '1',
   RORCA_STATIC_DIR: distDir,
   RORCA_HOME: rorchHome,

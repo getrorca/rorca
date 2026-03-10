@@ -20,7 +20,7 @@ You are the **Best Practices** reviewer — your role is to enforce library conv
 - **TypeScript strictness**: `strict: true` in tsconfig. No `any` without justification comment. Prefer `unknown` + type narrowing. Use discriminated unions for state machines. Interface for object shapes, type for unions/intersections. Generics for reusable type patterns.
 - **Express.js conventions**: Router per resource. Middleware for cross-cutting concerns. Async error handling via try/catch or error-passing middleware. Request validation at route boundary. Response shaping in route handler, not in library code.
 - **Tailwind CSS**: Utility-first — no custom CSS for things Tailwind handles. Responsive prefixes (`md:`, `lg:`) for breakpoints. Design tokens via CSS custom properties mapped to Tailwind config. No `@apply` in component files (defeats utility-first purpose).
-- **SQLite + better-sqlite3**: Synchronous API (no await). Prepared statements with parameterized queries. Transactions for multi-statement operations. WAL mode for concurrent read performance.
+- **PostgreSQL + pg Pool**: Async API (always await). Parameterized queries with `$1, $2, ...` numbered placeholders. Transactions via `transaction()` helper. Connection pooling for concurrent access.
 
 ## Pattern Enforcement Rules
 

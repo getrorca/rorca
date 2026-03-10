@@ -6,7 +6,7 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { db, execute, query as dbQuery, queryOne } from '../db/index';
+import { execute, query as dbQuery, queryOne } from '../db/index';
 import {
   readMemory,
   append,
@@ -30,8 +30,8 @@ const router = Router();
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function getWorkspacePath(workspaceId: string): string | null {
-  const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined;
+async function getWorkspacePath(workspaceId: string): Promise<string | null> {
+  const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
   return ws?.path ?? null;
 }
 
@@ -92,11 +92,11 @@ function todayDate(): string {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const { workspaceId, category, limit } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const ledgerPath = getLedgerPath(workspaceId as string);
@@ -160,7 +160,7 @@ router.get('/', (req: Request, res: Response) => {
  *       400: { description: "Missing required fields or invalid category" }
  *       404: { description: "Workspace not found" }
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   const { workspaceId, category, title, rule, context, source } = req.body;
 
   if (!workspaceId || !category || !title || !rule) {
@@ -171,7 +171,7 @@ router.post('/', (req: Request, res: Response) => {
     return res.status(400).json({ error: `Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}` });
   }
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const entry: MemoryEntry = {
@@ -227,7 +227,7 @@ router.post('/', (req: Request, res: Response) => {
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or entry not found" }
  */
-router.put('/entry', (req: Request, res: Response) => {
+router.put('/entry', async (req: Request, res: Response) => {
   const { workspaceId, date, title, updates } = req.body;
 
   if (!workspaceId || !date || !title) {
@@ -238,7 +238,7 @@ router.put('/entry', (req: Request, res: Response) => {
     return res.status(400).json({ error: `Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}` });
   }
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const result = updateEntry(wsPath, date, title, updates ?? {}, getLedgerPath(workspaceId));
@@ -278,14 +278,14 @@ router.put('/entry', (req: Request, res: Response) => {
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or entry not found" }
  */
-router.delete('/entry', (req: Request, res: Response) => {
+router.delete('/entry', async (req: Request, res: Response) => {
   const { workspaceId, date, title } = req.body;
 
   if (!workspaceId || !date || !title) {
     return res.status(400).json({ error: 'workspaceId, date, and title are required' });
   }
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const removed = deleteEntry(wsPath, date, title, getLedgerPath(workspaceId));
@@ -342,28 +342,31 @@ router.delete('/entry', (req: Request, res: Response) => {
  *                 total: { type: integer }
  *       400: { description: "Missing workspaceId" }
  */
-router.get('/proposals', (req: Request, res: Response) => {
+router.get('/proposals', async (req: Request, res: Response) => {
   const { workspaceId, status, runId } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  let sql = 'SELECT * FROM memory_proposals WHERE workspace_id = ?';
+  let sql = 'SELECT * FROM memory_proposals WHERE workspace_id = $1';
   const params: (string | number)[] = [workspaceId as string];
+  let paramIndex = 2;
 
   if (status) {
-    sql += ' AND status = ?';
+    sql += ` AND status = $${paramIndex}`;
     params.push(status as string);
+    paramIndex++;
   } else {
     sql += " AND status = 'pending'";
   }
 
   if (runId) {
-    sql += ' AND run_id = ?';
+    sql += ` AND run_id = $${paramIndex}`;
     params.push(parseInt(runId as string, 10));
+    paramIndex++;
   }
 
   sql += ' ORDER BY proposed_at DESC';
 
-  const rows = db.prepare(sql).all(...params) as Array<{
+  const rows = await dbQuery<{
     id: number;
     proposal_id: string;
     run_id: number;
@@ -376,7 +379,7 @@ router.get('/proposals', (req: Request, res: Response) => {
     status: string;
     proposed_at: string;
     resolved_at: string | null;
-  }>;
+  }>(sql, params);
 
   const items = rows.map(r => ({
     proposalId: r.proposal_id,
@@ -456,7 +459,7 @@ router.get('/proposals', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId or proposals array" }
  *       404: { description: "Workspace not found" }
  */
-router.post('/proposals', (req: Request, res: Response) => {
+router.post('/proposals', async (req: Request, res: Response) => {
   const { workspaceId, proposals } = req.body as {
     workspaceId: string;
     proposals: Array<{
@@ -471,15 +474,11 @@ router.post('/proposals', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'workspaceId and proposals array required' });
   }
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const ledgerPath = getLedgerPath(workspaceId);
   const results: Array<{ proposalId: string; action: string; success: boolean }> = [];
-
-  const updateStmt = db.prepare(
-    `UPDATE memory_proposals SET status = ?, resolved_at = datetime('now') WHERE proposal_id = ? AND workspace_id = ?`
-  );
 
   for (const p of proposals) {
     if (p.action === 'approve') {
@@ -488,11 +487,17 @@ router.post('/proposals', (req: Request, res: Response) => {
         date: p.entry.date || todayDate(),
       };
       append(wsPath, entryToAppend, ledgerPath);
-      updateStmt.run('approved', p.proposalId, workspaceId);
+      await execute(
+        `UPDATE memory_proposals SET status = $1, resolved_at = NOW() WHERE proposal_id = $2 AND workspace_id = $3`,
+        ['approved', p.proposalId, workspaceId]
+      );
       results.push({ proposalId: p.proposalId, action: 'approve', success: true });
     } else if (p.action === 'reject') {
       logRejected(wsPath, p.entry, p.proposalId);
-      updateStmt.run('rejected', p.proposalId, workspaceId);
+      await execute(
+        `UPDATE memory_proposals SET status = $1, resolved_at = NOW() WHERE proposal_id = $2 AND workspace_id = $3`,
+        ['rejected', p.proposalId, workspaceId]
+      );
       results.push({ proposalId: p.proposalId, action: 'reject', success: true });
     } else if (p.action === 'edit') {
       const edited: MemoryEntry = {
@@ -502,9 +507,10 @@ router.post('/proposals', (req: Request, res: Response) => {
       };
       append(wsPath, edited, ledgerPath);
       // Also update the DB row with the edited content
-      db.prepare(
-        `UPDATE memory_proposals SET status = 'approved', resolved_at = datetime('now'), title = ?, rule = ?, context = ?, category = ? WHERE proposal_id = ? AND workspace_id = ?`
-      ).run(edited.title, edited.rule, edited.context, edited.category, p.proposalId, workspaceId);
+      await execute(
+        `UPDATE memory_proposals SET status = 'approved', resolved_at = NOW(), title = $1, rule = $2, context = $3, category = $4 WHERE proposal_id = $5 AND workspace_id = $6`,
+        [edited.title, edited.rule, edited.context, edited.category, p.proposalId, workspaceId]
+      );
       results.push({ proposalId: p.proposalId, action: 'edit', success: true });
     }
   }
@@ -649,11 +655,11 @@ router.post('/proposals/undismiss', async (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/rejected', (req: Request, res: Response) => {
+router.get('/rejected', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const rejected = readRejected(wsPath);
@@ -690,11 +696,11 @@ router.get('/rejected', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/context', (req: Request, res: Response) => {
+router.get('/context', async (req: Request, res: Response) => {
   const { workspaceId, n } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const snippet = getContextSnippet(wsPath, parseInt(n as string, 10) || 20, getLedgerPath(workspaceId as string));
@@ -751,11 +757,11 @@ router.get('/categories', (_req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/archive/count', (req: Request, res: Response) => {
+router.get('/archive/count', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const count = countArchiveEntries(wsPath);
@@ -800,11 +806,11 @@ router.get('/archive/count', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.post('/rotate', (req: Request, res: Response) => {
+router.post('/rotate', async (req: Request, res: Response) => {
   const { workspaceId, retentionDays, maxEntries, tokenBudget } = req.body;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const result = rotateMemory(wsPath, {

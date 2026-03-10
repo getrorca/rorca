@@ -10,7 +10,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { installPack, forkPack } from '../lib/pack-installer';
 import { PackRegistry, PackJsonSchema } from '../lib/pack-registry';
 import { broadcastAll } from '../lib/sse-hub';
@@ -109,8 +109,9 @@ router.post('/install', async (req: Request, res: Response) => {
   }
 
   // Resolve workspace
-  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
-    { id: string; path: string; label: string } | undefined;
+  const workspace = await queryOne<{ id: string; path: string; label: string }>(
+    'SELECT * FROM workspaces WHERE id = $1', [workspaceId]
+  );
 
   if (!workspace) {
     res.status(404).json({ error: 'Workspace not found' });
@@ -234,8 +235,9 @@ router.post('/fork', async (req: Request, res: Response) => {
   }
 
   // Resolve workspace
-  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
-    { id: string; path: string; label: string } | undefined;
+  const workspace = await queryOne<{ id: string; path: string; label: string }>(
+    'SELECT * FROM workspaces WHERE id = $1', [workspaceId]
+  );
 
   if (!workspace) {
     res.status(404).json({ error: 'Workspace not found' });
@@ -325,8 +327,9 @@ router.get('/', async (req: Request, res: Response) => {
     return;
   }
 
-  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
-    { id: string; path: string } | undefined;
+  const workspace = await queryOne<{ id: string; path: string }>(
+    'SELECT * FROM workspaces WHERE id = $1', [workspaceId]
+  );
 
   if (!workspace) {
     res.status(404).json({ error: 'Workspace not found' });
@@ -369,7 +372,7 @@ router.get('/', async (req: Request, res: Response) => {
  *       200:
  *         description: List of available packs
  */
-router.get('/catalog', (req: Request, res: Response) => {
+router.get('/catalog', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string | undefined;
 
   // Rorca built-in packs directory
@@ -383,9 +386,10 @@ router.get('/catalog', (req: Request, res: Response) => {
   // Get installed pack names for this workspace (if provided)
   const installedNames = new Set<string>();
   if (workspaceId) {
-    const rows = db.prepare(
-      'SELECT pack_name FROM convention_packs WHERE workspace_id = ?',
-    ).all(workspaceId) as { pack_name: string }[];
+    const rows = await query<{ pack_name: string }>(
+      'SELECT pack_name FROM convention_packs WHERE workspace_id = $1',
+      [workspaceId]
+    );
     for (const r of rows) installedNames.add(r.pack_name);
   }
 
@@ -593,7 +597,7 @@ router.get('/detail', (req: Request, res: Response) => {
  *       404:
  *         description: Pack or workspace not found
  */
-router.delete('/:name', (req: Request, res: Response) => {
+router.delete('/:name', async (req: Request, res: Response) => {
   const packName = req.params.name as string;
   const rawWsId = req.query.workspaceId;
 
@@ -604,8 +608,9 @@ router.delete('/:name', (req: Request, res: Response) => {
 
   const workspaceId: string = rawWsId;
 
-  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
-    { id: string; path: string } | undefined;
+  const workspace = await queryOne<{ id: string; path: string }>(
+    'SELECT * FROM workspaces WHERE id = $1', [workspaceId]
+  );
 
   if (!workspace) {
     res.status(404).json({ error: 'Workspace not found' });
@@ -613,9 +618,10 @@ router.delete('/:name', (req: Request, res: Response) => {
   }
 
   // Check pack exists
-  const packRow = db.prepare(
-    'SELECT * FROM convention_packs WHERE workspace_id = ? AND pack_name = ?',
-  ).get(workspaceId, packName) as { id: number; pack_name: string; pack_path: string; forked_from: string | null } | undefined;
+  const packRow = await queryOne<{ id: number; pack_name: string; pack_path: string; forked_from: string | null }>(
+    'SELECT * FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2',
+    [workspaceId, packName]
+  );
 
   if (!packRow) {
     res.status(404).json({ error: `Pack "${packName}" not installed in this workspace` });
@@ -624,12 +630,16 @@ router.delete('/:name', (req: Request, res: Response) => {
 
   try {
     // Delete L0 direction layers for this workspace (pack-injected)
-    db.prepare(
-      'DELETE FROM direction_layers WHERE workspace_id = ? AND layer = 0',
-    ).run(workspaceId);
+    await execute(
+      'DELETE FROM direction_layers WHERE workspace_id = $1 AND layer = 0',
+      [workspaceId]
+    );
 
     // Delete installed_skills sourced from this pack
-    db.prepare('DELETE FROM installed_skills WHERE source = ?').run(`pack:${packName}`);
+    await execute(
+      'DELETE FROM installed_skills WHERE source = $1',
+      [`pack:${packName}`]
+    );
 
     // Unregister from DB
     const registry = new PackRegistry(workspace.path, workspaceId);

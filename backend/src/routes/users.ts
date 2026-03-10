@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db';
+import { query, queryOne } from '../db/index';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
@@ -58,19 +58,20 @@ interface AssignmentDbRow {
  *                             storyTitle: { type: string }
  *                             assignedAt: { type: string }
  */
-router.get('/me/assigned', (req: Request, res: Response) => {
+router.get('/me/assigned', async (req: Request, res: Response) => {
   try {
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.json({ assignments: [] }); return; }
 
-    const rows = db.prepare(`
-      SELECT sa.spec_id, sa.story_id, sa.workspace_id, sa.assigned_at,
+    const rows = await query<AssignmentDbRow>(
+      `SELECT sa.spec_id, sa.story_id, sa.workspace_id, sa.assigned_at,
              w.label AS workspace_label, w.path AS workspace_path
       FROM spec_assignments sa
       JOIN workspaces w ON w.id = sa.workspace_id
-      WHERE sa.assignee_id = ?
-      ORDER BY sa.assigned_at DESC
-    `).all(user.id) as AssignmentDbRow[];
+      WHERE sa.assignee_id = $1
+      ORDER BY sa.assigned_at DESC`,
+      [user.id],
+    );
 
     // Group by spec and enrich with spec titles from filesystem
     const specMap = new Map<string, {
@@ -177,7 +178,7 @@ router.get('/me/assigned', (req: Request, res: Response) => {
  *       400:
  *         description: Missing workspaceId query parameter
  */
-router.get('/workspace-members', (req: Request, res: Response) => {
+router.get('/workspace-members', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
@@ -187,9 +188,9 @@ router.get('/workspace-members', (req: Request, res: Response) => {
 
     // Return all users (in a team context this would filter by team membership)
     // For now, return all users in the system as potential assignees
-    const users = db.prepare(
-      'SELECT id, display_name, email, avatar_url FROM users ORDER BY display_name'
-    ).all() as { id: string; display_name: string; email: string; avatar_url: string | null }[];
+    const users = await query<{ id: string; display_name: string; email: string; avatar_url: string | null }>(
+      'SELECT id, display_name, email, avatar_url FROM users ORDER BY display_name',
+    );
 
     res.json({
       members: users.map(u => ({

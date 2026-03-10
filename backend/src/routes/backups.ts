@@ -12,7 +12,7 @@ const router = Router();
  *     tags: [Admin]
  *     summary: Trigger an immediate database backup
  *     operationId: createBackup
- *     description: Creates a new SQLite database backup and prunes old backups beyond the retention limit.
+ *     description: Creates a new PostgreSQL database backup via pg_dump and prunes old backups beyond the retention limit.
  *     responses:
  *       201:
  *         description: Backup created successfully

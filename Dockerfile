@@ -2,7 +2,7 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 
-# Native addon build deps (better-sqlite3 legacy shim)
+# Native build deps (pg, node-gyp)
 RUN apk add --no-cache python3 make g++
 
 # Root deps (frontend)

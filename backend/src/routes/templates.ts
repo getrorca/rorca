@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { AuthUser } from './auth';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
@@ -32,38 +32,41 @@ interface RatingRow {
   rating_count: number;
 }
 
-function getUserTeamIds(userId: string): string[] {
-  const rows = db.prepare(
-    'SELECT team_id FROM team_members WHERE user_id = ?'
-  ).all(userId) as { team_id: string }[];
+async function getUserTeamIds(userId: string): Promise<string[]> {
+  const rows = await query<{ team_id: string }>(
+    'SELECT team_id FROM team_members WHERE user_id = $1',
+    [userId]
+  );
   return rows.map(r => r.team_id);
 }
 
-function getTemplateRating(templateId: string): { avgRating: number; ratingCount: number } {
-  const row = db.prepare(
+async function getTemplateRating(templateId: string): Promise<{ avgRating: number; ratingCount: number }> {
+  const row = await queryOne<{ avg_rating: number | null; rating_count: number }>(
     `SELECT AVG(rating) as avg_rating, COUNT(*) as rating_count
-     FROM template_ratings WHERE template_id = ?`
-  ).get(templateId) as { avg_rating: number | null; rating_count: number };
+     FROM template_ratings WHERE template_id = $1`,
+    [templateId]
+  );
   return {
-    avgRating: row.avg_rating ? Math.round(row.avg_rating * 10) / 10 : 0,
-    ratingCount: row.rating_count,
+    avgRating: row?.avg_rating ? Math.round(row.avg_rating * 10) / 10 : 0,
+    ratingCount: row?.rating_count ?? 0,
   };
 }
 
-function getAuthorInfo(authorId: string | null): { authorName: string | null; authorEmail: string | null } {
+async function getAuthorInfo(authorId: string | null): Promise<{ authorName: string | null; authorEmail: string | null }> {
   if (!authorId) return { authorName: null, authorEmail: null };
-  const user = db.prepare(
-    'SELECT display_name, email FROM users WHERE id = ?'
-  ).get(authorId) as { display_name: string; email: string } | undefined;
+  const user = await queryOne<{ display_name: string; email: string }>(
+    'SELECT display_name, email FROM users WHERE id = $1',
+    [authorId]
+  );
   return {
     authorName: user?.display_name ?? null,
     authorEmail: user?.email ?? null,
   };
 }
 
-function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
-  const { avgRating, ratingCount } = getTemplateRating(row.id);
-  const { authorName, authorEmail } = getAuthorInfo(row.author_id);
+async function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
+  const { avgRating, ratingCount } = await getTemplateRating(row.id);
+  const { authorName, authorEmail } = await getAuthorInfo(row.author_id);
 
   const result: Record<string, unknown> = {
     id: row.id,
@@ -144,7 +147,7 @@ function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
  *                   type: array
  *                   items: { $ref: '#/components/schemas/Template' }
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const user = getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
@@ -164,7 +167,7 @@ router.post('/', (req: Request, res: Response) => {
 
     // Validate teamId if provided — user must be a member
     if (teamId) {
-      const userTeamIds = getUserTeamIds(user.id);
+      const userTeamIds = await getUserTeamIds(user.id);
       if (!userTeamIds.includes(teamId)) {
         res.status(403).json({ error: 'You are not a member of this team' });
         return;
@@ -174,24 +177,25 @@ router.post('/', (req: Request, res: Response) => {
     const id = randomUUID();
     const storyCount = storyStructure.length;
 
-    db.prepare(
+    await execute(
       `INSERT INTO templates (id, name, description, source_spec_id, brief, story_structure, direction_layers, story_count, team_id, author_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      id,
-      name,
-      description ?? null,
-      sourceSpecId,
-      brief,
-      JSON.stringify(storyStructure),
-      directionLayers ? JSON.stringify(directionLayers) : null,
-      storyCount,
-      teamId ?? null,
-      user.id,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        id,
+        name,
+        description ?? null,
+        sourceSpecId,
+        brief,
+        JSON.stringify(storyStructure),
+        directionLayers ? JSON.stringify(directionLayers) : null,
+        storyCount,
+        teamId ?? null,
+        user.id,
+      ]
     );
 
-    const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(id) as TemplateRow;
-    res.status(201).json(formatTemplate(row, true));
+    const row = await queryOne<TemplateRow>('SELECT * FROM templates WHERE id = $1', [id]);
+    res.status(201).json(await formatTemplate(row!, true));
   } catch (error: any) {
     logger.error('[Templates] Create error:', error);
     res.status(500).json({ error: error.message });
@@ -200,7 +204,7 @@ router.post('/', (req: Request, res: Response) => {
 
 // ─── GET / — List templates with scope filtering ─────────────────────────────
 
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const user = getEffectiveUser(req);
     if (!user) { res.json({ templates: [] }); return; }
@@ -210,40 +214,44 @@ router.get('/', (req: Request, res: Response) => {
 
     if (scope === 'personal') {
       // Only templates created by this user (no team_id)
-      rows = db.prepare(
-        `SELECT * FROM templates WHERE author_id = ? AND team_id IS NULL ORDER BY created_at DESC`
-      ).all(user.id) as TemplateRow[];
+      rows = await query<TemplateRow>(
+        `SELECT * FROM templates WHERE author_id = $1 AND team_id IS NULL ORDER BY created_at DESC`,
+        [user.id]
+      );
     } else if (scope === 'team') {
       // Templates shared with any of user's teams
-      const teamIds = getUserTeamIds(user.id);
+      const teamIds = await getUserTeamIds(user.id);
       if (teamIds.length === 0) {
         rows = [];
       } else {
-        const placeholders = teamIds.map(() => '?').join(',');
-        rows = db.prepare(
-          `SELECT * FROM templates WHERE team_id IN (${placeholders}) ORDER BY created_at DESC`
-        ).all(...teamIds) as TemplateRow[];
+        const placeholders = teamIds.map((_, i) => `$${i + 1}`).join(',');
+        rows = await query<TemplateRow>(
+          `SELECT * FROM templates WHERE team_id IN (${placeholders}) ORDER BY created_at DESC`,
+          teamIds
+        );
       }
     } else {
       // 'all' — personal + team templates visible to this user
-      const teamIds = getUserTeamIds(user.id);
+      const teamIds = await getUserTeamIds(user.id);
       if (teamIds.length === 0) {
         // No teams — show personal (author_id match) + templates with no team_id (legacy/global)
-        rows = db.prepare(
-          `SELECT * FROM templates WHERE author_id = ? OR team_id IS NULL ORDER BY created_at DESC`
-        ).all(user.id) as TemplateRow[];
+        rows = await query<TemplateRow>(
+          `SELECT * FROM templates WHERE author_id = $1 OR team_id IS NULL ORDER BY created_at DESC`,
+          [user.id]
+        );
       } else {
-        const placeholders = teamIds.map(() => '?').join(',');
-        rows = db.prepare(
+        const placeholders = teamIds.map((_, i) => `$${i + 2}`).join(',');
+        rows = await query<TemplateRow>(
           `SELECT * FROM templates
-           WHERE author_id = ? OR team_id IS NULL OR team_id IN (${placeholders})
-           ORDER BY created_at DESC`
-        ).all(user.id, ...teamIds) as TemplateRow[];
+           WHERE author_id = $1 OR team_id IS NULL OR team_id IN (${placeholders})
+           ORDER BY created_at DESC`,
+          [user.id, ...teamIds]
+        );
       }
     }
 
     // Sort: featured (avg rating >= 4.0) first, then by created_at desc
-    const templates = rows.map(row => formatTemplate(row));
+    const templates = await Promise.all(rows.map(row => formatTemplate(row)));
     templates.sort((a, b) => {
       const aFeatured = (a.avgRating as number) >= 4.0 ? 1 : 0;
       const bFeatured = (b.avgRating as number) >= 4.0 ? 1 : 0;
@@ -294,7 +302,7 @@ router.get('/', (req: Request, res: Response) => {
  *                 userRating: { type: integer }
  *       404: { description: "Template not found" }
  */
-router.post('/:id/rate', (req: Request, res: Response) => {
+router.post('/:id/rate', async (req: Request, res: Response) => {
   try {
     const user = getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
@@ -307,8 +315,10 @@ router.post('/:id/rate', (req: Request, res: Response) => {
     }
 
     // Check template exists
-    const template = db.prepare('SELECT id, team_id FROM templates WHERE id = ?').get(templateId) as
-      Pick<TemplateRow, 'id' | 'team_id'> | undefined;
+    const template = await queryOne<Pick<TemplateRow, 'id' | 'team_id'>>(
+      'SELECT id, team_id FROM templates WHERE id = $1',
+      [templateId]
+    );
     if (!template) {
       res.status(404).json({ error: 'Template not found' });
       return;
@@ -316,7 +326,7 @@ router.post('/:id/rate', (req: Request, res: Response) => {
 
     // If template belongs to a team, user must be a member
     if (template.team_id) {
-      const userTeamIds = getUserTeamIds(user.id);
+      const userTeamIds = await getUserTeamIds(user.id);
       if (!userTeamIds.includes(template.team_id)) {
         res.status(403).json({ error: 'You must be a team member to rate this template' });
         return;
@@ -325,13 +335,14 @@ router.post('/:id/rate', (req: Request, res: Response) => {
 
     // Upsert rating
     const id = randomUUID();
-    db.prepare(
+    await execute(
       `INSERT INTO template_ratings (id, template_id, user_id, rating)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(template_id, user_id) DO UPDATE SET rating = excluded.rating, updated_at = datetime('now')`
-    ).run(id, templateId, user.id, rating);
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT(template_id, user_id) DO UPDATE SET rating = EXCLUDED.rating, updated_at = NOW()`,
+      [id, templateId, user.id, rating]
+    );
 
-    const { avgRating, ratingCount } = getTemplateRating(templateId);
+    const { avgRating, ratingCount } = await getTemplateRating(templateId);
     res.json({ avgRating, ratingCount, userRating: rating });
   } catch (error: any) {
     logger.error('[Templates] Rate error:', error);
@@ -364,13 +375,14 @@ router.post('/:id/rate', (req: Request, res: Response) => {
  *       404:
  *         description: Template not found
  */
-router.post('/:id/use', (req: Request, res: Response) => {
+router.post('/:id/use', async (req: Request, res: Response) => {
   try {
-    const result = db.prepare(
-      `UPDATE templates SET usage_count = usage_count + 1, last_used_at = datetime('now') WHERE id = ?`
-    ).run(req.params.id);
+    const result = await execute(
+      `UPDATE templates SET usage_count = usage_count + 1, last_used_at = NOW() WHERE id = $1`,
+      [req.params.id]
+    );
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       res.status(404).json({ error: 'Template not found' });
       return;
     }
@@ -416,11 +428,11 @@ router.post('/:id/use', (req: Request, res: Response) => {
  *       204: { description: "Deleted" }
  *       404: { description: "Template not found" }
  */
-router.get('/:id', (req: Request, res: Response) => {
+router.get('/:id', async (req: Request, res: Response) => {
   try {
     const user = getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-    const row = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id) as TemplateRow | undefined;
+    const row = await queryOne<TemplateRow>('SELECT * FROM templates WHERE id = $1', [req.params.id]);
 
     if (!row) {
       res.status(404).json({ error: 'Template not found' });
@@ -428,11 +440,12 @@ router.get('/:id', (req: Request, res: Response) => {
     }
 
     // Include user's own rating if any
-    const userRating = db.prepare(
-      'SELECT rating FROM template_ratings WHERE template_id = ? AND user_id = ?'
-    ).get(row.id, user.id) as { rating: number } | undefined;
+    const userRating = await queryOne<{ rating: number }>(
+      'SELECT rating FROM template_ratings WHERE template_id = $1 AND user_id = $2',
+      [row.id, user.id]
+    );
 
-    const result = formatTemplate(row, true);
+    const result = await formatTemplate(row, true);
     (result as Record<string, unknown>).userRating = userRating?.rating ?? null;
 
     res.json(result);
@@ -444,11 +457,11 @@ router.get('/:id', (req: Request, res: Response) => {
 
 // ─── DELETE /:id — Remove a template ──────────────────────────────────────────
 
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   try {
-    const result = db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
+    const result = await execute('DELETE FROM templates WHERE id = $1', [req.params.id]);
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       res.status(404).json({ error: 'Template not found' });
       return;
     }

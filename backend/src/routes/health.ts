@@ -79,9 +79,13 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       status,
       version: VERSION,
       uptime: Math.floor((Date.now() - startTime) / 1000),
+      database: 'postgresql',
       db_connected: dbConnected,
       active_runs: activeRuns,
       db: healthResult.poolStats,
+      ...(healthResult.pgVersion ? { pgVersion: healthResult.pgVersion } : {}),
+      ...(healthResult.extensions ? { extensions: healthResult.extensions } : {}),
+      poolStats: healthResult.poolStats,
       // CA-021: Report MCP transport mode
       mcpTransport: 'http',
       // PR-005: Report telemetry status
