@@ -1,11 +1,9 @@
 # Run State Summary
 
-Spec: rorca-distribution
-Run ID: 26
-Started: 2026-03-10T22:02:11.346Z
-Last Updated: 2026-03-10T22:10:00.370Z
+Spec: rorca-semantic-wiring
+Run ID: 28
+Started: 2026-03-10T22:49:18.582Z
+Last Updated: 2026-03-10T22:55:09.368Z
 
-## Completed Stories (3)
-- DIST-006: LICENSE & Legal Files — DONE (claude, 61s)
-- DIST-007: GitHub Actions — Release Workflow — DONE (claude, 217s)
-- DIST-008: Install Script (curl | sh) — DONE (claude, 134s)
+## Completed Stories (1)
+- SW-001: Populate Embeddings on Spec Approval + Run Completion — DONE (claude, 342s)
