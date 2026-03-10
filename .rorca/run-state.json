@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T11:53:02.693Z",
+  "lastUpdatedAt": "2026-03-10T11:59:36.316Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -120,6 +120,15 @@
       "finishedAt": "2026-03-10T11:53:02.693Z",
       "agentType": "claude",
       "elapsedMs": 597549
+    },
+    {
+      "storyId": "PG-014",
+      "title": "Memory Tiering Router — CAG/RAG Fallback Chain",
+      "status": "passed",
+      "startedAt": "2026-03-10T11:53:11.403Z",
+      "finishedAt": "2026-03-10T11:59:36.316Z",
+      "agentType": "claude",
+      "elapsedMs": 384913
     }
   ],
   "failedStories": [],
