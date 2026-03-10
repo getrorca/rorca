@@ -15,7 +15,8 @@
     "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
     "prepublishOnly": "npm run build",
     "build:binary": "bun run bin/build-binary.ts",
-    "build:binaries": "bash scripts/build-binaries.sh"
+    "build:binaries": "bash scripts/build-binaries.sh",
+    "test:smoke": "bash scripts/smoke-test.sh"
   },
   "keywords": [
     "ai",
