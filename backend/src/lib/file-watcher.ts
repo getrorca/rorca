@@ -16,7 +16,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import chokidar, { type FSWatcher } from 'chokidar';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { loadRorcaConfig } from './rorca-config';
 import { computeHealthReport } from './workspace-echolocation';
@@ -166,7 +166,7 @@ function handleFileChange(
   if (existing) clearTimeout(existing);
 
   // Debounce 300ms
-  const timer = setTimeout(() => {
+  const timer = setTimeout(async () => {
     debounceTimers.delete(absPath);
 
     const relPath = path.relative(workspacePath, absPath);
@@ -183,29 +183,28 @@ function handleFileChange(
     };
 
     try {
-      const result = db.prepare(
+      const walEvent = await queryOne<WalEvent>(
         `INSERT INTO wal_events (event_type, workspace_id, payload)
-         VALUES ('context_file_changed', ?, ?)`,
-      ).run(workspaceId, JSON.stringify(payload));
+         VALUES ('context_file_changed', $1, $2) RETURNING *`,
+        [workspaceId, JSON.stringify(payload)],
+      );
 
       // Broadcast to SSE subscribers
-      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-        result.lastInsertRowid,
-      ) as WalEvent;
-
-      broadcastAll(walEvent);
+      if (walEvent) {
+        broadcastAll(walEvent);
+      }
 
       // CIE-012: Recalculate health score on context file change
       try {
         const health = computeHealthReport(workspacePath);
-        const healthEvent = db.prepare(
+        const healthWal = await queryOne<WalEvent>(
           `INSERT INTO wal_events (event_type, workspace_id, payload)
-           VALUES ('health_recalculated', ?, ?)`,
-        ).run(workspaceId, JSON.stringify({ score: health.score, trigger: relPath }));
-        const healthWal = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-          healthEvent.lastInsertRowid,
-        ) as WalEvent;
-        broadcastAll(healthWal);
+           VALUES ('health_recalculated', $1, $2) RETURNING *`,
+          [workspaceId, JSON.stringify({ score: health.score, trigger: relPath })],
+        );
+        if (healthWal) {
+          broadcastAll(healthWal);
+        }
       } catch (healthErr) {
         logger.error({ err: healthErr }, '[file-watcher] Health recalc failed');
       }
@@ -275,13 +274,13 @@ function createWatcher(workspaceId: string, workspacePath: string): WatcherEntry
  * Start file watchers for all registered workspaces.
  * Called on backend startup. Safe to call multiple times (idempotent).
  */
-export function startFileWatcher(): void {
+export async function startFileWatcher(): Promise<void> {
   interface WorkspaceRow {
     id: string;
     path: string;
   }
 
-  const workspaces = db.prepare('SELECT id, path FROM workspaces').all() as WorkspaceRow[];
+  const workspaces = await query<WorkspaceRow>('SELECT id, path FROM workspaces');
 
   for (const ws of workspaces) {
     if (watchers.has(ws.id)) continue; // Already watching

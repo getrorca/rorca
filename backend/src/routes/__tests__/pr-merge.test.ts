@@ -3,12 +3,11 @@ import * as os from 'os';
 import * as path from 'path';
 import { createHmac } from 'crypto';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -73,36 +72,27 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pr-merge-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
-  db.prepare('DELETE FROM wal_events').run();
+  await execute(`DELETE FROM wal_events`);
 
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)"
-  ).run(WORKSPACE_ID, 'PR Merge Test', tmpDir);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'PR Merge Test', tmpDir]);
 
   const authMod = require('../auth');
   const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
-  db.prepare(
-    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret);
+  await execute(`INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES ($1, $2, $3, $4, $5)`, [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret]);
 });
 
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 100));
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── extractStoryIds unit tests ─────────────────────────────────────────────
@@ -189,9 +179,7 @@ test('merged PR emits github_pr_merged WAL event', async () => {
   await sendWebhook(payload);
   await new Promise((r) => setTimeout(r, 200));
 
-  const events = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'"
-  ).all() as any[];
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'`) as any[];
 
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe(WORKSPACE_ID);
@@ -226,9 +214,7 @@ test('non-merged PR close does not update stories', async () => {
   const us001 = content.userStories.find((s: any) => s.id === 'US-001');
   expect(us001.passes).toBe(false);
 
-  const events = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'"
-  ).all();
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'`);
   expect(events).toHaveLength(0);
 });
 
@@ -250,9 +236,7 @@ test('PR with no story IDs does not emit WAL event', async () => {
   await sendWebhook(payload);
   await new Promise((r) => setTimeout(r, 200));
 
-  const events = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'"
-  ).all();
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'`);
   expect(events).toHaveLength(0);
 });
 
@@ -283,9 +267,7 @@ test('PR with multiple story IDs updates all matching stories', async () => {
   expect(content.userStories.find((s: any) => s.id === 'US-002').passes).toBe(false);
   expect(content.userStories.find((s: any) => s.id === 'US-003').passes).toBe(true);
 
-  const events = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'"
-  ).all() as any[];
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_pr_merged'`) as any[];
   const walPayload = JSON.parse(events[0].payload);
   expect(walPayload.story_ids).toContain('US-001');
   expect(walPayload.story_ids).toContain('US-003');

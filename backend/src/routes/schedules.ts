@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
 
@@ -45,7 +45,7 @@ function nextRunAt(cronExpression: string): string | null {
  *       400:
  *         description: Missing workspaceId query parameter
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
@@ -53,9 +53,10 @@ router.get('/', (req: Request, res: Response) => {
       return;
     }
 
-    const rows = db.prepare(
-      'SELECT * FROM pipeline_schedules WHERE workspace_id = ? ORDER BY created_at DESC'
-    ).all(workspaceId) as ScheduleRow[];
+    const rows = await query<ScheduleRow>(
+      'SELECT * FROM pipeline_schedules WHERE workspace_id = $1 ORDER BY created_at DESC',
+      [workspaceId]
+    );
 
     const schedules = rows.map(row => ({
       ...row,
@@ -101,7 +102,7 @@ router.get('/', (req: Request, res: Response) => {
  *       422:
  *         description: Invalid cron expression
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const { workspaceId, specId, cronExpression, enabled } = req.body;
 
@@ -111,7 +112,10 @@ router.post('/', (req: Request, res: Response) => {
     }
 
     // Validate workspace exists
-    const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspaceId);
+    const workspace = await queryOne<{ id: string }>(
+      'SELECT id FROM workspaces WHERE id = $1',
+      [workspaceId]
+    );
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -127,19 +131,17 @@ router.post('/', (req: Request, res: Response) => {
 
     const isEnabled = enabled !== undefined ? (enabled ? 1 : 0) : 1;
 
-    const result = db.prepare(
+    const schedule = await queryOne<ScheduleRow>(
       `INSERT INTO pipeline_schedules (workspace_id, spec_id, cron_expression, enabled)
-       VALUES (?, ?, ?, ?)`
-    ).run(workspaceId, specId, cronExpression, isEnabled);
-
-    const schedule = db.prepare('SELECT * FROM pipeline_schedules WHERE id = ?')
-      .get(result.lastInsertRowid) as ScheduleRow;
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [workspaceId, specId, cronExpression, isEnabled]
+    );
 
     res.status(201).json({
       schedule: {
         ...schedule,
-        enabled: !!schedule.enabled,
-        next_run_at: schedule.enabled ? nextRunAt(schedule.cron_expression) : null,
+        enabled: !!schedule!.enabled,
+        next_run_at: schedule!.enabled ? nextRunAt(schedule!.cron_expression) : null,
       },
     });
   } catch (error: any) {
@@ -181,7 +183,7 @@ router.post('/', (req: Request, res: Response) => {
  *       422:
  *         description: Invalid cron expression
  */
-router.patch('/:id', (req: Request, res: Response) => {
+router.patch('/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
@@ -189,7 +191,10 @@ router.patch('/:id', (req: Request, res: Response) => {
       return;
     }
 
-    const existing = db.prepare('SELECT * FROM pipeline_schedules WHERE id = ?').get(id) as ScheduleRow | undefined;
+    const existing = await queryOne<ScheduleRow>(
+      'SELECT * FROM pipeline_schedules WHERE id = $1',
+      [id]
+    );
     if (!existing) {
       res.status(404).json({ error: 'Schedule not found' });
       return;
@@ -210,17 +215,16 @@ router.patch('/:id', (req: Request, res: Response) => {
     const newEnabled = enabled !== undefined ? (enabled ? 1 : 0) : existing.enabled;
     const newSpecId = specId ?? existing.spec_id;
 
-    db.prepare(
-      `UPDATE pipeline_schedules SET cron_expression = ?, enabled = ?, spec_id = ?, updated_at = datetime('now') WHERE id = ?`
-    ).run(newCron, newEnabled, newSpecId, id);
-
-    const updated = db.prepare('SELECT * FROM pipeline_schedules WHERE id = ?').get(id) as ScheduleRow;
+    const updated = await queryOne<ScheduleRow>(
+      `UPDATE pipeline_schedules SET cron_expression = $1, enabled = $2, spec_id = $3, updated_at = NOW() WHERE id = $4 RETURNING *`,
+      [newCron, newEnabled, newSpecId, id]
+    );
 
     res.json({
       schedule: {
         ...updated,
-        enabled: !!updated.enabled,
-        next_run_at: updated.enabled ? nextRunAt(updated.cron_expression) : null,
+        enabled: !!updated!.enabled,
+        next_run_at: updated!.enabled ? nextRunAt(updated!.cron_expression) : null,
       },
     });
   } catch (error: any) {
@@ -256,7 +260,7 @@ router.patch('/:id', (req: Request, res: Response) => {
  *       404:
  *         description: Schedule not found
  */
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
@@ -264,13 +268,16 @@ router.delete('/:id', (req: Request, res: Response) => {
       return;
     }
 
-    const existing = db.prepare('SELECT * FROM pipeline_schedules WHERE id = ?').get(id);
+    const existing = await queryOne(
+      'SELECT * FROM pipeline_schedules WHERE id = $1',
+      [id]
+    );
     if (!existing) {
       res.status(404).json({ error: 'Schedule not found' });
       return;
     }
 
-    db.prepare('DELETE FROM pipeline_schedules WHERE id = ?').run(id);
+    await execute('DELETE FROM pipeline_schedules WHERE id = $1', [id]);
     res.json({ ok: true });
   } catch (error: any) {
     logger.error('[Schedules] Delete error:', error);

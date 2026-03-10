@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Layers, BookOpen, Users, Sparkles } from 'lucide-react';
+import { Layers, BookOpen, Users, Sparkles, Pin } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import DirectionStackPanel from './DirectionStackPanel';
@@ -45,6 +45,7 @@ export default function DirectionTabbedPanel() {
   const { workspaceId } = useWorkspace();
   const [healthLevel, setHealthLevel] = useState<HealthLevel>('amber');
   const [healthScore, setHealthScore] = useState<number | null>(null);
+  const [memoryCounts, setMemoryCounts] = useState<{ total: number; pinned: number } | null>(null);
 
   // Fetch workspace health score for the indicator
   useEffect(() => {
@@ -55,11 +56,18 @@ export default function DirectionTabbedPanel() {
         setHealthLevel(scoreToLevel(data.score));
       })
       .catch(() => {
-        // If health endpoint fails, default to amber
         setHealthLevel('amber');
         setHealthScore(null);
       });
   }, [workspaceId]);
+
+  // Fetch memory counts for the tab badge
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<{ total: number; pinned: number }>(`/api/memory/items?workspaceId=${workspaceId}`)
+      .then((data) => setMemoryCounts({ total: data.total, pinned: data.pinned }))
+      .catch(() => setMemoryCounts(null));
+  }, [workspaceId, activeTab]);
 
   // Synthesize memory from recent runs
   const [isSynthesizingMemory, setIsSynthesizingMemory] = useState(false);
@@ -105,6 +113,17 @@ export default function DirectionTabbedPanel() {
             >
               <Icon size={13} aria-hidden="true" />
               {tab.label}
+              {tab.id === 'memory' && memoryCounts && memoryCounts.total > 0 && (
+                <span className="ml-1 inline-flex items-center gap-0.5">
+                  <span className="px-1 py-0 text-[9px] rounded-full bg-accent/15 text-accent tabular-nums">{memoryCounts.total}</span>
+                  {memoryCounts.pinned > 0 && (
+                    <span className="inline-flex items-center gap-0.5 px-1 py-0 text-[9px] rounded-full bg-amber-500/15 text-amber-500 tabular-nums">
+                      <Pin size={7} className="fill-amber-500" />
+                      {memoryCounts.pinned}
+                    </span>
+                  )}
+                </span>
+              )}
             </button>
           );
         })}

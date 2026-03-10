@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db } from '../db/index';
+import { queryOne } from '../db/index';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
 const router = Router();
@@ -212,18 +212,18 @@ const ACTIVITY_EVENT_TYPES = [
  *                 hasMore: { type: boolean }
  *                 cursor: { type: string, nullable: true, description: "Pass as cursor param in next request" }
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const pagination = parsePaginationParams(req, { limit: 30, maxLimit: 100 });
   const typeFilter = req.query.type ? String(req.query.type) : null;
   const workspaceFilter = req.query.workspaceId ? String(req.query.workspaceId) : null;
   const fromFilter = req.query.from ? String(req.query.from) : null;
 
-  // Build WHERE clause
+  // Build WHERE clause with numbered placeholders ($1, $2, ...)
   const conditions: string[] = [];
   const params: (string | number)[] = [];
 
   // Filter to activity-relevant event types
-  const placeholders = ACTIVITY_EVENT_TYPES.map(() => '?').join(',');
+  const placeholders = ACTIVITY_EVENT_TYPES.map((_, i) => `$${params.length + i + 1}`).join(',');
   conditions.push(`event_type IN (${placeholders})`);
   params.push(...ACTIVITY_EVENT_TYPES);
 
@@ -241,25 +241,25 @@ router.get('/', (req, res) => {
     };
     const walTypes = reverseMap[typeFilter];
     if (walTypes) {
-      const fp = walTypes.map(() => '?').join(',');
+      const fp = walTypes.map((_, i) => `$${params.length + i + 1}`).join(',');
       conditions.push(`event_type IN (${fp})`);
       params.push(...walTypes);
     }
   }
 
   if (workspaceFilter) {
-    conditions.push('workspace_id = ?');
+    conditions.push(`workspace_id = $${params.length + 1}`);
     params.push(workspaceFilter);
   }
 
   if (fromFilter) {
-    conditions.push('ts >= ?');
+    conditions.push(`ts >= $${params.length + 1}`);
     params.push(fromFilter);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const result = paginateQuery<WalEventRow>(db, {
+  const result = await paginateQuery<WalEventRow>({
     query: `SELECT * FROM wal_events ${whereClause}`,
     countQuery: `SELECT COUNT(*) as total FROM wal_events ${whereClause}`,
     params,
@@ -273,9 +273,10 @@ router.get('/', (req, res) => {
   const actorIds = [...new Set(result.items.map(e => e.actor))];
   const userMap = new Map<string, UserRow>();
   for (const actorId of actorIds) {
-    const user = db.prepare(
-      'SELECT display_name, email, avatar_url FROM users WHERE id = ? OR email = ?'
-    ).get(actorId, actorId) as UserRow | undefined;
+    const user = await queryOne<UserRow>(
+      'SELECT display_name, email, avatar_url FROM users WHERE id = $1 OR email = $2',
+      [actorId, actorId]
+    );
     if (user) {
       userMap.set(actorId, user);
     }

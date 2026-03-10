@@ -17,7 +17,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { execute, queryOne } from '../db/index';
 import { PackLoader, type Pack, type ScaffoldEntry } from './convention-packs';
 import { PackRegistry, type InstalledPackRow } from './pack-registry';
 import { SkillRegistry } from './skill-registry';
@@ -51,11 +51,11 @@ export interface PackInstallResult {
 
 // ─── Installer ──────────────────────────────────────────────────────────────
 
-export function installPack(
+export async function installPack(
   workspaceId: string,
   workspacePath: string,
   packPath: string,
-): PackInstallResult {
+): Promise<PackInstallResult> {
   const loader = new PackLoader();
   const pack = loader.load(packPath);
   const registry = new PackRegistry(workspacePath, workspaceId);
@@ -65,7 +65,7 @@ export function installPack(
     copyScaffold(pack.scaffold, workspacePath);
 
   // 2. Inject direction/ layers as L0
-  const directionLayersInjected = injectL0Layers(pack, workspaceId);
+  const directionLayersInjected = await injectL0Layers(pack, workspaceId);
 
   // 3. Copy personas/ to .rorca/personas/
   const personasCopied = copyPersonas(pack, workspacePath);
@@ -80,13 +80,13 @@ export function installPack(
   const agentsMdAction = writeAgentsMd(pack, workspacePath);
 
   // 7. Register pack in DB (upserts — idempotent)
-  const dbRow = registry.register(packPath);
+  const dbRow = await registry.register(packPath);
 
   // 8. Register skills in installed_skills table
-  registerSkillsInDb(pack, packPath);
+  await registerSkillsInDb(pack, packPath);
 
   // 9. Emit WAL event
-  emitPackInstalledEvent(workspaceId, pack.metadata.name, pack.metadata.version, packPath);
+  await emitPackInstalledEvent(workspaceId, pack.metadata.name, pack.metadata.version, packPath);
 
   return {
     packName: pack.metadata.name,
@@ -117,16 +117,16 @@ export interface PackForkResult {
  * updates pack.json with new name + forkedFrom field, then
  * re-installs from the forked location (replacing original L0 layers).
  */
-export function forkPack(
+export async function forkPack(
   workspaceId: string,
   workspacePath: string,
   sourcePack: string,
   newName: string,
-): PackForkResult {
+): Promise<PackForkResult> {
   const registry = new PackRegistry(workspacePath, workspaceId);
 
   // 1. Resolve the source pack path
-  const sourcePackPath = registry.getPackPath(sourcePack);
+  const sourcePackPath = await registry.getPackPath(sourcePack);
 
   if (!fs.existsSync(sourcePackPath)) {
     throw new ValidationError('Source pack directory does not exist on disk', {
@@ -163,26 +163,28 @@ export function forkPack(
 
   // 6. Unregister original pack from DB (L0 layers will be replaced by fork)
   try {
-    registry.unregister(sourcePack);
+    await registry.unregister(sourcePack);
   } catch {
     // Source pack may not be registered (e.g., external pack path) — continue
   }
 
   // 7. Delete original pack's L0 direction layers
-  db.prepare(
-    `DELETE FROM direction_layers WHERE layer = 0 AND workspace_id = ?`,
-  ).run(workspaceId);
+  await execute(
+    `DELETE FROM direction_layers WHERE layer = 0 AND workspace_id = $1`,
+    [workspaceId],
+  );
 
   // 8. Install the forked pack (creates new L0 layers, registers in DB, etc.)
-  const installResult = installPack(workspaceId, workspacePath, destDir);
+  const installResult = await installPack(workspaceId, workspacePath, destDir);
 
   // 9. Update convention_packs row with forked_from reference
-  db.prepare(
-    `UPDATE convention_packs SET forked_from = ? WHERE workspace_id = ? AND pack_name = ?`,
-  ).run(originalName, workspaceId, newName);
+  await execute(
+    `UPDATE convention_packs SET forked_from = $1 WHERE workspace_id = $2 AND pack_name = $3`,
+    [originalName, workspaceId, newName],
+  );
 
   // 10. Emit fork WAL event
-  emitPackForkedEvent(workspaceId, originalName, newName, destDir);
+  await emitPackForkedEvent(workspaceId, originalName, newName, destDir);
 
   return {
     newName,
@@ -210,27 +212,22 @@ function copyDirRecursive(src: string, dest: string): void {
   }
 }
 
-function emitPackForkedEvent(
+async function emitPackForkedEvent(
   workspaceId: string,
   originalName: string,
   newName: string,
   forkedPath: string,
-): void {
-  const result = db.prepare(
-    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, ?, ?)',
-  ).run('pack_forked', workspaceId, JSON.stringify({ originalName, newName, forkedPath }));
+): Promise<void> {
+  const payload = JSON.stringify({ originalName, newName, forkedPath });
 
-  const walEvent: WalEvent = {
-    id: result.lastInsertRowid as number,
-    ts: new Date().toISOString(),
-    event_type: 'pack_forked',
-    workspace_id: workspaceId,
-    spec_id: null,
-    story_id: null,
-    actor: '',
-    payload: JSON.stringify({ originalName, newName, forkedPath }),
-  };
-  broadcastAll(walEvent);
+  const row = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('pack_forked', $1, $2) RETURNING *`,
+    [workspaceId, payload],
+  );
+
+  if (row) {
+    broadcastAll(row);
+  }
 }
 
 // ─── Scaffold Copy ──────────────────────────────────────────────────────────
@@ -273,22 +270,22 @@ function copyScaffold(
 
 // ─── L0 Direction Layer Injection ───────────────────────────────────────────
 
-function injectL0Layers(pack: Pack, workspaceId: string): number {
+async function injectL0Layers(pack: Pack, workspaceId: string): Promise<number> {
   let count = 0;
 
   for (const dirFile of pack.direction) {
     // All pack direction layers go in as L0 (lowest priority, overridable by L1+)
     // Use workspace_id scoping so L0 is per-workspace
-    db.prepare(`
+    await execute(`
       INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, updated_at)
-      VALUES (0, ?, ?, ?, datetime('now'))
+      VALUES (0, $1, $2, $3, NOW())
       ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
-      DO UPDATE SET content_yaml = excluded.content_yaml, updated_at = datetime('now')
-    `).run(
+      DO UPDATE SET content_yaml = excluded.content_yaml, updated_at = NOW()
+    `, [
       workspaceId,
       dirFile.meta.scope !== 'global' ? dirFile.meta.scope : null,
       dirFile.content,
-    );
+    ]);
     count++;
   }
 
@@ -412,12 +409,12 @@ function copySkills(pack: Pack, workspacePath: string): string[] {
 
 // ─── Skills DB Registration ─────────────────────────────────────────────────
 
-function registerSkillsInDb(pack: Pack, packPath: string): void {
+async function registerSkillsInDb(pack: Pack, packPath: string): Promise<void> {
   const registry = new SkillRegistry();
 
   for (const conv of pack.conventions) {
     const content = buildConventionMarkdown(conv);
-    registry.install(conv.meta.name, content, `pack:${pack.metadata.name}`);
+    await registry.install(conv.meta.name, content, `pack:${pack.metadata.name}`);
   }
 }
 
@@ -454,25 +451,20 @@ function writeAgentsMd(pack: Pack, workspacePath: string): 'created' | 'appended
 
 // ─── WAL Event ──────────────────────────────────────────────────────────────
 
-function emitPackInstalledEvent(
+async function emitPackInstalledEvent(
   workspaceId: string,
   packName: string,
   packVersion: string,
   packPath: string,
-): void {
-  const result = db.prepare(
-    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, ?, ?)',
-  ).run('pack_installed', workspaceId, JSON.stringify({ packName, packVersion, packPath }));
+): Promise<void> {
+  const payload = JSON.stringify({ packName, packVersion, packPath });
 
-  const walEvent: WalEvent = {
-    id: result.lastInsertRowid as number,
-    ts: new Date().toISOString(),
-    event_type: 'pack_installed',
-    workspace_id: workspaceId,
-    spec_id: null,
-    story_id: null,
-    actor: '',
-    payload: JSON.stringify({ packName, packVersion, packPath }),
-  };
-  broadcastAll(walEvent);
+  const row = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('pack_installed', $1, $2) RETURNING *`,
+    [workspaceId, payload],
+  );
+
+  if (row) {
+    broadcastAll(row);
+  }
 }

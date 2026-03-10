@@ -9,7 +9,7 @@
  */
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { db } from '../db';
+import { query, queryOne, execute } from '../db';
 import { encryptToken, decryptToken } from './auth';
 import type { AuthUser } from './auth';
 
@@ -36,10 +36,10 @@ interface IntegrationCredentialRow {
 }
 
 // Auth bypass helper (same pattern as vault.ts)
-function getEffectiveUser(req: Request): AuthUser | null {
+async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
   const user = (req as Request & { user: AuthUser }).user;
   if (user) return user;
-  return db.prepare('SELECT id, email FROM users LIMIT 1').get() as AuthUser | null;
+  return await queryOne<AuthUser>('SELECT id, email FROM users LIMIT 1', []);
 }
 
 /**
@@ -123,7 +123,7 @@ router.get('/callback', async (req: Request, res: Response) => {
     return;
   }
 
-  const user = getEffectiveUser(req);
+  const user = await getEffectiveUser(req);
   if (!user) {
     res.status(401).json({ error: 'No user found' });
     return;
@@ -185,24 +185,25 @@ router.get('/callback', async (req: Request, res: Response) => {
     const credId = crypto.randomUUID();
     const encryptedToken = encryptToken(githubToken);
 
-    db.prepare(`
+    await execute(`
       INSERT INTO integration_credentials (id, user_id, provider, encrypted_token, scopes, provider_username, provider_user_id)
-      VALUES (?, ?, 'github_copilot', ?, ?, ?, ?)
+      VALUES ($1, $2, 'github_copilot', $3, $4, $5, $6)
       ON CONFLICT(user_id, provider) DO UPDATE SET
         encrypted_token = excluded.encrypted_token,
         scopes = excluded.scopes,
         provider_username = excluded.provider_username,
         provider_user_id = excluded.provider_user_id,
-        updated_at = datetime('now')
-    `).run(credId, user.id, encryptedToken, grantedScopes, githubUser.login, String(githubUser.id));
+        updated_at = NOW()
+    `, [credId, user.id, encryptedToken, grantedScopes, githubUser.login, String(githubUser.id)]);
 
     // Emit WAL event
-    db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('copilot_connected', '', ?)`
-    ).run(JSON.stringify({
-      userId: user.id,
-      githubUsername: githubUser.login,
-    }));
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('copilot_connected', '', $1)`,
+      [JSON.stringify({
+        userId: user.id,
+        githubUsername: githubUser.login,
+      })]
+    );
 
     // Redirect back to Settings with success indicator
     res.redirect('http://localhost:5210/?copilot=connected');
@@ -235,16 +236,17 @@ router.get('/callback', async (req: Request, res: Response) => {
  *                 connectedAt: { type: string }
  *                 updatedAt: { type: string }
  */
-router.get('/status', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.get('/status', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) {
     res.json({ connected: false });
     return;
   }
 
-  const row = db.prepare(
-    'SELECT provider_username, provider_user_id, scopes, created_at, updated_at FROM integration_credentials WHERE user_id = ? AND provider = ?'
-  ).get(user.id, 'github_copilot') as Pick<IntegrationCredentialRow, 'provider_username' | 'provider_user_id' | 'scopes' | 'created_at' | 'updated_at'> | undefined;
+  const row = await queryOne<Pick<IntegrationCredentialRow, 'provider_username' | 'provider_user_id' | 'scopes' | 'created_at' | 'updated_at'>>(
+    'SELECT provider_username, provider_user_id, scopes, created_at, updated_at FROM integration_credentials WHERE user_id = $1 AND provider = $2',
+    [user.id, 'github_copilot']
+  );
 
   if (!row) {
     res.json({ connected: false });
@@ -283,41 +285,44 @@ router.get('/status', (req: Request, res: Response) => {
  *       404:
  *         description: No GitHub Copilot connection found
  */
-router.delete('/disconnect', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.delete('/disconnect', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) {
     res.status(401).json({ error: 'No user found' });
     return;
   }
 
-  const existing = db.prepare(
-    'SELECT id, provider_username FROM integration_credentials WHERE user_id = ? AND provider = ?'
-  ).get(user.id, 'github_copilot') as Pick<IntegrationCredentialRow, 'id' | 'provider_username'> | undefined;
+  const existing = await queryOne<Pick<IntegrationCredentialRow, 'id' | 'provider_username'>>(
+    'SELECT id, provider_username FROM integration_credentials WHERE user_id = $1 AND provider = $2',
+    [user.id, 'github_copilot']
+  );
 
   if (!existing) {
     res.status(404).json({ error: 'No GitHub Copilot connection found' });
     return;
   }
 
-  db.prepare('DELETE FROM integration_credentials WHERE id = ?').run(existing.id);
+  await execute('DELETE FROM integration_credentials WHERE id = $1', [existing.id]);
 
   // Emit WAL event
-  db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('copilot_disconnected', '', ?)`
-  ).run(JSON.stringify({
-    userId: user.id,
-    githubUsername: existing.provider_username,
-  }));
+  await execute(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('copilot_disconnected', '', $1)`,
+    [JSON.stringify({
+      userId: user.id,
+      githubUsername: existing.provider_username,
+    })]
+  );
 
   res.json({ disconnected: true });
 });
 
 // ─── Exported helper: get decrypted Copilot token for a user ────────────────
 
-export function getCopilotToken(userId: string): string | null {
-  const row = db.prepare(
-    'SELECT encrypted_token FROM integration_credentials WHERE user_id = ? AND provider = ?'
-  ).get(userId, 'github_copilot') as Pick<IntegrationCredentialRow, 'encrypted_token'> | undefined;
+export async function getCopilotToken(userId: string): Promise<string | null> {
+  const row = await queryOne<Pick<IntegrationCredentialRow, 'encrypted_token'>>(
+    'SELECT encrypted_token FROM integration_credentials WHERE user_id = $1 AND provider = $2',
+    [userId, 'github_copilot']
+  );
 
   if (!row) return null;
 

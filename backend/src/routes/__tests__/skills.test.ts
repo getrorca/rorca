@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -17,7 +17,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 let workspaceId: string;
@@ -56,29 +55,21 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-skills-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
   workspaceId = 'ws-skills-test-' + Date.now();
-  db.prepare('INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)').run(
-    workspaceId,
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [workspaceId,
     'Skills Test Workspace',
-    tmpDir,
-  );
+    tmpDir,]);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── GET /api/skills ──────────────────────────────────────────────────────
@@ -133,7 +124,7 @@ describe('POST /api/skills/install', () => {
     expect(res.body.description).toBeDefined();
 
     // Verify DB entry was created (name comes from frontmatter)
-    const row = db.prepare("SELECT * FROM installed_skills WHERE name = ?").get(skillName) as any;
+    const row = await queryOne(`SELECT * FROM installed_skills WHERE name = $1`, [skillName]) as any;
     expect(row).toBeDefined();
     expect(row.content).toContain(skillName);
   });
@@ -210,7 +201,7 @@ describe('DELETE /api/skills/:name', () => {
       });
 
     // Verify it exists
-    const before = db.prepare('SELECT * FROM installed_skills WHERE name = ?').get(skillName);
+    const before = await queryOne(`SELECT * FROM installed_skills WHERE name = $1`, [skillName]);
     expect(before).toBeDefined();
 
     const res = await request(app)
@@ -220,7 +211,7 @@ describe('DELETE /api/skills/:name', () => {
     expect(res.status).toBe(200);
 
     // Verify it's gone from DB
-    const after = db.prepare('SELECT * FROM installed_skills WHERE name = ?').get(skillName);
+    const after = await queryOne(`SELECT * FROM installed_skills WHERE name = $1`, [skillName]);
     expect(after).toBeUndefined();
   });
 

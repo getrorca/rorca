@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 /**
- * Self-register: Register ~/rorca/ as a workspace in its own SQLite DB,
+ * Self-register: Register ~/rorca/ as a workspace in its own PostgreSQL DB,
  * populate the Direction Stack with Rorca's own architecture context.
  *
  * Usage: npx tsx forge/self-register.ts
@@ -42,7 +42,7 @@ async function main() {
         id: 'rorca',
         label: 'Rorca',
         path: RORCA_PATH,
-        domains: ['typescript', 'vite', 'express', 'sqlite'],
+        domains: ['typescript', 'vite', 'express', 'postgresql'],
       }),
     });
     workspaceId = result.workspace.id;
@@ -79,7 +79,7 @@ async function main() {
   const l3Yaml = `project:
   name: Rorca
   type: standalone-tool
-  stack: [vite, react, express, sqlite, better-sqlite3, simple-git]
+  stack: [vite, react, express, postgresql, pg, simple-git]
   purpose: AI spec orchestration dashboard
   target_users: developers using Claude Code
   key_modules:

@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import type { PipelineHookRow } from '../lib/hook-runner';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { encryptToken } from './auth';
@@ -29,7 +29,7 @@ const VALID_HOOK_TYPES = ['pre_run', 'post_run', 'pre_story', 'post_story'];
  *       400:
  *         description: Missing workspaceId query parameter
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
@@ -37,9 +37,10 @@ router.get('/', (req: Request, res: Response) => {
       return;
     }
 
-    const hooks = db.prepare(
-      'SELECT * FROM pipeline_hooks WHERE workspace_id = ? ORDER BY hook_type, id ASC'
-    ).all(workspaceId) as PipelineHookRow[];
+    const hooks = await query<PipelineHookRow>(
+      'SELECT * FROM pipeline_hooks WHERE workspace_id = $1 ORDER BY hook_type, id ASC',
+      [workspaceId]
+    );
 
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(hooks, pagination));
@@ -75,7 +76,7 @@ router.get('/', (req: Request, res: Response) => {
  *       400:
  *         description: Missing required fields or invalid hookType
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const { workspaceId, hookType, command, webhookUrl, enabled } = req.body;
 
@@ -105,14 +106,11 @@ router.post('/', (req: Request, res: Response) => {
       encryptedSecret = encryptToken(webhookSecret);
     }
 
-    const result = db.prepare(
+    const hook = await queryOne<PipelineHookRow>(
       `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, webhook_url, encrypted_webhook_secret, enabled)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(workspaceId, hookType, command || '', webhookUrl || null, encryptedSecret, isEnabled);
-
-    const hook = db.prepare('SELECT * FROM pipeline_hooks WHERE id = ?').get(
-      result.lastInsertRowid
-    ) as PipelineHookRow;
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [workspaceId, hookType, command || '', webhookUrl || null, encryptedSecret, isEnabled]
+    );
 
     // Return the plaintext secret once so the user can configure their endpoint
     const response: Record<string, unknown> = { ...hook };
@@ -160,7 +158,7 @@ router.post('/', (req: Request, res: Response) => {
  *       404:
  *         description: Hook not found
  */
-router.put('/:id', (req: Request, res: Response) => {
+router.put('/:id', async (req: Request, res: Response) => {
   try {
     const hookId = parseInt(String(req.params.id), 10);
     if (isNaN(hookId)) {
@@ -168,7 +166,10 @@ router.put('/:id', (req: Request, res: Response) => {
       return;
     }
 
-    const existing = db.prepare('SELECT * FROM pipeline_hooks WHERE id = ?').get(hookId) as PipelineHookRow | undefined;
+    const existing = await queryOne<PipelineHookRow>(
+      'SELECT * FROM pipeline_hooks WHERE id = $1',
+      [hookId]
+    );
     if (!existing) {
       res.status(404).json({ error: 'Hook not found' });
       return;
@@ -185,11 +186,11 @@ router.put('/:id', (req: Request, res: Response) => {
     const newCommand = command !== undefined ? command : existing.command;
     const newEnabled = enabled !== undefined ? (enabled ? 1 : 0) : existing.enabled;
 
-    db.prepare(
-      `UPDATE pipeline_hooks SET hook_type = ?, command = ?, enabled = ?, updated_at = datetime('now') WHERE id = ?`
-    ).run(newHookType, newCommand, newEnabled, hookId);
+    const updated = await queryOne<PipelineHookRow>(
+      `UPDATE pipeline_hooks SET hook_type = $1, command = $2, enabled = $3, updated_at = NOW() WHERE id = $4 RETURNING *`,
+      [newHookType, newCommand, newEnabled, hookId]
+    );
 
-    const updated = db.prepare('SELECT * FROM pipeline_hooks WHERE id = ?').get(hookId) as PipelineHookRow;
     res.json(updated);
   } catch (error: any) {
     logger.error('[Hooks] Update error:', error);
@@ -218,7 +219,7 @@ router.put('/:id', (req: Request, res: Response) => {
  *       404:
  *         description: Hook not found
  */
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const hookId = parseInt(String(req.params.id), 10);
     if (isNaN(hookId)) {
@@ -226,13 +227,16 @@ router.delete('/:id', (req: Request, res: Response) => {
       return;
     }
 
-    const existing = db.prepare('SELECT * FROM pipeline_hooks WHERE id = ?').get(hookId) as PipelineHookRow | undefined;
+    const existing = await queryOne<PipelineHookRow>(
+      'SELECT * FROM pipeline_hooks WHERE id = $1',
+      [hookId]
+    );
     if (!existing) {
       res.status(404).json({ error: 'Hook not found' });
       return;
     }
 
-    db.prepare('DELETE FROM pipeline_hooks WHERE id = ?').run(hookId);
+    await execute('DELETE FROM pipeline_hooks WHERE id = $1', [hookId]);
     res.status(204).send();
   } catch (error: any) {
     logger.error('[Hooks] Delete error:', error);

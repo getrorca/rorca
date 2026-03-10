@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -33,26 +32,21 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-comments-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
-  db.prepare('DELETE FROM wal_events').run();
-  db.prepare("INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)").run(WORKSPACE_ID, 'Comments Test', tmpDir);
+  await execute(`DELETE FROM wal_events`);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'Comments Test', tmpDir]);
   createSpecFile();
 });
 
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 100));
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
+fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe('POST /api/specs/:specId/stories/:storyId/comments', () => {
@@ -97,9 +91,7 @@ describe('POST /api/specs/:specId/stories/:storyId/comments', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ body: 'WAL test comment' });
 
-    const walEvent = db.prepare(
-      "SELECT * FROM wal_events WHERE event_type = 'comment_added' AND spec_id = ? AND story_id = ?"
-    ).get(SPEC_ID, STORY_ID) as { event_type: string; payload: string } | undefined;
+    const walEvent = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'comment_added' AND spec_id = $1 AND story_id = $2`, [SPEC_ID, STORY_ID]) as { event_type: string; payload: string } | undefined;
 
     expect(walEvent).toBeDefined();
     expect(JSON.parse(walEvent!.payload).commentId).toBeDefined();
@@ -197,9 +189,7 @@ describe('POST /api/specs/:specId/stories/:storyId/comments/:commentId/resolve',
       .post(`/api/specs/${SPEC_ID}/stories/${STORY_ID}/comments/${createRes.body.id}/resolve`)
       .set('Authorization', `Bearer ${authToken}`);
 
-    const walEvent = db.prepare(
-      "SELECT * FROM wal_events WHERE event_type = 'comment_resolved' AND spec_id = ? AND story_id = ?"
-    ).get(SPEC_ID, STORY_ID) as { event_type: string; payload: string } | undefined;
+    const walEvent = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'comment_resolved' AND spec_id = $1 AND story_id = $2`, [SPEC_ID, STORY_ID]) as { event_type: string; payload: string } | undefined;
 
     expect(walEvent).toBeDefined();
     expect(JSON.parse(walEvent!.payload).commentId).toBe(createRes.body.id);
@@ -258,7 +248,7 @@ describe('@mention notifications', () => {
       password: 'securepass123',
       displayName: 'Mentioned User',
     });
-    const row = db.prepare("SELECT id FROM users WHERE email = 'mentioned@example.com'").get() as { id: string };
+    const row = await queryOne(`SELECT id FROM users WHERE email = 'mentioned@example.com'`) as { id: string };
     mentionedUserId = row.id;
   });
 
@@ -270,9 +260,7 @@ describe('@mention notifications', () => {
 
     expect(res.status).toBe(201);
 
-    const notif = db.prepare(
-      "SELECT * FROM notifications WHERE user_id = ? AND type = 'mention'"
-    ).get(mentionedUserId) as { title: string; body: string; link: string } | undefined;
+    const notif = await queryOne(`SELECT * FROM notifications WHERE user_id = $1 AND type = 'mention'`, [mentionedUserId]) as { title: string; body: string; link: string } | undefined;
 
     expect(notif).toBeDefined();
     expect(notif!.title).toContain('mentioned you');
@@ -288,10 +276,8 @@ describe('@mention notifications', () => {
 
     expect(res.status).toBe(201);
 
-    const authorId = (db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string }).id;
-    const notif = db.prepare(
-      "SELECT * FROM notifications WHERE user_id = ? AND type = 'mention'"
-    ).get(authorId) as { id: string } | undefined;
+    const authorId = (await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string }).id;
+    const notif = await queryOne(`SELECT * FROM notifications WHERE user_id = $1 AND type = 'mention'`, [authorId]) as { id: string } | undefined;
 
     expect(notif).toBeUndefined();
   });
@@ -303,7 +289,7 @@ describe('@mention notifications', () => {
       password: 'securepass123',
       displayName: 'Third User',
     });
-    const thirdRow = db.prepare("SELECT id FROM users WHERE email = 'third@example.com'").get() as { id: string };
+    const thirdRow = await queryOne(`SELECT id FROM users WHERE email = 'third@example.com'`) as { id: string };
 
     const res = await request(app)
       .post(`/api/specs/${SPEC_ID}/stories/${STORY_ID}/comments`)
@@ -312,9 +298,7 @@ describe('@mention notifications', () => {
 
     expect(res.status).toBe(201);
 
-    const notifs = db.prepare(
-      "SELECT * FROM notifications WHERE type = 'mention'"
-    ).all() as { user_id: string }[];
+    const notifs = await query(`SELECT * FROM notifications WHERE type = 'mention'`) as { user_id: string }[];
 
     const notifiedIds = notifs.map(n => n.user_id);
     expect(notifiedIds).toContain(mentionedUserId);

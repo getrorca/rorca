@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -20,7 +20,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let authToken: string;
@@ -59,15 +58,11 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-templates-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  const llmClient = require('../../lib/llm-client');
+const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
 
   authToken = await getAuthToken(app);
@@ -78,25 +73,22 @@ afterEach(() => {
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
-
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── Helper: get user ID from token ──────────────────────────────────────────
 
-function getUserId(): string {
-  const row = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
+async function getUserId(): Promise<string> {
+  const row = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
   return row.id;
 }
 
-function createTeam(name: string, slug: string): string {
-  const userId = getUserId();
+async function createTeam(name: string, slug: string): Promise<string> {
+  const userId = await getUserId();
   const teamId = require('crypto').randomUUID();
-  db.prepare('INSERT INTO teams (id, name, slug, owner_id) VALUES (?, ?, ?, ?)').run(teamId, name, slug, userId);
-  db.prepare("INSERT INTO team_members (team_id, user_id, role) VALUES (?, ?, 'admin')").run(teamId, userId);
+  await execute(`INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`, [teamId, name, slug, userId]);
+  await execute(`INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'admin')`, [teamId, userId]);
   return teamId;
 }
 
@@ -126,7 +118,7 @@ describe('POST /api/templates', () => {
     expect(res.body.directionLayers).toEqual({ l1: true, l2: 'backend' });
     expect(res.body.storyCount).toBe(2);
     expect(res.body.createdAt).toBeDefined();
-    expect(res.body.authorId).toBe(getUserId());
+    expect(res.body.authorId).toBe(await getUserId());
     expect(res.body.teamId).toBeNull();
     expect(res.body.usageCount).toBe(0);
     expect(res.body.avgRating).toBe(0);
@@ -151,7 +143,7 @@ describe('POST /api/templates', () => {
   });
 
   test('creates team template when teamId is provided', async () => {
-    const teamId = createTeam('Test Team', 'test-team');
+    const teamId = await createTeam('Test Team', 'test-team');
 
     const res = await request(app)
       .post('/api/templates')
@@ -171,10 +163,8 @@ describe('POST /api/templates', () => {
   test('rejects teamId when user is not a member', async () => {
     // Create a team the user is NOT a member of
     const teamId = require('crypto').randomUUID();
-    db.prepare('INSERT INTO users (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)').run(
-      'other-user', 'other@test.com', 'Other', '$2a$12$fakeHash'
-    );
-    db.prepare('INSERT INTO teams (id, name, slug, owner_id) VALUES (?, ?, ?, ?)').run(teamId, 'Other Team', 'other', 'other-user');
+    await execute(`INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`, ['other-user', 'other@test.com', 'Other', '$2a$12$fakeHash']);
+    await execute(`INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`, [teamId, 'Other Team', 'other', 'other-user']);
 
     const res = await request(app)
       .post('/api/templates')
@@ -241,7 +231,7 @@ describe('GET /api/templates', () => {
   });
 
   test('scope=all returns personal and team templates', async () => {
-    const teamId = createTeam('My Team', 'my-team');
+    const teamId = await createTeam('My Team', 'my-team');
 
     // Personal template
     await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
@@ -258,7 +248,7 @@ describe('GET /api/templates', () => {
   });
 
   test('scope=personal returns only personal templates', async () => {
-    const teamId = createTeam('T', 'team-scope');
+    const teamId = await createTeam('T', 'team-scope');
 
     await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'Personal', sourceSpecId: 'spec-p', brief: 'p', storyStructure: sampleStoryStructure,
@@ -274,7 +264,7 @@ describe('GET /api/templates', () => {
   });
 
   test('scope=team returns only team templates', async () => {
-    const teamId = createTeam('T', 'team-scope-2');
+    const teamId = await createTeam('T', 'team-scope-2');
 
     await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'Personal', sourceSpecId: 'spec-p', brief: 'p', storyStructure: sampleStoryStructure,
@@ -383,18 +373,14 @@ describe('POST /api/templates/:id/rate', () => {
   test('non-team-member cannot rate team template', async () => {
     // Create a team the test user is NOT a member of
     const otherUserId = require('crypto').randomUUID();
-    db.prepare('INSERT INTO users (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)').run(
-      otherUserId, 'owner@test.com', 'Owner', '$2a$12$fakeHash'
-    );
+    await execute(`INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`, [otherUserId, 'owner@test.com', 'Owner', '$2a$12$fakeHash']);
     const teamId = require('crypto').randomUUID();
-    db.prepare('INSERT INTO teams (id, name, slug, owner_id) VALUES (?, ?, ?, ?)').run(teamId, 'Other Team', 'other-rate', otherUserId);
+    await execute(`INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`, [teamId, 'Other Team', 'other-rate', otherUserId]);
 
     // Insert team template directly
     const tplId = require('crypto').randomUUID();
-    db.prepare(
-      `INSERT INTO templates (id, name, source_spec_id, brief, story_structure, story_count, team_id, author_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(tplId, 'Team TPL', 'spec', 'b', '[]', 0, teamId, otherUserId);
+    await execute(`INSERT INTO templates (id, name, source_spec_id, brief, story_structure, story_count, team_id, author_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [tplId, 'Team TPL', 'spec', 'b', '[]', 0, teamId, otherUserId]);
 
     const res = await request(app).post(`/api/templates/${tplId}/rate`).set('Authorization', `Bearer ${authToken}`)
       .send({ rating: 3 });
@@ -485,9 +471,7 @@ describe('POST /api/specs/generate with templateId', () => {
     mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
     // Seed workspace
-    db.prepare(
-      "INSERT INTO workspaces (id, label, path) VALUES ('ws-tpl', 'TPL WS', ?)"
-    ).run(os.tmpdir());
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-tpl', 'TPL WS', $1)`, [os.tmpdir()]);
 
     // Create a template
     const tplRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
@@ -518,9 +502,7 @@ describe('POST /api/specs/generate with templateId', () => {
   test('generates normally when templateId is not provided', async () => {
     mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
-    db.prepare(
-      "INSERT OR IGNORE INTO workspaces (id, label, path) VALUES ('ws-tpl2', 'TPL WS2', ?)"
-    ).run(os.tmpdir());
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-tpl2', 'TPL WS2', os.tmpdir()]);
 
     const res = await request(app)
       .post('/api/specs/generate')
@@ -540,9 +522,7 @@ describe('POST /api/specs/generate with templateId', () => {
   test('generates normally when templateId does not exist in DB', async () => {
     mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
-    db.prepare(
-      "INSERT OR IGNORE INTO workspaces (id, label, path) VALUES ('ws-tpl3', 'TPL WS3', ?)"
-    ).run(os.tmpdir());
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-tpl3', 'TPL WS3', os.tmpdir()]);
 
     const res = await request(app)
       .post('/api/specs/generate')

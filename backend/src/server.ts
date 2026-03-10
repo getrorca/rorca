@@ -41,8 +41,10 @@ import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
+import { startEmbeddingPipeline } from './lib/embedding-pipeline';
 import { subscribe, type WalEvent } from './lib/sse-hub';
 import { rotateMemory } from './lib/memory-ledger';
+import { deduplicateMemory } from './lib/memory-dedup';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
 import { rateLimiter } from './lib/rate-limiter';
@@ -50,11 +52,12 @@ import { publicReviewRouter, specReviewRouter } from './routes/review';
 import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
-import { db } from './db/index';
+import { queryOne } from './db/index';
 import runQueueRouter from './routes/run-queue';
 import configRouter from './routes/config';
 import copilotRouter from './routes/copilot';
 import memoryRouter from './routes/memory';
+import crossWorkspaceMemoryRouter from './routes/cross-workspace-memory';
 import agentsRouter from './routes/agents';
 import contextRoutingRouter from './routes/context-routing';
 import contextFilesRouter from './routes/context-files';
@@ -63,12 +66,16 @@ import packsRouter from './routes/packs';
 import skillsRouter from './routes/skills';
 import personasRouter from './routes/personas';
 import marketplaceRouter from './routes/marketplace';
+import searchRouter from './routes/search';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 import { createMcpRequestHandler } from './lib/mcp-http';
 import telemetryRouter from './routes/telemetry';
 import { logger } from './lib/logger';
 import pinoHttp from 'pino-http';
+import { startGraphPopulator } from './lib/graph-populator';
+import workspaceDriftRouter from './routes/workspace-drift';
+import { startDriftSubscriber } from './lib/drift-subscriber';
 
 dotenv.config();
 
@@ -213,6 +220,7 @@ app.use('/api/workspaces/:id/budget', budgetRouter);
 app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces/:id/github', workspaceGithubRouter);
+app.use('/api/workspaces', workspaceDriftRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/teams', teamsRouter);
 app.use('/api/activity', activityRouter);
@@ -228,6 +236,7 @@ app.use('/api/run-queue', runQueueRouter);
 app.use('/api/config', configRouter);
 app.use('/api/copilot', copilotRouter);
 app.use('/api/memory', memoryRouter);
+app.use('/api/memory/cross-workspace', crossWorkspaceMemoryRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/workspaces', contextRoutingRouter);
 app.use('/api/workspaces', contextFilesRouter);
@@ -236,6 +245,7 @@ app.use('/api/packs', packsRouter);
 app.use('/api/skills', skillsRouter);
 app.use('/api/personas', personasRouter);
 app.use('/api/marketplace', marketplaceRouter);
+app.use('/api/search', searchRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
@@ -263,16 +273,31 @@ startQueueConsumer();
 // CIE-005: Subscribe memory synthesis to generate ledger entries after successful runs
 startMemorySynthesis();
 
+// PG-007: Subscribe embedding pipeline to WAL events for automatic vector generation
+startEmbeddingPipeline();
+
+// PG-015: Subscribe graph populator to WAL events for knowledge graph edges
+startGraphPopulator();
+
+// PG-017: Subscribe drift detector to WAL events for post-run convention drift analysis
+startDriftSubscriber();
+
 // PR-019: Auto-rotate memory after each pipeline run completion
+// PR-018: Auto-deduplicate memory after rotation (post-run)
 subscribe((event: WalEvent) => {
   if (event.event_type !== 'run_finished' || !event.workspace_id) return;
-  const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(event.workspace_id) as { path: string } | undefined;
-  if (!ws) return;
-  try {
-    rotateMemory(ws.path);
-  } catch {
-    // Non-fatal — rotation failure must not affect the run result
-  }
+  const workspaceId = event.workspace_id;
+  (async () => {
+    try {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+      if (!ws) return;
+      rotateMemory(ws.path);
+      // Run dedup after rotation — removes semantically duplicate entries
+      await deduplicateMemory(ws.path, workspaceId);
+    } catch {
+      // Non-fatal — rotation/dedup failure must not affect the run result
+    }
+  })();
 });
 
 /* istanbul ignore next -- only when run directly, not in tests */
@@ -284,7 +309,7 @@ if (process.env.NODE_ENV !== 'test') {
     startScheduler();
     cleanupOldLogs();
     // V2-099: Run EXPLAIN QUERY PLAN audit at startup
-    runQueryPlanAudit(db);
+    runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
   });

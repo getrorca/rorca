@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { db } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { decryptToken } from './auth';
 import { verifyWebhookSignature } from './workspace-github';
 import { logger } from '../lib/logger';
@@ -98,7 +98,7 @@ async function dispatchEvent(
  *       404:
  *         description: No workspace connected to this repository
  */
-router.post('/github', (req: Request, res: Response) => {
+router.post('/github', async (req: Request, res: Response) => {
   const signature = req.headers['x-hub-signature-256'] as string | undefined;
   const event = req.headers['x-github-event'] as string | undefined;
   const deliveryId = req.headers['x-github-delivery'] as string | undefined;
@@ -128,9 +128,10 @@ router.post('/github', (req: Request, res: Response) => {
   const [repoOwner, repoName] = repoFullName.split('/');
 
   // Look up the workspace connection by repo owner + name
-  const row = db.prepare(
-    'SELECT * FROM workspace_github_webhooks WHERE repo_owner = ? AND repo_name = ?'
-  ).get(repoOwner, repoName) as GithubWebhookRow | undefined;
+  const row = await queryOne<GithubWebhookRow>(
+    'SELECT * FROM workspace_github_webhooks WHERE repo_owner = $1 AND repo_name = $2',
+    [repoOwner, repoName]
+  );
 
   if (!row) {
     res.status(404).json({ error: 'No workspace connected to this repository' });
@@ -157,21 +158,23 @@ router.post('/github', (req: Request, res: Response) => {
   setImmediate(async () => {
     try {
       // Update last_webhook_at timestamp
-      db.prepare(
-        "UPDATE workspace_github_webhooks SET last_webhook_at = datetime('now') WHERE workspace_id = ?"
-      ).run(row.workspace_id);
+      await execute(
+        "UPDATE workspace_github_webhooks SET last_webhook_at = NOW() WHERE workspace_id = $1",
+        [row.workspace_id]
+      );
 
       // Log every received webhook to wal_events
-      db.prepare(
-        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_webhook', ?, ?)"
-      ).run(row.workspace_id, JSON.stringify({
-        event,
-        deliveryId,
-        repo: repoFullName,
-        action: payload.action || null,
-        ref: payload.ref || null,
-        sender: payload.sender?.login || null,
-      }));
+      await execute(
+        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_webhook', $1, $2)",
+        [row.workspace_id, JSON.stringify({
+          event,
+          deliveryId,
+          repo: repoFullName,
+          action: payload.action || null,
+          ref: payload.ref || null,
+          sender: payload.sender?.login || null,
+        })]
+      );
 
       logger.info(`[Webhook] GitHub ${event} from ${repoFullName} for workspace ${row.workspace_id}`);
 

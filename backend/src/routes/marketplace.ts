@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { db } from '../db/index';
+import { queryOne, query, execute } from '../db/index';
 import { sanitizeSpec } from '../lib/spec-sanitizer';
 import { getEffectiveUser } from '../lib/get-user';
 import { ValidationError, NotFoundError, ForbiddenError } from '../lib/errors';
@@ -36,10 +36,10 @@ interface WorkspaceRow {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function ensureTable(): void {
-  const exists = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='spec_publications'")
-    .get() as { name: string } | undefined;
+async function ensureTable(): Promise<void> {
+  const exists = await queryOne<{ tablename: string }>(
+    "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'spec_publications'"
+  );
   if (!exists) {
     throw new ValidationError(
       'Marketplace tables not initialized. Restart backend to run migrations.',
@@ -166,9 +166,9 @@ router.post('/preview-sanitize', (req: Request, res: Response) => {
  *       404:
  *         description: Spec or workspace not found
  */
-router.post('/publish', requirePlan('marketplace_publish'), (req: Request, res: Response) => {
-  ensureTable();
-  const user = getEffectiveUser(req);
+router.post('/publish', requirePlan('marketplace_publish'), async (req: Request, res: Response) => {
+  await ensureTable();
+  const user = await getEffectiveUser(req);
   const { spec_id, workspace_id, title, description, tags } = req.body as {
     spec_id?: string;
     workspace_id?: string;
@@ -182,9 +182,10 @@ router.post('/publish', requirePlan('marketplace_publish'), (req: Request, res: 
   }
 
   // Resolve workspace path
-  const workspace = db
-    .prepare('SELECT id, path, label FROM workspaces WHERE id = ?')
-    .get(workspace_id) as WorkspaceRow | undefined;
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT id, path, label FROM workspaces WHERE id = $1',
+    [workspace_id]
+  );
   if (!workspace) throw new NotFoundError('Workspace', workspace_id);
 
   // Try approved first, then pending
@@ -211,26 +212,28 @@ router.post('/publish', requirePlan('marketplace_publish'), (req: Request, res: 
       : '');
   const tagsJson = JSON.stringify(tags || []);
 
-  db.prepare(
+  await execute(
     `INSERT INTO spec_publications
       (id, spec_id, workspace_id, publisher_id, title, description, tags, sanitized_spec_json, redaction_count, source, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'local', datetime('now'))`,
-  ).run(
-    pubId,
-    spec_id,
-    workspace_id,
-    user?.id || null,
-    specTitle,
-    specDesc,
-    tagsJson,
-    JSON.stringify(sanitizeResult.sanitized),
-    sanitizeResult.redactionCount,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'local', NOW())`,
+    [
+      pubId,
+      spec_id,
+      workspace_id,
+      user?.id || null,
+      specTitle,
+      specDesc,
+      tagsJson,
+      JSON.stringify(sanitizeResult.sanitized),
+      sanitizeResult.redactionCount,
+    ]
   );
 
-  // Insert into FTS5 index
-  db.prepare(
-    'INSERT INTO spec_fts (publication_id, title, description, tags) VALUES (?, ?, ?, ?)',
-  ).run(pubId, specTitle, specDesc, (tags || []).join(' '));
+  // Insert into FTS index
+  await execute(
+    'INSERT INTO spec_fts (publication_id, title, description, tags) VALUES ($1, $2, $3, $4)',
+    [pubId, specTitle, specDesc, (tags || []).join(' ')]
+  );
 
   res.json({ publicationId: pubId, redactionCount: sanitizeResult.redactionCount });
 });
@@ -279,8 +282,8 @@ router.post('/publish', requirePlan('marketplace_publish'), (req: Request, res: 
  *       404:
  *         description: Publication or workspace not found
  */
-router.post('/:id/fork', (req: Request, res: Response) => {
-  ensureTable();
+router.post('/:id/fork', async (req: Request, res: Response) => {
+  await ensureTable();
   const id = String(req.params.id);
   const { workspace_id } = req.body as { workspace_id?: string };
 
@@ -288,14 +291,16 @@ router.post('/:id/fork', (req: Request, res: Response) => {
     throw new ValidationError('Missing required field: workspace_id');
   }
 
-  const pub = db
-    .prepare('SELECT * FROM spec_publications WHERE id = ? AND deleted_at IS NULL')
-    .get(id) as PublicationRow | undefined;
+  const pub = await queryOne<PublicationRow>(
+    'SELECT * FROM spec_publications WHERE id = $1 AND deleted_at IS NULL',
+    [id]
+  );
   if (!pub) throw new NotFoundError('Publication', id);
 
-  const workspace = db
-    .prepare('SELECT id, path, label FROM workspaces WHERE id = ?')
-    .get(workspace_id) as WorkspaceRow | undefined;
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT id, path, label FROM workspaces WHERE id = $1',
+    [workspace_id]
+  );
   if (!workspace) throw new NotFoundError('Workspace', workspace_id);
 
   // Parse sanitized spec and add attribution
@@ -328,8 +333,9 @@ router.post('/:id/fork', (req: Request, res: Response) => {
   fs.writeFileSync(specPath, JSON.stringify(specJson, null, 2));
 
   // Increment download count
-  db.prepare('UPDATE spec_publications SET download_count = download_count + 1 WHERE id = ?').run(
-    pub.id,
+  await execute(
+    'UPDATE spec_publications SET download_count = download_count + 1 WHERE id = $1',
+    [pub.id]
   );
 
   res.json({
@@ -362,14 +368,15 @@ router.post('/:id/fork', (req: Request, res: Response) => {
  *       404:
  *         description: Publication not found
  */
-router.delete('/:id', (req: Request, res: Response) => {
-  ensureTable();
-  const user = getEffectiveUser(req);
+router.delete('/:id', async (req: Request, res: Response) => {
+  await ensureTable();
+  const user = await getEffectiveUser(req);
   const id = String(req.params.id);
 
-  const pub = db
-    .prepare('SELECT * FROM spec_publications WHERE id = ? AND deleted_at IS NULL')
-    .get(id) as PublicationRow | undefined;
+  const pub = await queryOne<PublicationRow>(
+    'SELECT * FROM spec_publications WHERE id = $1 AND deleted_at IS NULL',
+    [id]
+  );
   if (!pub) throw new NotFoundError('Publication', id);
 
   // Only original publisher can delete
@@ -377,10 +384,16 @@ router.delete('/:id', (req: Request, res: Response) => {
     throw new ForbiddenError('Only the original publisher can delete this publication');
   }
 
-  db.prepare('UPDATE spec_publications SET deleted_at = datetime(\'now\') WHERE id = ?').run(id);
+  await execute(
+    'UPDATE spec_publications SET deleted_at = NOW() WHERE id = $1',
+    [id]
+  );
 
   // Remove from FTS index
-  db.prepare('DELETE FROM spec_fts WHERE publication_id = ?').run(id);
+  await execute(
+    'DELETE FROM spec_fts WHERE publication_id = $1',
+    [id]
+  );
 
   res.json({ deleted: true });
 });
@@ -424,8 +437,8 @@ router.delete('/:id', (req: Request, res: Response) => {
  *       400:
  *         description: Missing spec_id query parameter
  */
-router.get('/', (req: Request, res: Response) => {
-  ensureTable();
+router.get('/', async (req: Request, res: Response) => {
+  await ensureTable();
   const spec_id = String(req.query.spec_id || '').trim();
 
   if (!spec_id) {
@@ -433,15 +446,14 @@ router.get('/', (req: Request, res: Response) => {
     return;
   }
 
-  const pub = db
-    .prepare(
-      `SELECT id, spec_id, title, description, tags, download_count, source, created_at
-       FROM spec_publications
-       WHERE spec_id = ? AND deleted_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT 1`,
-    )
-    .get(spec_id) as PublicationRow | undefined;
+  const pub = await queryOne<PublicationRow>(
+    `SELECT id, spec_id, title, description, tags, download_count, source, created_at
+     FROM spec_publications
+     WHERE spec_id = $1 AND deleted_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [spec_id]
+  );
 
   if (!pub) {
     res.json({ published: false, publication: null });
@@ -487,18 +499,17 @@ router.get('/', (req: Request, res: Response) => {
  *                 total:
  *                   type: integer
  */
-router.get('/my', (req: Request, res: Response) => {
-  ensureTable();
-  const user = getEffectiveUser(req);
+router.get('/my', async (req: Request, res: Response) => {
+  await ensureTable();
+  const user = await getEffectiveUser(req);
 
-  const rows = db
-    .prepare(
-      `SELECT id, spec_id, title, description, tags, download_count, source, created_at
-       FROM spec_publications
-       WHERE deleted_at IS NULL AND (publisher_id = ? OR publisher_id IS NULL)
-       ORDER BY created_at DESC`,
-    )
-    .all(user?.id || null) as PublicationRow[];
+  const rows = await query<PublicationRow>(
+    `SELECT id, spec_id, title, description, tags, download_count, source, created_at
+     FROM spec_publications
+     WHERE deleted_at IS NULL AND (publisher_id = $1 OR publisher_id IS NULL)
+     ORDER BY created_at DESC`,
+    [user?.id || null]
+  );
 
   const items = rows.map((r) => ({
     ...r,
@@ -532,17 +543,15 @@ router.get('/my', (req: Request, res: Response) => {
  *                 total:
  *                   type: integer
  */
-router.get('/popular', (req: Request, res: Response) => {
-  ensureTable();
-  const rows = db
-    .prepare(
-      `SELECT id, spec_id, title, description, tags, download_count, source, created_at
-       FROM spec_publications
-       WHERE deleted_at IS NULL
-       ORDER BY download_count DESC
-       LIMIT 20`,
-    )
-    .all() as PublicationRow[];
+router.get('/popular', async (req: Request, res: Response) => {
+  await ensureTable();
+  const rows = await query<PublicationRow>(
+    `SELECT id, spec_id, title, description, tags, download_count, source, created_at
+     FROM spec_publications
+     WHERE deleted_at IS NULL
+     ORDER BY download_count DESC
+     LIMIT 20`
+  );
 
   const items = rows.map((r) => ({
     ...r,
@@ -601,7 +610,7 @@ router.get('/popular', (req: Request, res: Response) => {
  *                         type: string
  *                       snippet:
  *                         type: string
- *                         description: FTS5 highlighted snippet
+ *                         description: FTS highlighted snippet
  *                       tags:
  *                         type: array
  *                         items:
@@ -616,62 +625,64 @@ router.get('/popular', (req: Request, res: Response) => {
  *                   type: integer
  *                   description: Total matching results for pagination
  */
-router.get('/search', (req: Request, res: Response) => {
-  ensureTable();
-  const query = String(req.query.q || '').trim();
+router.get('/search', async (req: Request, res: Response) => {
+  await ensureTable();
+  const searchQuery = String(req.query.q || '').trim();
   const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
   const offset = Math.max(parseInt(String(req.query.offset), 10) || 0, 0);
 
-  // Empty query → return popular specs
-  if (!query) {
-    const countRow = db
-      .prepare('SELECT COUNT(*) as total FROM spec_publications WHERE deleted_at IS NULL')
-      .get() as { total: number };
-    const rows = db
-      .prepare(
-        `SELECT id, spec_id, title, description, tags, download_count, source, created_at
-         FROM spec_publications
-         WHERE deleted_at IS NULL
-         ORDER BY download_count DESC
-         LIMIT ? OFFSET ?`,
-      )
-      .all(limit, offset) as PublicationRow[];
+  // Empty query -> return popular specs
+  if (!searchQuery) {
+    const countRow = await queryOne<{ total: number }>(
+      'SELECT COUNT(*) as total FROM spec_publications WHERE deleted_at IS NULL'
+    );
+    const rows = await query<PublicationRow>(
+      `SELECT id, spec_id, title, description, tags, download_count, source, created_at
+       FROM spec_publications
+       WHERE deleted_at IS NULL
+       ORDER BY download_count DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
 
     res.json({
       items: rows.map((r) => ({ ...r, tags: JSON.parse(r.tags || '[]') as string[], snippet: '' })),
-      total: countRow.total,
+      total: countRow?.total ?? 0,
     });
     return;
   }
 
-  // FTS5 search with snippet extraction
-  const countRow = db
-    .prepare(
-      `SELECT COUNT(*) as total FROM spec_fts
-       INNER JOIN spec_publications ON spec_publications.id = spec_fts.publication_id
-       WHERE spec_fts MATCH ? AND spec_publications.deleted_at IS NULL`,
-    )
-    .get(query) as { total: number };
+  // PostgreSQL full-text search with ts_headline for snippet extraction
+  const tsQuery = searchQuery.split(/\s+/).filter(Boolean).join(' & ');
 
-  const rows = db
-    .prepare(
-      `SELECT
-         spec_publications.id,
-         spec_publications.spec_id,
-         spec_publications.title,
-         spec_publications.description,
-         spec_publications.tags,
-         spec_publications.download_count,
-         spec_publications.source,
-         spec_publications.created_at,
-         snippet(spec_fts, 1, '<b>', '</b>', '...', 32) AS snippet
-       FROM spec_fts
-       INNER JOIN spec_publications ON spec_publications.id = spec_fts.publication_id
-       WHERE spec_fts MATCH ? AND spec_publications.deleted_at IS NULL
-       ORDER BY rank
-       LIMIT ? OFFSET ?`,
-    )
-    .all(query, limit, offset) as (PublicationRow & { snippet: string })[];
+  const countRow = await queryOne<{ total: number }>(
+    `SELECT COUNT(*) as total FROM spec_fts
+     INNER JOIN spec_publications ON spec_publications.id = spec_fts.publication_id
+     WHERE to_tsvector('english', spec_fts.title || ' ' || spec_fts.description || ' ' || spec_fts.tags) @@ to_tsquery('english', $1)
+       AND spec_publications.deleted_at IS NULL`,
+    [tsQuery]
+  );
+
+  const rows = await query<PublicationRow & { snippet: string }>(
+    `SELECT
+       spec_publications.id,
+       spec_publications.spec_id,
+       spec_publications.title,
+       spec_publications.description,
+       spec_publications.tags,
+       spec_publications.download_count,
+       spec_publications.source,
+       spec_publications.created_at,
+       ts_headline('english', spec_fts.description, to_tsquery('english', $1),
+         'StartSel=<b>, StopSel=</b>, MaxWords=32, MinWords=16') AS snippet
+     FROM spec_fts
+     INNER JOIN spec_publications ON spec_publications.id = spec_fts.publication_id
+     WHERE to_tsvector('english', spec_fts.title || ' ' || spec_fts.description || ' ' || spec_fts.tags) @@ to_tsquery('english', $1)
+       AND spec_publications.deleted_at IS NULL
+     ORDER BY ts_rank(to_tsvector('english', spec_fts.title || ' ' || spec_fts.description || ' ' || spec_fts.tags), to_tsquery('english', $1)) DESC
+     LIMIT $2 OFFSET $3`,
+    [tsQuery, limit, offset]
+  );
 
   res.json({
     items: rows.map((r) => ({
@@ -685,7 +696,7 @@ router.get('/search', (req: Request, res: Response) => {
       created_at: r.created_at,
       snippet: r.snippet || '',
     })),
-    total: countRow.total,
+    total: countRow?.total ?? 0,
   });
 });
 
@@ -715,18 +726,17 @@ router.get('/search', (req: Request, res: Response) => {
  *       404:
  *         description: Publication not found
  */
-router.get('/:id', (req: Request, res: Response) => {
-  ensureTable();
+router.get('/:id', async (req: Request, res: Response) => {
+  await ensureTable();
   const id = String(req.params.id);
 
-  const pub = db
-    .prepare(
-      `SELECT id, spec_id, workspace_id, publisher_id, title, description, tags,
-              sanitized_spec_json, redaction_count, download_count, source, created_at
-       FROM spec_publications
-       WHERE id = ? AND deleted_at IS NULL`,
-    )
-    .get(id) as PublicationRow | undefined;
+  const pub = await queryOne<PublicationRow>(
+    `SELECT id, spec_id, workspace_id, publisher_id, title, description, tags,
+            sanitized_spec_json, redaction_count, download_count, source, created_at
+     FROM spec_publications
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [id]
+  );
   if (!pub) throw new NotFoundError('Publication', id);
 
   res.json({

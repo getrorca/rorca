@@ -104,23 +104,23 @@ The production config (`deploy/nginx.conf`) includes:
 
 ## 4. Database Migration
 
-Database migrations run automatically on first backend startup. The SQLite database is created at `DB_PATH` (default: `/data/rorca.db`).
+Database migrations run automatically on first backend startup. PostgreSQL connection is configured via `DATABASE_URL` env var.
 
-For Docker deployments, the `rorca-data` volume persists the database across container restarts.
+For Docker deployments, the `rorca-pgdata` volume persists the database across container restarts. Docker Compose includes a PostgreSQL 16 service with pgvector + Apache AGE extensions.
 
 ### Manual migration (non-Docker)
 
 ```bash
 cd /opt/rorca/backend
-NODE_ENV=production npx tsx src/server.ts
+DATABASE_URL=postgres://rorca:rorca@localhost:5432/rorca NODE_ENV=production npx tsx src/server.ts
 # Server starts, runs migrations, then Ctrl+C
 ```
 
 Verify:
 
 ```bash
-sqlite3 /data/rorca.db ".tables"
-# Should list: workspaces direction_layers pipeline_runs story_results wal_events ...
+psql "$DATABASE_URL" -c "\dt"
+# Should list: workspaces, direction_layers, pipeline_runs, story_results, wal_events, ...
 ```
 
 ## 5. Build and Deploy
@@ -162,20 +162,20 @@ sudo systemctl reload nginx
 
 ## 6. Backup Configuration
 
-### Automated SQLite Backups
+### Automated PostgreSQL Backups
 
-Rorca has a built-in backup system. Configure the backup directory:
+Configure the backup directory:
 
 ```bash
 # .env
 BACKUP_DIR=/data/backups
 ```
 
-Set up a cron job for regular backups:
+Set up a cron job for regular backups using `pg_dump`:
 
 ```bash
 # Daily backup at 2 AM
-echo "0 2 * * * cd /opt/rorca/backend && sqlite3 /data/rorca.db '.backup /data/backups/rorca-$(date +\%Y\%m\%d).db'" | sudo crontab -
+echo "0 2 * * * pg_dump \$DATABASE_URL --format=custom --file=/data/backups/rorca-\$(date +\%Y\%m\%d).dump" | sudo crontab -
 ```
 
 ### Off-site Backup
@@ -191,8 +191,8 @@ echo "0 2 * * * cd /opt/rorca/backend && sqlite3 /data/rorca.db '.backup /data/b
 # Stop the backend
 docker compose stop rorca-backend
 
-# Replace database
-cp /data/backups/rorca-20260224.db /data/rorca.db
+# Restore database
+pg_restore --clean --if-exists -d "$DATABASE_URL" /data/backups/rorca-20260224.dump
 
 # Restart
 docker compose start rorca-backend
@@ -276,7 +276,7 @@ The script checks:
 - [ ] SSL certificate installed and auto-renewing
 - [ ] `.env` file is not in version control (check `.gitignore`)
 - [ ] Firewall allows only ports 80, 443, and SSH
-- [ ] Database file permissions are restrictive (`chmod 600`)
+- [ ] Database credentials are stored securely (not in code)
 - [ ] Nginx denies access to dotfiles
 - [ ] Rate limiting is active on auth and LLM endpoints
 - [ ] CORS_ORIGIN matches only your frontend domain
@@ -295,16 +295,17 @@ docker compose logs rorca-backend
 lsof -ti:3030 | xargs kill -9
 ```
 
-### Database locked
+### Database connection issues
 
-SQLite WAL mode handles concurrent reads, but only one writer at a time. If you see "database is locked":
+If you see "connection refused" or pool timeout errors:
 
 ```bash
-# Check for stale processes
-fuser /data/rorca.db
+# Check PostgreSQL is running
+docker compose ps db
+docker compose logs db
 
-# Force checkpoint WAL
-sqlite3 /data/rorca.db "PRAGMA wal_checkpoint(TRUNCATE);"
+# Verify connectivity
+psql "$DATABASE_URL" -c "SELECT 1"
 ```
 
 ### Stale pipeline runs
@@ -312,7 +313,7 @@ sqlite3 /data/rorca.db "PRAGMA wal_checkpoint(TRUNCATE);"
 After a server restart, running pipelines are orphaned:
 
 ```bash
-sqlite3 /data/rorca.db "UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE status='running';"
+psql "$DATABASE_URL" -c "UPDATE pipeline_runs SET status='failed', finished_at=NOW() WHERE status='running';"
 ```
 
 ### SSE streams disconnecting
