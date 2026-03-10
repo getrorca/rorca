@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T08:29:02.294Z",
+  "lastUpdatedAt": "2026-03-10T08:32:21.912Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-10T08:29:02.294Z",
       "agentType": "claude",
       "elapsedMs": 460532
+    },
+    {
+      "storyId": "PG-002",
+      "title": "Database Connection Layer — pg Pool + Async Helpers",
+      "status": "passed",
+      "startedAt": "2026-03-10T08:29:11.539Z",
+      "finishedAt": "2026-03-10T08:32:21.912Z",
+      "agentType": "claude",
+      "elapsedMs": 190373
     }
   ],
   "failedStories": [],
