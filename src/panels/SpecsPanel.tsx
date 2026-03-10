@@ -1,3 +1,4 @@
+/* @refresh reset */
 import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
 import { useDebounce } from '../hooks/useDebounce';
 import { useLazyVisible } from '../hooks/useLazyVisible';
@@ -34,6 +35,7 @@ import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
 import MarketplaceView from '../components/MarketplaceView';
+import ContextSummaryCard from '../components/ContextSummaryCard';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -590,6 +592,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   const dragSpecIdRef = useRef<string | null>(null);
   const dragFromColumnRef = useRef<string | null>(null);
   const dragOverColumnRef = useRef<string | null>(null);
+  const dragOverCardRef = useRef<{ specId: string; position: 'before' | 'after' } | null>(null);
   const dragLeaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const dragGhostRef = useRef<HTMLDivElement | null>(null);
   const [dragRenderKey, setDragRenderKey] = useState(0);
@@ -791,9 +794,31 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     if (announceRef.current) { announceRef.current.textContent = ''; requestAnimationFrame(() => { if (announceRef.current) announceRef.current.textContent = msg; }); }
   }, []);
 
+  // Within-column reorder (client-side only, no backend persistence)
+  const reorderWithinColumn = useCallback((specId: string, columnKey: string, dropTarget: { specId: string; position: 'before' | 'after' } | null) => {
+    if (!dropTarget || dropTarget.specId === specId) return;
+    const colKey = columnKey === 'in-progress' ? 'inProgress' : columnKey as 'draft' | 'done';
+    const base = effectiveKanban;
+    let specs = [...(base[colKey] as KanbanSpec[])];
+    const fromIdx = specs.findIndex(s => s.id === specId);
+    if (fromIdx === -1) return;
+    const [card] = specs.splice(fromIdx, 1);
+    let toIdx = specs.findIndex(s => s.id === dropTarget.specId);
+    if (toIdx === -1) return;
+    if (dropTarget.position === 'after') toIdx++;
+    specs.splice(toIdx, 0, card);
+    const optimistic: KanbanResponse = { ...base, customColumns: base.customColumns ? [...base.customColumns] : [] };
+    (optimistic[colKey] as KanbanSpec[]) = specs;
+    setKanban(optimistic);
+  }, [effectiveKanban]);
+
   // Execute card drop transition (source→target) with optimistic UI
   const executeMove = useCallback(async (specId: string, sourceColumn: string, targetColumn: string) => {
-    if (sourceColumn === targetColumn) return;
+    // Within-column reorder
+    if (sourceColumn === targetColumn) {
+      reorderWithinColumn(specId, sourceColumn, dragOverCardRef.current);
+      return;
+    }
 
     // Block moves TO done (read-only from pipeline completion)
     if (targetColumn === 'done') {
@@ -843,13 +868,21 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
     try {
       if (sourceColumn === 'draft' && targetColumn === 'in-progress') {
+        // Draft → In Progress = Approve
         await apiFetch(`/api/specs/${encodeURIComponent(specId)}/approve`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspaceId }),
         });
         toast.show(`Spec "${specTitle}" approved`, 'success');
+      } else if (sourceColumn === 'in-progress' && targetColumn === 'draft') {
+        // In Progress → Draft = Reject (move back to draft)
+        await apiFetch(`/api/specs/${encodeURIComponent(specId)}/reject`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        });
+        toast.show(`Spec "${specTitle}" moved back to Draft`, 'success');
       } else {
-        toast.show('Invalid move — only Draft → In Progress (approve) is supported for system columns', 'error');
+        toast.show('Invalid move — drag between Draft and In Progress to approve/reject', 'error');
         setOptimisticKanban(null);
         return;
       }
@@ -859,7 +892,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
       toast.show(err?.message || 'Move failed — reverted', 'error');
       setOptimisticKanban(null);
     }
-  }, [effectiveKanban, workspaceId, toast, fetchKanban, announce]);
+  }, [effectiveKanban, workspaceId, toast, fetchKanban, announce, reorderWithinColumn]);
 
   // Clean up ghost element
   const cleanupGhost = useCallback(() => {
@@ -895,10 +928,41 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     dragSpecIdRef.current = null;
     dragFromColumnRef.current = null;
     dragOverColumnRef.current = null;
+    dragOverCardRef.current = null;
+    // Remove all drop indicators
+    document.querySelectorAll('[data-drop-indicator]').forEach(el => el.remove());
     clearTimeout(dragLeaveTimerRef.current);
     cleanupGhost();
     setDragRenderKey(k => k + 1);
   }, [cleanupGhost]);
+
+  // Card-level dragOver — detect top/bottom half for within-column reorder
+  const handleCardDragOver = useCallback((e: React.DragEvent, specId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragSpecIdRef.current === specId) return; // hovering over self
+
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const position: 'before' | 'after' = e.clientY < midY ? 'before' : 'after';
+    dragOverCardRef.current = { specId, position };
+
+    // Show visual drop indicator line
+    const el = e.currentTarget as HTMLElement;
+    const parent = el.parentElement;
+    if (!parent) return;
+    // Remove old indicators
+    parent.querySelectorAll('[data-drop-indicator]').forEach(ind => ind.remove());
+    const indicator = document.createElement('div');
+    indicator.setAttribute('data-drop-indicator', 'true');
+    indicator.style.cssText = 'height:2px;background:var(--accent,#6366f1);border-radius:1px;margin:2px 0;pointer-events:none;';
+    if (position === 'before') {
+      el.parentElement?.insertBefore(indicator, el);
+    } else {
+      el.parentElement?.insertBefore(indicator, el.nextSibling);
+    }
+  }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent, columnKey: string) => {
     e.preventDefault();
@@ -921,6 +985,8 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   const handleDrop = useCallback(async (e: React.DragEvent, targetColumn: string) => {
     e.preventDefault();
     clearTimeout(dragLeaveTimerRef.current);
+    // Clean up drop indicators
+    document.querySelectorAll('[data-drop-indicator]').forEach(el => el.remove());
 
     // Check if this is a column header reorder
     if (dragColumnIdRef.current !== null) {
@@ -1055,9 +1121,39 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     }
   }, [workspaceId, executeMove]);
 
+  // Helper: find kanban spec by ID and build summary for the slide-over
+  const findAndOpenSpec = useCallback((specId: string, columnKey?: string) => {
+    // Determine status from column key
+    const colKey = columnKey || (() => {
+      if (effectiveKanban.draft.some(s => s.id === specId)) return 'draft';
+      if (effectiveKanban.inProgress.some(s => s.id === specId)) return 'in-progress';
+      if (effectiveKanban.done.some(s => s.id === specId)) return 'done';
+      return undefined;
+    })();
+    const allSpecs = [...effectiveKanban.draft, ...effectiveKanban.inProgress, ...effectiveKanban.done,
+      ...(effectiveKanban.customColumns?.flatMap(c => c.specs) || [])];
+    const spec = allSpecs.find(s => s.id === specId);
+    if (spec && colKey) {
+      const status = colKey === 'draft' ? 'pending' : colKey === 'done' ? 'completed' : 'approved';
+      onSpecClick(specId, {
+        id: spec.id,
+        specName: spec.title || slugToTitle(spec.id),
+        storyCount: spec.storyCount,
+        status: status as SpecStatus,
+        generatedAt: spec.generatedAt,
+        approvedAt: spec.approvedAt,
+        tags: spec.tags || [],
+        storyTitles: spec.storyTitles || [],
+        reviewStatus: spec.reviewStatus as ArchiveSpec['reviewStatus'],
+      });
+    } else {
+      onSpecClick(specId);
+    }
+  }, [effectiveKanban, onSpecClick]);
+
   // Keyboard card movement
   const handleCardKeyDown = useCallback((e: React.KeyboardEvent, specId: string, columnKey: string) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSpecClick(specId); return; }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); findAndOpenSpec(specId, columnKey); return; }
     if (!e.ctrlKey && !e.metaKey) return;
 
     // Build full column key list for keyboard nav
@@ -1073,7 +1169,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
     e.preventDefault();
     executeMove(specId, columnKey, allKeys[targetIdx]);
-  }, [executeMove, onSpecClick, effectiveKanban]);
+  }, [executeMove, findAndOpenSpec, effectiveKanban]);
 
   // Cleanup on unmount
   useEffect(() => () => {
@@ -1153,16 +1249,19 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   [allColumns, collapsedColumns]);
 
   const boardNavCallbacks = useMemo(() => ({
-    onOpen: (id: string) => onSpecClick(id),
+    onOpen: (id: string) => findAndOpenSpec(id),
     onApprove: (id: string) => handleApprove(id),
     onReject: (id: string) => {
       if (window.confirm(`Reject spec "${slugToTitle(id)}"?`)) handleDeny(id);
     },
-    onEdit: (id: string) => onSpecClick(id),
+    onEdit: (id: string) => findAndOpenSpec(id),
     onDelete: (id: string) => {
       if (window.confirm(`Delete spec "${slugToTitle(id)}"? This cannot be undone.`)) handleDeny(id);
     },
-  }), [onSpecClick, handleApprove, handleDeny]);
+  }), [findAndOpenSpec, handleApprove, handleDeny]);
+
+  // Tag overflow popover state — MUST be before any early returns (Rules of Hooks)
+  const [tagPopoverSpecId, setTagPopoverSpecId] = useState<string | null>(null);
 
   const { focusedCardId, focusedColumnKey } = useBoardNav(
     boardNavColumns,
@@ -1211,9 +1310,6 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     );
   }
 
-  // Tag overflow popover state
-  const [tagPopoverSpecId, setTagPopoverSpecId] = useState<string | null>(null);
-
   // Status icon for card
   const statusIcon = (colKey: string, colColor: string, hasActiveRun: boolean) => {
     if (hasActiveRun) return <Play size={10} className="fill-accent text-accent" />;
@@ -1251,7 +1347,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
         const dy = e.clientY - mouseDownPosRef.current.y;
         if (Math.sqrt(dx * dx + dy * dy) > 5) return; // was a drag, not a click
       }
-      onSpecClick(spec.id);
+      findAndOpenSpec(spec.id, colKey);
     };
 
     // ── Compact mode: title-only single line ──
@@ -1603,9 +1699,11 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
                     )
                   ) : (
                     specs.map((spec) => (
-                      <LazyBoardCard key={spec.id} height={compactMode ? 36 : 120}>
-                        {renderCard(spec, col.key, col.color, isDraft)}
-                      </LazyBoardCard>
+                      <div key={spec.id} onDragOver={(e) => handleCardDragOver(e, spec.id)}>
+                        <LazyBoardCard height={compactMode ? 36 : 120}>
+                          {renderCard(spec, col.key, col.color, isDraft)}
+                        </LazyBoardCard>
+                      </div>
                     ))
                   )}
                 </div>
@@ -2179,6 +2277,11 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       )}
       {contextPopover && <div className="fixed inset-0 z-40" onClick={() => setContextPopover(null)} />}
 
+      {/* Context summary card — shown during generation (once result arrives) */}
+      {isGenerating && generatedSpec?.contextSummary && (
+        <ContextSummaryCard summary={generatedSpec.contextSummary} isGenerating />
+      )}
+
       {/* Generate + Quick Run buttons */}
       {(!generatedSpec || isGenerating) && (
         <div className="space-y-2">
@@ -2266,6 +2369,11 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
             </div>
           )}
         </section>
+      )}
+
+      {/* Context summary card — persists after generation, collapsed */}
+      {generatedSpec?.contextSummary && !isGenerating && (
+        <ContextSummaryCard summary={generatedSpec.contextSummary} />
       )}
 
       {/* Post-generation preview */}

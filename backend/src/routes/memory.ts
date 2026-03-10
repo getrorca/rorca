@@ -858,6 +858,63 @@ router.post('/rotate', (req: Request, res: Response) => {
  *       400: { description: "Invalid runId" }
  *       404: { description: "Run not found" }
  */
+// POST /api/memory/synthesize — synthesize memory proposals from all recent runs for a workspace
+router.post('/synthesize', (req: Request, res: Response) => {
+  const { workspaceId } = req.body;
+  if (!workspaceId) return res.status(400).json({ error: 'workspaceId is required' });
+
+  // Find recent completed runs for this workspace (last 10)
+  const runs = db.prepare(
+    `SELECT id FROM pipeline_runs WHERE workspace_id = ? AND status IN ('passed','failed','finished')
+     ORDER BY finished_at DESC LIMIT 10`
+  ).all(String(workspaceId)) as { id: number }[];
+
+  if (runs.length === 0) {
+    return res.json({ proposals: [], total: 0 });
+  }
+
+  const allProposals: Array<{
+    proposalId: string; date: string; category: string;
+    title: string; rule: string; context: string; source: string; status: string;
+  }> = [];
+  const today = new Date().toISOString().slice(0, 10);
+  const insertStmt = db.prepare(
+    `INSERT OR IGNORE INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
+  );
+
+  for (const run of runs) {
+    const candidates = analyzeRunEvents(run.id);
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i];
+      const proposalId = `wal-feedback-${run.id}-${i}`;
+      insertStmt.run(proposalId, run.id, String(workspaceId), c.category, c.title, c.rule, c.context, c.source);
+      allProposals.push({
+        proposalId, date: today, category: c.category,
+        title: c.title, rule: c.rule, context: c.context,
+        source: c.source, status: 'pending',
+      });
+    }
+  }
+
+  if (allProposals.length > 0) {
+    const walPayload = JSON.stringify({ workspace_id: workspaceId, proposals: allProposals });
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', ?, ?)`
+    ).run(String(workspaceId), walPayload);
+    broadcastAll({
+      id: Number(walResult.lastInsertRowid),
+      ts: new Date().toISOString(),
+      event_type: 'memory_proposals',
+      workspace_id: String(workspaceId),
+      spec_id: null, story_id: null, actor: 'system',
+      payload: walPayload,
+    });
+  }
+
+  res.json({ proposals: allProposals, total: allProposals.length });
+});
+
 router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
   const runId = parseInt(req.params.runId as string, 10);
   if (isNaN(runId)) return res.status(400).json({ error: 'Invalid runId' });
