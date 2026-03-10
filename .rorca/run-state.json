@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T08:32:21.912Z",
+  "lastUpdatedAt": "2026-03-10T09:41:36.031Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-10T08:32:21.912Z",
       "agentType": "claude",
       "elapsedMs": 190373
+    },
+    {
+      "storyId": "PG-003",
+      "title": "Route Async Conversion — Wave 1 (Core Routes)",
+      "status": "passed",
+      "startedAt": "2026-03-10T09:17:36.463Z",
+      "finishedAt": "2026-03-10T09:41:36.031Z",
+      "agentType": "claude",
+      "elapsedMs": 1439568
     }
   ],
   "failedStories": [],
