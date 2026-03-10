@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T11:42:56.554Z",
+  "lastUpdatedAt": "2026-03-10T11:53:02.693Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -111,6 +111,15 @@
       "finishedAt": "2026-03-10T11:42:56.553Z",
       "agentType": "claude",
       "elapsedMs": 377637
+    },
+    {
+      "storyId": "PG-013",
+      "title": "CAG — In-Memory Context Cache (Hot Layer)",
+      "status": "passed",
+      "startedAt": "2026-03-10T11:43:05.144Z",
+      "finishedAt": "2026-03-10T11:53:02.693Z",
+      "agentType": "claude",
+      "elapsedMs": 597549
     }
   ],
   "failedStories": [],

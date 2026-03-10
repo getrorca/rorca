@@ -25,6 +25,7 @@ import {
 } from '../lib/memory-ledger';
 import { analyzeRunEvents } from '../lib/wal-feedback';
 import { broadcastAll } from '../lib/sse-hub';
+import { invalidateMemory } from '../lib/context-cache';
 
 const router = Router();
 
@@ -184,6 +185,7 @@ router.post('/', async (req: Request, res: Response) => {
   };
 
   const entries = append(wsPath, entry, getLedgerPath(workspaceId));
+  invalidateMemory(workspaceId); // PG-013
   res.status(201).json({ entry, total: entries.length });
 });
 
@@ -244,6 +246,7 @@ router.put('/entry', async (req: Request, res: Response) => {
   const result = updateEntry(wsPath, date, title, updates ?? {}, getLedgerPath(workspaceId));
   if (!result) return res.status(404).json({ error: 'Entry not found' });
 
+  invalidateMemory(workspaceId); // PG-013
   res.json({ items: result, total: result.length });
 });
 
@@ -291,6 +294,7 @@ router.delete('/entry', async (req: Request, res: Response) => {
   const removed = deleteEntry(wsPath, date, title, getLedgerPath(workspaceId));
   if (!removed) return res.status(404).json({ error: 'Entry not found' });
 
+  invalidateMemory(workspaceId); // PG-013
   res.json({ deleted: true });
 });
 

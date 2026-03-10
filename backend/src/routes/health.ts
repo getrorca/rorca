@@ -6,6 +6,7 @@ import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
+import { cacheStats } from '../lib/context-cache';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -101,6 +102,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         codexVersion: codex.codexVersion,
       } : {}),
       embeddings: getQueueStats(),
+      cache: cacheStats(),
     });
   } catch (err) { next(err); }
 });
