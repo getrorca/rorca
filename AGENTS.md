@@ -5,7 +5,7 @@ File governance, behavioral rules, and agent persona zones for the Rorca codebas
 ## Project Overview
 Rorca is an AI spec orchestration and pipeline management platform for autonomous software development.
 - **Dashboard** (`/src`): React 18 + Vite + Tailwind on :5210
-- **Backend** (`/backend`): Express.js + SQLite on :3030
+- **Backend** (`/backend`): Express.js + PostgreSQL 16 on :3030
 - **Landing Page** (`/landing-page`): Next.js 14 + Tailwind v4 + Framer Motion on :3002
 - **Execution Engine**: `claude --print` (Claude sub), `opencode run` (75+ providers), `codex` (ChatGPT sub)
 
@@ -42,11 +42,11 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
 ### Database (`backend/src/db/`)
 - **Owner**: Database specialist
 - **Rules**:
-  - `better-sqlite3` is **synchronous** — never `await` DB calls
-  - `.get()` → `T | undefined`, `.all()` → `T[]`, `.run()` → `RunResult`
-  - Migrations are SQL in `migrations/`, numbered sequentially (001–036+)
-  - Column additions: use `pragma table_info` check (SQLite lacks `ADD COLUMN IF NOT EXISTS`)
-  - WAL mode + FK constraints always on
+  - PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
+  - `query<T>()` → `T[]`, `queryOne<T>()` → `T | undefined`, `execute()` → `{ rowCount }`
+  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–049+), tracked via `schema_migrations` table
+  - Use `$1, $2, ...` numbered placeholders (NOT `?`)
+  - FK constraints always on, connection pooling (max 20)
 
 ### Execution Engine (`backend/src/lib/execution-engine.ts`)
 - **Owner**: Architect
@@ -94,7 +94,7 @@ NVM PATH isn't inherited by Node child processes. Resolve full path via `CLAUDE_
 ### Stale Pipeline Runs
 ```sql
 SELECT id, pid, status FROM pipeline_runs WHERE status='running';
--- Fix: UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE id=?;
+-- Fix: UPDATE pipeline_runs SET status='failed', finished_at=NOW() WHERE id=<id>;
 ```
 
 ### Auth Middleware — Intentionally Bypassed

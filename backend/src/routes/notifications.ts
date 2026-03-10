@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import crypto from 'crypto';
-import { db } from '../db/index';
+import { query, queryOne, execute, transaction } from '../db/index';
 import type { AuthUser } from './auth';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 
@@ -82,16 +82,16 @@ interface PreferenceRow {
  *                 cursor: { type: string, nullable: true }
  *                 unreadCount: { type: integer }
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const user = (req as any).user as AuthUser;
   const pagination = parsePaginationParams(req, { limit: 30, maxLimit: 100 });
   const unreadOnly = req.query.unread === 'true';
 
   const whereClause = unreadOnly
-    ? 'WHERE user_id = ? AND read_at IS NULL'
-    : 'WHERE user_id = ?';
+    ? 'WHERE user_id = $1 AND read_at IS NULL'
+    : 'WHERE user_id = $1';
 
-  const result = paginateQuery<NotificationRow>(db, {
+  const result = await paginateQuery<NotificationRow>({
     query: `SELECT * FROM notifications ${whereClause}`,
     countQuery: `SELECT COUNT(*) as total FROM notifications ${whereClause}`,
     params: [user.id],
@@ -101,9 +101,10 @@ router.get('/', (req, res) => {
     cursorDirection: 'desc',
   });
 
-  const unreadRow = db.prepare(
-    'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND read_at IS NULL'
-  ).get(user.id) as { count: number };
+  const unreadRow = await queryOne<{ count: number }>(
+    'SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND read_at IS NULL',
+    [user.id],
+  );
 
   res.json({
     items: result.items.map(r => ({
@@ -118,7 +119,7 @@ router.get('/', (req, res) => {
     total: result.total,
     hasMore: result.hasMore,
     cursor: result.cursor,
-    unreadCount: unreadRow.count,
+    unreadCount: unreadRow?.count ?? 0,
   });
 });
 
@@ -140,14 +141,15 @@ router.get('/', (req, res) => {
  *               properties:
  *                 count: { type: integer }
  */
-router.get('/unread-count', (req, res) => {
+router.get('/unread-count', async (req, res) => {
   const user = (req as any).user as AuthUser | undefined;
   // Auth bypassed in local mode — return 0 when no user session
   if (!user?.id) { res.json({ count: 0 }); return; }
-  const row = db.prepare(
-    'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND read_at IS NULL'
-  ).get(user.id) as { count: number };
-  res.json({ count: row.count });
+  const row = await queryOne<{ count: number }>(
+    'SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND read_at IS NULL',
+    [user.id],
+  );
+  res.json({ count: row?.count ?? 0 });
 });
 
 /**
@@ -175,12 +177,13 @@ router.get('/unread-count', (req, res) => {
  *                 ok: { type: boolean }
  *       404: { description: "Notification not found or already read" }
  */
-router.post('/:id/read', (req, res) => {
+router.post('/:id/read', async (req, res) => {
   const user = (req as any).user as AuthUser;
-  const result = db.prepare(
-    "UPDATE notifications SET read_at = datetime('now') WHERE id = ? AND user_id = ? AND read_at IS NULL"
-  ).run(req.params.id, user.id);
-  if (result.changes === 0) {
+  const result = await execute(
+    'UPDATE notifications SET read_at = NOW() WHERE id = $1 AND user_id = $2 AND read_at IS NULL',
+    [req.params.id, user.id],
+  );
+  if (result.rowCount === 0) {
     return res.status(404).json({ error: 'Notification not found or already read' });
   }
   res.json({ ok: true });
@@ -205,12 +208,13 @@ router.post('/:id/read', (req, res) => {
  *                 ok: { type: boolean }
  *                 marked: { type: integer, description: "Number of notifications marked as read" }
  */
-router.post('/read-all', (req, res) => {
+router.post('/read-all', async (req, res) => {
   const user = (req as any).user as AuthUser;
-  const result = db.prepare(
-    "UPDATE notifications SET read_at = datetime('now') WHERE user_id = ? AND read_at IS NULL"
-  ).run(user.id);
-  res.json({ ok: true, marked: result.changes });
+  const result = await execute(
+    'UPDATE notifications SET read_at = NOW() WHERE user_id = $1 AND read_at IS NULL',
+    [user.id],
+  );
+  res.json({ ok: true, marked: result.rowCount });
 });
 
 /**
@@ -238,12 +242,13 @@ router.post('/read-all', (req, res) => {
  *                 ok: { type: boolean }
  *       404: { description: "Notification not found" }
  */
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   const user = (req as any).user as AuthUser;
-  const result = db.prepare(
-    'DELETE FROM notifications WHERE id = ? AND user_id = ?'
-  ).run(req.params.id, user.id);
-  if (result.changes === 0) {
+  const result = await execute(
+    'DELETE FROM notifications WHERE id = $1 AND user_id = $2',
+    [req.params.id, user.id],
+  );
+  if (result.rowCount === 0) {
     return res.status(404).json({ error: 'Notification not found' });
   }
   res.json({ ok: true });
@@ -275,11 +280,12 @@ router.delete('/:id', (req, res) => {
  *                       inApp: { type: boolean }
  *                       email: { type: boolean }
  */
-router.get('/preferences', (req, res) => {
+router.get('/preferences', async (req, res) => {
   const user = (req as any).user as AuthUser;
-  const rows = db.prepare(
-    'SELECT * FROM notification_preferences WHERE user_id = ?'
-  ).all(user.id) as PreferenceRow[];
+  const rows = await query<PreferenceRow>(
+    'SELECT * FROM notification_preferences WHERE user_id = $1',
+    [user.id],
+  );
 
   // Build full map with defaults for any missing event types
   const prefsMap: Record<string, { inApp: boolean; email: boolean }> = {};
@@ -328,7 +334,7 @@ router.get('/preferences', (req, res) => {
  *                 ok: { type: boolean }
  *       400: { description: "preferences object required" }
  */
-router.put('/preferences', (req, res) => {
+router.put('/preferences', async (req, res) => {
   const user = (req as any).user as AuthUser;
   const { preferences } = req.body as {
     preferences: Record<string, { inApp: boolean; email: boolean }>;
@@ -338,49 +344,49 @@ router.put('/preferences', (req, res) => {
     return res.status(400).json({ error: 'preferences object required' });
   }
 
-  const upsert = db.prepare(`
-    INSERT INTO notification_preferences (id, user_id, event_type, in_app, email)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(user_id, event_type) DO UPDATE SET in_app = excluded.in_app, email = excluded.email
-  `);
-
-  const runAll = db.transaction(() => {
+  await transaction(async (client) => {
     for (const [eventType, pref] of Object.entries(preferences)) {
       if (!NOTIFICATION_TYPES.includes(eventType as NotificationType)) continue;
-      upsert.run(
-        crypto.randomUUID(),
-        user.id,
-        eventType,
-        pref.inApp ? 1 : 0,
-        pref.email ? 1 : 0,
+      await client.query(
+        `INSERT INTO notification_preferences (id, user_id, event_type, in_app, email)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT(user_id, event_type) DO UPDATE SET in_app = excluded.in_app, email = excluded.email`,
+        [
+          crypto.randomUUID(),
+          user.id,
+          eventType,
+          pref.inApp ? 1 : 0,
+          pref.email ? 1 : 0,
+        ],
       );
     }
   });
 
-  runAll();
   res.json({ ok: true });
 });
 
 // ─── Helper: create notification (used by WAL subscriber) ───
 
-export function createNotification(
+export async function createNotification(
   userId: string,
   type: NotificationType,
   title: string,
   body: string,
   link?: string,
-): string {
+): Promise<string> {
   // Check user preferences — skip if in_app disabled
-  const pref = db.prepare(
-    'SELECT in_app FROM notification_preferences WHERE user_id = ? AND event_type = ?'
-  ).get(userId, type) as { in_app: number } | undefined;
+  const pref = await queryOne<{ in_app: number }>(
+    'SELECT in_app FROM notification_preferences WHERE user_id = $1 AND event_type = $2',
+    [userId, type],
+  );
 
   if (pref && !pref.in_app) return ''; // user opted out of in-app for this type
 
   const id = crypto.randomUUID();
-  db.prepare(
-    'INSERT INTO notifications (id, user_id, type, title, body, link) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(id, userId, type, title, body, link ?? null);
+  await execute(
+    'INSERT INTO notifications (id, user_id, type, title, body, link) VALUES ($1, $2, $3, $4, $5, $6)',
+    [id, userId, type, title, body, link ?? null],
+  );
   return id;
 }
 

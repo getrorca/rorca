@@ -1,16 +1,14 @@
 /**
  * db/index.ts — PostgreSQL connection pool + async query helpers for Rorca
  *
- * Replaces the previous better-sqlite3 synchronous interface with an async
- * pg Pool. Helpers mirror the old API shape so route conversion is mechanical:
+ * All database access is async via pg Pool:
  *
- *   db.prepare(sql).all(...)   →  await query<T>(sql, params)
- *   db.prepare(sql).get(...)   →  await queryOne<T>(sql, params)
- *   db.prepare(sql).run(...)   →  await execute(sql, params)
- *   db.transaction(fn)()       →  await transaction(fn)
+ *   await query<T>(sql, params)       — SELECT multiple rows
+ *   await queryOne<T>(sql, params)    — SELECT single row or undefined
+ *   await execute(sql, params)        — INSERT/UPDATE/DELETE
+ *   await transaction(fn)             — Run function in a transaction
  *
  * All queries use $1, $2, ... numbered placeholders natively.
- * A rewritePlaceholders() utility is available for incremental migration.
  */
 
 import { Pool, PoolClient, PoolConfig } from 'pg';
@@ -101,7 +99,7 @@ export const pool: Pool = new Proxy({} as Pool, {
 
 /**
  * Converts ? placeholders to $1, $2, ... numbered placeholders.
- * Available for incremental migration but should NOT be used in final code.
+ * Utility for SQL string conversion. Prefer writing $N placeholders directly.
  */
 export function rewritePlaceholders(sql: string): string {
   let idx = 0;
@@ -130,7 +128,6 @@ function logSlowQuery(sql: string, params: unknown[] | undefined, durationMs: nu
 
 /**
  * Execute a query and return all matching rows.
- * Replaces: db.prepare(sql).all(...params)
  */
 export async function query<T = Record<string, unknown>>(
   sql: string,
@@ -146,7 +143,6 @@ export async function query<T = Record<string, unknown>>(
 
 /**
  * Execute a query and return the first row, or undefined.
- * Replaces: db.prepare(sql).get(...params)
  */
 export async function queryOne<T = Record<string, unknown>>(
   sql: string,
@@ -162,7 +158,6 @@ export async function queryOne<T = Record<string, unknown>>(
 
 /**
  * Execute a statement (INSERT/UPDATE/DELETE) and return affected row count.
- * Replaces: db.prepare(sql).run(...params)
  */
 export async function execute(
   sql: string,
@@ -179,7 +174,6 @@ export async function execute(
 /**
  * Run a function inside a transaction.
  * Acquires a client, BEGINs, runs fn, COMMITs on success, ROLLBACKs on error.
- * Replaces: db.transaction(() => { ... })()
  */
 export async function transaction<T>(
   fn: (client: PoolClient) => Promise<T>,
@@ -205,19 +199,38 @@ export async function transaction<T>(
 export interface DbHealthResult {
   ok: boolean;
   latencyMs: number;
-  poolStats: { total: number; idle: number; waiting: number };
+  poolStats: { total: number; idle: number; waiting: number; maxSize: number };
+  pgVersion?: string;
+  extensions?: string[];
 }
 
 /**
- * Runs SELECT 1 and returns pool diagnostics.
+ * Runs SELECT 1 and returns pool diagnostics + PostgreSQL metadata.
  * Used by GET /api/health.
  */
 export async function dbHealthCheck(): Promise<DbHealthResult> {
   const p = getPool();
+  const cfg = buildPoolConfig();
+  const maxSize = cfg.max ?? 20;
   const start = Date.now();
   try {
     await p.query('SELECT 1');
     const latencyMs = Date.now() - start;
+
+    // Fetch PG version + installed extensions
+    let pgVersion: string | undefined;
+    let extensions: string[] = [];
+    try {
+      const versionRow = await p.query<{ version: string }>('SELECT version()');
+      pgVersion = versionRow.rows[0]?.version;
+      const extRows = await p.query<{ extname: string }>(
+        "SELECT extname FROM pg_extension WHERE extname IN ('vector', 'age', 'pgcrypto') ORDER BY extname"
+      );
+      extensions = extRows.rows.map(r => r.extname);
+    } catch {
+      // Non-critical — version/extension queries may fail on restricted users
+    }
+
     return {
       ok: true,
       latencyMs,
@@ -225,7 +238,10 @@ export async function dbHealthCheck(): Promise<DbHealthResult> {
         total: p.totalCount,
         idle: p.idleCount,
         waiting: p.waitingCount,
+        maxSize,
       },
+      pgVersion,
+      extensions,
     };
   } catch {
     return {
@@ -235,6 +251,7 @@ export async function dbHealthCheck(): Promise<DbHealthResult> {
         total: p.totalCount,
         idle: p.idleCount,
         waiting: p.waitingCount,
+        maxSize,
       },
     };
   }
@@ -287,73 +304,3 @@ async function shutdown(): Promise<void> {
 process.on('SIGTERM', () => { shutdown().catch(() => {}); });
 process.on('SIGINT', () => { shutdown().catch(() => {}); });
 
-// ── Backward-Compatible `db` Shim ──────────────────────────────────────
-//
-// Many route files still `import { db } from '../db/index'` and call
-// db.prepare(sql).get/all/run(...).  This shim lets unconverted files
-// compile and run until they are migrated to the async helpers above.
-// The shim is intentionally synchronous-looking but uses the async pool
-// under the hood.  It logs a deprecation warning on first use so we can
-// track remaining migration work.
-//
-// REMOVE this shim once all files are converted to async helpers.
-
-let _dbShimWarned = false;
-
-function warnLegacyUsage(method: string): void {
-  if (!_dbShimWarned) {
-    logger.warn(`[db] Legacy db.prepare().${method}() called — migrate this call site to async helpers`);
-    _dbShimWarned = true;
-  }
-}
-
-/**
- * Backward-compatible shim that mimics better-sqlite3's synchronous API
- * by blocking on the pg Pool.  Only for unconverted files.
- *
- * @deprecated Use query/queryOne/execute/transaction instead.
- */
-export const db = {
-  prepare(sql: string) {
-    // Convert ? placeholders to $1, $2, ... on the fly
-    const pgSql = rewritePlaceholders(sql);
-    return {
-      get(...params: unknown[]): unknown {
-        warnLegacyUsage('get');
-        // We can't truly block, so we return a promise — callers that
-        // don't await will get a Promise object (which is truthy).
-        // This is intentional: it keeps TypeScript happy and the warning
-        // tells us which call sites to fix.
-        return (async () => {
-          await ensureMigrations();
-          const p = getPool();
-          const result = await p.query(pgSql, params);
-          return result.rows[0] ?? undefined;
-        })();
-      },
-      all(...params: unknown[]): unknown {
-        warnLegacyUsage('all');
-        return (async () => {
-          await ensureMigrations();
-          const p = getPool();
-          const result = await p.query(pgSql, params);
-          return result.rows;
-        })();
-      },
-      run(...params: unknown[]): unknown {
-        warnLegacyUsage('run');
-        return (async () => {
-          await ensureMigrations();
-          const p = getPool();
-          const result = await p.query(pgSql, params);
-          return { changes: result.rowCount ?? 0, lastInsertRowid: 0 };
-        })();
-      },
-    };
-  },
-  transaction<T>(fn: () => T) {
-    warnLegacyUsage('transaction');
-    // Returns a callable that executes the function — matches better-sqlite3 API
-    return () => fn();
-  },
-};

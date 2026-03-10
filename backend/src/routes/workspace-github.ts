@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
 
@@ -55,19 +55,20 @@ interface GitHubConnectionRow {
  *       500:
  *         description: Internal server error
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
 
-    const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspaceId);
+    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
     }
 
-    const row = db.prepare(
-      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = ?'
-    ).get(workspaceId) as GithubWebhookRow | undefined;
+    const row = await queryOne<GithubWebhookRow>(
+      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId]
+    );
 
     if (!row) {
       res.json({ connected: false });
@@ -151,16 +152,17 @@ router.post('/connect', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspaceId);
+    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
     }
 
     // Check if already connected
-    const existing = db.prepare(
-      'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = ?'
-    ).get(workspaceId);
+    const existing = await queryOne<{ workspace_id: string }>(
+      'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId]
+    );
     if (existing) {
       res.status(409).json({ error: 'GitHub already connected for this workspace. Disconnect first.' });
       return;
@@ -207,14 +209,16 @@ router.post('/connect', async (req: Request, res: Response) => {
     const ghData = await ghRes.json() as { id: number };
 
     // Store connection
-    db.prepare(
+    await execute(
       `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(workspaceId, repoOwner, repoName, ghData.id, encryptToken(webhookSecret));
+       VALUES ($1, $2, $3, $4, $5)`,
+      [workspaceId, repoOwner, repoName, ghData.id, encryptToken(webhookSecret)]
+    );
 
-    db.prepare(
-      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_connected', ?, ?)"
-    ).run(workspaceId, JSON.stringify({ repoOwner, repoName, webhookId: ghData.id }));
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_connected', $1, $2)",
+      [workspaceId, JSON.stringify({ repoOwner, repoName, webhookId: ghData.id })]
+    );
 
     res.status(201).json({
       connected: true,
@@ -278,9 +282,10 @@ router.post('/disconnect', async (req: Request, res: Response) => {
       return;
     }
 
-    const row = db.prepare(
-      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = ?'
-    ).get(workspaceId) as GithubWebhookRow | undefined;
+    const row = await queryOne<GithubWebhookRow>(
+      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId]
+    );
 
     if (!row) {
       res.status(404).json({ error: 'No GitHub connection found for this workspace' });
@@ -313,11 +318,12 @@ router.post('/disconnect', async (req: Request, res: Response) => {
     }
 
     // Remove from DB
-    db.prepare('DELETE FROM workspace_github_webhooks WHERE workspace_id = ?').run(workspaceId);
+    await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]);
 
-    db.prepare(
-      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_disconnected', ?, ?)"
-    ).run(workspaceId, JSON.stringify({ repoOwner: row.repo_owner, repoName: row.repo_name }));
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_disconnected', $1, $2)",
+      [workspaceId, JSON.stringify({ repoOwner: row.repo_owner, repoName: row.repo_name })]
+    );
 
     res.json({ connected: false });
   } catch (error: any) {
@@ -349,18 +355,20 @@ router.post('/disconnect', async (req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.get('/account', (req: Request, res: Response) => {
+router.get('/account', async (req: Request, res: Response) => {
   try {
     // Get first user's GitHub connection (auth is bypassed — single-user local tool)
-    const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const userId = userRow?.id;
     if (!userId) {
       res.json({ connected: false });
       return;
     }
 
-    const conn = db.prepare(
-      'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id WHERE gc.user_id = ?'
-    ).get(userId) as (GitHubConnectionRow & { avatar_url: string | null }) | undefined;
+    const conn = await queryOne<GitHubConnectionRow & { avatar_url: string | null }>(
+      'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id WHERE gc.user_id = $1',
+      [userId]
+    );
 
     if (!conn) {
       res.json({ connected: false });
@@ -405,15 +413,17 @@ router.get('/account', (req: Request, res: Response) => {
  */
 router.post('/test-connection', async (req: Request, res: Response) => {
   try {
-    const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const userId = userRow?.id;
     if (!userId) {
       res.json({ valid: false, error: 'No user configured' });
       return;
     }
 
-    const conn = db.prepare(
-      'SELECT encrypted_token, github_username FROM github_connections WHERE user_id = ?'
-    ).get(userId) as Pick<GitHubConnectionRow, 'encrypted_token' | 'github_username'> | undefined;
+    const conn = await queryOne<Pick<GitHubConnectionRow, 'encrypted_token' | 'github_username'>>(
+      'SELECT encrypted_token, github_username FROM github_connections WHERE user_id = $1',
+      [userId]
+    );
 
     if (!conn) {
       res.json({ valid: false, error: 'No GitHub connection found' });
@@ -469,15 +479,17 @@ router.post('/test-connection', async (req: Request, res: Response) => {
  */
 router.post('/disconnect-oauth', async (req: Request, res: Response) => {
   try {
-    const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const userId = userRow?.id;
     if (!userId) {
       res.status(404).json({ error: 'No user configured' });
       return;
     }
 
-    const conn = db.prepare(
-      'SELECT id, encrypted_token FROM github_connections WHERE user_id = ?'
-    ).get(userId) as Pick<GitHubConnectionRow, 'id' | 'encrypted_token'> | undefined;
+    const conn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token'>>(
+      'SELECT id, encrypted_token FROM github_connections WHERE user_id = $1',
+      [userId]
+    );
 
     if (!conn) {
       res.status(404).json({ error: 'No GitHub connection found' });
@@ -505,13 +517,14 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     }
 
     // Remove connection from DB
-    db.prepare('DELETE FROM github_connections WHERE id = ?').run(conn.id);
-    db.prepare("UPDATE users SET github_id = NULL, updated_at = datetime('now') WHERE id = ?").run(userId);
+    await execute('DELETE FROM github_connections WHERE id = $1', [conn.id]);
+    await execute("UPDATE users SET github_id = NULL, updated_at = NOW() WHERE id = $1", [userId]);
 
     // Emit WAL event
-    db.prepare(
-      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_oauth_disconnected', '', ?)"
-    ).run(JSON.stringify({ userId }));
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_oauth_disconnected', '', $1)",
+      [JSON.stringify({ userId })]
+    );
 
     res.json({ disconnected: true });
   } catch (error: any) {
@@ -563,36 +576,39 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.put('/auto-pr', (req: Request, res: Response) => {
+router.put('/auto-pr', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
     const { enabled, targetBranch, reviewers } = req.body;
 
-    const row = db.prepare(
-      'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = ?'
-    ).get(workspaceId);
+    const row = await queryOne<{ workspace_id: string }>(
+      'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId]
+    );
 
     if (!row) {
       res.status(404).json({ error: 'No GitHub connection found for this workspace' });
       return;
     }
 
-    db.prepare(
+    await execute(
       `UPDATE workspace_github_webhooks
-       SET auto_pr_enabled = ?,
-           auto_pr_target_branch = ?,
-           auto_pr_reviewers = ?
-       WHERE workspace_id = ?`
-    ).run(
-      enabled ? 1 : 0,
-      targetBranch || 'main',
-      JSON.stringify(Array.isArray(reviewers) ? reviewers : []),
-      workspaceId,
+       SET auto_pr_enabled = $1,
+           auto_pr_target_branch = $2,
+           auto_pr_reviewers = $3
+       WHERE workspace_id = $4`,
+      [
+        enabled ? 1 : 0,
+        targetBranch || 'main',
+        JSON.stringify(Array.isArray(reviewers) ? reviewers : []),
+        workspaceId,
+      ]
     );
 
-    db.prepare(
-      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_auto_pr_updated', ?, ?)"
-    ).run(workspaceId, JSON.stringify({ enabled, targetBranch, reviewers }));
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_auto_pr_updated', $1, $2)",
+      [workspaceId, JSON.stringify({ enabled, targetBranch, reviewers })]
+    );
 
     res.json({
       enabled: !!enabled,
@@ -636,12 +652,14 @@ router.put('/auto-pr', (req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.get('/actions-yaml', (req: Request, res: Response) => {
+router.get('/actions-yaml', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
 
-    const workspace = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?')
-      .get(workspaceId) as { id: string; label: string; path: string } | undefined;
+    const workspace = await queryOne<{ id: string; label: string; path: string }>(
+      'SELECT id, label, path FROM workspaces WHERE id = $1',
+      [workspaceId]
+    );
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -812,10 +830,11 @@ export function verifyWebhookSignature(
 
 // ─── Helper: get decrypted webhook secret for a workspace ────────────────────
 
-export function getWebhookSecret(workspaceId: string): string | null {
-  const row = db.prepare(
-    'SELECT encrypted_webhook_secret FROM workspace_github_webhooks WHERE workspace_id = ?'
-  ).get(workspaceId) as Pick<GithubWebhookRow, 'encrypted_webhook_secret'> | undefined;
+export async function getWebhookSecret(workspaceId: string): Promise<string | null> {
+  const row = await queryOne<Pick<GithubWebhookRow, 'encrypted_webhook_secret'>>(
+    'SELECT encrypted_webhook_secret FROM workspace_github_webhooks WHERE workspace_id = $1',
+    [workspaceId]
+  );
 
   if (!row) return null;
   return decryptToken(row.encrypted_webhook_secret);

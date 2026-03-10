@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { db } from '../db';
+import { query, queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import type { AuthUser } from './auth';
 import { requireRole } from './auth';
@@ -56,12 +56,13 @@ function generateInviteToken(): string {
   return crypto.randomBytes(32).toString('base64url');
 }
 
-function emitWalEvent(eventType: string, payload: Record<string, unknown>): void {
-  const result = db.prepare(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, '', ?)"
-  ).run(eventType, JSON.stringify(payload));
+async function emitWalEvent(eventType: string, payload: Record<string, unknown>): Promise<void> {
+  const result = await queryOne<{ id: number }>(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ($1, '', $2) RETURNING id",
+    [eventType, JSON.stringify(payload)]
+  );
   const walEvent: WalEvent = {
-    id: result.lastInsertRowid as number,
+    id: result?.id ?? 0,
     ts: new Date().toISOString(),
     event_type: eventType,
     workspace_id: null,
@@ -128,23 +129,23 @@ function emitWalEvent(eventType: string, payload: Record<string, unknown>): void
  *       409: { description: "Slug already taken" }
  *       500: { description: "Internal server error" }
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
-    const rows = db.prepare(`
-      SELECT t.id, t.name, t.slug, t.owner_id AS ownerId, t.created_at AS createdAt, tm.role
-      FROM teams t
-      JOIN team_members tm ON t.id = tm.team_id
-      WHERE tm.user_id = ?
-      ORDER BY t.name ASC
-    `).all(user.id) as Array<{
+    const rows = await query<{
       id: string;
       name: string;
       slug: string;
       ownerId: string;
       createdAt: string;
       role: string;
-    }>;
+    }>(`
+      SELECT t.id, t.name, t.slug, t.owner_id AS "ownerId", t.created_at AS "createdAt", tm.role
+      FROM teams t
+      JOIN team_members tm ON t.id = tm.team_id
+      WHERE tm.user_id = $1
+      ORDER BY t.name ASC
+    `, [user.id]);
 
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(rows, pagination, { cursorKey: (t) => t.id }));
@@ -155,7 +156,7 @@ router.get('/', (req: Request, res: Response) => {
 });
 
 // POST /api/teams — Create a new team
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
     const { name, slug } = req.body;
@@ -176,7 +177,7 @@ router.post('/', (req: Request, res: Response) => {
     }
 
     // Check slug uniqueness
-    const existing = db.prepare('SELECT id FROM teams WHERE slug = ?').get(trimmedSlug) as TeamRow | undefined;
+    const existing = await queryOne<TeamRow>('SELECT id FROM teams WHERE slug = $1', [trimmedSlug]);
     if (existing) {
       res.status(409).json({ error: 'Team slug already taken' });
       return;
@@ -186,16 +187,18 @@ router.post('/', (req: Request, res: Response) => {
     const trimmedName = name.trim();
 
     // Create team
-    db.prepare(
-      'INSERT INTO teams (id, name, slug, owner_id) VALUES (?, ?, ?, ?)'
-    ).run(teamId, trimmedName, trimmedSlug, user.id);
+    await execute(
+      'INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)',
+      [teamId, trimmedName, trimmedSlug, user.id]
+    );
 
     // Add owner as admin member
-    db.prepare(
-      "INSERT INTO team_members (team_id, user_id, role, accepted_at, last_active_at) VALUES (?, ?, 'admin', datetime('now'), datetime('now'))"
-    ).run(teamId, user.id);
+    await execute(
+      "INSERT INTO team_members (team_id, user_id, role, accepted_at, last_active_at) VALUES ($1, $2, 'admin', NOW(), NOW())",
+      [teamId, user.id]
+    );
 
-    emitWalEvent('team_created', { teamId, name: trimmedName, slug: trimmedSlug, ownerId: user.id });
+    await emitWalEvent('team_created', { teamId, name: trimmedName, slug: trimmedSlug, ownerId: user.id });
 
     res.status(201).json({
       id: teamId,
@@ -254,7 +257,7 @@ router.post('/', (req: Request, res: Response) => {
  *       429: { description: "Free tier pending invite limit reached" }
  *       500: { description: "Internal server error" }
  */
-router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) => {
+router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
     const teamId = req.params.id;
@@ -269,34 +272,37 @@ router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) 
     const inviteRole = role && ['admin', 'editor', 'viewer'].includes(role) ? role : 'editor';
 
     // Verify team exists
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
       res.status(404).json({ error: 'Team not found' });
       return;
     }
 
     // Check if email is already a member
-    const existingMember = db.prepare(
-      'SELECT tm.* FROM team_members tm JOIN users u ON tm.user_id = u.id WHERE tm.team_id = ? AND u.email = ?'
-    ).get(teamId, trimmedEmail) as TeamMemberRow | undefined;
+    const existingMember = await queryOne<TeamMemberRow>(
+      'SELECT tm.* FROM team_members tm JOIN users u ON tm.user_id = u.id WHERE tm.team_id = $1 AND u.email = $2',
+      [teamId, trimmedEmail]
+    );
     if (existingMember) {
       res.status(409).json({ error: 'User is already a team member' });
       return;
     }
 
     // Check pending invite limit (free tier: max 3)
-    const pendingCount = db.prepare(
-      'SELECT COUNT(*) as cnt FROM team_invites WHERE team_id = ? AND accepted_at IS NULL AND expires_at > datetime(\'now\')'
-    ).get(teamId) as { cnt: number };
-    if (pendingCount.cnt >= MAX_PENDING_INVITES_FREE) {
+    const pendingCount = await queryOne<{ cnt: number }>(
+      'SELECT COUNT(*) AS cnt FROM team_invites WHERE team_id = $1 AND accepted_at IS NULL AND expires_at > NOW()',
+      [teamId]
+    );
+    if (pendingCount && Number(pendingCount.cnt) >= MAX_PENDING_INVITES_FREE) {
       res.status(429).json({ error: `Free tier limit: maximum ${MAX_PENDING_INVITES_FREE} pending invites at a time` });
       return;
     }
 
     // Check for existing pending invite to same email
-    const existingInvite = db.prepare(
-      "SELECT id FROM team_invites WHERE team_id = ? AND email = ? AND accepted_at IS NULL AND expires_at > datetime('now')"
-    ).get(teamId, trimmedEmail) as TeamInviteRow | undefined;
+    const existingInvite = await queryOne<TeamInviteRow>(
+      'SELECT id FROM team_invites WHERE team_id = $1 AND email = $2 AND accepted_at IS NULL AND expires_at > NOW()',
+      [teamId, trimmedEmail]
+    );
     if (existingInvite) {
       res.status(409).json({ error: 'A pending invite already exists for this email' });
       return;
@@ -308,11 +314,12 @@ router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) 
     const expiresAt = new Date(Date.now() + INVITE_EXPIRY_DAYS * 24 * 60 * 60 * 1000).toISOString();
     const inviteId = crypto.randomUUID();
 
-    db.prepare(
-      'INSERT INTO team_invites (id, team_id, email, token_hash, invited_by, role, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(inviteId, teamId, trimmedEmail, tokenHash, user.id, inviteRole, expiresAt);
+    await execute(
+      'INSERT INTO team_invites (id, team_id, email, token_hash, invited_by, role, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [inviteId, teamId, trimmedEmail, tokenHash, user.id, inviteRole, expiresAt]
+    );
 
-    emitWalEvent('team_invite_sent', { teamId, inviteId, email: trimmedEmail, role: inviteRole, invitedBy: user.id });
+    await emitWalEvent('team_invite_sent', { teamId, inviteId, email: trimmedEmail, role: inviteRole, invitedBy: user.id });
 
     res.status(201).json({
       inviteId,
@@ -356,30 +363,17 @@ router.post('/:id/invites', requireRole('admin'), (req: Request, res: Response) 
  *       404: { description: "Team not found" }
  *       500: { description: "Internal server error" }
  */
-router.get('/:id/members', requireRole('viewer'), (req: Request, res: Response) => {
+router.get('/:id/members', requireRole('viewer'), async (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
 
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
       res.status(404).json({ error: 'Team not found' });
       return;
     }
 
-    const members = db.prepare(`
-      SELECT
-        tm.user_id AS userId,
-        u.email,
-        u.display_name AS displayName,
-        tm.role,
-        tm.invited_at AS joinedAt,
-        tm.accepted_at AS acceptedAt,
-        tm.last_active_at AS lastActiveAt
-      FROM team_members tm
-      JOIN users u ON tm.user_id = u.id
-      WHERE tm.team_id = ?
-      ORDER BY tm.invited_at ASC
-    `).all(teamId) as Array<{
+    const members = await query<{
       userId: string;
       email: string;
       displayName: string;
@@ -387,7 +381,20 @@ router.get('/:id/members', requireRole('viewer'), (req: Request, res: Response) 
       joinedAt: string;
       acceptedAt: string | null;
       lastActiveAt: string | null;
-    }>;
+    }>(`
+      SELECT
+        tm.user_id AS "userId",
+        u.email,
+        u.display_name AS "displayName",
+        tm.role,
+        tm.invited_at AS "joinedAt",
+        tm.accepted_at AS "acceptedAt",
+        tm.last_active_at AS "lastActiveAt"
+      FROM team_members tm
+      JOIN users u ON tm.user_id = u.id
+      WHERE tm.team_id = $1
+      ORDER BY tm.invited_at ASC
+    `, [teamId]);
 
     res.json({ teamId, teamName: team.name, members });
   } catch (error: unknown) {
@@ -439,7 +446,7 @@ router.get('/:id/members', requireRole('viewer'), (req: Request, res: Response) 
  *       404: { description: "Member not found" }
  *       500: { description: "Internal server error" }
  */
-router.patch('/:id/members/:userId', requireRole('admin'), (req: Request, res: Response) => {
+router.patch('/:id/members/:userId', requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
     const targetUserId = req.params.userId;
@@ -450,19 +457,21 @@ router.patch('/:id/members/:userId', requireRole('admin'), (req: Request, res: R
       return;
     }
 
-    const membership = db.prepare(
-      'SELECT * FROM team_members WHERE team_id = ? AND user_id = ?'
-    ).get(teamId, targetUserId) as TeamMemberRow | undefined;
+    const membership = await queryOne<TeamMemberRow>(
+      'SELECT * FROM team_members WHERE team_id = $1 AND user_id = $2',
+      [teamId, targetUserId]
+    );
     if (!membership) {
       res.status(404).json({ error: 'Member not found' });
       return;
     }
 
-    db.prepare(
-      'UPDATE team_members SET role = ? WHERE team_id = ? AND user_id = ?'
-    ).run(role, teamId, targetUserId);
+    await execute(
+      'UPDATE team_members SET role = $1 WHERE team_id = $2 AND user_id = $3',
+      [role, teamId, targetUserId]
+    );
 
-    emitWalEvent('team_member_role_changed', { teamId, userId: targetUserId, oldRole: membership.role, newRole: role });
+    await emitWalEvent('team_member_role_changed', { teamId, userId: targetUserId, oldRole: membership.role, newRole: role });
 
     res.json({ teamId, userId: targetUserId, role });
   } catch (error: unknown) {
@@ -503,29 +512,30 @@ router.patch('/:id/members/:userId', requireRole('admin'), (req: Request, res: R
  *       404: { description: "Member not found" }
  *       500: { description: "Internal server error" }
  */
-router.delete('/:id/members/:userId', requireRole('admin'), (req: Request, res: Response) => {
+router.delete('/:id/members/:userId', requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
     const targetUserId = req.params.userId;
     const user = getAuthUser(req);
 
     // Prevent removing yourself if you're the owner
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (team && team.owner_id === targetUserId) {
       res.status(400).json({ error: 'Cannot remove the team owner' });
       return;
     }
 
-    const result = db.prepare(
-      'DELETE FROM team_members WHERE team_id = ? AND user_id = ?'
-    ).run(teamId, targetUserId);
+    const result = await execute(
+      'DELETE FROM team_members WHERE team_id = $1 AND user_id = $2',
+      [teamId, targetUserId]
+    );
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       res.status(404).json({ error: 'Member not found' });
       return;
     }
 
-    emitWalEvent('team_member_removed', { teamId, userId: targetUserId, removedBy: user.id });
+    await emitWalEvent('team_member_removed', { teamId, userId: targetUserId, removedBy: user.id });
 
     res.json({ ok: true });
   } catch (error: unknown) {
@@ -572,7 +582,7 @@ router.delete('/:id/members/:userId', requireRole('admin'), (req: Request, res: 
  *       404: { description: "Team not found" }
  *       500: { description: "Internal server error" }
  */
-router.patch('/:id/settings', requireRole('admin'), (req: Request, res: Response) => {
+router.patch('/:id/settings', requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
     const { name } = req.body;
@@ -582,16 +592,16 @@ router.patch('/:id/settings', requireRole('admin'), (req: Request, res: Response
       return;
     }
 
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
       res.status(404).json({ error: 'Team not found' });
       return;
     }
 
     const trimmedName = name.trim();
-    db.prepare('UPDATE teams SET name = ? WHERE id = ?').run(trimmedName, teamId);
+    await execute('UPDATE teams SET name = $1 WHERE id = $2', [trimmedName, teamId]);
 
-    emitWalEvent('team_settings_updated', { teamId, name: trimmedName });
+    await emitWalEvent('team_settings_updated', { teamId, name: trimmedName });
 
     res.json({ id: teamId, name: trimmedName, slug: team.slug });
   } catch (error: unknown) {
@@ -629,23 +639,25 @@ router.patch('/:id/settings', requireRole('admin'), (req: Request, res: Response
  *       404: { description: "Team not found" }
  *       500: { description: "Internal server error" }
  */
-router.get('/:id/direction', requireRole('viewer'), (req: Request, res: Response) => {
+router.get('/:id/direction', requireRole('viewer'), async (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
 
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
       res.status(404).json({ error: 'Team not found' });
       return;
     }
 
-    const l1Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = ? AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-    ).get(teamId) as { content_yaml: string } | undefined;
+    const l1Row = await queryOne<{ content_yaml: string }>(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`,
+      [teamId]
+    );
 
-    const l2Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = ? AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-    ).get(teamId) as { content_yaml: string } | undefined;
+    const l2Row = await queryOne<{ content_yaml: string }>(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`,
+      [teamId]
+    );
 
     res.json({
       teamId,
@@ -697,7 +709,7 @@ router.get('/:id/direction', requireRole('viewer'), (req: Request, res: Response
  *       422: { description: "Invalid YAML syntax or schema validation failure" }
  *       500: { description: "Internal server error" }
  */
-router.put('/:id/direction', requireRole('admin'), (req: Request, res: Response) => {
+router.put('/:id/direction', requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
     const { layer, contentYaml } = req.body;
@@ -712,7 +724,7 @@ router.put('/:id/direction', requireRole('admin'), (req: Request, res: Response)
       return;
     }
 
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
       res.status(404).json({ error: 'Team not found' });
       return;
@@ -732,14 +744,14 @@ router.put('/:id/direction', requireRole('admin'), (req: Request, res: Response)
     }
 
     // Upsert team-scoped layer
-    db.prepare(`
+    await execute(`
       INSERT INTO direction_layers (layer, workspace_id, domain, team_id, content_yaml, updated_at)
-      VALUES (?, NULL, NULL, ?, ?, datetime('now'))
+      VALUES ($1, NULL, NULL, $2, $3, NOW())
       ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
-      DO UPDATE SET content_yaml = excluded.content_yaml, updated_at = datetime('now')
-    `).run(layerNum, teamId, contentYaml);
+      DO UPDATE SET content_yaml = EXCLUDED.content_yaml, updated_at = NOW()
+    `, [layerNum, teamId, contentYaml]);
 
-    emitWalEvent('team_direction_update', { teamId, layer: layerNum });
+    await emitWalEvent('team_direction_update', { teamId, layer: layerNum });
 
     res.json({ ok: true });
   } catch (error: unknown) {
@@ -782,42 +794,45 @@ router.put('/:id/direction', requireRole('admin'), (req: Request, res: Response)
  *       404: { description: "Team not found" }
  *       500: { description: "Internal server error" }
  */
-router.post('/:id/direction/preview', requireRole('viewer'), (req: Request, res: Response) => {
+router.post('/:id/direction/preview', requireRole('viewer'), async (req: Request, res: Response) => {
   try {
     const teamId = req.params.id;
     const { workspaceId, specBrief } = req.body;
 
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+    const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
       res.status(404).json({ error: 'Team not found' });
       return;
     }
 
     // Fetch global L1
-    const globalL1 = db.prepare(
+    const globalL1 = await queryOne<{ content_yaml: string }>(
       `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = '' AND COALESCE(team_id,'') = ''`
-    ).get() as { content_yaml: string } | undefined;
+    );
 
     // Fetch global L2
-    const globalL2 = db.prepare(
+    const globalL2 = await queryOne<{ content_yaml: string }>(
       `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = '' AND COALESCE(team_id,'') = ''`
-    ).get() as { content_yaml: string } | undefined;
+    );
 
     // Fetch team L1/L2
-    const teamL1 = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
-    ).get(teamId) as { content_yaml: string } | undefined;
+    const teamL1 = await queryOne<{ content_yaml: string }>(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`,
+      [teamId]
+    );
 
-    const teamL2 = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
-    ).get(teamId) as { content_yaml: string } | undefined;
+    const teamL2 = await queryOne<{ content_yaml: string }>(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`,
+      [teamId]
+    );
 
     // Fetch workspace L3 if provided
     let l3Content: string | undefined;
     if (workspaceId) {
-      const l3Row = db.prepare(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain,'') = '' AND COALESCE(team_id,'') = ''`
-      ).get(String(workspaceId)) as { content_yaml: string } | undefined;
+      const l3Row = await queryOne<{ content_yaml: string }>(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain,'') = '' AND COALESCE(team_id,'') = ''`,
+        [String(workspaceId)]
+      );
       l3Content = l3Row?.content_yaml;
     }
 

@@ -29,9 +29,9 @@ You are the **Backend Specialist** — the authority on Express.js API design, m
 
 1. **JSDoc `@swagger` annotations on every public endpoint** — feeds `/api/docs` OpenAPI spec. Annotate request body, query params, and response shape.
 
-2. **`better-sqlite3` is synchronous** — never `await` a DB call. `db.prepare(sql).get()` returns `T | undefined`, `.all()` returns `T[]`, `.run()` returns `RunResult`. This is the most common gotcha for developers used to async ORMs.
+2. **PostgreSQL via `pg` Pool is async** — always `await` DB calls. `query<T>(sql, params)` returns `T[]`, `queryOne<T>(sql, params)` returns `T | undefined`, `execute(sql, params)` returns `{ rowCount }`. Missing `await` returns a Promise instead of data.
 
-3. **Parameterized queries only** — never concatenate user input into SQL strings. `db.prepare('SELECT * FROM users WHERE id = ?').get(id)` — not string interpolation.
+3. **Parameterized queries only** — never concatenate user input into SQL strings. `await queryOne('SELECT * FROM users WHERE id = $1', [id])` — use `$1, $2, ...` numbered placeholders, not `?`.
 
 4. **WAL event emission** — every state change that the UI needs to reflect must emit a WAL event via `POST /api/wal` or direct DB insert. WAL events drive the SSE pipeline, audit log, and notification system.
 
@@ -44,7 +44,7 @@ You are the **Backend Specialist** — the authority on Express.js API design, m
 ## What You Flag
 
 - SQL queries built with string concatenation or template literals containing user input
-- `await` on `better-sqlite3` calls (it's synchronous, `await` hides bugs)
+- Missing `await` on `pg` Pool calls (all DB calls are async)
 - Route handlers that don't validate request input before using it
 - Missing `@swagger` annotations on public endpoints
 - Error responses that leak internal details (stack traces, file paths, SQL)

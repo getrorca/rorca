@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import Stripe from 'stripe';
 import { z } from 'zod';
-import { db } from '../db';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { logger } from '../lib/logger';
 
@@ -109,27 +109,29 @@ function hashToken(rawToken: string): string {
   return crypto.createHash('sha256').update(rawToken).digest('hex');
 }
 
-function storeRefreshToken(userId: string, rawToken: string): void {
+async function storeRefreshToken(userId: string, rawToken: string): Promise<void> {
   const tokenHash = hashToken(rawToken);
   const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRES_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const id = crypto.randomUUID();
-  db.prepare(
-    'INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)'
-  ).run(id, userId, tokenHash, expiresAt);
+  await execute(
+    'INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)',
+    [id, userId, tokenHash, expiresAt]
+  );
 }
 
 /**
  * Generate an email verification token, store its hash, and log the verification link.
  * Returns the raw token (for inclusion in dev response).
  */
-function generateAndStoreVerificationToken(userId: string, email: string): string {
+async function generateAndStoreVerificationToken(userId: string, email: string): Promise<string> {
   const rawToken = crypto.randomBytes(48).toString('hex');
   const tokenHash = hashToken(rawToken);
   const tokenId = crypto.randomUUID();
 
-  db.prepare(
-    `INSERT INTO email_verification_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, datetime('now', '+${VERIFICATION_TOKEN_EXPIRES_HOURS} hours'))`
-  ).run(tokenId, userId, tokenHash);
+  await execute(
+    `INSERT INTO email_verification_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, NOW() + INTERVAL '${VERIFICATION_TOKEN_EXPIRES_HOURS} hours')`,
+    [tokenId, userId, tokenHash]
+  );
 
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
   const verifyLink = `http://localhost:3030/api/auth/verify-email?token=${rawToken}`;
@@ -184,13 +186,13 @@ const RegisterSchema = z.object({
   displayName: z.string().min(1, 'Display name is required'),
 });
 
-router.post('/register', validateBody(RegisterSchema), (req: Request, res: Response) => {
+router.post('/register', validateBody(RegisterSchema), async (req: Request, res: Response) => {
   const { email, password, displayName } = req.body;
 
   const trimmedEmail = email.trim().toLowerCase();
 
   // Check for existing user
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(trimmedEmail) as UserRow | undefined;
+  const existing = await queryOne<UserRow>('SELECT id FROM users WHERE email = $1', [trimmedEmail]);
   if (existing) {
     res.status(409).json({ error: 'Email already registered' });
     return;
@@ -200,22 +202,24 @@ router.post('/register', validateBody(RegisterSchema), (req: Request, res: Respo
   const passwordHash = bcrypt.hashSync(password, BCRYPT_COST);
   const userId = crypto.randomUUID();
 
-  db.prepare(
-    'INSERT INTO users (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)'
-  ).run(userId, trimmedEmail, displayName.trim(), passwordHash);
+  await execute(
+    'INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)',
+    [userId, trimmedEmail, displayName.trim(), passwordHash]
+  );
 
   // Generate email verification token
-  const verificationToken = generateAndStoreVerificationToken(userId, trimmedEmail);
+  const verificationToken = await generateAndStoreVerificationToken(userId, trimmedEmail);
 
   // Generate auth tokens
   const accessToken = generateAccessToken(userId, trimmedEmail);
   const refreshToken = generateRefreshToken();
-  storeRefreshToken(userId, refreshToken);
+  await storeRefreshToken(userId, refreshToken);
 
   // Emit WAL event
-  db.prepare(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('user_registered', '', ?)"
-  ).run(JSON.stringify({ userId, email: trimmedEmail }));
+  await execute(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('user_registered', '', $1)",
+    [JSON.stringify({ userId, email: trimmedEmail })]
+  );
 
   res.status(201).json({
     user: {
@@ -273,12 +277,12 @@ const LoginSchema = z.object({
   password: z.string().min(1, 'Password is required'),
 });
 
-router.post('/login', validateBody(LoginSchema), (req: Request, res: Response) => {
+router.post('/login', validateBody(LoginSchema), async (req: Request, res: Response) => {
   const { email, password } = req.body;
 
   const trimmedEmail = email.trim().toLowerCase();
 
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(trimmedEmail) as UserRow | undefined;
+  const user = await queryOne<UserRow>('SELECT * FROM users WHERE email = $1', [trimmedEmail]);
   if (!user) {
     res.status(401).json({ error: 'Invalid email or password' });
     return;
@@ -292,11 +296,12 @@ router.post('/login', validateBody(LoginSchema), (req: Request, res: Response) =
 
   const accessToken = generateAccessToken(user.id, user.email);
   const refreshToken = generateRefreshToken();
-  storeRefreshToken(user.id, refreshToken);
+  await storeRefreshToken(user.id, refreshToken);
 
-  db.prepare(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('user_login', '', ?)"
-  ).run(JSON.stringify({ userId: user.id, email: user.email }));
+  await execute(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('user_login', '', $1)",
+    [JSON.stringify({ userId: user.id, email: user.email })]
+  );
 
   res.json({
     user: {
@@ -340,7 +345,7 @@ router.post('/login', validateBody(LoginSchema), (req: Request, res: Response) =
  *                 refreshToken: { type: string }
  *       401: { description: "Invalid or expired refresh token" }
  */
-router.post('/refresh', (req: Request, res: Response) => {
+router.post('/refresh', async (req: Request, res: Response) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken || typeof refreshToken !== 'string') {
@@ -350,9 +355,10 @@ router.post('/refresh', (req: Request, res: Response) => {
 
   const tokenHash = hashToken(refreshToken);
 
-  const storedToken = db.prepare(
-    'SELECT rt.*, u.email FROM refresh_tokens rt JOIN users u ON rt.user_id = u.id WHERE rt.token_hash = ?'
-  ).get(tokenHash) as (RefreshTokenRow & { email: string }) | undefined;
+  const storedToken = await queryOne<RefreshTokenRow & { email: string }>(
+    'SELECT rt.*, u.email FROM refresh_tokens rt JOIN users u ON rt.user_id = u.id WHERE rt.token_hash = $1',
+    [tokenHash]
+  );
 
   if (!storedToken) {
     res.status(401).json({ error: 'Invalid refresh token' });
@@ -370,14 +376,15 @@ router.post('/refresh', (req: Request, res: Response) => {
   }
 
   // Invalidate the old refresh token (rotation)
-  db.prepare(
-    "UPDATE refresh_tokens SET revoked_at = datetime('now') WHERE id = ?"
-  ).run(storedToken.id);
+  await execute(
+    'UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1',
+    [storedToken.id]
+  );
 
   // Issue new token pair
   const newAccessToken = generateAccessToken(storedToken.user_id, storedToken.email);
   const newRefreshToken = generateRefreshToken();
-  storeRefreshToken(storedToken.user_id, newRefreshToken);
+  await storeRefreshToken(storedToken.user_id, newRefreshToken);
 
   res.json({
     accessToken: newAccessToken,
@@ -407,7 +414,7 @@ router.post('/refresh', (req: Request, res: Response) => {
  *       200: { description: "Logged out successfully" }
  *       401: { description: "Invalid or already revoked token" }
  */
-router.post('/logout', (req: Request, res: Response) => {
+router.post('/logout', async (req: Request, res: Response) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken || typeof refreshToken !== 'string') {
@@ -417,11 +424,12 @@ router.post('/logout', (req: Request, res: Response) => {
 
   const tokenHash = hashToken(refreshToken);
 
-  const result = db.prepare(
-    "UPDATE refresh_tokens SET revoked_at = datetime('now') WHERE token_hash = ? AND revoked_at IS NULL"
-  ).run(tokenHash);
+  const result = await execute(
+    'UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 AND revoked_at IS NULL',
+    [tokenHash]
+  );
 
-  if (result.changes === 0) {
+  if (result.rowCount === 0) {
     res.status(401).json({ error: 'Invalid or already revoked refresh token' });
     return;
   }
@@ -454,20 +462,23 @@ router.post('/logout', (req: Request, res: Response) => {
  *                     githubConnected: { type: boolean }
  *       401: { description: "Not authenticated" }
  */
-router.get('/me', (req: Request, res: Response) => {
+router.get('/me', async (req: Request, res: Response) => {
   const authReq = req as Request & { user?: AuthUser };
   // When auth is bypassed globally, fall back to the first registered user
-  const userId = authReq.user?.id
-    ?? (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+  const fallbackUser = authReq.user?.id
+    ? undefined
+    : await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+  const userId = authReq.user?.id ?? fallbackUser?.id;
 
   if (!userId) {
     res.status(401).json({ error: 'No user configured' });
     return;
   }
 
-  const user = db.prepare(
-    'SELECT id, email, display_name, github_id, email_verified_at, plan FROM users WHERE id = ?'
-  ).get(userId) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> & { plan?: string } | undefined;
+  const user = await queryOne<Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> & { plan?: string }>(
+    'SELECT id, email, display_name, github_id, email_verified_at, plan FROM users WHERE id = $1',
+    [userId]
+  );
 
   if (!user) {
     res.status(401).json({ error: 'User not found' });
@@ -512,10 +523,12 @@ router.get('/me', (req: Request, res: Response) => {
  *       401: { description: "Not authenticated" }
  *       403: { description: "Current password incorrect" }
  */
-router.patch('/me', (req: Request, res: Response) => {
+router.patch('/me', async (req: Request, res: Response) => {
   const authReq = req as Request & { user?: AuthUser };
-  const userId = authReq.user?.id
-    ?? (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
+  const fallbackUser = authReq.user?.id
+    ? undefined
+    : await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+  const userId = authReq.user?.id ?? fallbackUser?.id;
 
   if (!userId) {
     res.status(401).json({ error: 'No user configured' });
@@ -526,6 +539,7 @@ router.patch('/me', (req: Request, res: Response) => {
 
   const updates: string[] = [];
   const params: (string | null)[] = [];
+  let paramIdx = 0;
 
   // Display name update
   if (displayName !== undefined) {
@@ -533,7 +547,8 @@ router.patch('/me', (req: Request, res: Response) => {
       res.status(400).json({ error: 'displayName must be a non-empty string' });
       return;
     }
-    updates.push('display_name = ?');
+    paramIdx++;
+    updates.push(`display_name = $${paramIdx}`);
     params.push(displayName.trim());
   }
 
@@ -548,7 +563,7 @@ router.patch('/me', (req: Request, res: Response) => {
       return;
     }
 
-    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId) as Pick<UserRow, 'password_hash'> | undefined;
+    const row = await queryOne<Pick<UserRow, 'password_hash'>>('SELECT password_hash FROM users WHERE id = $1', [userId]);
     if (!row) {
       res.status(404).json({ error: 'User not found' });
       return;
@@ -559,7 +574,8 @@ router.patch('/me', (req: Request, res: Response) => {
       return;
     }
 
-    updates.push('password_hash = ?');
+    paramIdx++;
+    updates.push(`password_hash = $${paramIdx}`);
     params.push(bcrypt.hashSync(newPassword, BCRYPT_COST));
   }
 
@@ -568,15 +584,17 @@ router.patch('/me', (req: Request, res: Response) => {
     return;
   }
 
-  updates.push("updated_at = datetime('now')");
+  updates.push('updated_at = NOW()');
+  paramIdx++;
   params.push(userId);
 
-  db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  await execute(`UPDATE users SET ${updates.join(', ')} WHERE id = $${paramIdx}`, params);
 
   // Return updated user
-  const user = db.prepare(
-    'SELECT id, email, display_name, github_id, email_verified_at, plan FROM users WHERE id = ?'
-  ).get(userId) as Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> & { plan?: string } | undefined;
+  const user = await queryOne<Pick<UserRow, 'id' | 'email' | 'display_name' | 'github_id' | 'email_verified_at'> & { plan?: string }>(
+    'SELECT id, email, display_name, github_id, email_verified_at, plan FROM users WHERE id = $1',
+    [userId]
+  );
 
   res.json({
     ok: true,
@@ -611,7 +629,7 @@ router.patch('/me', (req: Request, res: Response) => {
  *       302: { description: "Redirects to app on success" }
  *       400: { description: "Invalid or expired token" }
  */
-router.get('/verify-email', (req: Request, res: Response) => {
+router.get('/verify-email', async (req: Request, res: Response) => {
   const { token } = req.query;
 
   if (!token || typeof token !== 'string') {
@@ -620,9 +638,10 @@ router.get('/verify-email', (req: Request, res: Response) => {
   }
 
   const tokenHash = hashToken(token);
-  const verificationToken = db.prepare(
-    "SELECT *, (expires_at <= datetime('now')) as is_expired FROM email_verification_tokens WHERE token_hash = ?"
-  ).get(tokenHash) as (EmailVerificationTokenRow & { is_expired: number }) | undefined;
+  const verificationToken = await queryOne<EmailVerificationTokenRow & { is_expired: boolean }>(
+    'SELECT *, (expires_at <= NOW()) as is_expired FROM email_verification_tokens WHERE token_hash = $1',
+    [tokenHash]
+  );
 
   if (!verificationToken) {
     res.status(400).json({ error: 'Invalid or expired verification token' });
@@ -642,20 +661,23 @@ router.get('/verify-email', (req: Request, res: Response) => {
   }
 
   // Mark email as verified
-  db.prepare(
-    "UPDATE users SET email_verified_at = datetime('now'), updated_at = datetime('now') WHERE id = ?"
-  ).run(verificationToken.user_id);
+  await execute(
+    'UPDATE users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = $1',
+    [verificationToken.user_id]
+  );
 
   // Mark token as used
-  db.prepare(
-    "UPDATE email_verification_tokens SET used_at = datetime('now') WHERE id = ?"
-  ).run(verificationToken.id);
+  await execute(
+    'UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1',
+    [verificationToken.id]
+  );
 
   // Emit WAL event
-  const user = db.prepare('SELECT email FROM users WHERE id = ?').get(verificationToken.user_id) as Pick<UserRow, 'email'> | undefined;
-  db.prepare(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('email_verified', '', ?)"
-  ).run(JSON.stringify({ userId: verificationToken.user_id, email: user?.email }));
+  const user = await queryOne<Pick<UserRow, 'email'>>('SELECT email FROM users WHERE id = $1', [verificationToken.user_id]);
+  await execute(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('email_verified', '', $1)",
+    [JSON.stringify({ userId: verificationToken.user_id, email: user?.email })]
+  );
 
   // Redirect to app with success indicator
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
@@ -683,7 +705,7 @@ router.get('/verify-email', (req: Request, res: Response) => {
  *       200: { description: "Verification email sent (if account exists)" }
  *       429: { description: "Too many verification requests" }
  */
-router.post('/resend-verification', (req: Request, res: Response) => {
+router.post('/resend-verification', async (req: Request, res: Response) => {
   const { email } = req.body;
 
   if (!email || typeof email !== 'string') {
@@ -694,7 +716,7 @@ router.post('/resend-verification', (req: Request, res: Response) => {
   const trimmedEmail = email.trim().toLowerCase();
   const successMessage = 'If an account with that email exists and is unverified, a verification link has been sent.';
 
-  const user = db.prepare('SELECT id, email, email_verified_at FROM users WHERE email = ?').get(trimmedEmail) as Pick<UserRow, 'id' | 'email' | 'email_verified_at'> | undefined;
+  const user = await queryOne<Pick<UserRow, 'id' | 'email' | 'email_verified_at'>>('SELECT id, email, email_verified_at FROM users WHERE email = $1', [trimmedEmail]);
 
   if (!user) {
     // Don't reveal whether email exists
@@ -709,16 +731,18 @@ router.post('/resend-verification', (req: Request, res: Response) => {
   }
 
   // Rate limit: max 3 verification requests per email per hour
-  const recentCount = (db.prepare(
-    "SELECT COUNT(*) as count FROM email_verification_tokens WHERE user_id = ? AND created_at > datetime('now', '-1 hour')"
-  ).get(user.id) as { count: number }).count;
+  const rateRow = await queryOne<{ count: string }>(
+    "SELECT COUNT(*) as count FROM email_verification_tokens WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+    [user.id]
+  );
+  const recentCount = parseInt(rateRow?.count || '0', 10);
 
   if (recentCount >= VERIFICATION_RATE_LIMIT_PER_HOUR) {
     res.status(429).json({ error: 'Too many verification requests. Please try again later.' });
     return;
   }
 
-  const rawToken = generateAndStoreVerificationToken(user.id, trimmedEmail);
+  const rawToken = await generateAndStoreVerificationToken(user.id, trimmedEmail);
 
   res.json({
     message: successMessage,
@@ -764,7 +788,7 @@ interface PasswordResetTokenRow {
  *       400: { description: "Validation error" }
  *       429: { description: "Too many reset requests" }
  */
-router.post('/forgot-password', (req: Request, res: Response) => {
+router.post('/forgot-password', async (req: Request, res: Response) => {
   const { email } = req.body;
 
   if (!email || typeof email !== 'string') {
@@ -781,7 +805,7 @@ router.post('/forgot-password', (req: Request, res: Response) => {
   // Always return success to prevent email enumeration
   const successMessage = 'If an account with that email exists, a password reset link has been sent.';
 
-  const user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(trimmedEmail) as Pick<UserRow, 'id' | 'email'> | undefined;
+  const user = await queryOne<Pick<UserRow, 'id' | 'email'>>('SELECT id, email FROM users WHERE email = $1', [trimmedEmail]);
   if (!user) {
     // Don't reveal that the email doesn't exist
     res.json({ message: successMessage });
@@ -789,9 +813,11 @@ router.post('/forgot-password', (req: Request, res: Response) => {
   }
 
   // Rate limit: max 3 reset requests per email per hour
-  const recentCount = (db.prepare(
-    "SELECT COUNT(*) as count FROM password_reset_tokens WHERE user_id = ? AND created_at > datetime('now', '-1 hour')"
-  ).get(user.id) as { count: number }).count;
+  const rateRow = await queryOne<{ count: string }>(
+    "SELECT COUNT(*) as count FROM password_reset_tokens WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+    [user.id]
+  );
+  const recentCount = parseInt(rateRow?.count || '0', 10);
 
   if (recentCount >= RESET_RATE_LIMIT_PER_HOUR) {
     res.status(429).json({ error: 'Too many reset requests. Please try again later.' });
@@ -803,14 +829,16 @@ router.post('/forgot-password', (req: Request, res: Response) => {
   const tokenHash = hashToken(rawToken);
   const tokenId = crypto.randomUUID();
 
-  db.prepare(
-    "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, datetime('now', '+1 hour'))"
-  ).run(tokenId, user.id, tokenHash);
+  await execute(
+    "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour')",
+    [tokenId, user.id, tokenHash]
+  );
 
   // Emit WAL event
-  db.prepare(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('password_reset_requested', '', ?)"
-  ).run(JSON.stringify({ userId: user.id, email: trimmedEmail }));
+  await execute(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('password_reset_requested', '', $1)",
+    [JSON.stringify({ userId: user.id, email: trimmedEmail })]
+  );
 
   // Build reset link (for local dev, log to console; in production this would send an email)
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
@@ -849,7 +877,7 @@ router.post('/forgot-password', (req: Request, res: Response) => {
  *       200: { description: "Password reset successfully" }
  *       400: { description: "Invalid or expired token, or validation error" }
  */
-router.post('/reset-password', (req: Request, res: Response) => {
+router.post('/reset-password', async (req: Request, res: Response) => {
   const { token, newPassword } = req.body;
 
   if (!token || typeof token !== 'string') {
@@ -868,9 +896,10 @@ router.post('/reset-password', (req: Request, res: Response) => {
   }
 
   const tokenHash = hashToken(token);
-  const resetToken = db.prepare(
-    'SELECT *, (expires_at <= datetime(\'now\')) as is_expired FROM password_reset_tokens WHERE token_hash = ?'
-  ).get(tokenHash) as (PasswordResetTokenRow & { is_expired: number }) | undefined;
+  const resetToken = await queryOne<PasswordResetTokenRow & { is_expired: boolean }>(
+    'SELECT *, (expires_at <= NOW()) as is_expired FROM password_reset_tokens WHERE token_hash = $1',
+    [tokenHash]
+  );
 
   if (!resetToken) {
     res.status(400).json({ error: 'Invalid or expired reset token' });
@@ -889,25 +918,29 @@ router.post('/reset-password', (req: Request, res: Response) => {
 
   // Update password
   const passwordHash = bcrypt.hashSync(newPassword, BCRYPT_COST);
-  db.prepare(
-    "UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(passwordHash, resetToken.user_id);
+  await execute(
+    'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+    [passwordHash, resetToken.user_id]
+  );
 
   // Mark token as used
-  db.prepare(
-    "UPDATE password_reset_tokens SET used_at = datetime('now') WHERE id = ?"
-  ).run(resetToken.id);
+  await execute(
+    'UPDATE password_reset_tokens SET used_at = NOW() WHERE id = $1',
+    [resetToken.id]
+  );
 
   // Invalidate all existing refresh tokens for this user (force re-login)
-  db.prepare(
-    "UPDATE refresh_tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL"
-  ).run(resetToken.user_id);
+  await execute(
+    'UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL',
+    [resetToken.user_id]
+  );
 
   // Emit WAL event
-  const user = db.prepare('SELECT email FROM users WHERE id = ?').get(resetToken.user_id) as Pick<UserRow, 'email'> | undefined;
-  db.prepare(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('password_reset', '', ?)"
-  ).run(JSON.stringify({ userId: resetToken.user_id, email: user?.email }));
+  const user = await queryOne<Pick<UserRow, 'email'>>('SELECT email FROM users WHERE id = $1', [resetToken.user_id]);
+  await execute(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('password_reset', '', $1)",
+    [JSON.stringify({ userId: resetToken.user_id, email: user?.email })]
+  );
 
   res.json({ message: 'Password has been reset successfully. Please sign in with your new password.' });
 });
@@ -950,9 +983,10 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   }
 
   // Verify the user still exists
-  const user = db.prepare(
-    'SELECT id, email, password_hash FROM users WHERE id = ?'
-  ).get(authReq.user.id) as Pick<UserRow, 'id' | 'email' | 'password_hash'> | undefined;
+  const user = await queryOne<Pick<UserRow, 'id' | 'email' | 'password_hash'>>(
+    'SELECT id, email, password_hash FROM users WHERE id = $1',
+    [authReq.user.id]
+  );
 
   if (!user) {
     res.status(404).json({ error: 'User not found' });
@@ -972,10 +1006,11 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   }
 
   // Cancel active Stripe subscription if present
-  const subscription = db.prepare(
+  const subscription = await queryOne<{ stripe_subscription_id: string; stripe_customer_id: string }>(
     `SELECT stripe_subscription_id, stripe_customer_id FROM subscriptions
-     WHERE user_id = ? AND status IN ('active', 'past_due') AND stripe_subscription_id IS NOT NULL`
-  ).get(user.id) as { stripe_subscription_id: string; stripe_customer_id: string } | undefined;
+     WHERE user_id = $1 AND status IN ('active', 'past_due') AND stripe_subscription_id IS NOT NULL`,
+    [user.id]
+  );
 
   if (subscription?.stripe_subscription_id) {
     const stripeKey = process.env.STRIPE_SECRET_KEY;
@@ -991,16 +1026,17 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   }
 
   // Emit WAL event BEFORE deletion (so we have an audit trail)
-  db.prepare(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('account_deleted', '', ?)"
-  ).run(JSON.stringify({ userId: user.id, email: user.email, deletedAt: new Date().toISOString() }));
+  await execute(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('account_deleted', '', $1)",
+    [JSON.stringify({ userId: user.id, email: user.email, deletedAt: new Date().toISOString() })]
+  );
 
   // Delete user — ON DELETE CASCADE handles:
   // refresh_tokens, subscriptions, user_settings, github_connections, api_key_vault,
   // teams (owned), team_members, team_invites (sent), password_reset_tokens,
   // email_verification_tokens, notifications, notification_preferences, story_comments,
   // spec_assignments (assignee)
-  db.prepare('DELETE FROM users WHERE id = ?').run(user.id);
+  await execute('DELETE FROM users WHERE id = $1', [user.id]);
 
   // Log final confirmation (Rorca is local-first; email would go here in production)
   logger.info(`[auth] Account deleted: ${user.email} (id: ${user.id}). All data permanently removed.`);
@@ -1151,9 +1187,10 @@ router.get('/github/callback', async (req: Request, res: Response) => {
 
     // 4. Find or create user, link GitHub connection
     // Check if a github_connection already exists for this GitHub user
-    const existingConnection = db.prepare(
-      'SELECT * FROM github_connections WHERE github_user_id = ?'
-    ).get(githubUserId) as GitHubConnectionRow | undefined;
+    const existingConnection = await queryOne<GitHubConnectionRow>(
+      'SELECT * FROM github_connections WHERE github_user_id = $1',
+      [githubUserId]
+    );
 
     let userId: string;
     let userEmail: string;
@@ -1162,17 +1199,18 @@ router.get('/github/callback', async (req: Request, res: Response) => {
     if (existingConnection) {
       // Returning GitHub user — update their token
       userId = existingConnection.user_id;
-      const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as UserRow;
-      userEmail = user.email;
-      displayName = user.display_name;
+      const user = await queryOne<UserRow>('SELECT * FROM users WHERE id = $1', [userId]);
+      userEmail = user!.email;
+      displayName = user!.display_name;
 
       // Update encrypted token and scopes
-      db.prepare(
-        "UPDATE github_connections SET encrypted_token = ?, scopes = ?, github_username = ?, updated_at = datetime('now') WHERE id = ?"
-      ).run(encryptToken(githubAccessToken), grantedScopes, githubUsername, existingConnection.id);
+      await execute(
+        'UPDATE github_connections SET encrypted_token = $1, scopes = $2, github_username = $3, updated_at = NOW() WHERE id = $4',
+        [encryptToken(githubAccessToken), grantedScopes, githubUsername, existingConnection.id]
+      );
     } else {
       // Check if a user with this email already exists (account linking)
-      const existingUser = db.prepare('SELECT * FROM users WHERE email = ?').get(primaryEmail) as UserRow | undefined;
+      const existingUser = await queryOne<UserRow>('SELECT * FROM users WHERE email = $1', [primaryEmail]);
 
       if (existingUser) {
         // Link GitHub to existing email-based account
@@ -1181,7 +1219,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
         displayName = existingUser.display_name;
 
         // Set github_id on user
-        db.prepare("UPDATE users SET github_id = ?, updated_at = datetime('now') WHERE id = ?").run(githubUserId, userId);
+        await execute('UPDATE users SET github_id = $1, updated_at = NOW() WHERE id = $2', [githubUserId, userId]);
       } else {
         // Create new user (no password — GitHub-only account)
         userId = crypto.randomUUID();
@@ -1190,32 +1228,36 @@ router.get('/github/callback', async (req: Request, res: Response) => {
 
         // Use a random unusable password hash for GitHub-only users
         const noPasswordHash = `github:${crypto.randomBytes(32).toString('hex')}`;
-        db.prepare(
-          "INSERT INTO users (id, email, display_name, password_hash, github_id, email_verified_at) VALUES (?, ?, ?, ?, ?, datetime('now'))"
-        ).run(userId, userEmail, displayName, noPasswordHash, githubUserId);
+        await execute(
+          'INSERT INTO users (id, email, display_name, password_hash, github_id, email_verified_at) VALUES ($1, $2, $3, $4, $5, NOW())',
+          [userId, userEmail, displayName, noPasswordHash, githubUserId]
+        );
       }
 
       // GitHub verifies emails — mark as verified if not already
-      db.prepare(
-        "UPDATE users SET email_verified_at = COALESCE(email_verified_at, datetime('now')), updated_at = datetime('now') WHERE id = ?"
-      ).run(userId);
+      await execute(
+        'UPDATE users SET email_verified_at = COALESCE(email_verified_at, NOW()), updated_at = NOW() WHERE id = $1',
+        [userId]
+      );
 
       // Create github_connection
       const connectionId = crypto.randomUUID();
-      db.prepare(
-        'INSERT INTO github_connections (id, user_id, github_user_id, encrypted_token, scopes, github_username) VALUES (?, ?, ?, ?, ?, ?)'
-      ).run(connectionId, userId, githubUserId, encryptToken(githubAccessToken), grantedScopes, githubUsername);
+      await execute(
+        'INSERT INTO github_connections (id, user_id, github_user_id, encrypted_token, scopes, github_username) VALUES ($1, $2, $3, $4, $5, $6)',
+        [connectionId, userId, githubUserId, encryptToken(githubAccessToken), grantedScopes, githubUsername]
+      );
     }
 
     // 5. Generate JWT + refresh token pair (same as email login)
     const accessToken = generateAccessToken(userId, userEmail);
     const refreshToken = generateRefreshToken();
-    storeRefreshToken(userId, refreshToken);
+    await storeRefreshToken(userId, refreshToken);
 
     // Emit WAL event
-    db.prepare(
-      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_login', '', ?)"
-    ).run(JSON.stringify({ userId, email: userEmail, githubUserId, githubUsername }));
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_login', '', $1)",
+      [JSON.stringify({ userId, email: userEmail, githubUserId, githubUsername })]
+    );
 
     // Redirect to frontend with tokens in URL fragment (fragments aren't sent to servers)
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
@@ -1235,7 +1277,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
 /** Internal service token for scheduler→trigger calls (not exposed externally) */
 export const INTERNAL_SERVICE_TOKEN = `rorca-internal-${process.pid}`;
 
-export function authRequired(req: Request, res: Response, next: NextFunction): void {
+export async function authRequired(req: Request, res: Response, next: NextFunction): Promise<void> {
   // Allow internal scheduler calls (same-process only, token includes PID)
   if (req.headers['x-rorca-internal'] === INTERNAL_SERVICE_TOKEN) {
     (req as Request & { user: AuthUser }).user = { id: 'system', email: 'scheduler@rorca.internal', role: 'admin' };
@@ -1263,9 +1305,10 @@ export function authRequired(req: Request, res: Response, next: NextFunction): v
     const decoded = jwt.verify(token, JWT_SECRET) as { sub: string; email: string };
 
     // Look up user to get role
-    const user = db.prepare('SELECT id, email, role FROM users WHERE id = ?').get(decoded.sub) as
-      | Pick<UserRow, 'id' | 'email' | 'role'>
-      | undefined;
+    const user = await queryOne<Pick<UserRow, 'id' | 'email' | 'role'>>(
+      'SELECT id, email, role FROM users WHERE id = $1',
+      [decoded.sub]
+    );
 
     if (!user) {
       res.status(401).json({ error: 'Invalid token' });
@@ -1308,7 +1351,7 @@ const ROLE_HIERARCHY: Record<TeamRole, number> = {
  * Must be used AFTER authRequired (user must be authenticated).
  */
 export function requireRole(minRole: TeamRole) {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = (req as Request & { user: AuthUser }).user;
     if (!user) {
       res.status(401).json({ error: 'Authentication required' });
@@ -1332,9 +1375,10 @@ export function requireRole(minRole: TeamRole) {
       return;
     }
 
-    const membership = db
-      .prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?')
-      .get(teamId, user.id) as { role: string } | undefined;
+    const membership = await queryOne<{ role: string }>(
+      'SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2',
+      [teamId, user.id]
+    );
 
     if (!membership) {
       res.status(403).json({ error: 'You are not a member of this team' });

@@ -54,11 +54,12 @@ Task(subagent_type="Explore", prompt="
 ## 3. Implementation
 
 ### Backend changes
-- `better-sqlite3` is **synchronous** — no async/await for DB calls
-- `db.prepare(sql).get()` → T | undefined; `.all()` → T[]; `.run()` → RunResult
-- Always enable WAL + FK on connection (already done in `db/index.ts` — don't duplicate)
+- PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
+- `query<T>(sql, params)` → `T[]`, `queryOne<T>(sql, params)` → `T | undefined`, `execute(sql, params)` → `{ rowCount }`
+- Use `$1, $2, ...` numbered placeholders (NOT `?`)
+- FK constraints always on, connection pooling (max 20, 30s idle timeout)
 - Emit `wal_events` for every state change — this drives the SSE pipeline and audit log
-- **New tables**: numbered SQL migration files in `backend/src/db/migrations/` (next available: 039+). **Column additions**: SQLite lacks `ADD COLUMN IF NOT EXISTS` — use `pragma table_info` check in `backend/src/db/index.ts` instead of a migration file.
+- **New tables**: numbered SQL migration files in `backend/src/db/pg-migrations/`, tracked via `schema_migrations` table. Use `IF NOT EXISTS` guards freely.
 - `chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }` — always use `.text`
 
 ### Frontend changes
