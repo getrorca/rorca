@@ -102,10 +102,91 @@ class VoyageEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+// ─── Local TF-IDF Provider (no API key required) ────────────────────────────
+
+/**
+ * Generates a sparse TF-IDF-style embedding using term frequency hashing.
+ * NOT as good as OpenAI/Voyage embeddings but enables vector search without
+ * an API key — free local fallback for self-hosted users.
+ *
+ * Approach: hash each token into one of 1536 buckets, accumulate TF weights,
+ * then L2-normalize the resulting vector.
+ */
+export function localEmbedding(text: string): number[] {
+  const prepared = prepareText('local', text);
+  return localEmbeddingFromPrepared(prepared);
+}
+
+function localEmbeddingFromPrepared(prepared: string): number[] {
+  const DIMS = 1536;
+  const vec = new Float64Array(DIMS);
+
+  // Tokenize: lowercase, split on non-alphanumeric, filter short tokens
+  const tokens = prepared
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(t => t.length >= 2);
+
+  if (tokens.length === 0) return Array.from(vec);
+
+  // Term frequency map
+  const tf = new Map<string, number>();
+  for (const token of tokens) {
+    tf.set(token, (tf.get(token) || 0) + 1);
+  }
+
+  // Hash each term into the vector space with TF weighting
+  for (const [term, count] of tf) {
+    // Use two hash positions per term for better distribution (feature hashing)
+    const h1 = fnv1aHash(term) % DIMS;
+    const h2 = fnv1aHash(term + '_2') % DIMS;
+    const weight = Math.log(1 + count); // Log-scaled TF
+    // Sign from hash to reduce collisions (random projection)
+    const sign1 = (fnv1aHash(term + '_s1') % 2 === 0) ? 1 : -1;
+    const sign2 = (fnv1aHash(term + '_s2') % 2 === 0) ? 1 : -1;
+    vec[h1] += sign1 * weight;
+    vec[h2] += sign2 * weight;
+  }
+
+  // L2-normalize
+  let norm = 0;
+  for (let i = 0; i < DIMS; i++) norm += vec[i] * vec[i];
+  norm = Math.sqrt(norm);
+  if (norm > 0) {
+    for (let i = 0; i < DIMS; i++) vec[i] /= norm;
+  }
+
+  return Array.from(vec);
+}
+
+/** FNV-1a 32-bit hash — fast, good distribution for feature hashing */
+function fnv1aHash(str: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+class LocalEmbeddingProvider implements EmbeddingProvider {
+  readonly name = 'local';
+  readonly model = 'local-tfidf';
+  readonly dimension = 1536;
+  readonly maxBatchSize = 1000; // No API limit — local computation
+
+  async embed(texts: string[]): Promise<{ embeddings: number[][]; tokenCount: number }> {
+    const embeddings = texts.map(t => localEmbeddingFromPrepared(t));
+    // Estimate tokens from character count (same as truncateToTokens)
+    const tokenCount = texts.reduce((sum, t) => sum + Math.ceil(t.length / 4), 0);
+    return { embeddings, tokenCount };
+  }
+}
+
 // ─── Provider Resolution ────────────────────────────────────────────────────
 
 function getProvider(): EmbeddingProvider {
-  const providerName = process.env.EMBEDDING_PROVIDER || 'openai';
+  const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
   switch (providerName) {
     case 'openai':
       return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
@@ -113,9 +194,19 @@ function getProvider(): EmbeddingProvider {
       return new OpenAIEmbeddingProvider('text-embedding-3-large', 3072);
     case 'voyage':
       return new VoyageEmbeddingProvider();
+    case 'local':
+      return new LocalEmbeddingProvider();
+    case 'auto': {
+      // Auto-detect: use API provider if key available, else local fallback
+      if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+      if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
+      return new LocalEmbeddingProvider();
+    }
     default:
-      logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to openai');
-      return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+      logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
+      if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+      if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
+      return new LocalEmbeddingProvider();
   }
 }
 
@@ -167,11 +258,9 @@ async function resolveApiKey(provider: 'openai' | 'voyage'): Promise<string> {
     return process.env.VOYAGE_API_KEY;
   }
 
-  // 3. Error with helpful message
-  const envVar = provider === 'openai' ? 'OPENAI_API_KEY' : 'VOYAGE_API_KEY';
-  throw new EmbeddingApiError(
-    `No embedding API key configured. Add one in Settings > Providers or set ${envVar}`
-  );
+  // 3. Return 'local' sentinel — enables local TF-IDF fallback without API key
+  logger.info({ provider }, '[Embeddings] No API key found, using local TF-IDF fallback');
+  return 'local';
 }
 
 // ─── Text Preparation ───────────────────────────────────────────────────────
@@ -227,6 +316,9 @@ async function isStale(workspaceId: string, sourceType: string, sourceId: string
 
 export async function embedText(text: string): Promise<number[]> {
   const provider = getProvider();
+  if (provider.name === 'local') {
+    return localEmbeddingFromPrepared(prepareText('text', text));
+  }
   const result = await provider.embed([text]);
   return result.embeddings[0];
 }
@@ -308,12 +400,18 @@ export function getQueueStats(): QueueStats {
 
 export function enqueueJob(job: EmbedJob): void {
   jobQueue.push({ ...job, retries: job.retries ?? 0 });
+  logger.info({ sourceType: job.sourceType, sourceId: job.sourceId, queueDepth: jobQueue.length },
+    '[Embeddings] Queued 1 job (queue depth: %d)', jobQueue.length);
   processQueue();
 }
 
 export function enqueueJobs(jobs: EmbedJob[]): void {
   for (const job of jobs) {
     jobQueue.push({ ...job, retries: job.retries ?? 0 });
+  }
+  if (jobs.length > 0) {
+    logger.info({ count: jobs.length, queueDepth: jobQueue.length },
+      '[Embeddings] Queued %d jobs (queue depth: %d)', jobs.length, jobQueue.length);
   }
   processQueue();
 }
@@ -392,31 +490,40 @@ async function processJob(job: EmbedJob): Promise<void> {
 // ─── SSE Hub Subscription (Automatic Triggers) ─────────────────────────────
 
 export function startEmbeddingPipeline(): () => void {
+  const provider = getProvider();
   const unsubscribe = subscribe(handleWalEvent);
-  logger.info('[Embeddings] Pipeline started — listening for WAL events');
+  logger.info({ provider: provider.name, model: provider.model, dimension: provider.dimension },
+    '[Embeddings] Pipeline started — provider: %s, listening for WAL events', provider.name);
   return unsubscribe;
 }
 
 function handleWalEvent(event: WalEvent): void {
-  // All embedding work is best-effort — never throw from this handler
-  try {
-    switch (event.event_type) {
-      case 'spec_approved':
-        handleSpecApproved(event);
-        break;
-      case 'run_finished':
-        handleRunFinished(event);
-        break;
-      // Memory and archive triggers are handled by payload inspection
-      default:
-        // Check payload for memory/archive events
-        if (event.event_type === 'memory_created' || event.event_type === 'memory_updated') {
+  // All embedding work is best-effort — never throw from this handler.
+  // Async handlers are wrapped with .catch() since this function is synchronous.
+  switch (event.event_type) {
+    case 'spec_approved':
+      handleSpecApproved(event).catch(err => {
+        logger.warn({ err, eventType: event.event_type, specId: event.spec_id },
+          '[Embeddings] Error handling spec_approved event');
+      });
+      break;
+    case 'run_finished':
+      handleRunFinished(event).catch(err => {
+        logger.warn({ err, eventType: event.event_type, workspaceId: event.workspace_id },
+          '[Embeddings] Error handling run_finished event');
+      });
+      break;
+    default:
+      // Check payload for memory/archive events
+      if (event.event_type === 'memory_created' || event.event_type === 'memory_updated') {
+        try {
           handleMemoryEvent(event);
+        } catch (err) {
+          logger.warn({ err, eventType: event.event_type },
+            '[Embeddings] Error handling memory event');
         }
-        break;
-    }
-  } catch (err) {
-    logger.warn({ err, eventType: event.event_type }, '[Embeddings] Error handling WAL event');
+      }
+      break;
   }
 }
 
@@ -467,7 +574,8 @@ async function handleSpecApproved(event: WalEvent): Promise<void> {
       });
     }
 
-    logger.info({ specId: event.spec_id, stories: stories.length }, '[Embeddings] Queued spec stories for embedding');
+    logger.info({ specId: event.spec_id, stories: stories.length, queueDepth: jobQueue.length },
+      '[Embeddings] Queued %d stories from spec %s (queue depth: %d)', stories.length, event.spec_id, jobQueue.length);
   } catch (err) {
     logger.warn({ err, specId: event.spec_id }, '[Embeddings] Failed to queue spec stories');
   }
@@ -530,7 +638,8 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
       });
     }
 
-    logger.info({ runId, stories: results.length }, '[Embeddings] Queued post-run story re-embeddings');
+    logger.info({ runId, stories: results.length, queueDepth: jobQueue.length },
+      '[Embeddings] Queued %d post-run re-embeddings for run %s (queue depth: %d)', results.length, runId, jobQueue.length);
   } catch (err) {
     logger.warn({ err }, '[Embeddings] Failed to handle run_finished');
   }
