@@ -3,8 +3,9 @@
 Spec: rorca-curated-skills-library
 Run ID: 14
 Started: 2026-03-10T02:18:43.908Z
-Last Updated: 2026-03-10T02:27:43.762Z
+Last Updated: 2026-03-10T02:32:41.792Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - SL-002: Explicit Match & Inject Skills API — DONE (claude, 194s)
 - SL-008: Match & Inject Button in Spec Review — DONE (claude, 330s)
+- SL-001: GitHub Repository Skill Browser API — DONE (claude, 284s)
