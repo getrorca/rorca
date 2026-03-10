@@ -1247,13 +1247,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 7d. Inject active agent profile (system prompt + allowed tools + model override)
-    const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = 1 LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
+    const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
 
     if (activeProfile) {
       if (activeProfile.system_prompt_override) {
         env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
       }
-      const tools = JSON.parse(activeProfile.allowed_tools) as string[];
+      const tools = (Array.isArray(activeProfile.allowed_tools) ? activeProfile.allowed_tools : JSON.parse(activeProfile.allowed_tools)) as string[];
       if (tools.length > 0) {
         env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
       }
@@ -2204,10 +2204,10 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // Inject agent profile
-    const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = 1 LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
+    const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
     if (activeProfile) {
       if (activeProfile.system_prompt_override) env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
-      const tools = JSON.parse(activeProfile.allowed_tools) as string[];
+      const tools = (Array.isArray(activeProfile.allowed_tools) ? activeProfile.allowed_tools : JSON.parse(activeProfile.allowed_tools)) as string[];
       if (tools.length > 0) env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
       if (activeProfile.model_override) env['RORCA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
     }
@@ -4739,7 +4739,12 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
         suggestionMap.set(s.name, { relevance: s.relevance, reason: s.reason });
       }
 
-      const skills = activeSkillNames.map((name) => {
+      // If active_skills was never recorded (older runs), fall back to suggestedSkills from spec
+      const skillNamesToShow = activeSkillNames.length > 0
+        ? activeSkillNames
+        : suggestions.map(s => s.name);
+
+      const skills = skillNamesToShow.map((name) => {
         const suggestion = suggestionMap.get(name);
         return {
           name,
@@ -4750,8 +4755,8 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
         };
       });
 
-      // Update frequency counts
-      for (const name of activeSkillNames) {
+      // Update frequency counts (use the names actually shown)
+      for (const name of skillNamesToShow) {
         const existing = skillCounts.get(name) || { count: 0, passCount: 0, totalCount: 0 };
         existing.count++;
         existing.totalCount++;

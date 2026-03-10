@@ -231,7 +231,7 @@ interface SpecVersionRow {
   id: number;
   spec_slug: string;
   version: number;
-  content_json: string;
+  content_json: unknown; // jsonb — pg driver returns parsed object, not string
   status: string;
   rejection_reason: string | null;
   created_at: string;
@@ -2611,6 +2611,13 @@ router.get('/kanban', async (req: Request, res: Response) => {
       }
     }
 
+    // Include manually-done specs
+    const manualDone = await query<{ spec_id: string }>(
+      `SELECT spec_id FROM kanban_manual_done WHERE workspace_id = $1`,
+      [workspaceId]
+    );
+    for (const row of manualDone) completedSlugs.add(row.spec_id);
+
     // Fetch story pass/fail counts for approved specs with runs
     const approvedSlugs = approvedSpecs.map(s => s.id);
     const storyProgress = new Map<string, number>();
@@ -2694,6 +2701,27 @@ router.get('/kanban', async (req: Request, res: Response) => {
     logger.error('[Specs] Kanban grouping error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// ─── Kanban Manual Done ───────────────────────────────────────────────────────────
+
+router.post('/:id/mark-done', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { workspaceId } = req.body;
+  if (!workspaceId) { res.status(400).json({ error: 'Missing workspaceId' }); return; }
+  await execute(
+    `INSERT INTO kanban_manual_done (spec_id, workspace_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [id, workspaceId]
+  );
+  res.json({ ok: true });
+});
+
+router.post('/:id/unmark-done', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { workspaceId } = req.body;
+  if (!workspaceId) { res.status(400).json({ error: 'Missing workspaceId' }); return; }
+  await execute(`DELETE FROM kanban_manual_done WHERE spec_id = $1 AND workspace_id = $2`, [id, workspaceId]);
+  res.json({ ok: true });
 });
 
 // ─── Kanban Column CRUD ─────────────────────────────────────────────────────────
@@ -2988,10 +3016,10 @@ async function rebuildSearchIndex(workspaceId: string, workspacePath: string): P
     if (existing) continue;
 
     // Try to get content from spec_versions for richer indexing
-    const versionRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [evt.spec_id]) as { content_json: string } | undefined;
+    const versionRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [evt.spec_id]) as { content_json: unknown } | undefined;
 
     if (versionRow) {
-      const content = JSON.parse(versionRow.content_json);
+      const content = typeof versionRow.content_json === 'string' ? JSON.parse(versionRow.content_json) : versionRow.content_json as any;
       const fields = extractSearchableFields(content);
       await execute(`INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [evt.spec_id, workspaceId, content.title ?? evt.spec_id, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'rejected', evt.ts]);
@@ -3298,8 +3326,8 @@ router.get('/archive', async (req: Request, res: Response) => {
           else if (fs.existsSync(approvedFile)) content = parseSpecFile(approvedFile);
           else {
             // Rejected spec — try spec_versions
-            const vRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [spec.id]) as { content_json: string } | undefined;
-            if (vRow) content = JSON.parse(vRow.content_json);
+            const vRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [spec.id]) as { content_json: unknown } | undefined;
+            if (vRow) content = typeof vRow.content_json === 'string' ? JSON.parse(vRow.content_json) : vRow.content_json as any;
           }
         } catch {
           // skip
@@ -3631,11 +3659,43 @@ router.get('/:specId/versions', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
 
-    const rows = await query(`SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
+    let rows = await query(`SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
        FROM spec_versions WHERE spec_slug = $1 ORDER BY version ASC`, [specId]) as SpecVersionRow[];
 
+    // Auto-backfill: if no versions recorded yet, read the spec from disk and create version 1
+    if (rows.length === 0) {
+      const workspaces = await query('SELECT path FROM workspaces') as { path: string }[];
+      for (const ws of workspaces) {
+        const candidates = [
+          path.join(ws.path, 'forge', 'specs', 'approved', `${specId}.json`),
+          path.join(ws.path, 'forge', 'specs', 'pending', `${specId}.json`),
+        ];
+        for (const candidate of candidates) {
+          if (fs.existsSync(candidate)) {
+            try {
+              const raw = fs.readFileSync(candidate, 'utf-8');
+              const parsed = JSON.parse(raw);
+              const status = candidate.includes('/approved/') ? 'approved' : 'pending';
+              // Use spec generatedAt as created_at if available
+              const createdAt = parsed.generatedAt ? new Date(parsed.generatedAt) : new Date();
+              await execute(
+                `INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason, created_at)
+                 VALUES ($1, 1, $2, $3, NULL, $4)
+                 ON CONFLICT (spec_slug, version) DO NOTHING`,
+                [specId, raw, status, createdAt.toISOString()],
+              );
+              rows = await query(`SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
+                 FROM spec_versions WHERE spec_slug = $1 ORDER BY version ASC`, [specId]) as SpecVersionRow[];
+            } catch { /* unreadable — skip */ }
+            break;
+          }
+        }
+        if (rows.length > 0) break;
+      }
+    }
+
     const versions = rows.map(row => {
-      const content = JSON.parse(row.content_json);
+      const content: any = typeof row.content_json === 'string' ? JSON.parse(row.content_json) : row.content_json;
       const stories = content.userStories ?? content.stories ?? [];
       return {
         version: row.version,
@@ -3722,9 +3782,9 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
       return;
     }
 
-    const row1 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v1]) as { content_json: string; status: string; rejection_reason: string | null; created_at: string } | undefined;
+    const row1 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v1]) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
 
-    const row2 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v2]) as { content_json: string; status: string; rejection_reason: string | null; created_at: string } | undefined;
+    const row2 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v2]) as { content_json: unknown; status: string; rejection_reason: string | null; created_at: string } | undefined;
 
     if (!row1 || !row2) {
       const missing = !row1 && !row2 ? `v${v1} and v${v2}` : !row1 ? `v${v1}` : `v${v2}`;
@@ -3732,8 +3792,8 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
       return;
     }
 
-    const content1 = JSON.parse(row1.content_json);
-    const content2 = JSON.parse(row2.content_json);
+    const content1: any = typeof row1.content_json === 'string' ? JSON.parse(row1.content_json) : row1.content_json;
+    const content2: any = typeof row2.content_json === 'string' ? JSON.parse(row2.content_json) : row2.content_json;
 
     const diff = computeSpecDiff(content1, content2);
 
@@ -3816,14 +3876,14 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
     }
 
     // Fetch the version to restore
-    const row = await queryOne('SELECT content_json, status FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, versionNum]) as { content_json: string; status: string } | undefined;
+    const row = await queryOne('SELECT content_json, status FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, versionNum]) as { content_json: unknown; status: string } | undefined;
 
     if (!row) {
       res.status(404).json({ error: `Version ${versionNum} not found for spec ${specId}` });
       return;
     }
 
-    const restoredContent = JSON.parse(row.content_json);
+    const restoredContent: any = typeof row.content_json === 'string' ? JSON.parse(row.content_json) : row.content_json;
 
     // Find the current spec file and snapshot it before overwriting
     const { pendingDir, approvedDir } = specsDirs(workspace.path);

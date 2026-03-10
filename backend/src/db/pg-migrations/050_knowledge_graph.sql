@@ -6,8 +6,9 @@
 CREATE EXTENSION IF NOT EXISTS age;
 
 -- Load the AGE library and set search_path so Cypher functions resolve
+-- SET LOCAL scopes the change to this transaction only — does not bleed into later migrations
 LOAD 'age';
-SET search_path = ag_catalog, "$user", public;
+SET LOCAL search_path = ag_catalog, "$user", public;
 
 -- Create the rorca graph (only if it doesn't exist)
 DO $$

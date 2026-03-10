@@ -1,0 +1,210 @@
+{
+  "title": "rorca-context-autohydrate",
+  "model": "claude-opus-4-6",
+  "generatedAt": "2026-03-09T23:45:00.000Z",
+  "_philosophy": "Context injection is Rorca's core value proposition — the Direction Stack, schema snapshots, git memory, and skills ARE the reason specs are good. But three critical pieces are silently missing for every user: schema/git memory (requires manual hydrate), L2 conventions (domain never sent from frontend), and there's no feedback loop when context is incomplete. No user should have to know about manual hydration or domain parameters. These should work automatically from the moment a workspace is registered, and the UI should actively guide users when context is thin.",
+  "_skills": [
+    "spec-gap-analysis",
+    "exhaustive-specification",
+    "react-review",
+    "logging-fundamentals"
+  ],
+  "_audit": {
+    "confidence": "97%",
+    "filesAudited": [
+      "backend/src/routes/workspaces.ts (lines 112-166 registration, 266-376 hydrate, 937-1071 scan-direction)",
+      "backend/src/routes/specs.ts (lines 644-799 generate endpoint, context assembly)",
+      "backend/src/routes/direction.ts (lines 102-108 L2 fetch)",
+      "backend/src/lib/direction-stack.ts (lines 1-65 synthesizeWithMeta)",
+      "src/panels/SpecsPanel.tsx (line 2181 generate call — no domain field)",
+      "src/api/specs.ts (lines 68-76 GenerateSpecParams — no domain field)",
+      "src/panels/SpecForgeOutput.tsx (lines 22-36 ContextSummary interface)",
+      "src/components/OnboardingWizard.tsx (lines 291-301 generate call — no domain field)",
+      "src/panels/BatchForge.tsx (lines 130-135 batch generate — no domain field)"
+    ],
+    "gapsIdentified": [
+      "Domain never sent from any frontend generate call (SpecsPanel, OnboardingWizard, BatchForge)",
+      "L2 query uses undefined domain → always returns NULL → L2 conventions never injected",
+      "Schema/git memory require manual POST /api/workspaces/:id/hydrate — never auto-triggered",
+      "No domain inference from workspace registration or scan-direction",
+      "ContextSummary.domain always shows null in UI",
+      "No 'enrich context' nudge when items are missing"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "CTX-001",
+      "title": "Auto-Hydrate Schema on Workspace Registration",
+      "description": "When a workspace is registered via POST /api/workspaces, automatically hydrate the schema snapshot in the background. This eliminates the requirement for users to manually call the hydrate endpoint. Schema detection is fast (file scan, no LLM call) and should complete within 2-3 seconds for most projects.",
+      "acceptanceCriteria": [
+        "POST /api/workspaces handler (workspaces.ts:112-166) triggers schema hydration after successful workspace creation, BEFORE returning the response",
+        "Schema hydration uses the existing hydrateSchema() function from workspaces.ts:288-311 — no new logic, just calling it automatically",
+        "hydrateSchema() scans for SQL migration files, Prisma schema, Drizzle schema, TypeORM entities, Sequelize models, and raw CREATE TABLE statements in the workspace path",
+        "Result stored in workspace_context.schema_snapshot (same column, same format as manual hydrate)",
+        "If no schema files are found (e.g. pure frontend project), workspace_context.schema_snapshot is set to empty string — NOT left as NULL",
+        "Schema hydration errors are caught and logged (console.warn) but do NOT block workspace registration — the workspace is created regardless",
+        "workspace_context.schema_snapshot_at timestamp is set to current datetime on successful hydration",
+        "workspace_context.schema_table_count is populated with the number of CREATE TABLE statements found",
+        "If workspace already has a schema_snapshot (e.g. re-registration), it is overwritten with fresh scan results",
+        "Backend log line on successful auto-hydrate: '[workspace] Auto-hydrated schema: {N} tables found' (uses existing logging pattern)",
+        "The registration response now includes `schemaHydrated: boolean` in the response body so the frontend knows hydration occurred"
+      ],
+      "dependsOn": [],
+      "suggestedSkills": ["logging-fundamentals", "spec-gap-analysis"],
+      "passes": false
+    },
+    {
+      "id": "CTX-002",
+      "title": "Auto-Hydrate Git Memory on Workspace Registration (Background)",
+      "description": "When a workspace is registered, kick off git memory hydration in the background. Unlike schema hydration (fast file scan), git memory requires an LLM map-reduce over commit history and can take 10-30 seconds. Run it as a fire-and-forget background task so it doesn't block registration.",
+      "acceptanceCriteria": [
+        "POST /api/workspaces handler triggers git memory hydration AFTER the response is sent (fire-and-forget, non-blocking)",
+        "Uses a setImmediate() or process.nextTick() pattern to defer the LLM call after response.json() is sent",
+        "Git memory hydration uses the existing gitMapStep() and gitReduceStep() functions from workspaces.ts:313-376 — no new LLM logic",
+        "gitMapStep() scans the last 100 commits (or all commits if fewer) using git log --oneline",
+        "gitReduceStep() calls the LLM to synthesize commit patterns into a structured memory summary",
+        "Result stored in workspace_context.git_memory (same column, same format as manual hydrate)",
+        "workspace_context.git_memory_updated_at and last_ingested_commit_hash are set on completion",
+        "workspace_context.git_commit_count is populated with the total number of commits analyzed",
+        "If the workspace has no git history (fresh repo, 0 commits), git_memory is set to 'No commit history available' — NOT left as NULL",
+        "If the LLM call fails (API key missing, rate limit, network error), the error is logged and git_memory is set to 'Hydration failed: {error message}' — NOT left as NULL",
+        "A WAL event is emitted on completion: event_type='context_hydrated', payload includes { type: 'git_memory', commitCount: N, workspaceId }",
+        "The WAL event allows the frontend to reactively update the context summary card if the user is already on the Forge page",
+        "If workspace already has git_memory (re-registration), a delta hydrate is performed (only new commits since last_ingested_commit_hash) — reuses existing delta logic in the hydrate endpoint",
+        "Backend log line: '[workspace] Auto-hydrated git memory: {N} commits analyzed' on success, '[workspace] Git memory hydration deferred — no API key configured' if LLM unavailable"
+      ],
+      "dependsOn": ["CTX-001"],
+      "suggestedSkills": ["logging-fundamentals", "workflow-orchestrator"],
+      "passes": false
+    },
+    {
+      "id": "CTX-003",
+      "title": "L2 Domain Resolution Fallback — Use Workspace Domain When Not Provided",
+      "description": "The spec generation endpoint accepts an optional `domain` parameter for L2 convention lookup, but no frontend caller ever sends it. Fix this by falling back to the workspace's stored domain(s) when the request doesn't include an explicit domain. This is a 5-line fix that unlocks L2 conventions for every user.",
+      "acceptanceCriteria": [
+        "In specs.ts generate handler (~line 675), when req.body.domain is undefined or empty string, resolve domain from workspace.domains JSON array",
+        "Domain resolution order: (1) explicit req.body.domain, (2) workspace.domains[0] (first domain in the array), (3) null (no L2 injected — same as current behavior)",
+        "workspace.domains is a JSON array string stored in the workspaces table — parse it with JSON.parse() and take element [0]",
+        "If workspace.domains is '[]' (empty array) or null, domain resolves to null and L2 is gracefully skipped (no error)",
+        "The resolved domain value is used in the L2 direction_layers query: SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = ?",
+        "The resolved domain is included in the contextSummary response: contextSummary.directionLayers.l2.domain now shows the actual domain string (e.g. 'saas') instead of always null",
+        "Backend log line when domain is resolved from workspace: '[specs] L2 domain resolved from workspace: {domain}'",
+        "The same domain fallback is applied in the batch generate endpoint (specs.ts /api/specs/generate/batch) if it exists",
+        "If a user explicitly sends domain='' (empty string) in the request body, it is treated the same as undefined (fallback to workspace domain)",
+        "Direction stack synthesize call receives the resolved L2 content — synthesizeWithMeta({ l2: resolvedL2Content }) instead of l2: undefined",
+        "No change to the direction_layers table schema — the fix is purely in the query parameter resolution"
+      ],
+      "dependsOn": [],
+      "suggestedSkills": ["spec-gap-analysis"],
+      "passes": false
+    },
+    {
+      "id": "CTX-004",
+      "title": "Frontend Domain Pass-Through — Send Workspace Domain in Generate Request",
+      "description": "Update all frontend spec generation callers to include the workspace domain in the request body. While CTX-003 adds a backend fallback, the frontend should also send the domain explicitly for transparency and to enable future per-spec domain override.",
+      "acceptanceCriteria": [
+        "GenerateSpecParams interface in src/api/specs.ts adds optional `domain?: string` field",
+        "generateSpec() function in src/api/specs.ts includes domain in the JSON body when provided",
+        "SpecsPanel.tsx generate call (~line 2181) resolves domain from workspace context and includes it: domain: workspaceDomain || undefined",
+        "workspaceDomain is derived from the active workspace's domains array (domains[0]) — the workspace object is already available in WorkspaceContext",
+        "OnboardingWizard.tsx generate call (~line 296-301) includes domain from the newly created workspace if a domain was selected during onboarding",
+        "BatchForge.tsx batch generate call (~line 130-135) includes domain from the active workspace context",
+        "If the workspace has no domains (empty array), the domain field is omitted from the request (not sent as null or empty string)",
+        "The domain value is visible in the ContextSummary card's L2 badge: 'L2 Conventions (saas)' instead of 'L2 Conventions (null)'",
+        "TypeScript compiles clean: npx tsc --noEmit passes with no new errors from these changes"
+      ],
+      "dependsOn": ["CTX-003"],
+      "suggestedSkills": ["react-review"],
+      "passes": false
+    },
+    {
+      "id": "CTX-005",
+      "title": "Context Enrichment Nudge — Actionable Hints for Missing Context",
+      "description": "When the context summary card shows missing items (no schema, no git memory, no L2, no skills), display subtle actionable hints that guide users to enrich their context. Not a modal or a blocker — just a gentle nudge with one-click actions.",
+      "acceptanceCriteria": [
+        "ContextSummaryCard (in SpecForgeOutput.tsx or its child component) detects missing context items from the contextSummary prop",
+        "Missing items are: schemaSnapshot=false, gitMemory=false, directionLayers.l2.present=false, skills.length===0, agentsMd=false, memoryEntries===0",
+        "When ANY items are missing, a collapsed 'Enrich context' row appears at the bottom of the context card with a subtle amber info icon",
+        "Clicking 'Enrich context' expands to show specific missing items with one-click fix actions",
+        "Missing schema: 'No database schema detected' + 'Scan now' button → calls POST /api/workspaces/:id/hydrate?types=schema",
+        "Missing git memory: 'No git memory synthesized' + 'Analyze commits' button → calls POST /api/workspaces/:id/hydrate?types=git",
+        "Missing L2: 'No domain conventions set' + 'Set domain' link → navigates to Direction panel (/direction) with L2 tab focused",
+        "Missing skills: 'No skills installed' + 'Browse skills' link → navigates to Marketplace tab (/specs?view=marketplace)",
+        "Missing AGENTS.md: 'No file governance configured' + 'Auto-generate' button → calls POST /api/workspaces/:id/scan-direction",
+        "Missing memory: 'No memory entries' + 'Memory is built automatically as specs run' info text (no action — memory is auto-populated)",
+        "Each 'Scan now' / 'Analyze commits' button shows a spinner while the request is in-flight and replaces with a green checkmark on success",
+        "After a successful enrichment action, the relevant context summary badge updates from red X to green checkmark WITHOUT requiring a page refresh (local state update)",
+        "The nudge row is NOT shown when all context items are present (clean state = no nudge)",
+        "The nudge row is collapsible and remembers its collapsed/expanded state in sessionStorage (key: 'rorca-context-nudge-collapsed')",
+        "Accessible: nudge row has aria-expanded attribute, action buttons have descriptive aria-labels"
+      ],
+      "dependsOn": ["CTX-001", "CTX-002", "CTX-003"],
+      "suggestedSkills": ["react-review", "exhaustive-specification"],
+      "passes": false
+    },
+    {
+      "id": "CTX-006",
+      "title": "Re-Hydrate on First Spec Generation If Context Is Stale",
+      "description": "Even with auto-hydration on registration, context can become stale as the project evolves. When a user triggers spec generation and the schema/git memory is older than 24 hours or has never been hydrated, trigger a background refresh before (or during) generation. This ensures the LLM always gets fresh context.",
+      "acceptanceCriteria": [
+        "In the specs.ts generate handler, before the LLM call, check workspace_context.schema_snapshot_at and git_memory_updated_at timestamps",
+        "If schema_snapshot_at is NULL (never hydrated) or older than 24 hours: trigger synchronous schema re-hydration (fast, 1-2s) before LLM call",
+        "If git_memory_updated_at is NULL (never hydrated) or older than 24 hours: trigger background git re-hydration (fire-and-forget, does NOT block LLM call)",
+        "The 24-hour staleness threshold is a constant CONTEXT_STALENESS_HOURS = 24 defined at the top of specs.ts (easily tunable)",
+        "Schema re-hydration is synchronous because it's fast (file scan, no LLM) and the schema is used in the current generation prompt",
+        "Git memory re-hydration is async/background because it requires LLM calls and the current generation can proceed with stale git memory (better than blocking for 30s)",
+        "If schema re-hydration fails, the generation proceeds with whatever schema was previously stored (or empty) — no error thrown to the user",
+        "If the workspace has no workspace_context row at all (edge case: registered before auto-hydrate was implemented), create the row with default empty values, then hydrate",
+        "Backend log: '[specs] Schema context stale ({N} hours old), re-hydrating before generation' when refresh is triggered",
+        "Backend log: '[specs] Git memory context stale ({N} hours old), background refresh triggered' for async git refresh",
+        "The freshly hydrated values are used in the CURRENT generation's context assembly (for schema), not just cached for next time",
+        "Re-hydration respects existing delta logic for git (only fetches new commits since last_ingested_commit_hash)",
+        "No re-hydration triggered if timestamps are within the 24-hour window — this avoids unnecessary work on rapid consecutive generations"
+      ],
+      "dependsOn": ["CTX-001", "CTX-002"],
+      "suggestedSkills": ["logging-fundamentals", "workflow-orchestrator"],
+      "passes": false
+    },
+    {
+      "id": "CTX-007",
+      "title": "Domain Inference During Workspace Scan-Direction",
+      "description": "The scan-direction endpoint (POST /api/workspaces/:id/scan-direction) already scans package.json, CLAUDE.md, and config files to generate direction layers, but it never infers a domain. Extend it to suggest a domain based on detected stack and file patterns, and auto-populate the workspace's domains array if empty.",
+      "acceptanceCriteria": [
+        "scan-direction endpoint (workspaces.ts:937-1071) now includes domain inference in its LLM prompt",
+        "The LLM prompt includes a domain taxonomy: 'saas', 'cli', 'mobile', 'data-pipeline', 'game', 'ecommerce', 'devtools', 'api', 'docs', 'ml', 'iot', 'desktop', 'blockchain', 'other'",
+        "The LLM response is extended to include: `suggestedDomain: string` alongside the existing L1/L2/L3 content",
+        "If the workspace's domains array is empty ('[]'), the scan automatically updates it with the suggested domain: UPDATE workspaces SET domains = ? WHERE id = ?",
+        "If the workspace already has domains set, the suggested domain is returned in the response but NOT auto-applied (user can review)",
+        "The scan-direction response now includes `{ ...existingFields, suggestedDomain: string, domainApplied: boolean }`",
+        "Domain inference heuristics (in the LLM prompt, not in code): presence of auth/billing routes → 'saas', CLI entry point (bin/) → 'cli', React Native / Expo → 'mobile', Express/Fastify with no frontend → 'api', etc.",
+        "If the LLM cannot determine a domain with confidence, suggestedDomain is 'other'",
+        "When domain is auto-applied, an L2 direction_layers row is created with the inferred domain IF no L2 row exists yet for that domain",
+        "Backend log: '[workspace] Domain inferred from scan: {domain}' on successful inference"
+      ],
+      "dependsOn": [],
+      "suggestedSkills": ["spec-gap-analysis"],
+      "passes": false
+    },
+    {
+      "id": "CTX-008",
+      "title": "Context Health Score in Spec Forge Header",
+      "description": "Show a simple context health score (0-100%) in the Spec Forge area so users can see at a glance whether their context is rich enough for good spec generation. This replaces having to mentally count green/red checkmarks in the context summary card.",
+      "acceptanceCriteria": [
+        "A context health score is computed from the contextSummary object returned by the generate endpoint",
+        "Score components (total 100 points): L1 present (10pt), L2 present (15pt), L3 present (15pt), schema snapshot present (15pt), git memory present (10pt), skills count > 0 (10pt), AGENTS.md present (10pt), memory entries > 0 (5pt), token usage < 50% of context window (10pt)",
+        "Score is displayed as a compact badge in the Forge area header: '{score}% context' with color coding",
+        "Color coding: 0-40% = red (text-red-400), 41-70% = amber (text-amber-400), 71-100% = green (text-green-400)",
+        "Badge has a tooltip showing the breakdown: 'L1 ✓ (10/10) L2 ✗ (0/15) L3 ✓ (15/15) Schema ✓ (15/15) ...'",
+        "Score is computed client-side from the contextSummary prop — no new backend endpoint needed",
+        "Score is shown BEFORE generation starts (from the last known contextSummary, cached in component state) so users can decide to enrich context first",
+        "If no contextSummary has been fetched yet (first visit, no prior generation), the badge shows '—' with tooltip 'Generate a spec to see context health'",
+        "Score updates reactively when an enrichment action from CTX-005 succeeds (e.g. schema scan completes → score jumps from 60% to 75%)",
+        "The score computation function is a pure utility: computeContextHealthScore(summary: ContextSummary): { score: number, breakdown: { component: string, points: number, maxPoints: number }[] }",
+        "TypeScript: function is exported from a shared location (e.g. src/lib/contextHealth.ts) for reuse in tests"
+      ],
+      "dependsOn": ["CTX-005"],
+      "suggestedSkills": ["react-review"],
+      "passes": false
+    }
+  ]
+}

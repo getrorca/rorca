@@ -47,7 +47,7 @@ import { rotateMemory } from './lib/memory-ledger';
 import { deduplicateMemory } from './lib/memory-dedup';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
-import { rateLimiter } from './lib/rate-limiter';
+import { rateLimiter, initRateLimiterCache } from './lib/rate-limiter';
 import { publicReviewRouter, specReviewRouter } from './routes/review';
 import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
@@ -308,6 +308,8 @@ if (process.env.NODE_ENV !== 'test') {
     cleanupOrphanRuns();
     startScheduler();
     cleanupOldLogs();
+    // PR-xxx: Init rate limiter cache so fallback user ID is loaded (prevents 429s in single-user mode)
+    initRateLimiterCache().catch(err => logger.error({ err }, '[RateLimiter] Cache init failed'));
     // V2-099: Run EXPLAIN QUERY PLAN audit at startup
     runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
     // CIE-009: Start file watchers for all registered workspaces

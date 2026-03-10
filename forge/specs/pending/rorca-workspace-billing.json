@@ -1,0 +1,297 @@
+{
+  "title": "rorca-workspace-billing",
+  "model": "claude-opus-4-6",
+  "generatedAt": "2026-03-09T23:59:00.000Z",
+  "_philosophy": "Rorca is local-first — no auth wall, no login required, no cloud dependency for basic usage. Free tier = 1 workspace, unlimited specs + runs. Upgrade = more workspaces. The gate is the local SQLite DB (workspace count), NOT user identity. License keys are signed JWTs stored in ~/.rorca/license.json, verified offline via bundled public key. Stripe checkout happens on rorca.app, redirects back to localhost:3030 with the license key. No phone-home required for license verification — the JWT signature is self-contained. This matches the 'local-first, no auth wall' philosophy while enabling monetization.",
+  "_skills": [
+    "spec-gap-analysis",
+    "exhaustive-specification",
+    "logging-fundamentals"
+  ],
+  "_audit": {
+    "confidence": "97%",
+    "filesAudited": [
+      "backend/src/routes/billing.ts (581 lines — Stripe checkout, webhook, portal, quotas all implemented)",
+      "backend/src/routes/workspaces.ts (lines 112-166 — POST handler already calls requirePlan('workspaces'))",
+      "backend/src/lib/require-plan.ts (132 lines — middleware returns 402 with { error, feature, currentPlan, requiredPlan, currentUsage, quotaLimit })",
+      "backend/src/lib/get-user.ts — getEffectiveUser() falls back to first DB user (admin@rorca.local)",
+      "backend/src/routes/auth.ts (1291 lines — JWT handling, bcrypt, refresh tokens)",
+      "backend/src/db/index.ts (lines 703-708 — seeds admin@rorca.local with plan='pro')",
+      "backend/src/db/migrations/035_billing.sql — subscriptions table (user_id, stripe_*, plan, status)",
+      "backend/src/db/migrations/043_plan_quotas.sql — plan_quotas table (plan_name, feature, quota_limit)",
+      "bin/rorca.ts (252 lines — rorca start creates ~/.rorca/, sets DB_PATH, RORCA_HOME)",
+      "src/panels/settings/AccountSettingsTab.tsx (1022 lines — BillingSection component, plan comparison, checkout button)",
+      "package.json (bin: ./bin/rorca.js, version 0.1.0, files array configured)",
+      "backend/package.json (stripe v20.3.1 already a dependency)"
+    ],
+    "existingInfrastructure": {
+      "requirePlan_middleware": "Already on POST /api/workspaces — returns 402 when quota exceeded",
+      "plan_quotas_table": "Already seeded: free=1 workspace, solo=3, pro=unlimited, team=unlimited",
+      "stripe_dependency": "v20.3.1 in backend/package.json",
+      "stripe_checkout": "POST /api/billing/checkout creates Stripe session — needs price IDs configured",
+      "stripe_webhook": "POST /api/billing/webhook handles subscription lifecycle events",
+      "billing_ui": "BillingSection in AccountSettingsTab.tsx — plan comparison, checkout, invoices",
+      "effective_user": "getEffectiveUser() returns admin@rorca.local (plan='pro') when no auth"
+    },
+    "criticalGaps": [
+      "Default admin seeded with plan='pro' — must be 'free' for new installs (db/index.ts:708)",
+      "No ~/.rorca/license.json handling — needs read/write/verify",
+      "No license activation endpoint — needs POST /api/billing/activate",
+      "requirePlan reads user.plan from DB, but license key overrides plan — needs license-aware tier resolution",
+      "Stripe checkout redirects to success_url — needs localhost:3030 callback with license key",
+      "No paywall UI component — 402 response exists but frontend doesn't catch and display upgrade prompt",
+      "No public key bundled for offline JWT license verification",
+      "getCurrentUsage('workspaces') counts globally (correct for local-first, no user scoping needed)"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "BIL-001",
+      "title": "Change Default Seeded User Plan to 'free'",
+      "description": "The default admin user (admin@rorca.local) is currently seeded with plan='pro' in db/index.ts. This must be 'free' so new installs start on the free tier (1 workspace). Existing installs that already have plan='pro' should NOT be downgraded — only new database creation should seed 'free'.",
+      "acceptanceCriteria": [
+        "In backend/src/db/index.ts line ~708, change the default admin INSERT from plan='pro' to plan='free'",
+        "The INSERT uses ON CONFLICT DO NOTHING — so existing databases where admin already has plan='pro' are NOT affected (idempotent, no downgrade)",
+        "New database creation (first rorca start) seeds admin@rorca.local with plan='free'",
+        "getEffectiveUser() still returns admin@rorca.local as the fallback user — but now with plan='free'",
+        "requirePlan('workspaces') on POST /api/workspaces now correctly limits to 1 workspace for new installs",
+        "Verify: fresh DB → create workspace #1 succeeds → create workspace #2 returns 402",
+        "The plan_quotas table already has free=1 workspace — no change needed to quotas"
+      ],
+      "dependsOn": [],
+      "suggestedSkills": ["spec-gap-analysis"],
+      "passes": false
+    },
+    {
+      "id": "BIL-002",
+      "title": "License Key Infrastructure — Generate, Store, Verify Offline",
+      "description": "Implement the license key system. License keys are RS256-signed JWTs containing tier + expiry. The public key is bundled in the npm package for offline verification. The private key lives only on the cloud/Stripe side (rorca.app). License keys are stored in ~/.rorca/license.json and read on backend startup.",
+      "acceptanceCriteria": [
+        "New file: backend/src/lib/license.ts — exports getLicenseTier(), verifyLicenseKey(), activateLicense()",
+        "License key format: RS256-signed JWT with payload { tier: 'solo'|'pro'|'team', email: string, issuedAt: number, expiresAt: number, machineId?: string }",
+        "Public key bundled as a constant string in license.ts (RS256 public key, ~450 bytes) — used for OFFLINE verification, no network call needed",
+        "Private key is NOT in the codebase — it lives only on the cloud licensing server (rorca.app)",
+        "getLicenseTier() reads ~/.rorca/license.json → verifies JWT signature with bundled public key → returns tier string or 'free' if missing/invalid/expired",
+        "License file path resolved from RORCA_HOME env var (set by bin/rorca.ts to ~/.rorca/) with fallback to path.join(os.homedir(), '.rorca', 'license.json')",
+        "license.json format: { key: '<jwt-string>', activatedAt: '<ISO-8601>', email: '<user-email>' }",
+        "If license.json doesn't exist: getLicenseTier() returns 'free' (no error, no log — normal state for free tier)",
+        "If license.json exists but JWT signature is invalid: log warning '[license] Invalid license key — reverting to free tier', return 'free'",
+        "If license.json exists but JWT is expired: log info '[license] License expired on {date} — reverting to free tier', return 'free'",
+        "getLicenseTier() caches the result in a module-level variable — re-reads the file only on explicit invalidation (after activation) or every 60 minutes",
+        "activateLicense(keyString) writes license.json and invalidates the cache, returns the decoded tier",
+        "TypeScript types exported: LicensePayload, LicenseTier = 'free' | 'solo' | 'pro' | 'team'"
+      ],
+      "dependsOn": [],
+      "suggestedSkills": ["logging-fundamentals", "spec-gap-analysis"],
+      "passes": false
+    },
+    {
+      "id": "BIL-003",
+      "title": "Wire License Tier into requirePlan Middleware",
+      "description": "The existing requirePlan middleware reads the user's plan from the DB (users.plan column). For local-first mode (no auth), it should also check the license key tier and use the HIGHER of the two. This way, a license key upgrade takes effect without needing to modify the DB.",
+      "acceptanceCriteria": [
+        "In backend/src/lib/require-plan.ts, import getLicenseTier() from license.ts",
+        "When resolving the effective plan: effectivePlan = max(user.plan, getLicenseTier()) where tier ordering is free < solo < pro < team",
+        "Add a TIER_ORDER constant: { free: 0, solo: 1, pro: 2, team: 3 } for comparison",
+        "The higher tier wins — if user.plan='free' and license='pro', effective plan is 'pro'",
+        "If both are 'free', workspace limit is 1 (from plan_quotas table, already seeded)",
+        "The 402 response body includes the effective plan and the license tier for debugging: { currentPlan: effectivePlan, licenseTier: licenseTier, dbPlan: user.plan }",
+        "No change to the quota calculation logic — it still reads from plan_quotas table using the effective plan",
+        "requirePlan continues to work for all features (workspaces, specs_per_month, team_members, etc.), not just workspaces",
+        "getLicenseTier() is called once per request (cached in module variable, negligible cost)"
+      ],
+      "dependsOn": ["BIL-002"],
+      "suggestedSkills": ["spec-gap-analysis"],
+      "passes": false
+    },
+    {
+      "id": "BIL-004",
+      "title": "License Activation Endpoint — POST /api/billing/activate",
+      "description": "Add an endpoint that receives a license key JWT (from Stripe redirect or manual paste), verifies it, stores it in ~/.rorca/license.json, and returns the activated tier. This is the callback target for the Stripe checkout flow.",
+      "acceptanceCriteria": [
+        "New route: POST /api/billing/activate — accepts { key: string } in request body",
+        "No auth required on this endpoint — it's part of the no-auth-wall local-first flow",
+        "Validates the JWT signature using the bundled public key (same as getLicenseTier())",
+        "If signature is invalid: returns 400 { error: 'Invalid license key', code: 'INVALID_LICENSE' }",
+        "If JWT is expired: returns 400 { error: 'License key has expired', code: 'LICENSE_EXPIRED', expiresAt: '<date>' }",
+        "If valid: calls activateLicense(key) from license.ts → writes ~/.rorca/license.json",
+        "Also updates the local user's plan in the DB: UPDATE users SET plan = ? WHERE id = (SELECT id FROM users LIMIT 1)",
+        "Updating the DB ensures consistency — both license.json AND users.plan reflect the tier",
+        "Returns 200 { tier: 'pro', email: 'user@example.com', expiresAt: '<ISO-8601>', message: 'License activated successfully' }",
+        "Emits a WAL event: event_type='license_activated', payload includes { tier, email, expiresAt }",
+        "Backend log: '[billing] License activated: {tier} tier, expires {date}'",
+        "GET /api/billing/activate?key=<jwt> also works (for Stripe redirect URL callback — GET with query param for browser redirect compatibility)",
+        "GET variant redirects to the frontend settings page after activation: 302 redirect to /?activated={tier}",
+        "Frontend detects ?activated= query param and shows a success toast: 'Upgraded to {tier} — you can now add more workspaces'"
+      ],
+      "dependsOn": ["BIL-002"],
+      "suggestedSkills": ["logging-fundamentals"],
+      "passes": false
+    },
+    {
+      "id": "BIL-005",
+      "title": "Stripe Checkout Flow — Local-First with rorca.app Redirect",
+      "description": "Configure the Stripe checkout session to work with local-first billing. The checkout happens on Stripe's hosted page, but the success redirect points back to localhost:3030 with the license key. Since Stripe can't generate the license key directly, a lightweight cloud function on rorca.app acts as the intermediary: Stripe webhook → cloud function generates signed JWT → redirects to localhost:3030/api/billing/activate.",
+      "acceptanceCriteria": [
+        "POST /api/billing/checkout updated: success_url set to RORCA_CLOUD_URL/api/license/fulfill?session_id={CHECKOUT_SESSION_ID}&port={localPort}",
+        "RORCA_CLOUD_URL env var (default: 'https://rorca.app') — the cloud endpoint that signs license keys",
+        "cancel_url set to http://localhost:{port}/settings/billing (returns to local settings page)",
+        "Stripe checkout metadata includes: { localPort: PORT, machineId: os.hostname() } so the cloud fulfillment endpoint knows where to redirect",
+        "The cloud fulfillment endpoint (NOT in this codebase — documented as external dependency) does: verify Stripe session → extract plan → sign JWT with private key → redirect to http://localhost:{port}/api/billing/activate?key={jwt}",
+        "Documentation added as a comment block in billing.ts explaining the full flow: User clicks Upgrade → POST /api/billing/checkout → Stripe hosted page → payment → Stripe redirects to rorca.app/api/license/fulfill → cloud signs JWT → redirects to localhost:3030/api/billing/activate?key=jwt → license.json written → user sees success",
+        "If STRIPE_SECRET_KEY is not configured: POST /api/billing/checkout returns 503 { error: 'Billing not configured', suggestion: 'Visit rorca.app/pricing to upgrade' }",
+        "Fallback: if cloud fulfillment fails (user closes browser, network issue), Settings > Billing shows 'Enter license key manually' input field",
+        "The manual key entry field calls POST /api/billing/activate with the pasted JWT"
+      ],
+      "dependsOn": ["BIL-004"],
+      "suggestedSkills": ["exhaustive-specification"],
+      "passes": false
+    },
+    {
+      "id": "BIL-006",
+      "title": "Paywall UI Component — Show Upgrade Prompt on 402",
+      "description": "When the frontend receives a 402 response from POST /api/workspaces (workspace limit reached), show a polished paywall modal instead of a generic error. The modal shows the current plan, the limit, and a one-click upgrade button.",
+      "acceptanceCriteria": [
+        "New component: src/components/PaywallModal.tsx — a modal overlay triggered by 402 responses",
+        "PaywallModal props: { feature: string, currentPlan: string, quotaLimit: number, currentUsage: number, onClose: () => void, onUpgrade: () => void }",
+        "Modal layout: centered overlay (max-w-md), dark backdrop blur, rounded-xl border-border bg-panel",
+        "Header: Lock icon + 'Workspace limit reached' (or dynamic based on feature)",
+        "Body: 'Your {currentPlan} plan includes {quotaLimit} workspace(s). You're currently using {currentUsage}.'",
+        "Plan comparison section: shows current plan vs next tier with feature differences (reuses plan data from GET /api/billing/status)",
+        "Primary CTA button: 'Upgrade to {nextTier} — ${price}/mo' — calls onUpgrade which triggers POST /api/billing/checkout",
+        "Secondary option: 'Enter license key' text link — expands to show a text input + 'Activate' button → calls POST /api/billing/activate",
+        "Tertiary option: 'Or visit rorca.app/pricing' link — opens in new tab (fallback for users who want to purchase outside the app)",
+        "Close button (X) in top-right corner — dismisses modal, user stays on current page",
+        "Animation: modal slides up with opacity transition (200ms ease-out)",
+        "Accessible: focus trap inside modal, Escape key closes, aria-labelledby on header, role='dialog'",
+        "The modal is rendered from a context provider (PaywallContext) so any component can trigger it, not just the workspace creation flow"
+      ],
+      "dependsOn": ["BIL-004"],
+      "suggestedSkills": ["react-review", "exhaustive-specification"],
+      "passes": false
+    },
+    {
+      "id": "BIL-007",
+      "title": "Frontend 402 Interceptor — Catch Plan Limit Errors Globally",
+      "description": "Add a global fetch interceptor that catches 402 responses and triggers the PaywallModal. This ensures ANY plan-gated feature (workspaces, specs, marketplace) shows the upgrade prompt automatically without each component handling it individually.",
+      "acceptanceCriteria": [
+        "In src/lib/apiFetch.ts, add 402 response handling to the global fetch wrapper",
+        "When a 402 response is received: parse the JSON body (expects { error, feature, currentPlan, requiredPlan, currentUsage, quotaLimit })",
+        "Emit a custom event: window.dispatchEvent(new CustomEvent('rorca:paywall', { detail: parsedBody }))",
+        "New context: src/contexts/PaywallContext.tsx — provides PaywallProvider wrapping the app in App.tsx",
+        "PaywallProvider listens for 'rorca:paywall' events and renders PaywallModal with the event detail as props",
+        "PaywallProvider manages modal open/close state and the onUpgrade callback (POST /api/billing/checkout)",
+        "The 402 response is NOT thrown as an error to the calling component — the paywall modal handles it. The calling component receives a rejected promise with a PaywallError type so it can optionally handle it (e.g. reset loading state)",
+        "PaywallError class: extends Error with { feature, currentPlan, quotaLimit } properties",
+        "If the 402 response body doesn't match the expected shape (non-plan 402): fall through to normal error handling, don't show paywall",
+        "Multiple rapid 402s don't open multiple modals — PaywallProvider debounces (only one modal at a time)"
+      ],
+      "dependsOn": ["BIL-006"],
+      "suggestedSkills": ["react-review"],
+      "passes": false
+    },
+    {
+      "id": "BIL-008",
+      "title": "License Status Display in Settings Billing Tab",
+      "description": "Update the existing BillingSection in AccountSettingsTab.tsx to show the license status for local-first mode. Display current tier, license expiry, workspace usage, and manual key entry.",
+      "acceptanceCriteria": [
+        "GET /api/billing/status response extended: add licenseTier, licenseExpiry, licenseEmail fields (read from license.ts getLicenseTier() + cached payload)",
+        "BillingSection shows license-based tier when no Stripe subscription is active (local-first mode): badge showing 'Free', 'Solo', 'Pro', or 'Team' with the license expiry date",
+        "Workspace usage indicator: '{used}/{limit} workspaces' with a mini progress bar (same style as token usage bars)",
+        "If on free tier: prominent upgrade card below the badge — 'Unlock more workspaces' with plan comparison and 'Upgrade' button",
+        "If license is within 30 days of expiry: amber warning banner — 'Your {tier} license expires on {date}. Renew to keep your workspaces.'",
+        "If license is expired: red banner — 'Your {tier} license has expired. Workspace creation is limited to 1.' with 'Renew' button",
+        "Manual license entry section: collapsible 'Have a license key?' row with text input + 'Activate' button",
+        "On successful activation: toast 'Upgraded to {tier}!' + BillingSection re-fetches status to update display",
+        "License key input shows validation state: green checkmark on valid JWT format, red X on invalid",
+        "No auth-related fields shown (no email, no password, no login prompt) — this is pure license-based, no auth wall"
+      ],
+      "dependsOn": ["BIL-003", "BIL-004"],
+      "suggestedSkills": ["react-review"],
+      "passes": false
+    },
+    {
+      "id": "BIL-009",
+      "title": "Workspace Count Badge in Sidebar — Visual Limit Indicator",
+      "description": "Show the workspace count and limit in the workspace selector dropdown so users always know how close they are to their limit. When at the limit, the 'Add Workspace' button shows the upgrade prompt instead of the creation flow.",
+      "acceptanceCriteria": [
+        "In src/components/WorkspaceSelector.tsx, fetch workspace count and plan limit from GET /api/billing/quotas (already exists, returns workspace usage)",
+        "Below the workspace list in the dropdown: show '{used}/{limit} workspaces' in text-xs text-muted",
+        "If used < limit: 'Add Workspace' button works normally (existing behavior)",
+        "If used >= limit: 'Add Workspace' button label changes to 'Add Workspace (Upgrade)' with a small lock icon",
+        "Clicking 'Add Workspace (Upgrade)' opens the PaywallModal (from PaywallContext) instead of the workspace creation flow",
+        "If limit is -1 (unlimited, pro/team): show '{used} workspaces' without the limit (no '/N')",
+        "The count updates reactively when a workspace is added or deleted (re-fetch on workspace list change)",
+        "Workspace count fetch is lightweight — uses the same GET /api/billing/quotas endpoint, cached for 30s in component state"
+      ],
+      "dependsOn": ["BIL-006", "BIL-007"],
+      "suggestedSkills": ["react-review"],
+      "passes": false
+    },
+    {
+      "id": "BIL-010",
+      "title": "Generate RSA Key Pair and Document Cloud Fulfillment API",
+      "description": "Generate the RSA-256 key pair used for license signing. Bundle the public key in the npm package. Document the cloud fulfillment endpoint contract that rorca.app must implement. Create a test helper that generates valid license keys for development.",
+      "acceptanceCriteria": [
+        "Generate RSA-256 key pair: 2048-bit minimum (openssl genrsa 2048 + openssl rsa -pubout)",
+        "Public key stored as a string constant in backend/src/lib/license.ts (the offline verifier)",
+        "Private key stored ONLY in a .env.example comment and documented as 'keep this on your cloud server, never commit to git'",
+        "Private key added to .gitignore pattern: '*.pem', 'license-private-key*'",
+        "New file: backend/src/lib/license-dev.ts — development-only helper that generates test license keys using a DEV_PRIVATE_KEY",
+        "DEV_PRIVATE_KEY is a separate key pair used ONLY in development (NODE_ENV=development) — not the production key",
+        "license-dev.ts exports generateTestLicense(tier, expiresInDays) for use in tests and local development",
+        "In development mode: getLicenseTier() also accepts keys signed by the dev key pair (checks both public keys)",
+        "In production mode: only the production public key is accepted",
+        "New file: docs/cloud-fulfillment-api.md (or inline as a comment block in billing.ts) documenting the contract:",
+        "Cloud endpoint: POST /api/license/fulfill — receives { sessionId: string, plan: string, email: string, machineId?: string } from Stripe webhook → returns signed JWT",
+        "Cloud endpoint: GET /api/license/fulfill?session_id=X&port=Y — Stripe success redirect → looks up session → generates JWT → redirects to http://localhost:{port}/api/billing/activate?key={jwt}",
+        "JWT payload contract: { tier: 'solo'|'pro'|'team', email: string, iat: number, exp: number, machineId?: string, stripeSubscriptionId?: string }",
+        "JWT lifetime: 365 days (annual renewal, matching typical SaaS billing)",
+        "Test: generate a test license → verify with getLicenseTier() → assert correct tier returned",
+        "Test: generate an expired test license → verify getLicenseTier() returns 'free'"
+      ],
+      "dependsOn": ["BIL-002"],
+      "suggestedSkills": ["exhaustive-specification", "logging-fundamentals"],
+      "passes": false
+    },
+    {
+      "id": "BIL-011",
+      "title": "Startup License Check and Plan Sync",
+      "description": "On backend startup (server.ts boot sequence), read the license key and sync the effective tier to the database. This ensures the DB state matches the license state even if the user manually placed a license.json file or if the license expired since last startup.",
+      "acceptanceCriteria": [
+        "In backend/src/server.ts startup sequence (after DB migration, before route registration), call syncLicenseToDb() from license.ts",
+        "syncLicenseToDb() reads ~/.rorca/license.json → verifies JWT → updates users.plan for the default user to match the license tier",
+        "If no license.json exists: ensures default user has plan='free' (corrects any manual DB edits)",
+        "If license.json is expired: sets user plan to 'free', logs '[license] License expired, reverting to free tier'",
+        "If license.json is valid: sets user plan to the license tier, logs '[license] License valid: {tier} tier, expires {date}'",
+        "Startup log always shows current tier: '[rorca] Starting on {tier} tier ({N}/{limit} workspaces)'",
+        "If workspace count exceeds the license tier limit (e.g. had pro, expired to free, but has 3 workspaces): do NOT delete workspaces — just block creation of new ones. Log warning: '[license] Warning: {N} workspaces exceed {tier} limit of {limit}. Existing workspaces are preserved, new creation blocked.'",
+        "sync is idempotent — running it multiple times produces the same result",
+        "sync does NOT phone home — entirely offline, reads local file + verifies with bundled public key"
+      ],
+      "dependsOn": ["BIL-002", "BIL-003"],
+      "suggestedSkills": ["logging-fundamentals"],
+      "passes": false
+    },
+    {
+      "id": "BIL-012",
+      "title": "CLI License Commands — rorca license status and rorca license activate",
+      "description": "Add license management commands to the rorca CLI for users who prefer terminal workflows over the UI.",
+      "acceptanceCriteria": [
+        "New CLI command: rorca license status — shows current tier, expiry, workspace usage. Output: 'Plan: {tier}\\nExpires: {date}\\nWorkspaces: {used}/{limit}'",
+        "If no license: shows 'Plan: free\\nWorkspaces: {used}/1\\nUpgrade at rorca.app/pricing'",
+        "New CLI command: rorca license activate <key> — writes license.json, verifies, shows result. Output: 'License activated: {tier} tier (expires {date})'",
+        "New CLI command: rorca license activate --from-clipboard — reads JWT from system clipboard (pbpaste on macOS, xclip on Linux)",
+        "If key is invalid: shows 'Error: Invalid license key. Check that you copied the full key.' (exit code 1)",
+        "If key is expired: shows 'Error: This license key expired on {date}. Visit rorca.app/pricing to renew.' (exit code 1)",
+        "Commands work WITHOUT the backend running — they read/write ~/.rorca/license.json directly and use the same verifyLicenseKey() function",
+        "CLI help text updated: rorca --help shows license subcommand group",
+        "rorca license deactivate — removes license.json, shows 'License removed. Reverted to free tier.'",
+        "All commands use the same license.ts module — no duplicate verification logic"
+      ],
+      "dependsOn": ["BIL-002"],
+      "suggestedSkills": ["exhaustive-specification"],
+      "passes": false
+    }
+  ]
+}

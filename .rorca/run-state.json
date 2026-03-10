@@ -1,12 +1,22 @@
 {
   "specId": "rorca-distribution",
-  "runId": 18,
-  "startedAt": "2026-03-10T17:19:40.743Z",
-  "lastUpdatedAt": "2026-03-10T17:21:44.304Z",
-  "completedStories": [],
+  "runId": 26,
+  "startedAt": "2026-03-10T22:02:11.346Z",
+  "lastUpdatedAt": "2026-03-10T22:03:21.252Z",
+  "completedStories": [
+    {
+      "storyId": "DIST-006",
+      "title": "LICENSE & Legal Files",
+      "status": "passed",
+      "startedAt": "2026-03-10T22:02:20.092Z",
+      "finishedAt": "2026-03-10T22:03:21.251Z",
+      "agentType": "claude",
+      "elapsedMs": 61159
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": "DIST-006",
+  "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
 }
