@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T10:09:52.083Z",
+  "lastUpdatedAt": "2026-03-10T10:10:14.016Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-10T10:09:52.083Z",
       "agentType": "claude",
       "elapsedMs": 416619
+    },
+    {
+      "storyId": "PG-006",
+      "title": "pgvector Extension + Embedding Store",
+      "status": "passed",
+      "startedAt": "2026-03-10T10:10:00.794Z",
+      "finishedAt": "2026-03-10T10:10:14.015Z",
+      "agentType": "claude",
+      "elapsedMs": 13221
     }
   ],
   "failedStories": [],
