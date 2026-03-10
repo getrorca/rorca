@@ -3,8 +3,9 @@
 Spec: rorca-semantic-wiring
 Run ID: 28
 Started: 2026-03-10T22:49:18.582Z
-Last Updated: 2026-03-10T22:59:08.530Z
+Last Updated: 2026-03-10T23:03:57.429Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - SW-001: Populate Embeddings on Spec Approval + Run Completion — DONE (claude, 342s)
 - SW-002: Auto-Index Specs in tsvector for Keyword Search — DONE (claude, 215s)
+- SW-003: Wire retrieveContext() into Spec Generation Prompt — DONE (claude, 265s)
