@@ -2,7 +2,7 @@
   "specId": "rorca-distribution",
   "runId": 17,
   "startedAt": "2026-03-10T13:18:22.929Z",
-  "lastUpdatedAt": "2026-03-10T13:36:38.485Z",
+  "lastUpdatedAt": "2026-03-10T13:36:58.481Z",
   "completedStories": [
     {
       "storyId": "DIST-001",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-10T13:36:38.485Z",
       "agentType": "claude",
       "elapsedMs": 911288
+    },
+    {
+      "storyId": "DIST-003",
+      "title": "Postgres Binary Build Pipeline",
+      "status": "passed",
+      "startedAt": "2026-03-10T13:36:47.037Z",
+      "finishedAt": "2026-03-10T13:36:58.481Z",
+      "agentType": "claude",
+      "elapsedMs": 11444
     }
   ],
   "failedStories": [],
