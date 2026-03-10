@@ -2,7 +2,7 @@
   "specId": "rorca-curated-skills-library",
   "runId": 14,
   "startedAt": "2026-03-10T02:18:43.908Z",
-  "lastUpdatedAt": "2026-03-10T02:47:53.248Z",
+  "lastUpdatedAt": "2026-03-10T02:48:22.438Z",
   "completedStories": [
     {
       "storyId": "SL-002",
@@ -57,6 +57,15 @@
       "finishedAt": "2026-03-10T02:47:53.248Z",
       "agentType": "claude",
       "elapsedMs": 250178
+    },
+    {
+      "storyId": "SL-004",
+      "title": "Skills Usage Per-Run API Endpoint",
+      "status": "passed",
+      "startedAt": "2026-03-10T02:48:06.843Z",
+      "finishedAt": "2026-03-10T02:48:22.438Z",
+      "agentType": "claude",
+      "elapsedMs": 15595
     }
   ],
   "failedStories": [],
