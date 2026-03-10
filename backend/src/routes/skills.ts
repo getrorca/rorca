@@ -845,6 +845,389 @@ router.post('/search', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Parse a GitHub repo URL or shorthand into owner/repo.
+ * Accepted formats:
+ *  - 'https://github.com/owner/repo'
+ *  - 'https://github.com/owner/repo/tree/main'
+ *  - 'https://github.com/owner/repo.git'
+ *  - 'owner/repo'
+ */
+function parseGitHubRepo(repoUrl: string): { owner: string; repo: string } | null {
+  let cleaned = repoUrl.trim();
+  // Strip protocol + github.com prefix
+  cleaned = cleaned.replace(/^https?:\/\/(www\.)?github\.com\//, '');
+  // Strip .git suffix
+  cleaned = cleaned.replace(/\.git$/, '');
+  // Strip /tree/... suffix
+  cleaned = cleaned.replace(/\/tree\/.*$/, '');
+  // Strip trailing slashes
+  cleaned = cleaned.replace(/\/+$/, '');
+
+  const parts = cleaned.split('/');
+  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+  return { owner: parts[0], repo: parts[1] };
+}
+
+/**
+ * @swagger
+ * /api/skills/browse-github:
+ *   post:
+ *     tags: [Skills]
+ *     summary: Browse SKILL.md files in a GitHub repository
+ *     operationId: browseGitHubSkills
+ *     description: |
+ *       Lists all SKILL.md files found in a GitHub repository tree.
+ *       Fetches each file's YAML frontmatter for name and description.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [repoUrl]
+ *             properties:
+ *               repoUrl:
+ *                 type: string
+ *                 description: "GitHub URL or shorthand (e.g. 'wojons/skills' or 'https://github.com/wojons/skills')"
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         schema:
+ *           type: string
+ *         description: Workspace ID for checking installed status. Defaults to first workspace.
+ *     responses:
+ *       200:
+ *         description: List of SKILL.md files in the repo
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 repo:
+ *                   type: string
+ *                 branch:
+ *                   type: string
+ *                 skills:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *                       path:
+ *                         type: string
+ *                       installed:
+ *                         type: boolean
+ *       400:
+ *         description: Invalid repository URL
+ *       404:
+ *         description: Repository not found
+ *       429:
+ *         description: GitHub API rate limit exceeded
+ *       502:
+ *         description: GitHub API unavailable
+ */
+router.post('/browse-github', async (req: Request, res: Response) => {
+  try {
+    const { repoUrl } = req.body;
+    if (!repoUrl || typeof repoUrl !== 'string' || !repoUrl.trim()) {
+      res.status(400).json({ error: 'Invalid repository URL' });
+      return;
+    }
+
+    const parsed = parseGitHubRepo(repoUrl);
+    if (!parsed) {
+      res.status(400).json({ error: 'Invalid repository URL' });
+      return;
+    }
+    const { owner, repo } = parsed;
+
+    // Fetch repo tree
+    const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`;
+    let treeData: any;
+    try {
+      const treeResp = await fetch(treeUrl, {
+        headers: { Accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (treeResp.status === 404) {
+        res.status(404).json({ error: 'Repository not found' });
+        return;
+      }
+      if (treeResp.status === 403) {
+        res.status(429).json({ error: 'GitHub API rate limit exceeded. Try again later or add a GitHub token in Settings.' });
+        return;
+      }
+      if (!treeResp.ok) {
+        res.status(502).json({ error: 'GitHub API unavailable' });
+        return;
+      }
+      treeData = await treeResp.json();
+    } catch (err: any) {
+      if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+        res.status(502).json({ error: 'GitHub API unavailable' });
+        return;
+      }
+      throw err;
+    }
+
+    // Filter for SKILL.md files at any depth (pattern: */SKILL.md)
+    const skillPaths: string[] = (treeData.tree || [])
+      .filter((f: any) => f.type === 'blob' && f.path.endsWith('/SKILL.md'))
+      .map((f: any) => f.path);
+
+    // Build installed set for checking
+    const wsPath = resolveWorkspacePath(req);
+    const installedNames = new Set<string>();
+    if (wsPath) {
+      const registry = new SkillRegistry();
+      registry.discover(wsPath);
+      for (const s of registry.getAll()) {
+        installedNames.add(s.metadata.name.toLowerCase());
+      }
+    }
+
+    // Determine branch — try main first, fall back to master
+    let branch = 'main';
+
+    // Fetch frontmatter for each SKILL.md (parallel, capped at 30 to avoid flooding)
+    const skills: Array<{ name: string; description: string; path: string; installed: boolean }> = [];
+    const batchSize = 30;
+    const toFetch = skillPaths.slice(0, batchSize);
+
+    const fetchResults = await Promise.allSettled(
+      toFetch.map(async (skillPath) => {
+        // Try main branch first
+        let content: string | null = null;
+        let usedBranch = 'main';
+        const mainUrl = `https://raw.githubusercontent.com/${owner}/${repo}/main/${skillPath}`;
+        try {
+          const resp = await fetch(mainUrl, { signal: AbortSignal.timeout(10_000) });
+          if (resp.ok) {
+            content = await resp.text();
+          }
+        } catch { /* try master */ }
+
+        if (!content) {
+          const masterUrl = `https://raw.githubusercontent.com/${owner}/${repo}/master/${skillPath}`;
+          try {
+            const resp = await fetch(masterUrl, { signal: AbortSignal.timeout(10_000) });
+            if (resp.ok) {
+              content = await resp.text();
+              usedBranch = 'master';
+            }
+          } catch { /* skip */ }
+        }
+
+        if (!content) return null;
+
+        // Update branch if we found master works
+        if (usedBranch === 'master') branch = 'master';
+
+        // Parse frontmatter
+        let name = '';
+        let description = '';
+        const fm = parseFrontmatter(content);
+        if (fm) {
+          try {
+            const meta = yaml.load(fm.yaml) as Record<string, unknown> | null;
+            if (meta && typeof meta === 'object') {
+              if (typeof meta['name'] === 'string') name = meta['name'];
+              if (typeof meta['description'] === 'string') description = meta['description'];
+            }
+          } catch { /* use defaults */ }
+        }
+
+        // Derive name from directory if frontmatter has none
+        if (!name) {
+          const parts = skillPath.split('/');
+          name = parts.length >= 2 ? parts[parts.length - 2] : skillPath;
+        }
+
+        return {
+          name,
+          description,
+          path: skillPath,
+          installed: installedNames.has(name.toLowerCase()),
+        };
+      })
+    );
+
+    for (const result of fetchResults) {
+      if (result.status === 'fulfilled' && result.value) {
+        skills.push(result.value);
+      }
+    }
+
+    res.json({
+      repo: `${owner}/${repo}`,
+      branch,
+      skills,
+    });
+  } catch (error: any) {
+    logger.error('[Skills] browse-github error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/skills/install-from-github:
+ *   post:
+ *     tags: [Skills]
+ *     summary: Install a skill from a GitHub repository by path
+ *     operationId: installSkillFromGitHub
+ *     description: |
+ *       Fetches a specific SKILL.md from a GitHub repository and installs it
+ *       using the SkillRegistry with dual-save to .rorca/skills/ and .claude/skills/.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [repoUrl, skillPath]
+ *             properties:
+ *               repoUrl:
+ *                 type: string
+ *                 description: "GitHub URL or shorthand (e.g. 'wojons/skills')"
+ *               skillPath:
+ *                 type: string
+ *                 description: "Path within the repo (e.g. 'skills/react/SKILL.md')"
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID to install into. Defaults to first workspace.
+ *     responses:
+ *       201:
+ *         description: Skill installed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 name:
+ *                   type: string
+ *                 description:
+ *                   type: string
+ *                 source:
+ *                   type: string
+ *                 filePath:
+ *                   type: string
+ *       400:
+ *         description: Missing repoUrl or skillPath
+ *       404:
+ *         description: Skill file not found at path
+ */
+router.post('/install-from-github', async (req: Request, res: Response) => {
+  try {
+    const { repoUrl, skillPath, workspaceId } = req.body;
+
+    if (!repoUrl || typeof repoUrl !== 'string' || !repoUrl.trim()) {
+      res.status(400).json({ error: 'repoUrl is required' });
+      return;
+    }
+    if (!skillPath || typeof skillPath !== 'string' || !skillPath.trim()) {
+      res.status(400).json({ error: 'skillPath is required' });
+      return;
+    }
+
+    const parsed = parseGitHubRepo(repoUrl);
+    if (!parsed) {
+      res.status(400).json({ error: 'Invalid repository URL' });
+      return;
+    }
+    const { owner, repo } = parsed;
+
+    // Resolve workspace
+    const wsPath = workspaceId
+      ? (db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined)?.path
+      : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
+
+    if (!wsPath) {
+      res.status(400).json({ error: 'No workspace found' });
+      return;
+    }
+
+    // Fetch raw content — try main, then master
+    let content: string | null = null;
+    const trimmedPath = skillPath.trim();
+    const mainUrl = `https://raw.githubusercontent.com/${owner}/${repo}/main/${trimmedPath}`;
+    try {
+      const resp = await fetch(mainUrl, { signal: AbortSignal.timeout(15_000) });
+      if (resp.ok) {
+        content = await resp.text();
+      }
+    } catch { /* try master */ }
+
+    if (!content) {
+      const masterUrl = `https://raw.githubusercontent.com/${owner}/${repo}/master/${trimmedPath}`;
+      try {
+        const resp = await fetch(masterUrl, { signal: AbortSignal.timeout(15_000) });
+        if (resp.ok) {
+          content = await resp.text();
+        }
+      } catch { /* not found */ }
+    }
+
+    if (!content) {
+      res.status(404).json({ error: `Skill file not found at ${trimmedPath} in ${owner}/${repo}` });
+      return;
+    }
+
+    // Parse frontmatter for name and description
+    let name = '';
+    let description = '';
+    const fm = parseFrontmatter(content);
+    if (fm) {
+      try {
+        const meta = yaml.load(fm.yaml) as Record<string, unknown> | null;
+        if (meta && typeof meta === 'object') {
+          if (typeof meta['name'] === 'string') name = meta['name'];
+          if (typeof meta['description'] === 'string') description = meta['description'];
+        }
+      } catch { /* use defaults */ }
+    }
+
+    // Derive name from directory if no frontmatter name
+    if (!name) {
+      const parts = trimmedPath.split('/');
+      // e.g. 'skills/react/SKILL.md' -> 'react'
+      name = parts.length >= 2 ? parts[parts.length - 2] : path.basename(trimmedPath, '.md');
+    }
+
+    const skillName = name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const source = `github:${owner}/${repo}`;
+
+    // Dual-save to .rorca/skills/ and .claude/skills/
+    const rorcaSkillsDir = path.join(wsPath, '.rorca', 'skills');
+    const claudeSkillsDir = path.join(wsPath, '.claude', 'skills');
+    fs.mkdirSync(rorcaSkillsDir, { recursive: true });
+    fs.mkdirSync(claudeSkillsDir, { recursive: true });
+
+    const rorcaPath = path.join(rorcaSkillsDir, `${skillName}.md`);
+    const claudePath = path.join(claudeSkillsDir, `${skillName}.md`);
+    fs.writeFileSync(rorcaPath, content, 'utf-8');
+    fs.writeFileSync(claudePath, content, 'utf-8');
+
+    // Register in DB
+    const registry = new SkillRegistry();
+    registry.install(skillName, content, source);
+
+    res.status(201).json({
+      name: skillName,
+      description,
+      source,
+      filePath: rorcaPath,
+    });
+  } catch (error: any) {
+    logger.error('[Skills] install-from-github error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 /** Recursively find .md files in a directory. */
 function findMdFiles(dir: string): string[] {
   const results: string[] = [];
