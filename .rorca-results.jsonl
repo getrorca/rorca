@@ -1,0 +1,1 @@
+{"type":"wal","storyId":"PG-010","status":"story_token_update","runId":16,"retries":3,"ts":"2026-03-10T11:04:47.953Z","payload":{"event_type":"story_token_update","workspace_id":"rorcha","story_id":"PG-010","spec_id":null,"payload":{"run_id":16,"story_id":"PG-010","input_tokens":3,"output_tokens":114,"cumulative_input":3,"cumulative_output":158,"turn":4}}}

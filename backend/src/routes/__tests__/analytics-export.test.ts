@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -17,7 +17,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -39,49 +38,36 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-export-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
   // Seed test data
-  db.prepare(`INSERT OR IGNORE INTO workspaces (id, label, path) VALUES (?, ?, ?)`)
-    .run(workspaceId, 'Export Test', '/tmp/export-test');
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [workspaceId, 'Export Test', '/tmp/export-test']);
 
-  const result = db.prepare(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
-     VALUES (?, ?, ?, datetime('now', '-1 day'), datetime('now'))`
-  ).run('ralph/specs/approved/test-export.json', workspaceId, 'done');
-  runId = result.lastInsertRowid as number;
+  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
+     VALUES ($1, $2, $3, NOW() - INTERVAL '1 day', NOW()) RETURNING id`, ['ralph/specs/approved/test-export.json', workspaceId, 'done']);
+  runId = result!.id;
 
   // Insert 5 token_usage rows
   for (let i = 1; i <= 5; i++) {
-    db.prepare(
-      `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '-' || ? || ' hours'))`
-    ).run(runId, `US-${String(i).padStart(3, '0')}`, workspaceId, 'claude-sonnet-4-5-20250929', 10000 * i, 2000 * i, 0.05 * i, i);
+    await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() - ($8 || ' hours')::INTERVAL)`, [runId, `US-${String(i).padStart(3, '0')}`, workspaceId, 'claude-sonnet-4-5-20250929', 10000 * i, 2000 * i, 0.05 * i, i]);
   }
 
   // Insert 5 story_results rows
   const statuses = ['pass', 'pass', 'fail', 'pass', 'skip'];
   for (let i = 1; i <= 5; i++) {
-    db.prepare(
-      `INSERT INTO story_results (run_id, story_id, status, finished_at, elapsed_seconds, input_tokens, output_tokens)
-       VALUES (?, ?, ?, datetime('now', '-' || ? || ' hours'), ?, ?, ?)`
-    ).run(runId, `US-${String(i).padStart(3, '0')}`, statuses[i - 1], i, 60 * i, 10000 * i, 2000 * i);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, elapsed_seconds, input_tokens, output_tokens)
+       VALUES ($1, $2, $3, NOW() - ($4 || ' hours')::INTERVAL, $5, $6, $7)`, [runId, `US-${String(i).padStart(3, '0')}`, statuses[i - 1], i, 60 * i, 10000 * i, 2000 * i]);
   }
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 function get(urlPath: string) {
@@ -188,10 +174,8 @@ describe('GET /api/analytics/export (V2-050)', () => {
 
   it('properly quotes CSV fields containing commas', async () => {
     // Insert a token_usage row with a user_id containing a comma
-    db.prepare(
-      `INSERT INTO token_usage (run_id, story_id, workspace_id, user_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
-    ).run(runId, 'US-COMMA', workspaceId, 'user,with,commas', 'claude-sonnet-4-5-20250929', 1000, 200, 0.01);
+    await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, user_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`, [runId, 'US-COMMA', workspaceId, 'user,with,commas', 'claude-sonnet-4-5-20250929', 1000, 200, 0.01]);
 
     const res = await get('/api/analytics/export?format=csv&data_type=usage&workspace_id=' + workspaceId);
     expect(res.status).toBe(200);

@@ -3,12 +3,11 @@ import * as os from 'os';
 import * as path from 'path';
 import { createHmac } from 'crypto';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -69,36 +68,27 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-commit-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
-  db.prepare('DELETE FROM wal_events').run();
+  await execute(`DELETE FROM wal_events`);
 
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)"
-  ).run(WORKSPACE_ID, 'Commit Test', tmpDir);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'Commit Test', tmpDir]);
 
   const authMod = require('../auth');
   const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
-  db.prepare(
-    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret);
+  await execute(`INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES ($1, $2, $3, $4, $5)`, [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret]);
 });
 
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 100));
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── extractStoryIdsFromCommit unit tests ────────────────────────────────────
@@ -157,7 +147,7 @@ test('push with feat(US-XXX) commits creates story_commits rows', async () => {
   expect(res.status).toBe(200);
   await new Promise((r) => setTimeout(r, 200));
 
-  const rows = db.prepare('SELECT * FROM story_commits').all() as any[];
+  const rows = await query(`SELECT * FROM story_commits`) as any[];
   expect(rows).toHaveLength(1);
   expect(rows[0].story_id).toBe('US-001');
   expect(rows[0].spec_id).toBe('test-spec');
@@ -180,7 +170,7 @@ test('single commit with multiple story IDs creates multiple rows', async () => 
   await sendWebhook(payload);
   await new Promise((r) => setTimeout(r, 200));
 
-  const rows = db.prepare('SELECT * FROM story_commits ORDER BY story_id').all() as any[];
+  const rows = await query(`SELECT * FROM story_commits ORDER BY story_id`) as any[];
   expect(rows).toHaveLength(2);
   expect(rows[0].story_id).toBe('US-001');
   expect(rows[1].story_id).toBe('US-003');
@@ -200,9 +190,7 @@ test('push emits github_push_commits WAL event', async () => {
   await sendWebhook(payload);
   await new Promise((r) => setTimeout(r, 200));
 
-  const events = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'github_push_commits'"
-  ).all() as any[];
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_push_commits'`) as any[];
 
   expect(events).toHaveLength(1);
   const walPayload = JSON.parse(events[0].payload);
@@ -222,7 +210,7 @@ test('commit without story IDs does not create rows', async () => {
   await sendWebhook(payload);
   await new Promise((r) => setTimeout(r, 200));
 
-  const rows = db.prepare('SELECT * FROM story_commits').all();
+  const rows = await query(`SELECT * FROM story_commits`);
   expect(rows).toHaveLength(0);
 });
 
@@ -240,7 +228,7 @@ test('duplicate commit SHA is ignored (INSERT OR IGNORE)', async () => {
   await sendWebhook(payload);
   await new Promise((r) => setTimeout(r, 200));
 
-  const rows = db.prepare('SELECT * FROM story_commits').all();
+  const rows = await query(`SELECT * FROM story_commits`);
   expect(rows).toHaveLength(1);
 });
 
@@ -252,10 +240,8 @@ test('GET story commits returns linked commits', async () => {
   ]);
 
   // Insert a commit directly
-  db.prepare(
-    `INSERT INTO story_commits (story_id, spec_id, workspace_id, commit_sha, commit_message, author, pushed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run('US-001', 'test-spec', WORKSPACE_ID, 'abc123', 'feat(US-001): Add login', 'octocat', '2026-02-23T12:00:00Z');
+  await execute(`INSERT INTO story_commits (story_id, spec_id, workspace_id, commit_sha, commit_message, author, pushed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`, ['US-001', 'test-spec', WORKSPACE_ID, 'abc123', 'feat(US-001): Add login', 'octocat', '2026-02-23T12:00:00Z']);
 
   const res = await request(app)
     .get(`/api/specs/test-spec/stories/US-001/commits?workspaceId=${WORKSPACE_ID}`)

@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -15,32 +14,25 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sse-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
-function createWorkspace(id = 'ws-sse-1') {
-  db.prepare(
-    `INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)`
-  ).run(id, 'SSE Test Workspace', tmpDir);
+async function createWorkspace(id = 'ws-sse-1') {
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [id, 'SSE Test Workspace', tmpDir]);
 }
 
 // ─── Test 1: POST /api/pipeline/runs creates run → triggers broadcastAll ────
 
 test('POST /api/pipeline/runs creates run and broadcasts WAL event to subscribers', async () => {
-  createWorkspace();
+  await createWorkspace();
 
   // Subscribe via the sse-hub before creating the run
   const sseHub = require('../../lib/sse-hub');
@@ -93,7 +85,7 @@ test('subscribe() cleanup function removes subscriber from Map (no leak)', () =>
 // ─── Test 3: GET /api/pipeline/runs/:runId returns run + empty stories ──────
 
 test('GET /api/pipeline/runs/:runId returns the run with empty story_results array', async () => {
-  createWorkspace();
+  await createWorkspace();
 
   // Create a run first
   const createRes = await request(app)
@@ -139,16 +131,14 @@ test('GET /api/pipeline/runs/:runId returns 404 for nonexistent run', async () =
 // ─── Test 6: WAL event persisted with correct Phase 3 event types ───────────
 
 test('POST /api/pipeline/runs persists run_started WAL event in wal_events table', async () => {
-  createWorkspace();
+  await createWorkspace();
 
   await request(app)
     .post('/api/pipeline/runs')
     .set('Authorization', `Bearer ${authToken}`)
     .send({ specPath: 'specs/pending/wal-check.json', workspaceId: 'ws-sse-1' });
 
-  const events = db.prepare(
-    `SELECT * FROM wal_events WHERE event_type = 'run_started'`
-  ).all() as any[];
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'run_started'`) as any[];
 
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe('ws-sse-1');
