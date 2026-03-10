@@ -2,7 +2,7 @@
   "specId": "rorca-curated-skills-library",
   "runId": 14,
   "startedAt": "2026-03-10T02:18:43.908Z",
-  "lastUpdatedAt": "2026-03-10T02:22:00.343Z",
+  "lastUpdatedAt": "2026-03-10T02:27:43.762Z",
   "completedStories": [
     {
       "storyId": "SL-002",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-10T02:22:00.342Z",
       "agentType": "claude",
       "elapsedMs": 193932
+    },
+    {
+      "storyId": "SL-008",
+      "title": "Match & Inject Button in Spec Review",
+      "status": "passed",
+      "startedAt": "2026-03-10T02:22:13.860Z",
+      "finishedAt": "2026-03-10T02:27:43.762Z",
+      "agentType": "claude",
+      "elapsedMs": 329902
     }
   ],
   "failedStories": [],

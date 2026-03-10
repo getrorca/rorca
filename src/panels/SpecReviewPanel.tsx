@@ -15,6 +15,7 @@ import {
   Play,
   Pencil,
   Trash2,
+  Wrench,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
@@ -38,6 +39,7 @@ interface Story {
   excluded?: boolean;
   /** Per-story execution model override (e.g. 'claude-opus-4-6'). */
   model?: string;
+  suggestedSkills?: Array<{ name: string; relevance: number; reason: string }>;
 }
 
 interface SpecDetail {
@@ -271,6 +273,7 @@ function StoryReviewCard({
   onToggle,
   onScrollToStory,
   onModelChange,
+  onRemoveSkill,
 }: {
   story: Story;
   allStoryIds: Set<string>;
@@ -280,6 +283,7 @@ function StoryReviewCard({
   onToggle: () => void;
   onScrollToStory: (id: string) => void;
   onModelChange: (storyId: string, model: string) => void;
+  onRemoveSkill: (storyId: string, skillName: string) => void;
 }) {
   const deps = story.dependsOn ?? story.dependencies ?? [];
   const ac = story.acceptanceCriteria ?? [];
@@ -401,6 +405,43 @@ function StoryReviewCard({
             <p className="text-sm text-muted mt-3 mb-3 leading-relaxed">
               {story.description}
             </p>
+          )}
+
+          {/* Matched skills */}
+          {story.suggestedSkills && story.suggestedSkills.length > 0 && (
+            <div className="mt-3 mb-3">
+              <h4 className="text-xs font-semibold text-muted uppercase tracking-wide mb-1.5">
+                Matched Skills
+              </h4>
+              <div className="flex flex-wrap gap-1.5">
+                {story.suggestedSkills.map((skill) => {
+                  const badgeStyle =
+                    skill.relevance >= 8
+                      ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
+                      : skill.relevance >= 5
+                        ? 'bg-blue-500/10 text-blue-500 border border-blue-500/20'
+                        : 'bg-gray-500/10 text-gray-400 border border-gray-500/20';
+                  return (
+                    <span
+                      key={skill.name}
+                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${badgeStyle}`}
+                      title={skill.reason}
+                    >
+                      {skill.name} ({skill.relevance})
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRemoveSkill(story.id, skill.name);
+                        }}
+                        className="ml-0.5 hover:opacity-70 transition-opacity"
+                      >
+                        <X size={8} />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
           )}
 
           {/* Per-story model override */}
@@ -589,6 +630,8 @@ export default function SpecReviewPanel({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [highlightedStoryId, setHighlightedStoryId] = useState<string | null>(null);
   const [dagModalOpen, setDagModalOpen] = useState(false);
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [matchConfirmOpen, setMatchConfirmOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const mod = modLabel();
 
@@ -841,6 +884,80 @@ export default function SpecReviewPanel({
     }
   }, [workspaceId, specId, toast, onBack]);
 
+  // Check if any stories already have suggestedSkills
+  const storiesWithSkills = useMemo(
+    () => stories.filter((s) => s.suggestedSkills && s.suggestedSkills.length > 0).length,
+    [stories],
+  );
+
+  const handleMatchSkills = useCallback(async () => {
+    if (!workspaceId || matchLoading) return;
+    // If stories already have skills, require confirmation
+    if (storiesWithSkills > 0 && !matchConfirmOpen) {
+      setMatchConfirmOpen(true);
+      return;
+    }
+    setMatchConfirmOpen(false);
+    setMatchLoading(true);
+    try {
+      const result = await apiFetch<{ matched: number; stories: Array<{ storyId: string; skills: Array<{ name: string; relevance: number; reason: string }> }> }>(
+        `/api/specs/${specId}/match-skills`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        },
+      );
+      toast.show(`Matched ${result.matched} skills across ${result.stories.length} stories`, 'success');
+      // Re-fetch spec to pick up updated suggestedSkills
+      const fresh = await apiFetch<SpecDetail>(`/api/specs/${specId}?workspaceId=${workspaceId}`);
+      setSpec(fresh);
+    } catch (err: any) {
+      const status = err?.status ?? err?.statusCode;
+      if (status === 422) {
+        toast.show('No skills installed. Visit the Marketplace to install skills.', 'warning');
+      } else {
+        toast.show(`Skill matching failed: ${err?.message || 'Unknown error'}`, 'error');
+      }
+    } finally {
+      setMatchLoading(false);
+    }
+  }, [workspaceId, matchLoading, specId, toast, storiesWithSkills, matchConfirmOpen]);
+
+  const handleRemoveSkill = useCallback(async (storyId: string, skillName: string) => {
+    if (!workspaceId || !spec) return;
+    // Update local state optimistically
+    setSpec((prev) => {
+      if (!prev) return prev;
+      const updated = (prev.userStories ?? prev.stories ?? []).map((s: Story) => {
+        if (s.id !== storyId) return s;
+        return {
+          ...s,
+          suggestedSkills: (s.suggestedSkills ?? []).filter((sk) => sk.name !== skillName),
+        };
+      });
+      return { ...prev, userStories: updated };
+    });
+    // Persist via API — re-read and re-write spec file
+    try {
+      await apiFetch(`/api/specs/${specId}/stories/${storyId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceId,
+          suggestedSkills: (stories.find((s) => s.id === storyId)?.suggestedSkills ?? []).filter(
+            (sk) => sk.name !== skillName,
+          ),
+        }),
+      });
+      toast.show(`Removed ${skillName} from ${storyId}`, 'success');
+    } catch {
+      // Re-fetch to revert optimistic update
+      const fresh = await apiFetch<SpecDetail>(`/api/specs/${specId}?workspaceId=${workspaceId}`);
+      setSpec(fresh);
+    }
+  }, [workspaceId, spec, specId, stories, toast]);
+
   const isPending = spec?._status === 'pending';
   const isApproved = spec?._status === 'approved';
 
@@ -1014,6 +1131,7 @@ export default function SpecReviewPanel({
                 }}
                 onScrollToStory={scrollToStory}
                 onModelChange={handleStoryModelChange}
+                onRemoveSkill={handleRemoveSkill}
               />
             ))
           )}
@@ -1039,6 +1157,21 @@ export default function SpecReviewPanel({
             >
               <Trash2 size={14} />
               Delete
+            </button>
+            <button
+              onClick={handleMatchSkills}
+              disabled={matchLoading || !workspaceId || !stories.length}
+              title={
+                !workspaceId
+                  ? 'Select a workspace first'
+                  : !stories.length
+                    ? 'No stories to match'
+                    : 'Match skills to stories'
+              }
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-muted border border-border hover:text-text hover:border-accent/40 transition-colors disabled:opacity-50"
+            >
+              {matchLoading ? <Loader2 size={14} className="animate-spin" /> : <Wrench size={14} />}
+              {matchLoading ? 'Matching...' : 'Match Skills'}
             </button>
           </div>
 
@@ -1136,6 +1269,35 @@ export default function SpecReviewPanel({
           workspaceId={workspaceId}
           onClose={() => setDagModalOpen(false)}
         />
+      )}
+
+      {/* ─── Match Skills confirmation dialog ──────────────────────── */}
+      {matchConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setMatchConfirmOpen(false)}>
+          <div
+            className="bg-bg border border-border rounded-xl w-[420px] p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-text mb-2">Replace Existing Skills?</h3>
+            <p className="text-xs text-muted mb-4">
+              This will replace existing skill assignments for {storiesWithSkills} {storiesWithSkills === 1 ? 'story' : 'stories'}. Continue?
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setMatchConfirmOpen(false)}
+                className="px-3 py-1.5 text-sm font-medium text-muted border border-border rounded-lg hover:text-text transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleMatchSkills}
+                className="px-3 py-1.5 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
+              >
+                Replace
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
