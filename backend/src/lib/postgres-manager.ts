@@ -2,8 +2,11 @@
 // DIST-001: Downloads and manages pre-built PostgreSQL 16 binaries (with pgvector
 // and AGE extensions) on first run. Same pattern as Prisma (engine binaries)
 // and Playwright (browser binaries).
+// DIST-002: Lifecycle management — initCluster, start, stop, createDatabase,
+// waitForReady. Postgres runs on port 5433 to avoid conflicts.
 //
 // Cache location: ~/.rorca/postgres/
+// Data location:  ~/.rorca/data/
 // Supports: darwin-arm64, darwin-x64, linux-x64, win32-x64
 
 import { execSync } from 'child_process';
@@ -18,6 +21,8 @@ import { logger } from './logger';
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const POSTGRES_VERSION = '16.4';
+const DEFAULT_PORT = 5433;
+const DEFAULT_DATABASE = 'rorca';
 
 const DEFAULT_DOWNLOAD_URL =
   'https://github.com/rorca-postgres-builds/releases/download';
@@ -35,8 +40,29 @@ const SUPPORTED_TARGETS: PlatformTarget[] = [
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+function getRorcaHome(): string {
+  return path.join(os.homedir(), '.rorca');
+}
+
 function getCacheDir(): string {
-  return path.join(os.homedir(), '.rorca', 'postgres');
+  return path.join(getRorcaHome(), 'postgres');
+}
+
+function getDataDir(): string {
+  return path.join(getRorcaHome(), 'data');
+}
+
+function getLogFile(): string {
+  return path.join(getRorcaHome(), 'postgres.log');
+}
+
+function getPort(): number {
+  const envPort = process.env.RORCA_PG_PORT;
+  if (envPort) {
+    const parsed = parseInt(envPort, 10);
+    if (!isNaN(parsed) && parsed >= 1 && parsed <= 65535) return parsed;
+  }
+  return DEFAULT_PORT;
 }
 
 function getVersionFile(): string {
@@ -132,8 +158,11 @@ export class PostgresManager {
   private readonly versionFile: string;
   private readonly downloadBaseUrl: string;
   private readonly expectedVersion: string;
+  readonly dataDir: string;
+  readonly port: number;
+  readonly logFile: string;
 
-  constructor(opts?: { downloadBaseUrl?: string; cacheDir?: string }) {
+  constructor(opts?: { downloadBaseUrl?: string; cacheDir?: string; dataDir?: string; port?: number }) {
     this.cacheDir = opts?.cacheDir ?? getCacheDir();
     this.versionFile = opts?.cacheDir
       ? path.join(opts.cacheDir, '.version')
@@ -143,6 +172,9 @@ export class PostgresManager {
       opts?.downloadBaseUrl ||
       DEFAULT_DOWNLOAD_URL;
     this.expectedVersion = POSTGRES_VERSION;
+    this.dataDir = opts?.dataDir ?? getDataDir();
+    this.port = opts?.port ?? getPort();
+    this.logFile = getLogFile();
   }
 
   /** Path to the postgres binary inside the cache. */
@@ -160,6 +192,23 @@ export class PostgresManager {
   getInitdbPath(): string {
     const name = process.platform === 'win32' ? 'initdb.exe' : 'initdb';
     return path.join(this.cacheDir, 'bin', name);
+  }
+
+  /** Path to the pg_isready binary. */
+  getPgIsReadyPath(): string {
+    const name = process.platform === 'win32' ? 'pg_isready.exe' : 'pg_isready';
+    return path.join(this.cacheDir, 'bin', name);
+  }
+
+  /** Path to the createdb binary. */
+  getCreatedbPath(): string {
+    const name = process.platform === 'win32' ? 'createdb.exe' : 'createdb';
+    return path.join(this.cacheDir, 'bin', name);
+  }
+
+  /** Path to the PID file inside the data directory. */
+  getPidFilePath(): string {
+    return path.join(this.dataDir, 'postmaster.pid');
   }
 
   /** Check if postgres binary exists and is executable. */
@@ -278,6 +327,268 @@ export class PostgresManager {
   /** Ensure postgres is available — download if needed. Convenience wrapper. */
   async ensureInstalled(): Promise<string> {
     return this.download();
+  }
+
+  // ─── Lifecycle (DIST-002) ───────────────────────────────────────────────
+
+  /**
+   * Initialize a new database cluster at dataDir if not already initialized.
+   * Runs `initdb` with --no-locale for reproducibility across platforms.
+   */
+  initCluster(): void {
+    // Already initialized if PG_VERSION file exists in data dir
+    if (fs.existsSync(path.join(this.dataDir, 'PG_VERSION'))) {
+      logger.info(`[postgres] Cluster already initialized at ${this.dataDir}`);
+      return;
+    }
+
+    fs.mkdirSync(this.dataDir, { recursive: true });
+
+    const initdbBin = this.getInitdbPath();
+    logger.info(`[postgres] Initializing cluster at ${this.dataDir}...`);
+
+    try {
+      execSync(
+        `"${initdbBin}" -D "${this.dataDir}" --no-locale --encoding=UTF8 --auth=trust`,
+        {
+          encoding: 'utf-8',
+          timeout: 60_000,
+          env: { ...process.env, LC_ALL: 'C' },
+        }
+      );
+      logger.info('[postgres] Cluster initialized successfully');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`initdb failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Check if the managed Postgres server is running on our port.
+   * Uses pg_isready for a reliable check.
+   */
+  isRunning(): boolean {
+    try {
+      execSync(
+        `"${this.getPgIsReadyPath()}" -h localhost -p ${this.port}`,
+        { encoding: 'utf-8', timeout: 5_000, stdio: 'pipe' }
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Read the PID from the postmaster.pid file. Returns null if not found.
+   */
+  private readPidFile(): number | null {
+    try {
+      const content = fs.readFileSync(this.getPidFilePath(), 'utf-8');
+      const firstLine = content.split('\n')[0].trim();
+      const pid = parseInt(firstLine, 10);
+      return isNaN(pid) ? null : pid;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Check if a PID is alive.
+   */
+  private isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check if port is in use by our managed Postgres (via PID file).
+   * Returns 'ours' if our managed PG is running, 'foreign' if something
+   * else occupies the port, 'free' if port is available.
+   */
+  checkPort(): 'ours' | 'foreign' | 'free' {
+    const pid = this.readPidFile();
+    if (pid && this.isPidAlive(pid)) {
+      // PID file exists and process is alive — it's ours
+      return 'ours';
+    }
+
+    // Check if something else is on the port
+    if (this.isRunning()) {
+      // pg_isready succeeds but we have no valid PID file → foreign process
+      return 'foreign';
+    }
+
+    return 'free';
+  }
+
+  /**
+   * Start the managed Postgres server. Uses pg_ctl start with log output
+   * redirected to ~/.rorca/postgres.log.
+   * Throws if port is occupied by a foreign process.
+   */
+  async start(): Promise<void> {
+    const portStatus = this.checkPort();
+
+    if (portStatus === 'ours') {
+      logger.info(`[postgres] Already running on port ${this.port} (pid: ${this.readPidFile()})`);
+      return;
+    }
+
+    if (portStatus === 'foreign') {
+      throw new Error(
+        `Port ${this.port} is already in use by another process (not managed by Rorca). ` +
+        `Either stop the other Postgres on port ${this.port} or set RORCA_PG_PORT to a different port.`
+      );
+    }
+
+    // Clean up stale PID file if process is dead
+    const stalePid = this.readPidFile();
+    if (stalePid && !this.isPidAlive(stalePid)) {
+      logger.info(`[postgres] Cleaning up stale PID file (pid ${stalePid} is dead)`);
+      this.cleanupFile(this.getPidFilePath());
+    }
+
+    const pgCtl = this.getPgCtlPath();
+    logger.info(`[postgres] Starting server on port ${this.port}...`);
+
+    try {
+      execSync(
+        `"${pgCtl}" start -D "${this.dataDir}" -l "${this.logFile}" -o "-p ${this.port}" -w`,
+        {
+          encoding: 'utf-8',
+          timeout: 30_000,
+          env: { ...process.env, LC_ALL: 'C' },
+        }
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`pg_ctl start failed: ${msg}. Check ${this.logFile} for details.`);
+    }
+
+    // Verify it's actually running
+    await this.waitForReady(10_000);
+    logger.info(`[postgres] Server started on port ${this.port} (pid: ${this.readPidFile()})`);
+  }
+
+  /**
+   * Stop the managed Postgres server cleanly using pg_ctl stop -m fast.
+   * No-op if server is not running.
+   */
+  stop(): void {
+    if (!this.isRunning()) {
+      logger.info('[postgres] Server is not running — nothing to stop');
+      return;
+    }
+
+    const pgCtl = this.getPgCtlPath();
+    logger.info('[postgres] Stopping server...');
+
+    try {
+      execSync(
+        `"${pgCtl}" stop -D "${this.dataDir}" -m fast -w`,
+        {
+          encoding: 'utf-8',
+          timeout: 30_000,
+          env: { ...process.env, LC_ALL: 'C' },
+        }
+      );
+      logger.info('[postgres] Server stopped');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[postgres] pg_ctl stop failed: ${msg}`);
+      // Force kill via PID as last resort
+      const pid = this.readPidFile();
+      if (pid && this.isPidAlive(pid)) {
+        logger.info(`[postgres] Force-killing pid ${pid}`);
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // best-effort
+        }
+      }
+    }
+  }
+
+  /**
+   * Create the rorca database if it doesn't exist.
+   * Uses createdb which fails gracefully if DB already exists.
+   */
+  createDatabase(): void {
+    const createdbBin = this.getCreatedbPath();
+
+    // Check if database already exists by trying to connect
+    try {
+      execSync(
+        `"${this.getPgIsReadyPath()}" -h localhost -p ${this.port} -d ${DEFAULT_DATABASE}`,
+        { encoding: 'utf-8', timeout: 5_000, stdio: 'pipe' }
+      );
+      // pg_isready succeeds → database likely exists, but let createdb confirm
+    } catch {
+      // expected if database doesn't exist yet
+    }
+
+    try {
+      execSync(
+        `"${createdbBin}" -h localhost -p ${this.port} ${DEFAULT_DATABASE}`,
+        { encoding: 'utf-8', timeout: 10_000, stdio: 'pipe' }
+      );
+      logger.info(`[postgres] Database "${DEFAULT_DATABASE}" created`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // "already exists" is not an error
+      if (msg.includes('already exists')) {
+        logger.info(`[postgres] Database "${DEFAULT_DATABASE}" already exists`);
+        return;
+      }
+      throw new Error(`createdb failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Poll pg_isready until the server is accepting connections.
+   * Throws if timeout is exceeded.
+   */
+  async waitForReady(timeoutMs: number = 30_000): Promise<void> {
+    const pollInterval = 500;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (this.isRunning()) return;
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
+
+    throw new Error(
+      `PostgreSQL did not become ready within ${timeoutMs}ms. Check ${this.logFile} for details.`
+    );
+  }
+
+  /**
+   * Get the DATABASE_URL connection string for the managed Postgres.
+   */
+  getDatabaseUrl(): string {
+    return `postgresql://localhost:${this.port}/${DEFAULT_DATABASE}`;
+  }
+
+  /**
+   * Full lifecycle: ensure binary, init cluster, start server, create DB,
+   * set DATABASE_URL in process.env.
+   */
+  async ensureRunning(): Promise<string> {
+    await this.ensureInstalled();
+    this.initCluster();
+    await this.start();
+    this.createDatabase();
+
+    const url = this.getDatabaseUrl();
+    process.env.DATABASE_URL = url;
+    logger.info(`[postgres] DATABASE_URL set to ${url}`);
+
+    return url;
   }
 
   // ─── Private ────────────────────────────────────────────────────────────
