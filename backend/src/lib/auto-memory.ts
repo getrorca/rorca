@@ -7,10 +7,11 @@
  * block story completion or the next story from starting.
  */
 
-import { execute, query } from '../db/index';
+import { execute, query, queryOne } from '../db/index';
 import { chatComplete, type ChatMessage } from './llm-client';
 import { embedText, prepareText } from './embedding-pipeline';
 import { logger } from './logger';
+import { broadcastAll, type WalEvent } from './sse-hub';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -204,6 +205,255 @@ export async function autoSynthesizeMemory(
       logger.warn(`[auto-memory] Synthesis timed out for ${storyId} after ${elapsed}ms — skipping`);
     } else {
       logger.warn(`[auto-memory] Synthesis failed for ${storyId}: ${err.message}`);
+    }
+  }
+}
+
+// ─── Run Memory Synthesis (PG-021) ──────────────────────────────────────────
+
+/** Cosine similarity between two embedding vectors */
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** Duplicate similarity threshold (from PR-018) */
+const DEDUP_SIMILARITY_THRESHOLD = 0.92;
+
+/** Timeout for run-level synthesis (longer than per-story — more data to process) */
+const RUN_SYNTHESIS_TIMEOUT_MS = 30_000;
+
+/**
+ * After an entire pipeline run completes, synthesizes higher-level 'run memory'
+ * that captures cross-story patterns, recurring issues, and architectural insights
+ * that individual story memories miss.
+ *
+ * Non-fatal: all errors are caught and logged. Never throws.
+ */
+export async function synthesizeRunMemory(
+  runId: number,
+  workspaceId: string,
+): Promise<void> {
+  const t0 = Date.now();
+
+  try {
+    // ── Gather story results + existing story memories for this run ───────
+    const storyResults = await query<{
+      story_id: string;
+      status: string;
+      model_used: string | null;
+    }>(
+      `SELECT story_id, status, model_used FROM story_results WHERE run_id = $1 ORDER BY id ASC`,
+      [runId],
+    );
+
+    if (storyResults.length === 0) {
+      logger.info(`[auto-memory] Run #${runId} has no story results — skipping run synthesis`);
+      return;
+    }
+
+    const storyMemories = await query<{
+      category: string;
+      content: string;
+      source_story_id: string | null;
+      confidence: string;
+    }>(
+      `SELECT category, content, source_story_id, confidence FROM memories WHERE source_run_id = $1 AND source_story_id IS NOT NULL AND deleted_at IS NULL`,
+      [runId],
+    );
+
+    // ── Build status summary ──────────────────────────────────────────────
+    const passed = storyResults.filter(s => s.status === 'pass');
+    const failed = storyResults.filter(s => s.status === 'fail');
+    const skipped = storyResults.filter(s => s.status === 'skip');
+
+    const statusSummary = [
+      `Total stories: ${storyResults.length}`,
+      `Passed: ${passed.length} (${passed.map(s => s.story_id).join(', ') || 'none'})`,
+      `Failed: ${failed.length} (${failed.map(s => s.story_id).join(', ') || 'none'})`,
+      `Skipped: ${skipped.length} (${skipped.map(s => s.story_id).join(', ') || 'none'})`,
+    ].join('\n');
+
+    const memorySummary = storyMemories.length > 0
+      ? storyMemories.map(m => `- [${m.category}] (${m.source_story_id}): ${m.content}`).join('\n')
+      : 'No story-level memories were recorded.';
+
+    // ── LLM synthesis ─────────────────────────────────────────────────────
+    const prompt = `You are a run-level memory synthesis agent. A pipeline run has just completed with ${storyResults.length} stories. Analyze the aggregate results and individual story memories to identify 1-3 HIGH-LEVEL insights that no individual story could produce alone.
+
+## Run Results
+${statusSummary}
+
+## Story-Level Memories (${storyMemories.length} entries)
+${memorySummary}
+
+## Instructions
+Identify 1-3 cross-cutting insights. Focus on:
+${failed.length > 0
+  ? `- Failure patterns: Which stories failed and why? Are there common themes (same files, same subsystem, rate limiting, architectural gaps)?
+- What should future runs handle differently?`
+  : `- Patterns of success: What conventions were consistently followed? What worked well?
+- What made this run successful that future runs should preserve?`}
+- Architectural insights that emerge from looking at ALL stories together
+- Conventions that were consistently followed or violated across multiple stories
+
+Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha
+
+Respond with ONLY a JSON array (no markdown fences, no explanation):
+[
+  {
+    "category": "Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha",
+    "content": "concise cross-story insight (1-2 sentences)",
+    "confidence": "high",
+    "relatedFiles": ["path/to/file.ts"]
+  }
+]`;
+
+    const messages: ChatMessage[] = [{ role: 'user', content: prompt }];
+
+    const llmResult = await Promise.race([
+      chatComplete(messages, SYNTHESIS_MODEL),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('run_synthesis_timeout')), RUN_SYNTHESIS_TIMEOUT_MS),
+      ),
+    ]);
+
+    // ── Parse LLM response ────────────────────────────────────────────────
+    let entries: MemoryEntry[];
+    try {
+      const text = llmResult.text.trim();
+      const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+      entries = JSON.parse(cleaned);
+    } catch (parseErr) {
+      logger.warn(`[auto-memory] Failed to parse run synthesis for run #${runId}: ${(parseErr as Error).message}`);
+      return;
+    }
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+      logger.warn(`[auto-memory] No run-level entries extracted for run #${runId}`);
+      return;
+    }
+
+    entries = entries.slice(0, 3);
+
+    // ── Validate entries ──────────────────────────────────────────────────
+    const validCategories = new Set(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']);
+    const validConfidence = new Set(['high', 'medium', 'low']);
+
+    entries = entries.filter(e => {
+      if (!e.category || !e.content) return false;
+      if (!validCategories.has(e.category)) e.category = 'Pattern';
+      if (!validConfidence.has(e.confidence)) e.confidence = 'high';
+      if (!Array.isArray(e.relatedFiles)) e.relatedFiles = [];
+      return true;
+    });
+
+    if (entries.length === 0) return;
+
+    // ── Store entries with dedup check ──────────────────────────────────
+    const categories: string[] = [];
+    let savedCount = 0;
+
+    for (const entry of entries) {
+      // Embed the new entry
+      let embedding: number[] | null = null;
+      try {
+        const prepared = prepareText('memory', entry.content);
+        embedding = await embedText(prepared);
+      } catch (embErr) {
+        logger.warn(`[auto-memory] Embedding failed for run memory in run #${runId}: ${(embErr as Error).message}`);
+      }
+
+      // Dedup check: find semantically similar existing memories (> 0.92 cosine)
+      if (embedding) {
+        try {
+          const embeddingStr = `[${embedding.join(',')}]`;
+          const similar = await query<{ id: number; content: string; embedding: string }>(
+            `SELECT id, content, embedding::text FROM memories
+             WHERE workspace_id = $1 AND deleted_at IS NULL AND embedding IS NOT NULL
+             ORDER BY embedding <=> $2::vector ASC LIMIT 3`,
+            [workspaceId, embeddingStr],
+          );
+
+          let isDuplicate = false;
+          for (const row of similar) {
+            // Parse the embedding text back to number[]
+            const existingEmb = row.embedding.replace(/[\[\]]/g, '').split(',').map(Number);
+            const sim = cosineSimilarity(embedding, existingEmb);
+            if (sim >= DEDUP_SIMILARITY_THRESHOLD) {
+              logger.info(`[auto-memory] Run memory for run #${runId} is duplicate of memory #${row.id} (similarity ${sim.toFixed(3)}) — merging`);
+              // Merge: update existing entry's content to include new insight
+              await execute(
+                `UPDATE memories SET content = content || E'\n' || $1, confidence = 'high' WHERE id = $2`,
+                [` (Run #${runId} confirms: ${entry.content})`, row.id],
+              );
+              isDuplicate = true;
+              break;
+            }
+          }
+
+          if (isDuplicate) {
+            categories.push(entry.category);
+            continue;
+          }
+        } catch (dedupErr) {
+          logger.warn(`[auto-memory] Dedup check failed for run memory: ${(dedupErr as Error).message}`);
+          // Continue to insert — better to have a duplicate than lose the memory
+        }
+      }
+
+      const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+
+      // Run memories: source_story_id is NULL, category is 'Run Synthesis'
+      await execute(
+        `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::vector)`,
+        [
+          workspaceId,
+          'Run Synthesis',
+          entry.content,
+          runId,
+          'high',
+          JSON.stringify(entry.relatedFiles),
+          embeddingStr,
+        ],
+      );
+
+      categories.push(entry.category);
+      savedCount++;
+    }
+
+    logger.info(`[auto-memory] Saved ${savedCount} run memories for run #${runId} [${categories.join(', ')}] (${Date.now() - t0}ms)`);
+
+    // ── WAL event ─────────────────────────────────────────────────────────
+    try {
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_memory_synthesized', $1, $2) RETURNING *`,
+        [
+          workspaceId,
+          JSON.stringify({
+            runId,
+            entriesCount: savedCount,
+            categories,
+          }),
+        ],
+      );
+      if (walEvent) broadcastAll(walEvent);
+    } catch {
+      // Best-effort WAL event
+    }
+  } catch (err: any) {
+    const elapsed = Date.now() - t0;
+    if (err.message === 'run_synthesis_timeout') {
+      logger.warn(`[auto-memory] Run synthesis timed out for run #${runId} after ${elapsed}ms — skipping`);
+    } else {
+      logger.warn(`[auto-memory] Run synthesis failed for run #${runId}: ${err.message}`);
     }
   }
 }
