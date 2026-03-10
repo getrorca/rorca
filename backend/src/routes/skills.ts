@@ -1228,6 +1228,382 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/skills/bulk-install:
+ *   post:
+ *     tags: [Skills]
+ *     summary: Install multiple skills in a single request
+ *     operationId: bulkInstallSkills
+ *     description: |
+ *       Processes an array of skills sequentially (to avoid GitHub rate limiting).
+ *       Each skill can come from skills.sh, a GitHub repo, or raw markdown content.
+ *       Failed items do not abort the batch — processing continues.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [skills]
+ *             properties:
+ *               skills:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [name, source]
+ *                   properties:
+ *                     name:
+ *                       type: string
+ *                       description: Skill name
+ *                     source:
+ *                       type: string
+ *                       enum: [sh, github, content]
+ *                       description: "Source type: 'sh' (skills.sh registry), 'github' (GitHub repo), 'content' (raw markdown)"
+ *                     repoUrl:
+ *                       type: string
+ *                       description: "GitHub repo URL (required when source='github')"
+ *                     skillPath:
+ *                       type: string
+ *                       description: "Path within GitHub repo (required when source='github')"
+ *                     content:
+ *                       type: string
+ *                       description: "Raw markdown content (required when source='content')"
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID to install into. Defaults to first workspace.
+ *     responses:
+ *       200:
+ *         description: Bulk install results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 installed:
+ *                   type: number
+ *                 failed:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                       error:
+ *                         type: string
+ *                 total:
+ *                   type: number
+ *       400:
+ *         description: Missing or invalid request body
+ */
+router.post('/bulk-install', async (req: Request, res: Response) => {
+  try {
+    const { skills, workspaceId } = req.body;
+
+    if (!Array.isArray(skills) || skills.length === 0) {
+      res.status(400).json({ error: 'skills array is required and must not be empty' });
+      return;
+    }
+
+    // Resolve workspace path
+    const wsPath = workspaceId
+      ? (db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined)?.path
+      : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
+
+    if (!wsPath) {
+      res.status(400).json({ error: 'No workspace found' });
+      return;
+    }
+
+    // Ensure skill directories exist
+    const rorcaSkillsDir = path.join(wsPath, '.rorca', 'skills');
+    const claudeSkillsDir = path.join(wsPath, '.claude', 'skills');
+    fs.mkdirSync(rorcaSkillsDir, { recursive: true });
+    fs.mkdirSync(claudeSkillsDir, { recursive: true });
+
+    const registry = new SkillRegistry();
+    let installed = 0;
+    const failed: Array<{ name: string; error: string }> = [];
+
+    // Process sequentially to avoid GitHub rate limiting
+    for (const item of skills) {
+      const itemName = (item.name || '').trim();
+      if (!itemName) {
+        failed.push({ name: item.name || '(empty)', error: 'name is required' });
+        continue;
+      }
+
+      try {
+        if (item.source === 'sh') {
+          // Fetch from skills.sh registry
+          const query = itemName.replace(/\.md$/i, '').toLowerCase();
+          const result = await fetchSkillFromRegistry(query);
+          if (!result) {
+            failed.push({ name: itemName, error: `Not found in skills.sh registry` });
+            continue;
+          }
+          const skillName = query.replace(/[^a-z0-9-]/g, '-');
+          fs.writeFileSync(path.join(rorcaSkillsDir, `${skillName}.md`), result.content, 'utf-8');
+          fs.writeFileSync(path.join(claudeSkillsDir, `${skillName}.md`), result.content, 'utf-8');
+          registry.install(skillName, result.content, result.source);
+          installed++;
+
+        } else if (item.source === 'github') {
+          // Fetch from GitHub repo
+          if (!item.repoUrl || !item.skillPath) {
+            failed.push({ name: itemName, error: 'repoUrl and skillPath are required for source=github' });
+            continue;
+          }
+          const parsed = parseGitHubRepo(item.repoUrl);
+          if (!parsed) {
+            failed.push({ name: itemName, error: 'Invalid repository URL' });
+            continue;
+          }
+          const { owner, repo } = parsed;
+          const trimmedPath = item.skillPath.trim();
+
+          let content: string | null = null;
+          const mainUrl = `https://raw.githubusercontent.com/${owner}/${repo}/main/${trimmedPath}`;
+          try {
+            const resp = await fetch(mainUrl, { signal: AbortSignal.timeout(15_000) });
+            if (resp.ok) content = await resp.text();
+          } catch { /* try master */ }
+
+          if (!content) {
+            const masterUrl = `https://raw.githubusercontent.com/${owner}/${repo}/master/${trimmedPath}`;
+            try {
+              const resp = await fetch(masterUrl, { signal: AbortSignal.timeout(15_000) });
+              if (resp.ok) content = await resp.text();
+            } catch { /* not found */ }
+          }
+
+          if (!content) {
+            failed.push({ name: itemName, error: `Skill file not found at ${trimmedPath} in ${owner}/${repo}` });
+            continue;
+          }
+
+          // Parse frontmatter for name
+          let skillName = itemName;
+          const fm = parseFrontmatter(content);
+          if (fm) {
+            try {
+              const meta = yaml.load(fm.yaml) as Record<string, unknown> | null;
+              if (meta && typeof meta === 'object' && typeof meta['name'] === 'string') {
+                skillName = meta['name'];
+              }
+            } catch { /* use provided name */ }
+          }
+          const normalizedName = skillName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+          const source = `github:${owner}/${repo}`;
+
+          fs.writeFileSync(path.join(rorcaSkillsDir, `${normalizedName}.md`), content, 'utf-8');
+          fs.writeFileSync(path.join(claudeSkillsDir, `${normalizedName}.md`), content, 'utf-8');
+          registry.install(normalizedName, content, source);
+          installed++;
+
+        } else if (item.source === 'content' || item.content) {
+          // Install from raw markdown content
+          const rawContent = item.content;
+          if (!rawContent || typeof rawContent !== 'string') {
+            failed.push({ name: itemName, error: 'content is required for source=content' });
+            continue;
+          }
+          const normalizedName = itemName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+          fs.writeFileSync(path.join(rorcaSkillsDir, `${normalizedName}.md`), rawContent, 'utf-8');
+          fs.writeFileSync(path.join(claudeSkillsDir, `${normalizedName}.md`), rawContent, 'utf-8');
+          registry.install(normalizedName, rawContent, 'user');
+          installed++;
+
+        } else {
+          failed.push({ name: itemName, error: `Unknown source type: ${item.source}` });
+        }
+      } catch (err: any) {
+        failed.push({ name: itemName, error: err.message || 'Unknown error' });
+      }
+    }
+
+    res.json({ installed, failed, total: skills.length });
+  } catch (error: any) {
+    logger.error('[Skills] bulk-install error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/skills/bulk-remove:
+ *   post:
+ *     tags: [Skills]
+ *     summary: Remove multiple installed skills at once
+ *     operationId: bulkRemoveSkills
+ *     description: |
+ *       Removes multiple skills by name. For each skill, deletes from DB via SkillRegistry,
+ *       and removes .rorca/skills/{name}.md and .claude/skills/{name}.md from the filesystem.
+ *       Missing files are not treated as errors.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [names]
+ *             properties:
+ *               names:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: Array of skill names to remove
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID for filesystem cleanup. Defaults to first workspace.
+ *     responses:
+ *       200:
+ *         description: Bulk remove results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 removed:
+ *                   type: number
+ *                 notFound:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *       400:
+ *         description: Missing or invalid request body
+ */
+router.post('/bulk-remove', (req: Request, res: Response) => {
+  try {
+    const { names, workspaceId } = req.body;
+
+    if (!Array.isArray(names) || names.length === 0) {
+      res.status(400).json({ error: 'names array is required and must not be empty' });
+      return;
+    }
+
+    // Resolve workspace path for filesystem cleanup
+    const wsPath = workspaceId
+      ? (db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined)?.path
+      : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
+
+    const registry = new SkillRegistry();
+    let removed = 0;
+    const notFound: string[] = [];
+
+    for (const name of names) {
+      if (!name || typeof name !== 'string') continue;
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+
+      const wasRemoved = registry.remove(trimmed);
+      if (wasRemoved) {
+        removed++;
+      } else {
+        notFound.push(trimmed);
+      }
+
+      // Clean up filesystem files (missing files are not errors)
+      if (wsPath) {
+        const normalizedName = trimmed.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+        const rorcaPath = path.join(wsPath, '.rorca', 'skills', `${normalizedName}.md`);
+        const claudePath = path.join(wsPath, '.claude', 'skills', `${normalizedName}.md`);
+        try { fs.unlinkSync(rorcaPath); } catch { /* missing file is fine */ }
+        try { fs.unlinkSync(claudePath); } catch { /* missing file is fine */ }
+      }
+    }
+
+    res.json({ removed, notFound });
+  } catch (error: any) {
+    logger.error('[Skills] bulk-remove error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/skills/export:
+ *   get:
+ *     tags: [Skills]
+ *     summary: Export installed skills as a shareable JSON manifest
+ *     operationId: exportSkills
+ *     description: |
+ *       Returns a JSON manifest of all installed skills that can be saved and
+ *       used to re-install the same skill set in another workspace via bulk-install.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         schema:
+ *           type: string
+ *         description: Workspace ID. Defaults to first workspace.
+ *     responses:
+ *       200:
+ *         description: Skills export manifest
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 skills:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *                       source:
+ *                         type: string
+ *                       category:
+ *                         type: string
+ *                         nullable: true
+ *                 exportedAt:
+ *                   type: string
+ *                   format: date-time
+ *                 workspacePath:
+ *                   type: string
+ *                   nullable: true
+ */
+router.get('/export', (req: Request, res: Response) => {
+  try {
+    const wsPath = resolveWorkspacePath(req);
+
+    const registry = new SkillRegistry();
+    if (wsPath) {
+      registry.discover(wsPath);
+    }
+
+    const allSkills = registry.getAll();
+
+    // If no skills from registry, also check DB directly
+    const exportSkills = allSkills.length > 0
+      ? allSkills.map(s => ({
+          name: s.metadata.name,
+          description: s.metadata.description,
+          source: s.source,
+          category: null as string | null,
+        }))
+      : (db.prepare('SELECT name, description, source FROM installed_skills').all() as {
+          name: string; description: string; source: string;
+        }[]).map(s => ({
+          name: s.name,
+          description: s.description,
+          source: s.source,
+          category: null as string | null,
+        }));
+
+    res.json({
+      skills: exportSkills,
+      exportedAt: new Date().toISOString(),
+      workspacePath: wsPath || null,
+    });
+  } catch (error: any) {
+    logger.error('[Skills] export error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 /** Recursively find .md files in a directory. */
 function findMdFiles(dir: string): string[] {
   const results: string[] = [];
