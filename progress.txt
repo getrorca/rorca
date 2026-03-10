@@ -3,7 +3,8 @@
 Spec: rorca-live-spec-terminal
 Run ID: 13
 Started: 2026-03-10T01:19:16.575Z
-Last Updated: 2026-03-10T01:30:37.760Z
+Last Updated: 2026-03-10T01:31:04.515Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - LST-001: Context Injection Summary — Show What's Being Sent to the LLM — DONE (claude, 672s)
+- LST-002: Real Progress Bar — Replace Simulated Stages with Actual Elapsed Time — DONE (claude, 13s)
