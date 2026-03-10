@@ -55,7 +55,8 @@
       "suggestedSkills": [
         "react-review"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "LST-003",
