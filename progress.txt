@@ -3,15 +3,16 @@
 Spec: rorca-distribution
 Run ID: 17
 Started: 2026-03-10T13:18:22.929Z
-Last Updated: 2026-03-10T14:38:08.442Z
+Last Updated: 2026-03-10T14:44:35.291Z
 
-## Completed Stories (6)
+## Completed Stories (7)
 - DIST-001: Postgres Binary Download Manager — DONE (claude, 173s)
 - DIST-002: Postgres Lifecycle Management (init, start, stop) — DONE (claude, 911s)
 - DIST-003: Postgres Binary Build Pipeline — DONE (claude, 11s)
 - DIST-004: Bun Build Compile — Proof of Concept — DONE (claude, 1733s)
 - DIST-005: Cross-Platform Build Matrix — DONE (claude, 247s)
 - DIST-009: First-Run Experience — DONE (claude, 1415s)
+- DIST-010: End-to-End Binary Smoke Test — DONE (claude, 371s)
 
 ## Failed Stories (1)
 - DIST-006: LICENSE & Legal Files — FAILED (max_retries)

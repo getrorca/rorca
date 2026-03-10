@@ -2,7 +2,7 @@
   "specId": "rorca-distribution",
   "runId": 17,
   "startedAt": "2026-03-10T13:18:22.929Z",
-  "lastUpdatedAt": "2026-03-10T14:38:08.442Z",
+  "lastUpdatedAt": "2026-03-10T14:44:35.291Z",
   "completedStories": [
     {
       "storyId": "DIST-001",
@@ -57,6 +57,15 @@
       "finishedAt": "2026-03-10T14:38:08.442Z",
       "agentType": "claude",
       "elapsedMs": 1415420
+    },
+    {
+      "storyId": "DIST-010",
+      "title": "End-to-End Binary Smoke Test",
+      "status": "passed",
+      "startedAt": "2026-03-10T14:38:24.021Z",
+      "finishedAt": "2026-03-10T14:44:35.291Z",
+      "agentType": "claude",
+      "elapsedMs": 371270
     }
   ],
   "failedStories": [
