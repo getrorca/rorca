@@ -21,7 +21,8 @@
         "Backend TypeScript compiles with no errors"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-002",
@@ -42,7 +43,8 @@
       "dependsOn": [
         "PG-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-003",
@@ -65,7 +67,8 @@
       "dependsOn": [
         "PG-002"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-004",
@@ -85,7 +88,8 @@
       "dependsOn": [
         "PG-003"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-005",
@@ -107,7 +111,8 @@
       "dependsOn": [
         "PG-002"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-006",
@@ -127,7 +132,8 @@
       "dependsOn": [
         "PG-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-007",
@@ -149,7 +155,8 @@
         "PG-006",
         "PG-005"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-008",
@@ -171,7 +178,8 @@
       "dependsOn": [
         "PG-007"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-009",
@@ -190,7 +198,8 @@
         "Works on macOS (ARM64), Linux (x64), and Windows (WSL2) — tested Docker architectures"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-010",
@@ -212,7 +221,8 @@
         "PG-004",
         "PG-005"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-011",
@@ -233,7 +243,8 @@
         "PG-005",
         "PG-010"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-012",
@@ -254,7 +265,8 @@
         "PG-008",
         "PG-005"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-013",
@@ -276,7 +288,8 @@
       "dependsOn": [
         "PG-005"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-014",
@@ -296,7 +309,8 @@
         "PG-013",
         "PG-012"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-015",
@@ -315,7 +329,8 @@
       "dependsOn": [
         "PG-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-016",
@@ -335,7 +350,8 @@
         "PG-015",
         "PG-014"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-017",
@@ -356,7 +372,8 @@
         "PG-015",
         "PG-005"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-018",
@@ -378,7 +395,8 @@
         "PG-001",
         "PG-002"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-019",
@@ -398,7 +416,8 @@
       "dependsOn": [
         "PG-011"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PR-018",
@@ -419,7 +438,8 @@
         "PG-007",
         "PG-008"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PR-021",
@@ -441,7 +461,107 @@
         "PG-008",
         "PG-016"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "PG-020",
+      "title": "Auto-Memory — Write Memories Automatically After Each Story",
+      "description": "After each story completes (pass or fail), the execution engine automatically synthesizes what was learned and writes it to the memories table. No approval required. Memories are written immediately and become searchable via pgvector for subsequent stories in the same run and all future runs. This is the 'write first, curate later' philosophy — the cost of a slightly imperfect memory is far lower than the cost of zero memory.",
+      "acceptanceCriteria": [
+        "In execution-engine.ts, after a story completes (both pass and fail paths), call autoSynthesizeMemory(storyId, workspaceId, storyText, storyOutput, status)",
+        "autoSynthesizeMemory() in backend/src/lib/auto-memory.ts: takes the story text + output + status → calls LLM with a focused prompt: 'What did this story teach us? Extract 1-3 structured memory entries. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha. Format: {category, content, confidence: high|medium|low, relatedFiles: string[]}'",
+        "LLM call uses the CHEAPEST available model (Haiku tier for OpenCode, or the same model for Claude subscription) — memory synthesis should cost < $0.001 per story",
+        "Each extracted memory entry is INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding, created_at)",
+        "Embedding computed inline via embedText() from PG-007 — stored in the vector column for immediate semantic search availability",
+        "New table: memories (id SERIAL PRIMARY KEY, workspace_id INT REFERENCES workspaces(id), category TEXT NOT NULL, content TEXT NOT NULL, source_story_id TEXT, source_run_id INT, confidence TEXT DEFAULT 'medium', related_files JSONB DEFAULT '[]', embedding vector(1536), created_at TIMESTAMPTZ DEFAULT NOW(), deleted_at TIMESTAMPTZ) — soft delete for undo",
+        "Migration PG-040 creates the memories table + GIN index on related_files + ivfflat index on embedding",
+        "Failed stories produce memories too — 'Bug Fix: story X failed because {reason}' is valuable context for retry and future stories touching the same files",
+        "If LLM call fails (no API key, rate limit): memory synthesis is skipped silently — logged as warning, does NOT block story completion or the next story from starting",
+        "If embedding generation fails: memory is still saved with NULL embedding — text search still works, just no vector similarity. Log warning: '[auto-memory] Embedding failed for memory {id}, saved without vector'",
+        "WAL event emitted: event_type='memory_auto_saved', payload includes { storyId, runId, entriesCount, categories }",
+        "Memory synthesis runs AFTER the story result is posted and BEFORE the next story starts — sequential, not fire-and-forget, so the next story can benefit from the memory",
+        "Latency budget: memory synthesis should complete in < 5 seconds (cheap model + short prompt). If it exceeds 10 seconds, abort and skip",
+        "Backend TypeScript compiles with no errors"
+      ],
+      "dependsOn": [
+        "PG-007",
+        "PG-002"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "PG-021",
+      "title": "Auto-Memory — Run-Level Synthesis After Pipeline Completion",
+      "description": "After an entire pipeline run completes, synthesize a higher-level 'run memory' that captures cross-story patterns, recurring issues, and architectural insights that individual story memories miss. This is the 30,000-foot view of what the run taught us.",
+      "acceptanceCriteria": [
+        "In pipeline.ts, after a run finishes (all stories complete, before emitting run_finished WAL event), call synthesizeRunMemory(runId, workspaceId)",
+        "synthesizeRunMemory() in auto-memory.ts: queries all story memories from the run (SELECT * FROM memories WHERE source_run_id = $1), plus story_results for pass/fail/skip status",
+        "LLM prompt: 'Given these {N} story outcomes and {M} memory entries from this run, identify 1-3 high-level insights: cross-cutting patterns, recurring failures, architectural decisions that emerged, conventions that were consistently followed or violated. These should be insights that NO individual story could produce alone.'",
+        "Run memories are tagged with category='Run Synthesis' and source_run_id but no source_story_id (they're run-level, not story-level)",
+        "Run memories have confidence='high' by default — they're synthesized from multiple data points, more reliable than single-story memories",
+        "If the run had zero failures: synthesize patterns of success ('All 12 stories followed the convention of...', 'The direction stack L3 was sufficient for...')",
+        "If the run had failures: synthesize failure patterns ('Stories touching auth.ts failed 3/4 times — possible architectural issue', 'Rate limit errors on stories 5-8 suggest model throttling')",
+        "Run memories are written to the same memories table with the same embedding — they participate in vector search for future stories",
+        "Deduplication check (from PR-018): before writing, check if a semantically similar memory already exists (> 0.92 cosine similarity). If so, merge rather than create duplicate",
+        "WAL event: event_type='run_memory_synthesized', payload includes { runId, entriesCount, categories }",
+        "Frontend: MemoryUpdatesCard.tsx (already exists) displays run memories in the run results view — no approval needed, just display",
+        "Backend TypeScript compiles with no errors"
+      ],
+      "dependsOn": [
+        "PG-020",
+        "PR-018"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "PG-022",
+      "title": "Memory Curation UI — Delete, Edit, Pin (Post-Write Review)",
+      "description": "Since memories are auto-saved without approval, users need a lightweight way to curate them after the fact. This is the 'curate later' part of 'write first, curate later'. Not a heavy review queue — just inline edit/delete/pin on the memory list.",
+      "acceptanceCriteria": [
+        "Memory panel (Direction > Memory tab) shows all memories from the memories table, sorted by created_at DESC",
+        "Each memory entry row has three inline action icons: Edit (pencil), Delete (trash), Pin (thumbtack)",
+        "Delete: soft-deletes the memory (SET deleted_at = NOW()). Deleted memories don't appear in the list or in vector search results. Undo toast shown for 10 seconds: 'Memory deleted. Undo?' → clears deleted_at",
+        "Edit: inline text editing. Click pencil → content becomes an editable textarea. Save → UPDATE memories SET content = $1 WHERE id = $2. Re-computes embedding on save (content changed → vector must update)",
+        "Pin: pinned memories are ALWAYS included in story prompts regardless of vector similarity score. They bypass the relevance threshold. Stored as: UPDATE memories SET pinned = true WHERE id = $1. Pinned memories show a gold pin icon and sort to the top of the list",
+        "New column: memories.pinned BOOLEAN DEFAULT false. Migration PG-041 adds the column",
+        "retrieveContext() (PG-014) updated: always includes pinned memories first (SELECT * FROM memories WHERE workspace_id = $1 AND pinned = true AND deleted_at IS NULL), then fills remaining budget with relevance-ranked memories",
+        "Bulk actions: checkbox on each row, 'Delete selected' and 'Pin selected' buttons in a floating action bar when any are checked",
+        "Filter controls: category dropdown (Architecture, Convention, Bug Fix, etc.), confidence dropdown (high/medium/low), source run dropdown (last 10 runs), search text input (uses tsvector)",
+        "Memory count badge: shows total / pinned / this-run counts in the tab header",
+        "API endpoints: PATCH /api/memories/:id (update content, pinned), DELETE /api/memories/:id (soft delete), POST /api/memories/:id/undelete (clear deleted_at)",
+        "Backend TypeScript compiles with no errors"
+      ],
+      "dependsOn": [
+        "PG-020",
+        "PG-002"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
+    },
+    {
+      "id": "PG-023",
+      "title": "Auto-Memory — Spec Generation Memory Capture",
+      "description": "Memory capture isn't just for execution — spec generation also learns things. When the LLM generates a spec, it discovers codebase patterns, identifies complexity, and makes architectural observations. Capture these as memories too.",
+      "acceptanceCriteria": [
+        "In specs.ts generate handler, after successful spec generation, call autoSynthesizeSpecMemory(specId, workspaceId, brief, generatedSpec, contextSummary)",
+        "autoSynthesizeSpecMemory() in auto-memory.ts: takes the brief + generated spec + context summary → LLM prompt: 'What did you learn about this codebase while generating this spec? Extract 1-2 observations about: architecture patterns, complexity hotspots, missing conventions, or technical debt you noticed.'",
+        "Spec memories are tagged with category='Spec Observation' and source_spec_id (new column, nullable)",
+        "New column: memories.source_spec_id TEXT. Migration PG-042 adds it",
+        "Context summary is included in the prompt so the LLM can reference what context it had: 'You had access to: L1 standards, L2 saas conventions, L3 project brief, schema (14 tables), git memory (50 commits), 3 skills'",
+        "Example output: 'Architecture: This project has 46 DB migrations but no schema versioning strategy — future stories should include a migration consolidation step.' or 'Convention: The codebase uses both camelCase and snake_case for API response fields — should establish a convention.'",
+        "Spec memories are available immediately for the EXECUTION of that spec — when the pipeline runs the generated stories, buildPrompt() can retrieve these observations via vector search",
+        "If spec generation fails: no memory capture (nothing useful was learned)",
+        "Same cost controls as PG-020: cheapest model, < 5s timeout, skip on failure",
+        "Backend TypeScript compiles with no errors"
+      ],
+      "dependsOn": [
+        "PG-020"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }

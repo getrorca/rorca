@@ -143,7 +143,9 @@
         "No NOTICE file needed (BSL-1.1 doesn't require it unless using Apache-licensed dependencies)"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": false,
+      "skipped": true,
+      "notes": "Skipped after max retries — fix manually and re-run with --story DIST-006"
     },
     {
       "id": "DIST-007",
