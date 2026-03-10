@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-wiring",
   "runId": 28,
   "startedAt": "2026-03-10T22:49:18.582Z",
-  "lastUpdatedAt": "2026-03-10T23:03:57.429Z",
+  "lastUpdatedAt": "2026-03-10T23:09:17.813Z",
   "completedStories": [
     {
       "storyId": "SW-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-10T23:03:57.429Z",
       "agentType": "claude",
       "elapsedMs": 265272
+    },
+    {
+      "storyId": "SW-004",
+      "title": "Wire Graph Context into Execution Engine buildPrompt()",
+      "status": "passed",
+      "startedAt": "2026-03-10T23:04:19.349Z",
+      "finishedAt": "2026-03-10T23:09:17.813Z",
+      "agentType": "claude",
+      "elapsedMs": 298464
     }
   ],
   "failedStories": [],
