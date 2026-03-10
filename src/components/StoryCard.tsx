@@ -17,6 +17,9 @@ export interface Story {
   passes?: boolean;
   excluded?: boolean;
   mergedVia?: string;
+  suggestedSkills?: Array<{ name: string; relevance: number; reason: string }>;
+  /** Per-story execution model override (e.g. 'claude-opus-4-6'). */
+  model?: string;
 }
 
 interface CriteriaSuggestion {
