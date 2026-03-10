@@ -11,3 +11,8 @@ dist
 progress.txt
 .rorca/run-state.json
 .rorca/memory/health-log.json
+
+# Bun binary build artifacts
+bin/.generated/
+rorca
+.rorca-results.jsonl
