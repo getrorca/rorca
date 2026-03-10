@@ -13,7 +13,8 @@
     "self-register": "npx tsx forge/self-register.ts",
     "start": "node cli.js start",
     "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "build:binary": "bun run bin/build-binary.ts"
   },
   "keywords": [
     "ai",
