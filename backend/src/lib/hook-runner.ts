@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
 import { createHmac } from 'crypto';
-import { db } from '../db/index';
+import { query } from '../db/index';
 import { decryptToken } from '../routes/auth';
 import { logger } from './logger';
 
@@ -92,15 +92,16 @@ async function fireWebhook(
  * Returns array of results. Pre-run hooks abort on first non-zero exit.
  * Supports both shell command hooks and outbound HTTP webhook hooks.
  */
-export function runHooks(
+export async function runHooks(
   workspaceId: string,
   hookType: PipelineHookRow['hook_type'],
   cwd: string,
   env: Record<string, string>,
-): HookResult[] {
-  const hooks = db.prepare(
-    `SELECT * FROM pipeline_hooks WHERE workspace_id = ? AND hook_type = ? AND enabled = 1 ORDER BY id ASC`
-  ).all(workspaceId, hookType) as PipelineHookRow[];
+): Promise<HookResult[]> {
+  const hooks = await query<PipelineHookRow>(
+    `SELECT * FROM pipeline_hooks WHERE workspace_id = $1 AND hook_type = $2 AND enabled = 1 ORDER BY id ASC`,
+    [workspaceId, hookType],
+  );
 
   const results: HookResult[] = [];
 

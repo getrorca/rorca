@@ -482,11 +482,11 @@ describe('CIE E2E: Chokidar File Watcher — Echo Suppression', () => {
     // The handleFileChange function writes to DB and broadcasts via SSE.
     // Verify the mock DB was set up to accept the insert.
     const { broadcastAll } = require('../sse-hub');
-    const { db } = require('../../db/index');
+    const { execute } = require('../../db/index');
 
-    // Verify the DB mock is callable
-    expect(db.prepare).toBeDefined();
-    expect(typeof db.prepare).toBe('function');
+    // Verify the async DB helper is callable
+    expect(execute).toBeDefined();
+    expect(typeof execute).toBe('function');
 
     // Verify broadcastAll mock is callable
     expect(broadcastAll).toBeDefined();
