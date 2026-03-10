@@ -166,9 +166,9 @@ router.post('/preview-sanitize', (req: Request, res: Response) => {
  *       404:
  *         description: Spec or workspace not found
  */
-router.post('/publish', requirePlan('marketplace_publish'), (req: Request, res: Response) => {
+router.post('/publish', requirePlan('marketplace_publish'), async (req: Request, res: Response) => {
   ensureTable();
-  const user = getEffectiveUser(req);
+  const user = await getEffectiveUser(req);
   const { spec_id, workspace_id, title, description, tags } = req.body as {
     spec_id?: string;
     workspace_id?: string;
@@ -362,9 +362,9 @@ router.post('/:id/fork', (req: Request, res: Response) => {
  *       404:
  *         description: Publication not found
  */
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   ensureTable();
-  const user = getEffectiveUser(req);
+  const user = await getEffectiveUser(req);
   const id = String(req.params.id);
 
   const pub = db
@@ -487,9 +487,9 @@ router.get('/', (req: Request, res: Response) => {
  *                 total:
  *                   type: integer
  */
-router.get('/my', (req: Request, res: Response) => {
+router.get('/my', async (req: Request, res: Response) => {
   ensureTable();
-  const user = getEffectiveUser(req);
+  const user = await getEffectiveUser(req);
 
   const rows = db
     .prepare(

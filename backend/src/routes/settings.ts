@@ -50,8 +50,8 @@ interface UserSettingsRow {
  *       500:
  *         description: No user configured
  */
-router.get('/profile', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.get('/profile', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
   const row = db.prepare(
@@ -107,8 +107,8 @@ const ProfileUpdateSchema = z.object({
   avatarUrl: z.string().nullable().optional(),
 });
 
-router.put('/profile', validateBody(ProfileUpdateSchema), (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.put('/profile', validateBody(ProfileUpdateSchema), async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { displayName, avatarUrl } = req.body;
 
@@ -173,8 +173,8 @@ router.put('/profile', validateBody(ProfileUpdateSchema), (req: Request, res: Re
  *       500:
  *         description: No user configured
  */
-router.put('/password', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.put('/password', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { currentPassword, newPassword } = req.body;
 
@@ -225,8 +225,8 @@ router.put('/password', (req: Request, res: Response) => {
  *       500:
  *         description: No user configured
  */
-router.get('/display', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.get('/display', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
   const row = db.prepare(
@@ -270,8 +270,8 @@ router.get('/display', (req: Request, res: Response) => {
  *       500:
  *         description: No user configured
  */
-router.put('/display', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.put('/display', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { defaultModel, itemsPerPage } = req.body;
 

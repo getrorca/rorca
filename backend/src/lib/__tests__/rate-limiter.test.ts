@@ -2,12 +2,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from '../../routes/__tests__/helpers/auth-helper';
 
 let app: Express;
-let db: Database.Database;
+let query: typeof import('../../db/index').query;
+let execute: typeof import('../../db/index').execute;
 let tmpDir: string;
 let authToken: string;
 
@@ -21,7 +21,8 @@ beforeEach(async () => {
   const serverMod = require('../../server');
   app = serverMod.default;
   const dbMod = require('../../db/index');
-  db = dbMod.db;
+  query = dbMod.query;
+  execute = dbMod.execute;
 
   // Reset in-memory windows between tests
   const { resetRateLimitWindows, invalidateRateLimitCache } = require('../rate-limiter');
@@ -34,7 +35,6 @@ beforeEach(async () => {
 afterEach(() => {
   const { stopCleanupTimer } = require('../rate-limiter');
   stopCleanupTimer();
-  db.close();
   delete process.env.RATE_LIMIT_ENABLED;
   fs.rmSync(tmpDir, { recursive: true, force: true });
   delete process.env.DB_PATH;
@@ -42,8 +42,8 @@ afterEach(() => {
 });
 
 describe('rate_limits table', () => {
-  test('migration creates rate_limits table with seeded defaults', () => {
-    const rows = db.prepare('SELECT * FROM rate_limits ORDER BY id').all() as any[];
+  test('migration creates rate_limits table with seeded defaults', async () => {
+    const rows = await query<any>('SELECT * FROM rate_limits ORDER BY id');
     expect(rows.length).toBeGreaterThanOrEqual(4);
 
     // Check wildcard defaults
@@ -77,8 +77,10 @@ describe('rate limiter middleware', () => {
 
   test('returns 429 after exceeding limit for authenticated users', async () => {
     // Set a very low limit for testing
-    db.prepare('UPDATE rate_limits SET max_requests = 3 WHERE endpoint_pattern = ? AND tier = ?')
-      .run('*', 'authenticated');
+    await execute(
+      'UPDATE rate_limits SET max_requests = 3 WHERE endpoint_pattern = $1 AND tier = $2',
+      ['*', 'authenticated'],
+    );
     const { invalidateRateLimitCache } = require('../rate-limiter');
     invalidateRateLimitCache();
 
@@ -104,8 +106,10 @@ describe('rate limiter middleware', () => {
 
   test('rate limits apply per-user (different users have independent windows)', async () => {
     // Set low limit
-    db.prepare('UPDATE rate_limits SET max_requests = 2 WHERE endpoint_pattern = ? AND tier = ?')
-      .run('*', 'authenticated');
+    await execute(
+      'UPDATE rate_limits SET max_requests = 2 WHERE endpoint_pattern = $1 AND tier = $2',
+      ['*', 'authenticated'],
+    );
     const { invalidateRateLimitCache } = require('../rate-limiter');
     invalidateRateLimitCache();
 
@@ -139,8 +143,10 @@ describe('rate limiter middleware', () => {
 
   test('unauthenticated routes are rate limited by IP', async () => {
     // Set low limit for unauthenticated
-    db.prepare('UPDATE rate_limits SET max_requests = 2 WHERE endpoint_pattern = ? AND tier = ?')
-      .run('*', 'unauthenticated');
+    await execute(
+      'UPDATE rate_limits SET max_requests = 2 WHERE endpoint_pattern = $1 AND tier = $2',
+      ['*', 'unauthenticated'],
+    );
     const { invalidateRateLimitCache } = require('../rate-limiter');
     invalidateRateLimitCache();
 
@@ -162,8 +168,10 @@ describe('rate limiter middleware', () => {
 
   test('per-endpoint config overrides wildcard', async () => {
     // Wildcard allows 100, but we'll add a specific endpoint with limit 2
-    db.prepare('INSERT OR REPLACE INTO rate_limits (endpoint_pattern, tier, max_requests, window_seconds) VALUES (?, ?, ?, ?)')
-      .run('GET /api/workspaces', 'authenticated', 2, 60);
+    await execute(
+      'INSERT INTO rate_limits (endpoint_pattern, tier, max_requests, window_seconds) VALUES ($1, $2, $3, $4) ON CONFLICT (endpoint_pattern, tier) DO UPDATE SET max_requests = EXCLUDED.max_requests, window_seconds = EXCLUDED.window_seconds',
+      ['GET /api/workspaces', 'authenticated', 2, 60],
+    );
     const { invalidateRateLimitCache } = require('../rate-limiter');
     invalidateRateLimitCache();
 
@@ -182,15 +190,17 @@ describe('rate limiter middleware', () => {
     expect(res.headers['x-ratelimit-limit']).toBe('2');
   });
 
-  test('rate_limits table supports per-tier customization', () => {
+  test('rate_limits table supports per-tier customization', async () => {
     // Insert a custom tier
-    db.prepare('INSERT INTO rate_limits (endpoint_pattern, tier, max_requests, window_seconds) VALUES (?, ?, ?, ?)')
-      .run('*', 'premium', 500, 60);
+    await execute(
+      'INSERT INTO rate_limits (endpoint_pattern, tier, max_requests, window_seconds) VALUES ($1, $2, $3, $4)',
+      ['*', 'premium', 500, 60],
+    );
 
-    const row = db.prepare('SELECT * FROM rate_limits WHERE tier = ?').get('premium') as any;
-    expect(row).toBeDefined();
-    expect(row.max_requests).toBe(500);
-    expect(row.window_seconds).toBe(60);
+    const rows = await query<any>('SELECT * FROM rate_limits WHERE tier = $1', ['premium']);
+    expect(rows.length).toBe(1);
+    expect(rows[0].max_requests).toBe(500);
+    expect(rows[0].window_seconds).toBe(60);
   });
 
   test('health endpoint is not rate limited', async () => {
@@ -203,8 +213,10 @@ describe('rate limiter middleware', () => {
 
   test('SSE endpoints are exempt from rate limiting', async () => {
     // Set a very low limit to ensure they would be rate limited if not exempt
-    db.prepare('UPDATE rate_limits SET max_requests = 1 WHERE endpoint_pattern = ? AND tier = ?')
-      .run('*', 'authenticated');
+    await execute(
+      'UPDATE rate_limits SET max_requests = 1 WHERE endpoint_pattern = $1 AND tier = $2',
+      ['*', 'authenticated'],
+    );
     const { invalidateRateLimitCache } = require('../rate-limiter');
     invalidateRateLimitCache();
 

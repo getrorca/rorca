@@ -98,7 +98,7 @@ function findSpecFile(workspacePath: string, specId: string): string | null {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace or spec not found" }
  */
-specReviewRouter.post('/:specId/review-link', (req: Request, res: Response) => {
+specReviewRouter.post('/:specId/review-link', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const { workspaceId } = req.body;
@@ -121,7 +121,7 @@ specReviewRouter.post('/:specId/review-link', (req: Request, res: Response) => {
       return;
     }
 
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     const rawToken = crypto.randomUUID();
     const tokenHash = hashToken(rawToken);
     const id = crypto.randomUUID();

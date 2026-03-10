@@ -95,7 +95,7 @@ const router = Router();
  *       422:
  *         description: Invalid pack structure (missing pack.json or required dirs)
  */
-router.post('/install', (req: Request, res: Response) => {
+router.post('/install', async (req: Request, res: Response) => {
   const { workspaceId, packPath } = req.body;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
@@ -133,7 +133,7 @@ router.post('/install', (req: Request, res: Response) => {
   }
 
   try {
-    const result = installPack(workspaceId, workspace.path, absPackPath);
+    const result = await installPack(workspaceId, workspace.path, absPackPath);
 
     res.status(201).json({
       ok: true,
@@ -215,7 +215,7 @@ router.post('/install', (req: Request, res: Response) => {
  *       422:
  *         description: Invalid pack structure after fork
  */
-router.post('/fork', (req: Request, res: Response) => {
+router.post('/fork', async (req: Request, res: Response) => {
   const { workspaceId, sourcePack, newName } = req.body;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
@@ -248,7 +248,7 @@ router.post('/fork', (req: Request, res: Response) => {
   }
 
   try {
-    const result = forkPack(workspaceId, workspace.path, sourcePack, newName);
+    const result = await forkPack(workspaceId, workspace.path, sourcePack, newName);
 
     res.status(201).json({
       ok: true,
@@ -317,7 +317,7 @@ router.post('/fork', (req: Request, res: Response) => {
  *       404:
  *         description: Workspace not found
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string | undefined;
 
   if (!workspaceId) {
@@ -334,7 +334,7 @@ router.get('/', (req: Request, res: Response) => {
   }
 
   const registry = new PackRegistry(workspace.path, workspaceId);
-  const installed = registry.listInstalled();
+  const installed = await registry.listInstalled();
 
   res.json({
     packs: installed.map(row => ({
