@@ -71,6 +71,7 @@ import { createMcpRequestHandler } from './lib/mcp-http';
 import telemetryRouter from './routes/telemetry';
 import { logger } from './lib/logger';
 import pinoHttp from 'pino-http';
+import { startGraphPopulator } from './lib/graph-populator';
 
 dotenv.config();
 
@@ -268,6 +269,9 @@ startMemorySynthesis();
 
 // PG-007: Subscribe embedding pipeline to WAL events for automatic vector generation
 startEmbeddingPipeline();
+
+// PG-015: Subscribe graph populator to WAL events for knowledge graph edges
+startGraphPopulator();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
 subscribe((event: WalEvent) => {
