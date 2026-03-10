@@ -23,6 +23,7 @@ export const MEMORY_CATEGORIES = [
   'Decision',
   'Pattern',
   'Gotcha',
+  'Run Synthesis',
 ] as const;
 
 export type MemoryCategory = typeof MEMORY_CATEGORIES[number];
