@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T10:23:50.625Z",
+  "lastUpdatedAt": "2026-03-10T10:29:57.877Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -75,6 +75,15 @@
       "finishedAt": "2026-03-10T10:23:50.625Z",
       "agentType": "claude",
       "elapsedMs": 329818
+    },
+    {
+      "storyId": "PG-009",
+      "title": "Docker Compose — Postgres 16 + pgvector + AGE",
+      "status": "passed",
+      "startedAt": "2026-03-10T10:23:59.264Z",
+      "finishedAt": "2026-03-10T10:29:57.877Z",
+      "agentType": "claude",
+      "elapsedMs": 358613
     }
   ],
   "failedStories": [],
