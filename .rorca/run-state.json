@@ -2,7 +2,7 @@
   "specId": "rorca-curated-skills-library",
   "runId": 14,
   "startedAt": "2026-03-10T02:18:43.908Z",
-  "lastUpdatedAt": "2026-03-10T02:43:29.170Z",
+  "lastUpdatedAt": "2026-03-10T02:47:53.248Z",
   "completedStories": [
     {
       "storyId": "SL-002",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-10T02:43:29.169Z",
       "agentType": "claude",
       "elapsedMs": 606280
+    },
+    {
+      "storyId": "SL-017",
+      "title": "SpecForgePreview Skills & Model Integration",
+      "status": "passed",
+      "startedAt": "2026-03-10T02:43:43.070Z",
+      "finishedAt": "2026-03-10T02:47:53.248Z",
+      "agentType": "claude",
+      "elapsedMs": 250178
     }
   ],
   "failedStories": [],
