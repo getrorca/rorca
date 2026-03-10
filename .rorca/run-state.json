@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T12:41:30.965Z",
+  "lastUpdatedAt": "2026-03-10T12:47:15.552Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -183,6 +183,15 @@
       "finishedAt": "2026-03-10T12:41:30.965Z",
       "agentType": "claude",
       "elapsedMs": 354247
+    },
+    {
+      "storyId": "PR-021",
+      "title": "Cross-Workspace Memory Synthesis",
+      "status": "passed",
+      "startedAt": "2026-03-10T12:41:39.727Z",
+      "finishedAt": "2026-03-10T12:47:15.552Z",
+      "agentType": "claude",
+      "elapsedMs": 335825
     }
   ],
   "failedStories": [],
