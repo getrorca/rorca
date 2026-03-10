@@ -2,7 +2,7 @@
   "specId": "rorca-distribution",
   "runId": 17,
   "startedAt": "2026-03-10T13:18:22.929Z",
-  "lastUpdatedAt": "2026-03-10T13:36:58.481Z",
+  "lastUpdatedAt": "2026-03-10T14:06:05.042Z",
   "completedStories": [
     {
       "storyId": "DIST-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-10T13:36:58.481Z",
       "agentType": "claude",
       "elapsedMs": 11444
+    },
+    {
+      "storyId": "DIST-004",
+      "title": "Bun Build Compile — Proof of Concept",
+      "status": "passed",
+      "startedAt": "2026-03-10T13:37:11.852Z",
+      "finishedAt": "2026-03-10T14:06:05.041Z",
+      "agentType": "claude",
+      "elapsedMs": 1733189
     }
   ],
   "failedStories": [],
