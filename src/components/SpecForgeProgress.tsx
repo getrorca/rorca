@@ -3,6 +3,26 @@ import { useWalSSE } from '../hooks/useWalSSE';
 
 export type GenerationStage = 'analyzing' | 'context' | 'generating' | 'validating';
 
+export type SpecErrorCategory =
+  | 'model_error'
+  | 'api_key_error'
+  | 'rate_limit'
+  | 'context_too_large'
+  | 'timeout'
+  | 'parse_error'
+  | 'network_error'
+  | 'unknown';
+
+export interface SpecGenerationError {
+  message: string;
+  category?: SpecErrorCategory;
+  model?: string;
+  provider?: string;
+  suggestion?: string;
+  rawResponse?: string;
+  contextSummary?: Record<string, unknown>;
+}
+
 interface StageConfig {
   id: string;
   label: string;
@@ -89,19 +109,230 @@ const CheckIcon = () => (
   </svg>
 );
 
+// ─── Error category display config ──────────────────────────────────────────
+
+interface ErrorCategoryConfig {
+  label: string;
+  icon: React.ReactNode;
+}
+
+const ErrorCategoryIcon = ({ d }: { d: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
+    <path strokeLinecap="round" strokeLinejoin="round" d={d} />
+  </svg>
+);
+
+const ERROR_CATEGORY_CONFIG: Record<SpecErrorCategory, ErrorCategoryConfig> = {
+  model_error: {
+    label: 'Model Error',
+    icon: <ErrorCategoryIcon d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />,
+  },
+  api_key_error: {
+    label: 'API Key Error',
+    icon: <ErrorCategoryIcon d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />,
+  },
+  rate_limit: {
+    label: 'Rate Limit',
+    icon: <ErrorCategoryIcon d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />,
+  },
+  context_too_large: {
+    label: 'Context Too Large',
+    icon: <ErrorCategoryIcon d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />,
+  },
+  timeout: {
+    label: 'Timeout',
+    icon: <ErrorCategoryIcon d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />,
+  },
+  parse_error: {
+    label: 'Parse Error',
+    icon: <ErrorCategoryIcon d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />,
+  },
+  network_error: {
+    label: 'Network Error',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 5.636a9 9 0 010 12.728m0 0l-2.829-2.829m2.829 2.829L21 21M15.536 8.464a5 5 0 010 7.072m0 0l-2.829-2.829m-4.243 2.829a5 5 0 01-1.414-3.536" />
+        <line x1="4" y1="4" x2="20" y2="20" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  unknown: {
+    label: 'Error',
+    icon: <ErrorCategoryIcon d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />,
+  },
+};
+
+// ─── Structured Error Card ──────────────────────────────────────────────────
+
+function SpecErrorCard({
+  error,
+  onRetry,
+  onRetryWithModel,
+}: {
+  error: SpecGenerationError;
+  onRetry?: () => void;
+  onRetryWithModel?: () => void;
+}) {
+  const [rawExpanded, setRawExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const category = error.category || 'unknown';
+  const config = ERROR_CATEGORY_CONFIG[category];
+
+  const handleCopy = async () => {
+    const details = [
+      `Category: ${config.label}`,
+      `Error: ${error.message}`,
+      error.model ? `Model: ${error.model}` : null,
+      error.provider ? `Provider: ${error.provider}` : null,
+      error.suggestion ? `Suggestion: ${error.suggestion}` : null,
+      error.rawResponse ? `\nRaw response (first 500 chars):\n${error.rawResponse}` : null,
+    ].filter(Boolean).join('\n');
+
+    try {
+      await navigator.clipboard.writeText(details);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API not available
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-error/30 bg-error/5 overflow-hidden">
+      {/* Header: category + icon */}
+      <div className="flex items-center gap-2 px-3 py-2.5 border-b border-error/15">
+        <div className="text-error shrink-0">{config.icon}</div>
+        <span className="text-sm font-semibold text-error">{config.label}</span>
+        {error.model && (
+          <span className="ml-auto text-xs text-muted bg-surface px-1.5 py-0.5 rounded font-mono">
+            {error.model}
+          </span>
+        )}
+      </div>
+
+      <div className="px-3 py-2.5 space-y-2.5">
+        {/* Raw error message */}
+        <div className="text-xs font-mono text-error/80 bg-error/5 rounded px-2 py-1.5 max-h-24 overflow-y-auto break-all whitespace-pre-wrap">
+          {error.message}
+        </div>
+
+        {/* Model + Provider info */}
+        {(error.model || error.provider) && (
+          <div className="flex gap-3 text-xs text-muted">
+            {error.provider && (
+              <span>Provider: <span className="text-text font-medium">{error.provider}</span></span>
+            )}
+          </div>
+        )}
+
+        {/* Suggestion */}
+        {error.suggestion && (
+          <div className="flex gap-2 text-xs bg-accent/5 border border-accent/15 rounded px-2.5 py-2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5 text-accent shrink-0 mt-0.5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+            </svg>
+            <span className="text-text/80">{error.suggestion}</span>
+          </div>
+        )}
+
+        {/* Context summary (if available) */}
+        {error.contextSummary && (
+          <div className="text-xs text-muted space-y-0.5">
+            <span className="font-medium text-text/60">Context injected:</span>
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+              {(error.contextSummary as any).estimatedTokens != null && (
+                <span>~{Math.round(((error.contextSummary as any).estimatedTokens) / 1000)}K tokens</span>
+              )}
+              {(error.contextSummary as any).skills?.length > 0 && (
+                <span>{(error.contextSummary as any).skills.length} skills</span>
+              )}
+              {(error.contextSummary as any).memoryEntries > 0 && (
+                <span>{(error.contextSummary as any).memoryEntries} memory entries</span>
+              )}
+              {(error.contextSummary as any).agentsMd && <span>AGENTS.md</span>}
+            </div>
+          </div>
+        )}
+
+        {/* Parse error: show raw LLM output */}
+        {category === 'parse_error' && error.rawResponse && (
+          <div>
+            <button
+              onClick={() => setRawExpanded(!rawExpanded)}
+              className="text-xs text-muted hover:text-text flex items-center gap-1 cursor-pointer"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={`w-3 h-3 transition-transform ${rawExpanded ? 'rotate-90' : ''}`}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+              Raw LLM response ({error.rawResponse.length} chars)
+            </button>
+            {rawExpanded && (
+              <div className="mt-1 text-xs font-mono text-muted/70 bg-surface rounded px-2 py-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap break-all">
+                {error.rawResponse}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Action buttons */}
+        <div className="flex gap-2 pt-1">
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              className="flex-1 py-1.5 rounded text-xs font-medium bg-accent text-white hover:bg-accent-hover transition-colors cursor-pointer"
+            >
+              Retry with same settings
+            </button>
+          )}
+          {onRetryWithModel && (
+            <button
+              onClick={onRetryWithModel}
+              className="flex-1 py-1.5 rounded text-xs font-medium text-muted hover:text-text border border-border hover:border-muted transition-colors cursor-pointer"
+            >
+              Try different model
+            </button>
+          )}
+          <button
+            onClick={handleCopy}
+            className="px-2 py-1.5 rounded text-xs text-muted hover:text-text border border-border hover:border-muted transition-colors cursor-pointer"
+            title="Copy error details"
+          >
+            {copied ? (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5 text-green-400">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+              </svg>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main Component ─────────────────────────────────────────────────────────
+
 interface SpecForgeProgressProps {
   isActive: boolean;
   onCancel: () => void;
-  error: string | null;
+  error: SpecGenerationError | null;
   /** Signal that the API call has completed (success or fail) — triggers validating stage */
   apiDone: boolean;
   /** When true, shows 6-pass pipeline stages driven by SSE events */
   multiPass?: boolean;
   /** Spec slug for SSE event filtering in multi-pass mode */
   specSlug?: string;
+  /** Retry with same settings */
+  onRetry?: () => void;
+  /** Open model picker for retry with different model */
+  onRetryWithModel?: () => void;
 }
 
-export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, multiPass, specSlug }: SpecForgeProgressProps) {
+export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, multiPass, specSlug, onRetry, onRetryWithModel }: SpecForgeProgressProps) {
   const stages = multiPass ? MULTI_PASS_STAGES : SINGLE_PASS_STAGES;
 
   // Single-pass: simulated index-based stage tracking
@@ -293,12 +524,13 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
         })}
       </div>
 
-      {/* Error state */}
+      {/* Error state — structured error card */}
       {error && (
-        <div className="px-3 py-2.5 rounded border border-error/30 bg-error/5 text-xs text-error space-y-1.5">
-          <div className="font-medium">Generation failed</div>
-          <div className="text-error/80">{error}</div>
-        </div>
+        <SpecErrorCard
+          error={error}
+          onRetry={onRetry}
+          onRetryWithModel={onRetryWithModel}
+        />
       )}
 
       {/* Cancel button */}

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, ApiError } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWalSSE } from '../hooks/useWalSSE';
 import type { PanelId } from '../components/Sidebar';
@@ -26,7 +26,7 @@ import SpecDetailSlideOver from '../components/SpecDetailSlideOver';
 import type { SpecSlideOverSummary } from '../components/SpecDetailSlideOver';
 import { relativeTime, REVIEW_STATUS_CONFIG } from '../components/SpecReviewInline';
 import type { SpecSummary, ReviewStatus } from '../components/SpecReviewInline';
-import SpecForgeProgress from '../components/SpecForgeProgress';
+import SpecForgeProgress, { type SpecGenerationError } from '../components/SpecForgeProgress';
 import SpecForgePreview from '../components/SpecForgePreview';
 import TemplatePickerModal from '../components/TemplatePickerModal';
 import { briefToSlug, KEBAB_RE } from '../lib/slugify';
@@ -2023,7 +2023,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedSpec, setGeneratedSpec] = useState<GeneratedSpec | null>(null);
-  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [generateError, setGenerateError] = useState<SpecGenerationError | null>(null);
   const [apiDone, setApiDone] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -2110,6 +2110,13 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     setGenerateError(null);
   }, []);
 
+  /** Switch model and retry — clears error, opens advanced, scrolls to model picker */
+  const handleRetryWithModel = useCallback(() => {
+    setGenerateError(null);
+    setApiDone(false);
+    setAdvancedOpen(true);
+  }, []);
+
   const handleGenerate = async () => {
     if (!canGenerate || isGenerating) return;
     const controller = new AbortController();
@@ -2130,11 +2137,28 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       if (controller.signal.aborted) return;
       setApiDone(true);
       const message = err instanceof Error ? err.message : String(err);
-      const alternatives = availableModels.filter(m => m.id !== modelUsed).map(m => m.label);
-      const suggestion = alternatives.length > 0 ? ` Try an alternative model: ${alternatives.join(', ')}.` : '';
-      setGenerateError(`Generation failed with ${availableModels.find(m => m.id === modelUsed)?.label || modelUsed}: ${message}.${suggestion}`);
+
+      // Extract structured error details from ApiError if available
+      const details = err instanceof ApiError ? err.details : {};
+      setGenerateError({
+        message,
+        category: (details.category as SpecGenerationError['category']) || 'unknown',
+        model: (details.model as string) || modelUsed,
+        provider: (details.provider as string) || undefined,
+        suggestion: (details.suggestion as string) || undefined,
+        rawResponse: (details.rawResponse as string) || undefined,
+        contextSummary: (details.contextSummary as Record<string, unknown>) || undefined,
+      });
       setIsGenerating(false);
     }
+  };
+
+  /** Retry with same settings — clears error and re-triggers generation */
+  const handleRetry = () => {
+    setGenerateError(null);
+    setApiDone(false);
+    // Defer so state clears, then call generate
+    setTimeout(() => handleGenerate(), 0);
   };
 
   const handleQuickRun = async () => {
@@ -2286,7 +2310,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       {(!generatedSpec || isGenerating) && (
         <div className="space-y-2">
           {isGenerating || (generateError && !generatedSpec) ? (
-            <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} />
+            <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} onRetry={handleRetry} onRetryWithModel={handleRetryWithModel} />
           ) : !generatedSpec ? (
             <>
               <button onClick={handleGenerate} disabled={!canGenerate || isGenerating}
