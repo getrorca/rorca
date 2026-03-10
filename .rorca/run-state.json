@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T12:35:27.934Z",
+  "lastUpdatedAt": "2026-03-10T12:41:30.965Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -174,6 +174,15 @@
       "finishedAt": "2026-03-10T12:35:27.934Z",
       "agentType": "claude",
       "elapsedMs": 489847
+    },
+    {
+      "storyId": "PR-018",
+      "title": "Memory Semantic Deduplication",
+      "status": "passed",
+      "startedAt": "2026-03-10T12:35:36.718Z",
+      "finishedAt": "2026-03-10T12:41:30.965Z",
+      "agentType": "claude",
+      "elapsedMs": 354247
     }
   ],
   "failedStories": [],

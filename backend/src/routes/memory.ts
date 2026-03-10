@@ -26,6 +26,7 @@ import {
 import { analyzeRunEvents } from '../lib/wal-feedback';
 import { broadcastAll } from '../lib/sse-hub';
 import { invalidateMemory } from '../lib/context-cache';
+import { deduplicateMemory } from '../lib/memory-dedup';
 
 const router = Router();
 
@@ -995,6 +996,67 @@ router.post('/synthesize-from-run/:runId', async (req: Request, res: Response) =
   });
 
   res.json({ proposals, total: proposals.length });
+});
+
+/**
+ * @swagger
+ * /api/memory/deduplicate:
+ *   post:
+ *     tags: [Memory]
+ *     summary: Deduplicate memory entries using embedding similarity
+ *     operationId: deduplicateMemory
+ *     description: |
+ *       Detects semantically duplicate memory entries using pgvector embedding similarity (>0.92 cosine threshold).
+ *       When duplicates found: keeps the most recent entry, merges unique details from older entries.
+ *       Falls back to Levenshtein distance comparison when vector search is unavailable.
+ *       Use dryRun=true query param to preview what would be removed without modifying anything.
+ *     parameters:
+ *       - name: dryRun
+ *         in: query
+ *         schema: { type: boolean }
+ *         description: If true, returns what would be removed without modifying anything
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deduplication result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 removed: { type: integer, description: "Number of duplicate entries removed" }
+ *                 merged: { type: integer, description: "Number of entries that absorbed details from duplicates" }
+ *                 total: { type: integer, description: "Total entries remaining after deduplication" }
+ *                 details:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       kept: { type: object, properties: { date: { type: string }, title: { type: string } } }
+ *                       removed: { type: array, items: { type: object, properties: { date: { type: string }, title: { type: string } } } }
+ *                       similarity: { type: number }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found" }
+ */
+router.post('/deduplicate', async (req: Request, res: Response) => {
+  const { workspaceId } = req.body;
+  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+
+  const dryRun = req.query.dryRun === 'true';
+
+  const result = await deduplicateMemory(wsPath, workspaceId, dryRun);
+  res.json(result);
 });
 
 export default router;

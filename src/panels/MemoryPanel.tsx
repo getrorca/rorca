@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BookOpen, Plus, Trash2, Pencil, Search, Filter, Save, X, Archive, RotateCcw, Bot } from 'lucide-react';
+import { BookOpen, Plus, Trash2, Pencil, Search, Filter, Save, X, Archive, RotateCcw, Bot, Merge } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 
@@ -185,6 +185,8 @@ export default function MemoryPanel() {
   const [loaded, setLoaded] = useState(false);
   const [archiveCount, setArchiveCount] = useState(0);
   const [rotating, setRotating] = useState(false);
+  const [deduplicating, setDeduplicating] = useState(false);
+  const [dedupResult, setDedupResult] = useState<{ removed: number; merged: number; total: number } | null>(null);
 
   const fetchEntries = useCallback(async () => {
     if (!workspaceId) return;
@@ -220,6 +222,27 @@ export default function MemoryPanel() {
       await Promise.all([fetchEntries(), fetchArchiveCount()]);
     } catch { /* ignore */ }
     setRotating(false);
+  };
+
+  const handleDeduplicate = async () => {
+    if (!workspaceId || deduplicating) return;
+    setDeduplicating(true);
+    setDedupResult(null);
+    try {
+      const result = await apiFetch<{ removed: number; merged: number; total: number }>(
+        '/api/memory/deduplicate',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        },
+      );
+      setDedupResult(result);
+      if (result.removed > 0) {
+        await fetchEntries();
+      }
+    } catch { /* ignore */ }
+    setDeduplicating(false);
   };
 
   const handleAdd = async (entry: Omit<MemoryEntry, 'date' | 'lineNumber'>) => {
@@ -372,8 +395,8 @@ export default function MemoryPanel() {
             </span>
           </div>
 
-          {/* Archive info + rotate */}
-          <div className="flex items-center gap-3 text-[11px] text-muted">
+          {/* Archive info + rotate + deduplicate */}
+          <div className="flex items-center gap-3 text-[11px] text-muted flex-wrap">
             <div className="flex items-center gap-1.5">
               <Archive size={11} />
               <span>{archiveCount} archived</span>
@@ -387,6 +410,22 @@ export default function MemoryPanel() {
               <RotateCcw size={10} className={rotating ? 'animate-spin' : ''} />
               {rotating ? 'Rotating…' : 'Rotate now'}
             </button>
+            <button
+              onClick={handleDeduplicate}
+              disabled={deduplicating}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border hover:bg-surface-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Remove semantically duplicate entries (uses embedding similarity)"
+            >
+              <Merge size={10} className={deduplicating ? 'animate-pulse' : ''} />
+              {deduplicating ? 'Deduplicating…' : 'Deduplicate'}
+            </button>
+            {dedupResult && (
+              <span className="text-[10px]">
+                {dedupResult.removed > 0
+                  ? `Removed ${dedupResult.removed}, merged ${dedupResult.merged} — ${dedupResult.total} remaining`
+                  : 'No duplicates found'}
+              </span>
+            )}
           </div>
 
           {/* Add form */}
