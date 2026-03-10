@@ -9,8 +9,11 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 export function runMigrations() {
-  // Migrations are .sql files in src/db/migrations/ — resolve for both dev (tsx) and compiled (dist/) modes
-  let migrationsDir = path.join(__dirname, 'migrations');
+  // Migrations are .sql files — resolve for dev (tsx), compiled (dist/), and bun binary modes
+  let migrationsDir = process.env.RORCA_MIGRATIONS_DIR || '';
+  if (!migrationsDir || !fs.existsSync(migrationsDir)) {
+    migrationsDir = path.join(__dirname, 'migrations');
+  }
   if (!fs.existsSync(migrationsDir)) {
     // Running from compiled backend/dist/db/ — look at source directory
     migrationsDir = path.join(__dirname, '..', '..', 'src', 'db', 'migrations');
