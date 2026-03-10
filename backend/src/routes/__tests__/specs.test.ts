@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -20,7 +20,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let authToken: string;
@@ -66,15 +65,11 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-specs-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  const llmClient = require('../../lib/llm-client');
+const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
 
   // Clean up any stale spec files from prior test suites that share os.tmpdir()
@@ -84,9 +79,7 @@ beforeEach(async () => {
   }
 
   // Seed a workspace for tests
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', ?)"
-  ).run(os.tmpdir());
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1)`, [os.tmpdir()]);
 
   authToken = await getAuthToken(app);
 });
@@ -97,11 +90,8 @@ afterEach(() => {
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
-
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 test('POST /api/specs/generate with valid body returns slug, stories, diagrams, provider, model', async () => {
@@ -200,9 +190,7 @@ test('WAL event inserted with event_type=generate and payload includes provider'
       brief: 'Build auth',
     });
 
-  const event = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'generate'"
-  ).get() as { event_type: string; spec_id: string; payload: string };
+  const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'generate'`) as { event_type: string; spec_id: string; payload: string };
 
   expect(event).toBeDefined();
   expect(event.event_type).toBe('generate');
@@ -219,10 +207,8 @@ test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydr
   mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
 
   // Seed workspace_context with schema + git
-  db.prepare(
-    `INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_memory, git_commit_count)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run('ws-test', 'CREATE TABLE users (id TEXT);', 1, 'conventions:\n  - use snake_case', 10);
+  await execute(`INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_memory, git_commit_count)
+     VALUES ($1, $2, $3, $4, $5)`, ['ws-test', 'CREATE TABLE users (id TEXT);', 1, 'conventions:\n  - use snake_case', 10]);
 
   await request(app)
     .post('/api/specs/generate')
@@ -234,9 +220,7 @@ test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydr
       brief: 'Build with context',
     });
 
-  const event = db.prepare(
-    "SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'hydrated-spec'"
-  ).get() as { payload: string };
+  const event = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'hydrated-spec'`) as { payload: string };
 
   expect(event).toBeDefined();
   const payload = JSON.parse(event.payload);
@@ -259,9 +243,7 @@ test('WAL event has hasSchema:false when workspace has no hydrated context', asy
       brief: 'Build without context',
     });
 
-  const event = db.prepare(
-    "SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'no-context-spec'"
-  ).get() as { payload: string };
+  const event = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'no-context-spec'`) as { payload: string };
 
   expect(event).toBeDefined();
   const payload = JSON.parse(event.payload);
@@ -298,9 +280,7 @@ test('POST /api/specs/generate with existing slug snapshots old version and succ
   expect(res2.body.slug).toBe('duplicate-check');
 
   // Verify version was created in DB
-  const version = db.prepare(
-    "SELECT * FROM spec_versions WHERE spec_slug = 'duplicate-check'"
-  ).get() as { version: number; status: string; content_json: string } | undefined;
+  const version = await queryOne(`SELECT * FROM spec_versions WHERE spec_slug = 'duplicate-check'`) as { version: number; status: string; content_json: string } | undefined;
   expect(version).toBeDefined();
   expect(version!.version).toBe(1);
   expect(version!.status).toBe('pending');
@@ -355,10 +335,10 @@ test('POST /api/specs/generate without model uses workspace L3 preferred_model',
   mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
   // Set workspace L3 preferred_model
-  db.prepare(`
+  await execute(`
     INSERT INTO direction_layers (layer, workspace_id, content_yaml, preferred_model, updated_at)
-    VALUES (3, 'ws-test', 'project: test', 'claude-haiku-4-5-20251001', datetime('now'))
-  `).run();
+    VALUES (3, 'ws-test', 'project: test', 'claude-haiku-4-5-20251001', NOW())
+  `);
 
   const res = await request(app)
     .post('/api/specs/generate')
@@ -381,12 +361,12 @@ test('POST /api/specs/generate with explicit model overrides workspace default',
   mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
   // Set workspace L3 preferred_model
-  db.prepare(`
+  await execute(`
     INSERT INTO direction_layers (layer, workspace_id, content_yaml, preferred_model, updated_at)
-    VALUES (3, 'ws-test', 'project: test', 'claude-haiku-4-5-20251001', datetime('now'))
+    VALUES (3, 'ws-test', 'project: test', 'claude-haiku-4-5-20251001', NOW())
     ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
     DO UPDATE SET preferred_model = 'claude-haiku-4-5-20251001'
-  `).run();
+  `);
 
   const res = await request(app)
     .post('/api/specs/generate')
@@ -414,9 +394,7 @@ test('WAL event payload includes token usage', async () => {
       brief: 'Test token tracking',
     });
 
-  const event = db.prepare(
-    "SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'token-usage-test'"
-  ).get() as { payload: string };
+  const event = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'token-usage-test'`) as { payload: string };
 
   expect(event).toBeDefined();
   const payload = JSON.parse(event.payload);
@@ -546,9 +524,7 @@ describe('POST /api/specs/:id/approve', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test' });
 
-    const event = db.prepare(
-      "SELECT * FROM wal_events WHERE event_type = 'spec_approved'"
-    ).get() as { event_type: string; spec_id: string; actor: string; payload: string };
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'spec_approved'`) as { event_type: string; spec_id: string; actor: string; payload: string };
 
     expect(event).toBeDefined();
     expect(event.spec_id).toBe('wal-approve');
@@ -617,9 +593,7 @@ describe('POST /api/specs/:id/reject', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', reason: 'Too many stories' });
 
-    const event = db.prepare(
-      "SELECT * FROM wal_events WHERE event_type = 'spec_rejected'"
-    ).get() as { event_type: string; spec_id: string; actor: string; payload: string };
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'spec_rejected'`) as { event_type: string; spec_id: string; actor: string; payload: string };
 
     expect(event).toBeDefined();
     expect(event.spec_id).toBe('wal-reject');
@@ -710,12 +684,8 @@ describe('GET /api/specs/:specId/versions', () => {
 
   test('returns multiple versions in ascending order', async () => {
     // Manually insert two versions
-    db.prepare(
-      `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, ?)`
-    ).run('multi-ver', 1, JSON.stringify({ title: 'V1', userStories: [] }), 'rejected');
-    db.prepare(
-      `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, ?)`
-    ).run('multi-ver', 2, JSON.stringify({ title: 'V2', userStories: [{ id: 'US-001', title: 'S1' }] }), 'pending');
+    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['multi-ver', 1, JSON.stringify({ title: 'V1', userStories: [] }), 'rejected']);
+    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['multi-ver', 2, JSON.stringify({ title: 'V2', userStories: [{ id: 'US-001', title: 'S1' }] }), 'pending']);
 
     const res = await request(app).get('/api/specs/multi-ver/versions').set('Authorization', `Bearer ${authToken}`);
     expect(res.status).toBe(200);
@@ -730,7 +700,7 @@ describe('GET /api/specs/:specId/versions', () => {
 });
 
 describe('GET /api/specs/:specId/diff', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     // Seed two versions with different stories
     const v1 = {
       title: 'Auth System',
@@ -746,12 +716,8 @@ describe('GET /api/specs/:specId/diff', () => {
         { id: 'US-003', title: 'Password Reset', description: 'Reset flow', acceptanceCriteria: ['AC5'], dependsOn: ['US-001'] },
       ],
     };
-    db.prepare(
-      `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, ?)`
-    ).run('diff-test', 1, JSON.stringify(v1), 'rejected');
-    db.prepare(
-      `INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES (?, ?, ?, ?, ?)`
-    ).run('diff-test', 2, JSON.stringify(v2), 'pending', null);
+    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, $4)`, ['diff-test', 1, JSON.stringify(v1), 'rejected']);
+    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES ($1, $2, $3, $4, $5)`, ['diff-test', 2, JSON.stringify(v2), 'pending', null]);
   });
 
   test('returns structured diff with added, removed, modified, unchanged stories', async () => {
@@ -1128,9 +1094,7 @@ describe('POST /api/specs/generate/batch', () => {
 
     expect(res.status).toBe(201);
 
-    const event = db.prepare(
-      "SELECT * FROM wal_events WHERE event_type = 'batch_started'"
-    ).get() as { event_type: string; payload: string };
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'batch_started'`) as { event_type: string; payload: string };
 
     expect(event).toBeDefined();
     const payload = JSON.parse(event.payload);
@@ -1288,9 +1252,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
 
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    const events = db.prepare(
-      "SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC"
-    ).all() as { payload: string }[];
+    const events = await query(`SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC`) as { payload: string }[];
 
     // Should have at least 2 progress events: generating + completed/failed
     expect(events.length).toBeGreaterThanOrEqual(2);
@@ -1364,9 +1326,7 @@ describe('V2-083: Story exclusion', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-test', excluded: true });
 
-    const events = db.prepare(
-      "SELECT * FROM wal_events WHERE event_type = 'story_excluded' AND spec_id = 'excl-wal'"
-    ).all() as { story_id: string; payload: string }[];
+    const events = await query(`SELECT * FROM wal_events WHERE event_type = 'story_excluded' AND spec_id = 'excl-wal'`) as { story_id: string; payload: string }[];
 
     expect(events).toHaveLength(1);
     expect(events[0].story_id).toBe('US-001');
@@ -1427,21 +1387,15 @@ describe('V2-083: Story exclusion', () => {
     expect(content.userStories[1].excluded).toBe(true);
   });
 
-  test('story_results accepts excluded status', () => {
+  test('story_results accepts excluded status', async () => {
     // Create a pipeline run to reference
-    const runResult = db.prepare(
-      "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('test.json', 'ws-test', 'running')"
-    ).run();
-    const runId = runResult.lastInsertRowid as number;
+    const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('test.json', 'ws-test', 'running') RETURNING id`);
+    const runId = runResult!.id;
 
     // Insert excluded story result
-    db.prepare(
-      "INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, 'US-001', 'excluded', datetime('now'))"
-    ).run(runId);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, 'US-001', 'excluded', NOW())`, [runId]);
 
-    const row = db.prepare(
-      "SELECT * FROM story_results WHERE run_id = ? AND story_id = 'US-001'"
-    ).get(runId) as { status: string };
+    const row = await queryOne(`SELECT * FROM story_results WHERE run_id = $1 AND story_id = 'US-001'`, [runId]) as { status: string };
 
     expect(row.status).toBe('excluded');
   });

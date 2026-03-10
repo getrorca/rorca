@@ -1,9 +1,6 @@
 # ── Stage 1: Build backend ──
 FROM node:20-alpine AS build
 
-# better-sqlite3 needs build tools for native compilation
-RUN apk add --no-cache python3 make g++
-
 WORKDIR /app/backend
 
 # Install dependencies (cache layer)
@@ -18,26 +15,19 @@ RUN npx tsc
 # ── Stage 2: Production runtime ──
 FROM node:20-alpine
 
-# better-sqlite3 native addon needs libstdc++
-RUN apk add --no-cache libstdc++
-
 WORKDIR /app
 
 # Install production dependencies only
 COPY backend/package.json backend/package-lock.json* ./
-RUN apk add --no-cache python3 make g++ \
-  && npm ci --omit=dev \
-  && apk del python3 make g++
+RUN npm ci --omit=dev
 
 # Copy compiled JS from build stage
 COPY --from=build /app/backend/dist/ dist/
 
-# Copy SQL migration files (needed at runtime by db/index.ts)
-COPY backend/src/db/migrations/ dist/db/migrations/
+# Copy PostgreSQL migration files (needed at runtime by db/pg-index.ts)
+COPY backend/src/db/pg-migrations/ dist/db/pg-migrations/
 
-# Data directory for SQLite
-RUN mkdir -p /data
-ENV DB_PATH=/data/rorca.db
+ENV DATABASE_URL=postgres://rorca:rorca@db:5432/rorca
 ENV NODE_ENV=production
 ENV PORT=3030
 

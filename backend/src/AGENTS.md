@@ -1,7 +1,7 @@
 # AGENTS.md — backend/src/
 
 ## Stack
-Express.js + TypeScript + SQLite (`better-sqlite3`, WAL mode). Runs on :3030. `ts-node`/`tsx` — **no hot-reload**, restart required after every change.
+Express.js + TypeScript + PostgreSQL 16 (`pg` Pool, async). Runs on :3030. `ts-node`/`tsx` — **no hot-reload**, restart required after every change.
 
 ## Entry Point
 `backend/src/server.ts` — mounts all routers, enables CORS, starts listening.
@@ -22,29 +22,30 @@ No auth middleware — Rorca is local-only.
 
 ## Key Patterns
 
-### DB Calls (synchronous — never async)
+### DB Calls (async — always `await`)
 ```typescript
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 
 // Single row
-const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as WorkspaceRow | undefined;
+const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [id]);
 
 // Multiple rows
-const rows = db.prepare('SELECT * FROM pipeline_runs ORDER BY id DESC').all() as PipelineRunRow[];
+const rows = await query<PipelineRunRow>('SELECT * FROM pipeline_runs ORDER BY id DESC');
 
 // Write
-const result = db.prepare('INSERT INTO ...').run(val1, val2);
-const newId = result.lastInsertRowid; // bigint
+const result = await execute('INSERT INTO ... VALUES ($1, $2)', [val1, val2]);
+// result.rowCount — number of affected rows
 ```
 
 ### WAL Event Emission Pattern
 Every state-changing operation must emit a WAL event — this drives the SSE pipeline and audit log:
 ```typescript
-const walResult = db.prepare(
-  `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
-).run(eventType, specId, workspaceId, JSON.stringify(payload));
+await execute(
+  `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)`,
+  [eventType, specId, workspaceId, JSON.stringify(payload)]
+);
 
-const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+const walEvent = await queryOne<WalEvent>('SELECT * FROM wal_events ORDER BY id DESC LIMIT 1');
 broadcastAll(walEvent);  // from '../lib/sse-hub'
 ```
 
@@ -58,26 +59,24 @@ const usage = result.usage; // { inputTokens, outputTokens }
 
 ### Workspace Lookup Helper
 ```typescript
-import { getWorkspace } from '../db/index'; // or inline db.prepare
-const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+import { queryOne } from '../db/index';
+const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [workspaceId]);
 if (!workspace) { res.status(404).json({ error: 'Workspace not found' }); return; }
 ```
 
 ### Response Pattern
 ```typescript
-router.get('/path', (req: Request, res: Response) => {
+router.get('/path', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    // ... synchronous DB calls ...
+    // ... async DB calls with await ...
     res.json(result);
-  } catch (error: any) {
-    console.error('[RouteFile] Operation error:', error);
-    res.status(500).json({ error: error.message });
-  }
+  } catch (err) { next(err); }
 });
 ```
 
 ## Common Mistakes
-- **Using async for DB**: better-sqlite3 is sync. No `await db.prepare(...).get()`.
+- **Forgetting `await` on DB calls**: All `query`, `queryOne`, `execute` are async. Missing `await` returns a Promise instead of data.
+- **Using `?` placeholders instead of `$1, $2, ...`**: PostgreSQL uses numbered placeholders.
 - **Missing workspace isolation**: every query that touches workspace-scoped data must filter by `workspace_id`.
 - **Forgetting WAL event**: state changes without WAL events won't appear in the Pipeline Monitor SSE stream.
 - **Using old `chatComplete` string result**: it now returns `ChatResult`. Use `.text`.

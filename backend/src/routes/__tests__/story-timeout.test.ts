@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -17,7 +17,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -58,18 +57,12 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-timeout-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  // Seed workspace
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test Workspace', ?)"
-  ).run(tmpDir);
+// Seed workspace
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test Workspace', $1)`, [tmpDir]);
 
   // Create spec file on disk
   const pendingDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending');
@@ -80,10 +73,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 test('PUT story update accepts timeoutMinutes', async () => {
@@ -148,20 +139,16 @@ test('existing timeoutMinutes is preserved when not provided in update', async (
 
 test('story_results table accepts timeout status', async () => {
   // Create a pipeline run first
-  const runResult = db.prepare(
-    "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('test.json', 'ws-test', 'running')"
-  ).run();
-  const runId = runResult.lastInsertRowid;
+  const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('test.json', 'ws-test', 'running') RETURNING id`);
+  const runId = runResult!.id;
 
   // Insert a timeout story result
-  const storyResult = db.prepare(
-    "INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES (?, 'US-001', 'timeout', 2700)"
-  ).run(runId);
+  const storyResult = await queryOne<{ id: number }>(`INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES ($1, 'US-001', 'timeout', 2700) RETURNING id`, [runId]);
 
-  expect(storyResult.lastInsertRowid).toBeGreaterThan(0);
+  expect(storyResult!.id).toBeGreaterThan(0);
 
   // Verify it can be read back
-  const row = db.prepare('SELECT * FROM story_results WHERE id = ?').get(storyResult.lastInsertRowid) as any;
+  const row = await queryOne(`SELECT * FROM story_results WHERE id = $1`, [storyResult!.id]) as any;
   expect(row.status).toBe('timeout');
   expect(row.elapsed_seconds).toBe(2700);
 });

@@ -11,15 +11,10 @@ import type { Pack } from '../convention-packs';
 // ─── DB Mock (required by pack-registry import chain) ────────────────────────
 
 jest.mock('../../db/index', () => ({
-  db: {
-    prepare: jest.fn().mockReturnValue({
-      all: jest.fn().mockReturnValue([]),
-      get: jest.fn().mockReturnValue(undefined),
-      run: jest.fn().mockReturnValue({ lastInsertRowid: 1, changes: 0 }),
-    }),
-    exec: jest.fn(),
-    pragma: jest.fn(),
-  },
+  query: jest.fn().mockResolvedValue([]),
+  queryOne: jest.fn().mockResolvedValue(undefined),
+  execute: jest.fn().mockResolvedValue({ rowCount: 0 }),
+  transaction: jest.fn().mockImplementation((fn: Function) => fn()),
 }));
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

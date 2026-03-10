@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let dbPath: string;
 let authToken: string;
@@ -16,20 +15,15 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-ws-test-'));
   dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 const validWorkspace = {
@@ -113,9 +107,7 @@ test('WAL events logged for workspace_create and workspace_delete', async () => 
   await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
   await request(app).delete('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
 
-  const events = db
-    .prepare("SELECT event_type, workspace_id FROM wal_events WHERE workspace_id = 'ws-test-1' ORDER BY id")
-    .all() as { event_type: string; workspace_id: string }[];
+  const events = await query("SELECT event_type, workspace_id FROM wal_events WHERE workspace_id = 'ws-test-1' ORDER BY id") as { event_type: string; workspace_id: string }[];
 
   expect(events).toHaveLength(2);
   expect(events[0].event_type).toBe('workspace_create');
@@ -138,10 +130,8 @@ test('GET /api/workspaces/:id/context returns 200 with null fields before hydrat
 test('GET /api/workspaces/:id/context returns populated fields after INSERT', async () => {
   await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
 
-  db.prepare(
-    `INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_snapshot_at, schema_table_count, git_memory, git_memory_updated_at, last_ingested_commit_hash, git_commit_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('ws-test-1', 'CREATE TABLE users (id TEXT);', '2026-02-21T00:00:00Z', 1, 'some memory', '2026-02-21T00:00:00Z', 'abc123', 5);
+  await execute(`INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_snapshot_at, schema_table_count, git_memory, git_memory_updated_at, last_ingested_commit_hash, git_commit_count)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, ['ws-test-1', 'CREATE TABLE users (id TEXT);', '2026-02-21T00:00:00Z', 1, 'some memory', '2026-02-21T00:00:00Z', 'abc123', 5]);
 
   const res = await request(app).get('/api/workspaces/ws-test-1/context').set('Authorization', `Bearer ${authToken}`);
 

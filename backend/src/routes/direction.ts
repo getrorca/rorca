@@ -1,6 +1,6 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { synthesize } from '../lib/direction-stack';
 import { chatComplete } from '../lib/llm-client';
@@ -9,25 +9,29 @@ import type { ProviderType, ModelInfo } from '../lib/llm-client';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 import { getVaultKey } from './vault';
 import { logger } from '../lib/logger';
+import { invalidateDirection } from '../lib/context-cache';
 
 const router = Router();
 
 /** Look up team L1/L2 for a workspace via workspace_access */
-function getTeamLayers(workspaceId: string): { teamL1?: string; teamL2?: string } {
+async function getTeamLayers(workspaceId: string): Promise<{ teamL1?: string; teamL2?: string }> {
   // A workspace may belong to a team via workspace_access
-  const access = db.prepare(
-    'SELECT team_id FROM workspace_access WHERE workspace_id = ? LIMIT 1'
-  ).get(workspaceId) as { team_id: string } | undefined;
+  const access = await queryOne<{ team_id: string }>(
+    'SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1',
+    [workspaceId]
+  );
 
   if (!access) return {};
 
-  const teamL1 = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
-  ).get(access.team_id) as { content_yaml: string } | undefined;
+  const teamL1 = await queryOne<{ content_yaml: string }>(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`,
+    [access.team_id]
+  );
 
-  const teamL2 = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
-  ).get(access.team_id) as { content_yaml: string } | undefined;
+  const teamL2 = await queryOne<{ content_yaml: string }>(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`,
+    [access.team_id]
+  );
 
   return {
     teamL1: teamL1?.content_yaml,
@@ -84,39 +88,43 @@ function getTeamLayers(workspaceId: string): { teamL1?: string; teamL2?: string 
  *       400: { description: "Missing fields or invalid layer" }
  *       422: { description: "Invalid YAML or schema validation error" }
  */
-router.get('/', (req: Request, res: Response) => {
-  const { layer, workspaceId } = req.query;
+router.get('/', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { layer, workspaceId } = req.query;
 
-  if (!layer || ![1, 2, 3].includes(Number(layer))) {
-    res.status(400).json({ error: 'layer must be 1, 2, or 3' });
-    return;
-  }
+    if (!layer || ![1, 2, 3].includes(Number(layer))) {
+      res.status(400).json({ error: 'layer must be 1, 2, or 3' });
+      return;
+    }
 
-  const layerNum = Number(layer);
-  let row: { content_yaml: string } | undefined;
+    const layerNum = Number(layer);
+    let row: { content_yaml: string } | undefined;
 
-  if (layerNum === 1) {
-    row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-    ).get() as { content_yaml: string } | undefined;
-  } else if (layerNum === 2) {
-    // L2 is domain-scoped; for the panel we fetch workspace-level L2
-    row = workspaceId
-      ? db.prepare(
-          `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-        ).get(String(workspaceId)) as { content_yaml: string } | undefined
-      : undefined;
-  } else {
-    const l3Row = workspaceId
-      ? db.prepare(
-          `SELECT content_yaml, preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-        ).get(String(workspaceId)) as { content_yaml: string; preferred_model: string | null } | undefined
-      : undefined;
-    res.json({ contentYaml: l3Row?.content_yaml ?? '', preferredModel: l3Row?.preferred_model ?? null });
-    return;
-  }
+    if (layerNum === 1) {
+      row = await queryOne<{ content_yaml: string }>(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+      );
+    } else if (layerNum === 2) {
+      // L2 is domain-scoped; for the panel we fetch workspace-level L2
+      row = workspaceId
+        ? await queryOne<{ content_yaml: string }>(
+            `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+            [String(workspaceId)]
+          )
+        : undefined;
+    } else {
+      const l3Row = workspaceId
+        ? await queryOne<{ content_yaml: string; preferred_model: string | null }>(
+            `SELECT content_yaml, preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+            [String(workspaceId)]
+          )
+        : undefined;
+      res.json({ contentYaml: l3Row?.content_yaml ?? '', preferredModel: l3Row?.preferred_model ?? null });
+      return;
+    }
 
-  res.json({ contentYaml: row?.content_yaml ?? '' });
+    res.json({ contentYaml: row?.content_yaml ?? '' });
+  } catch (err) { next(err); }
 });
 
 // PUT /api/direction — upsert a direction layer
@@ -129,51 +137,61 @@ const DirectionUpsertSchema = z.object({
   skipValidation: z.boolean().optional(),
 });
 
-router.put('/', validateBody(DirectionUpsertSchema), (req: Request, res: Response) => {
-  const { layer, workspaceId, domain, contentYaml, preferredModel, skipValidation } = req.body;
+router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { layer, workspaceId, domain, contentYaml, preferredModel, skipValidation } = req.body;
 
-  // Validate preferredModel if provided (only valid for L3)
-  if (preferredModel !== undefined && preferredModel !== null) {
-    if (layer !== 3) {
-      res.status(400).json({ error: 'preferredModel is only valid for layer 3' });
-      return;
+    // Validate preferredModel if provided (only valid for L3)
+    if (preferredModel !== undefined && preferredModel !== null) {
+      if (layer !== 3) {
+        res.status(400).json({ error: 'preferredModel is only valid for layer 3' });
+        return;
+      }
+      // Accept any model string — registered models get cost tracking, unregistered models pass through to openai-compat
     }
-    // Accept any model string — registered models get cost tracking, unregistered models pass through to openai-compat
-  }
 
-  // Validate YAML syntax and per-layer schema (skip for Simple/prose mode)
-  if (!skipValidation) {
-    const validation = validateDirectionYaml(layer, contentYaml);
-    if (validation.yamlError) {
-      res.status(422).json({
-        error: 'Invalid YAML syntax',
-        yamlError: validation.yamlError,
-      });
-      return;
+    // Validate YAML syntax and per-layer schema (skip for Simple/prose mode)
+    if (!skipValidation) {
+      const validation = validateDirectionYaml(layer, contentYaml);
+      if (validation.yamlError) {
+        res.status(422).json({
+          error: 'Invalid YAML syntax',
+          yamlError: validation.yamlError,
+        });
+        return;
+      }
+      if (!validation.valid) {
+        res.status(422).json({
+          error: 'Direction content failed schema validation',
+          validationErrors: validation.errors,
+        });
+        return;
+      }
     }
-    if (!validation.valid) {
-      res.status(422).json({
-        error: 'Direction content failed schema validation',
-        validationErrors: validation.errors,
-      });
-      return;
+
+    // Upsert via INSERT ... ON CONFLICT (unique index on layer + workspace_id + domain + team_id)
+    await execute(`
+      INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, preferred_model, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
+      DO UPDATE SET content_yaml = EXCLUDED.content_yaml, preferred_model = EXCLUDED.preferred_model, updated_at = NOW()
+    `, [layer, workspaceId || null, domain || null, contentYaml, (layer === 3 ? preferredModel ?? null : null)]);
+
+    // PG-013: Invalidate direction cache — global layers affect all workspaces
+    if (layer === 1 && !workspaceId) {
+      invalidateDirection(); // Global L1 changed — invalidate all
+    } else {
+      invalidateDirection(workspaceId ? String(workspaceId) : undefined);
     }
-  }
 
-  // Upsert via INSERT OR REPLACE (unique index on layer + workspace_id + domain + team_id)
-  db.prepare(`
-    INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, preferred_model, updated_at)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
-    ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
-    DO UPDATE SET content_yaml = excluded.content_yaml, preferred_model = excluded.preferred_model, updated_at = datetime('now')
-  `).run(layer, workspaceId || null, domain || null, contentYaml, (layer === 3 ? preferredModel ?? null : null));
+    // WAL event
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('direction_update', $1, $2)`,
+      [workspaceId || null, JSON.stringify({ layer, domain: domain || null, ...(preferredModel ? { preferredModel } : {}) })]
+    );
 
-  // WAL event
-  db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('direction_update', ?, ?)`
-  ).run(workspaceId || null, JSON.stringify({ layer, domain: domain || null, ...(preferredModel ? { preferredModel } : {}) }));
-
-  res.json({ ok: true });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -193,45 +211,49 @@ router.put('/', validateBody(DirectionUpsertSchema), (req: Request, res: Respons
  *         description: All direction layers
  *       400: { description: "Missing workspaceId" }
  */
-router.get('/all', (req: Request, res: Response) => {
-  const { workspaceId } = req.query;
+router.get('/all', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { workspaceId } = req.query;
 
-  if (!workspaceId) {
-    res.status(400).json({ error: 'Missing required query param: workspaceId' });
-    return;
-  }
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
 
-  const wsId = String(workspaceId);
+    const wsId = String(workspaceId);
 
-  // L1: global (no workspace, no domain)
-  const l1Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-  ).get() as { content_yaml: string } | undefined;
+    // L1: global (no workspace, no domain)
+    const l1Row = await queryOne<{ content_yaml: string }>(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+    );
 
-  // L2: workspace-scoped
-  const l2Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-  ).get(wsId) as { content_yaml: string } | undefined;
+    // L2: workspace-scoped
+    const l2Row = await queryOne<{ content_yaml: string }>(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+      [wsId]
+    );
 
-  // L3: workspace-scoped with preferred_model
-  const l3Row = db.prepare(
-    `SELECT content_yaml, preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-  ).get(wsId) as { content_yaml: string; preferred_model: string | null } | undefined;
+    // L3: workspace-scoped with preferred_model
+    const l3Row = await queryOne<{ content_yaml: string; preferred_model: string | null }>(
+      `SELECT content_yaml, preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+      [wsId]
+    );
 
-  // Team L1/L2 overrides
-  const teamLayers = getTeamLayers(wsId);
+    // Team L1/L2 overrides
+    const teamLayers = await getTeamLayers(wsId);
 
-  res.json({
-    layers: {
-      l1: { content: l1Row?.content_yaml ?? null, source: teamLayers.teamL1 ? 'team' : 'global' },
-      l2: { content: l2Row?.content_yaml ?? null, teamOverride: teamLayers.teamL2 ?? null },
-      l3: { content: l3Row?.content_yaml ?? null, preferredModel: l3Row?.preferred_model ?? null },
-      l4: { content: null, note: 'L4 (spec brief) is provided per-request, not persisted' },
-      l5: { content: null, note: 'L5 (story annotations) is provided per-request, not persisted' },
-    },
-    teamL1: teamLayers.teamL1 ?? null,
-    teamL2: teamLayers.teamL2 ?? null,
-  });
+    res.json({
+      layers: {
+        l1: { content: l1Row?.content_yaml ?? null, source: teamLayers.teamL1 ? 'team' : 'global' },
+        l2: { content: l2Row?.content_yaml ?? null, teamOverride: teamLayers.teamL2 ?? null },
+        l3: { content: l3Row?.content_yaml ?? null, preferredModel: l3Row?.preferred_model ?? null },
+        l4: { content: null, note: 'L4 (spec brief) is provided per-request, not persisted' },
+        l5: { content: null, note: 'L5 (story annotations) is provided per-request, not persisted' },
+      },
+      teamL1: teamLayers.teamL1 ?? null,
+      teamL2: teamLayers.teamL2 ?? null,
+    });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -257,95 +279,99 @@ router.get('/all', (req: Request, res: Response) => {
  *                       id: { type: string, example: "claude-sonnet-4-5-20250929" }
  *                       label: { type: string }
  */
-router.get('/models', async (req: Request, res: Response) => {
-  const { workspaceId } = req.query;
+router.get('/models', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { workspaceId } = req.query;
 
-  // Resolve workspace default model for "recommended" badge
-  let workspaceDefault: string | null = null;
-  if (workspaceId) {
-    const l3Pref = db.prepare(
-      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-    ).get(String(workspaceId)) as { preferred_model: string | null } | undefined;
-    workspaceDefault = l3Pref?.preferred_model ?? null;
-  }
-
-  const recommendedId = workspaceDefault || DEFAULT_MODEL;
-
-  // Determine which providers the user has configured (vault keys + claude-cli always available)
-  const configuredProviders: ProviderType[] = ['claude-cli'];
-
-  // Check vault for stored API keys (any user — vault keys indicate configured providers)
-  const vaultProviders = db.prepare(
-    'SELECT DISTINCT provider FROM api_key_vault'
-  ).all() as { provider: string }[];
-  for (const row of vaultProviders) {
-    if (['anthropic', 'openai-compat', 'openrouter'].includes(row.provider)) {
-      configuredProviders.push(row.provider as ProviderType);
-    }
-  }
-
-  // Also check env vars for API keys
-  if (process.env.ANTHROPIC_API_KEY && !configuredProviders.includes('anthropic')) {
-    configuredProviders.push('anthropic');
-  }
-  if (process.env.OPENROUTER_API_KEY && !configuredProviders.includes('openrouter')) {
-    configuredProviders.push('openrouter');
-  }
-  if (process.env.OPENAI_API_KEY && !configuredProviders.includes('openai-compat')) {
-    configuredProviders.push('openai-compat');
-  }
-
-  // Start with hardcoded models for non-openrouter providers
-  let models: ModelInfo[] = getModelsForProviders(configuredProviders);
-
-  // If OpenRouter is configured, fetch live catalog from their API
-  if (configuredProviders.includes('openrouter')) {
-    let openrouterKey: string | undefined;
-
-    // Try vault first — find any user who has an openrouter key (single-user tool)
-    const vaultUser = db.prepare(
-      'SELECT user_id FROM api_key_vault WHERE provider = ? ORDER BY created_at DESC LIMIT 1'
-    ).get('openrouter') as { user_id: string } | undefined;
-
-    if (vaultUser) {
-      const result = getVaultKey(vaultUser.user_id, 'openrouter');
-      if (result) openrouterKey = result.key;
+    // Resolve workspace default model for "recommended" badge
+    let workspaceDefault: string | null = null;
+    if (workspaceId) {
+      const l3Pref = await queryOne<{ preferred_model: string | null }>(
+        `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+        [String(workspaceId)]
+      );
+      workspaceDefault = l3Pref?.preferred_model ?? null;
     }
 
-    // Fallback to env var
-    if (!openrouterKey) {
-      openrouterKey = process.env.OPENROUTER_API_KEY;
-    }
+    const recommendedId = workspaceDefault || DEFAULT_MODEL;
 
-    if (openrouterKey) {
-      try {
-        const catalogModels = await fetchOpenRouterModels(openrouterKey);
-        // Replace hardcoded openrouter models with live catalog
-        models = models.filter(m => m.providerType !== 'openrouter');
-        models.push(...catalogModels);
-      } catch (err: any) {
-        logger.warn('[direction/models] Failed to fetch OpenRouter catalog:', err.message);
-        // Keep hardcoded openrouter models as fallback
+    // Determine which providers the user has configured (vault keys + claude-cli always available)
+    const configuredProviders: ProviderType[] = ['claude-cli'];
+
+    // Check vault for stored API keys (any user — vault keys indicate configured providers)
+    const vaultProviders = await query<{ provider: string }>(
+      'SELECT DISTINCT provider FROM api_key_vault'
+    );
+    for (const row of vaultProviders) {
+      if (['anthropic', 'openai-compat', 'openrouter'].includes(row.provider)) {
+        configuredProviders.push(row.provider as ProviderType);
       }
     }
-  }
 
-  res.json({
-    models: models.map(info => ({
-      id: info.id,
-      label: info.label,
-      provider: info.provider,
-      providerType: info.providerType,
-      costPer1kInput: info.costPer1kInput,
-      costPer1kOutput: info.costPer1kOutput,
-      contextWindow: info.contextWindow,
-      speedTier: info.speedTier,
-      costTier: info.costTier,
-      recommended: info.id === recommendedId,
-    })),
-    defaultModel: recommendedId,
-    configuredProviders,
-  });
+    // Also check env vars for API keys
+    if (process.env.ANTHROPIC_API_KEY && !configuredProviders.includes('anthropic')) {
+      configuredProviders.push('anthropic');
+    }
+    if (process.env.OPENROUTER_API_KEY && !configuredProviders.includes('openrouter')) {
+      configuredProviders.push('openrouter');
+    }
+    if (process.env.OPENAI_API_KEY && !configuredProviders.includes('openai-compat')) {
+      configuredProviders.push('openai-compat');
+    }
+
+    // Start with hardcoded models for non-openrouter providers
+    let models: ModelInfo[] = getModelsForProviders(configuredProviders);
+
+    // If OpenRouter is configured, fetch live catalog from their API
+    if (configuredProviders.includes('openrouter')) {
+      let openrouterKey: string | undefined;
+
+      // Try vault first — find any user who has an openrouter key (single-user tool)
+      const vaultUser = await queryOne<{ user_id: string }>(
+        'SELECT user_id FROM api_key_vault WHERE provider = $1 ORDER BY created_at DESC LIMIT 1',
+        ['openrouter']
+      );
+
+      if (vaultUser) {
+        const result = getVaultKey(vaultUser.user_id, 'openrouter');
+        if (result) openrouterKey = result.key;
+      }
+
+      // Fallback to env var
+      if (!openrouterKey) {
+        openrouterKey = process.env.OPENROUTER_API_KEY;
+      }
+
+      if (openrouterKey) {
+        try {
+          const catalogModels = await fetchOpenRouterModels(openrouterKey);
+          // Replace hardcoded openrouter models with live catalog
+          models = models.filter(m => m.providerType !== 'openrouter');
+          models.push(...catalogModels);
+        } catch (err: any) {
+          logger.warn('[direction/models] Failed to fetch OpenRouter catalog:', err.message);
+          // Keep hardcoded openrouter models as fallback
+        }
+      }
+    }
+
+    res.json({
+      models: models.map(info => ({
+        id: info.id,
+        label: info.label,
+        provider: info.provider,
+        providerType: info.providerType,
+        costPer1kInput: info.costPer1kInput,
+        costPer1kOutput: info.costPer1kOutput,
+        contextWindow: info.contextWindow,
+        speedTier: info.speedTier,
+        costTier: info.costTier,
+        recommended: info.id === recommendedId,
+      })),
+      defaultModel: recommendedId,
+      configuredProviders,
+    });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -378,15 +404,15 @@ router.get('/models', async (req: Request, res: Response) => {
  *       400: { description: "Missing modelId" }
  *       500: { description: "Model test failed" }
  */
-router.post('/models/test', async (req: Request, res: Response) => {
-  const { modelId } = req.body as { modelId?: string };
-
-  if (!modelId || typeof modelId !== 'string') {
-    res.status(400).json({ error: 'modelId is required' });
-    return;
-  }
-
+router.post('/models/test', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const { modelId } = req.body as { modelId?: string };
+
+    if (!modelId || typeof modelId !== 'string') {
+      res.status(400).json({ error: 'modelId is required' });
+      return;
+    }
+
     // Resolve provider and API key for this model
     const modelInfo = ALL_MODELS.find(m => m.id === modelId);
     const providerType = modelInfo?.providerType ?? 'claude-cli';
@@ -396,9 +422,10 @@ router.post('/models/test', async (req: Request, res: Response) => {
 
     if (providerType !== 'claude-cli' && providerType !== 'anthropic') {
       // Check vault for API key
-      const vaultRow = db.prepare(
-        'SELECT user_id FROM api_key_vault WHERE provider = ? ORDER BY created_at DESC LIMIT 1'
-      ).get(providerType) as { user_id: string } | undefined;
+      const vaultRow = await queryOne<{ user_id: string }>(
+        'SELECT user_id FROM api_key_vault WHERE provider = $1 ORDER BY created_at DESC LIMIT 1',
+        [providerType]
+      );
 
       if (vaultRow) {
         const result = getVaultKey(vaultRow.user_id, providerType);
@@ -415,9 +442,10 @@ router.post('/models/test', async (req: Request, res: Response) => {
       }
     } else if (providerType === 'anthropic') {
       // Check vault then env
-      const vaultRow = db.prepare(
-        'SELECT user_id FROM api_key_vault WHERE provider = ? ORDER BY created_at DESC LIMIT 1'
-      ).get('anthropic') as { user_id: string } | undefined;
+      const vaultRow = await queryOne<{ user_id: string }>(
+        'SELECT user_id FROM api_key_vault WHERE provider = $1 ORDER BY created_at DESC LIMIT 1',
+        ['anthropic']
+      );
 
       if (vaultRow) {
         const result = getVaultKey(vaultRow.user_id, 'anthropic');
@@ -479,91 +507,97 @@ router.post('/models/test', async (req: Request, res: Response) => {
  *                 warnings: { type: array, items: { type: string } }
  *       400: { description: "Missing brief" }
  */
-router.get('/preview', (req: Request, res: Response) => {
-  const { workspaceId, domain, brief } = req.query;
+router.get('/preview', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { workspaceId, domain, brief } = req.query;
 
-  if (!brief) {
-    res.status(400).json({ error: 'Missing required query param: brief' });
-    return;
-  }
-
-  // Fetch layers
-  const l1Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-  ).get() as { content_yaml: string } | undefined;
-
-  const l2Row = domain
-    ? db.prepare(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = ? AND COALESCE(workspace_id, '') = ''`
-      ).get(String(domain)) as { content_yaml: string } | undefined
-    : undefined;
-
-  const l3Row = workspaceId
-    ? db.prepare(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-      ).get(String(workspaceId)) as { content_yaml: string } | undefined
-    : undefined;
-
-  // Fetch auto-hydrated context from workspace_context
-  let schemaSnapshot: string | undefined;
-  let gitMemory: string | undefined;
-  let schemaTableCount: number | null = null;
-  let gitCommitCount: number | null = null;
-
-  if (workspaceId) {
-    const ctx = db.prepare(
-      `SELECT schema_snapshot, schema_table_count, git_memory, git_commit_count
-       FROM workspace_context WHERE workspace_id = ?`
-    ).get(String(workspaceId)) as {
-      schema_snapshot: string | null;
-      schema_table_count: number | null;
-      git_memory: string | null;
-      git_commit_count: number | null;
-    } | undefined;
-
-    if (ctx) {
-      schemaSnapshot = ctx.schema_snapshot || undefined;
-      gitMemory = ctx.git_memory || undefined;
-      schemaTableCount = ctx.schema_table_count;
-      gitCommitCount = ctx.git_commit_count;
+    if (!brief) {
+      res.status(400).json({ error: 'Missing required query param: brief' });
+      return;
     }
-  }
 
-  // Look up workspace domains for mismatch detection
-  let workspaceDomains: string[] | undefined;
-  if (workspaceId) {
-    const wsRow = db.prepare(
-      `SELECT domains FROM workspaces WHERE id = ?`
-    ).get(String(workspaceId)) as { domains: string | null } | undefined;
-    if (wsRow?.domains) {
-      try { workspaceDomains = JSON.parse(wsRow.domains); } catch { /* ignore */ }
+    // Fetch layers
+    const l1Row = await queryOne<{ content_yaml: string }>(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+    );
+
+    const l2Row = domain
+      ? await queryOne<{ content_yaml: string }>(
+          `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`,
+          [String(domain)]
+        )
+      : undefined;
+
+    const l3Row = workspaceId
+      ? await queryOne<{ content_yaml: string }>(
+          `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+          [String(workspaceId)]
+        )
+      : undefined;
+
+    // Fetch auto-hydrated context from workspace_context
+    let schemaSnapshot: string | undefined;
+    let gitMemory: string | undefined;
+    let schemaTableCount: number | null = null;
+    let gitCommitCount: number | null = null;
+
+    if (workspaceId) {
+      const ctx = await queryOne<{
+        schema_snapshot: string | null;
+        schema_table_count: number | null;
+        git_memory: string | null;
+        git_commit_count: number | null;
+      }>(
+        `SELECT schema_snapshot, schema_table_count, git_memory, git_commit_count
+         FROM workspace_context WHERE workspace_id = $1`,
+        [String(workspaceId)]
+      );
+
+      if (ctx) {
+        schemaSnapshot = ctx.schema_snapshot || undefined;
+        gitMemory = ctx.git_memory || undefined;
+        schemaTableCount = ctx.schema_table_count;
+        gitCommitCount = ctx.git_commit_count;
+      }
     }
-  }
 
-  // Fetch team L1/L2 if workspace belongs to a team
-  const teamLayers = workspaceId ? getTeamLayers(String(workspaceId)) : {};
+    // Look up workspace domains for mismatch detection
+    let workspaceDomains: string[] | undefined;
+    if (workspaceId) {
+      const wsRow = await queryOne<{ domains: string | null }>(
+        `SELECT domains FROM workspaces WHERE id = $1`,
+        [String(workspaceId)]
+      );
+      if (wsRow?.domains) {
+        try { workspaceDomains = JSON.parse(wsRow.domains); } catch { /* ignore */ }
+      }
+    }
 
-  const warnings = getPreviewWarnings({
-    l1Content: l1Row?.content_yaml,
-    l2Content: l2Row?.content_yaml,
-    l3Content: l3Row?.content_yaml,
-    workspaceId: workspaceId ? String(workspaceId) : undefined,
-    domain: domain ? String(domain) : undefined,
-    workspaceDomains,
-  });
+    // Fetch team L1/L2 if workspace belongs to a team
+    const teamLayers = workspaceId ? await getTeamLayers(String(workspaceId)) : {};
 
-  const synthesized = synthesize({
-    l1: l1Row?.content_yaml,
-    l2: l2Row?.content_yaml,
-    teamL1: teamLayers.teamL1,
-    teamL2: teamLayers.teamL2,
-    l3: l3Row?.content_yaml,
-    schemaSnapshot,
-    gitMemory,
-    specBrief: String(brief),
-  });
+    const warnings = getPreviewWarnings({
+      l1Content: l1Row?.content_yaml,
+      l2Content: l2Row?.content_yaml,
+      l3Content: l3Row?.content_yaml,
+      workspaceId: workspaceId ? String(workspaceId) : undefined,
+      domain: domain ? String(domain) : undefined,
+      workspaceDomains,
+    });
 
-  res.json({ synthesized, schemaTableCount, gitCommitCount, warnings });
+    const synthesized = synthesize({
+      l1: l1Row?.content_yaml,
+      l2: l2Row?.content_yaml,
+      teamL1: teamLayers.teamL1,
+      teamL2: teamLayers.teamL2,
+      l3: l3Row?.content_yaml,
+      schemaSnapshot,
+      gitMemory,
+      specBrief: String(brief),
+    });
+
+    res.json({ synthesized, schemaTableCount, gitCommitCount, warnings });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -592,57 +626,62 @@ router.get('/preview', (req: Request, res: Response) => {
  *               properties:
  *                 synthesized: { type: string }
  */
-router.post('/synthesize', (req: Request, res: Response) => {
-  const { workspaceId, l4SpecBrief, l5Annotations } = req.body;
+router.post('/synthesize', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { workspaceId, l4SpecBrief, l5Annotations } = req.body;
 
-  // Fetch persisted layers
-  const l1Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-  ).get() as { content_yaml: string } | undefined;
+    // Fetch persisted layers
+    const l1Row = await queryOne<{ content_yaml: string }>(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+    );
 
-  const l2Row = workspaceId
-    ? db.prepare(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-      ).get(String(workspaceId)) as { content_yaml: string } | undefined
-    : undefined;
+    const l2Row = workspaceId
+      ? await queryOne<{ content_yaml: string }>(
+          `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+          [String(workspaceId)]
+        )
+      : undefined;
 
-  const l3Row = workspaceId
-    ? db.prepare(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-      ).get(String(workspaceId)) as { content_yaml: string } | undefined
-    : undefined;
+    const l3Row = workspaceId
+      ? await queryOne<{ content_yaml: string }>(
+          `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+          [String(workspaceId)]
+        )
+      : undefined;
 
-  // Fetch auto-hydrated context
-  let schemaSnapshot: string | undefined;
-  let gitMemory: string | undefined;
+    // Fetch auto-hydrated context
+    let schemaSnapshot: string | undefined;
+    let gitMemory: string | undefined;
 
-  if (workspaceId) {
-    const ctx = db.prepare(
-      `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
-    ).get(String(workspaceId)) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+    if (workspaceId) {
+      const ctx = await queryOne<{ schema_snapshot: string | null; git_memory: string | null }>(
+        `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`,
+        [String(workspaceId)]
+      );
 
-    if (ctx) {
-      schemaSnapshot = ctx.schema_snapshot || undefined;
-      gitMemory = ctx.git_memory || undefined;
+      if (ctx) {
+        schemaSnapshot = ctx.schema_snapshot || undefined;
+        gitMemory = ctx.git_memory || undefined;
+      }
     }
-  }
 
-  // Fetch team L1/L2 if workspace belongs to a team
-  const teamLayers = workspaceId ? getTeamLayers(String(workspaceId)) : {};
+    // Fetch team L1/L2 if workspace belongs to a team
+    const teamLayers = workspaceId ? await getTeamLayers(String(workspaceId)) : {};
 
-  const synthesized = synthesize({
-    l1: l1Row?.content_yaml,
-    l2: l2Row?.content_yaml,
-    teamL1: teamLayers.teamL1,
-    teamL2: teamLayers.teamL2,
-    l3: l3Row?.content_yaml,
-    schemaSnapshot,
-    gitMemory,
-    specBrief: l4SpecBrief || '',
-    storyAnnotations: l5Annotations || undefined,
-  });
+    const synthesized = synthesize({
+      l1: l1Row?.content_yaml,
+      l2: l2Row?.content_yaml,
+      teamL1: teamLayers.teamL1,
+      teamL2: teamLayers.teamL2,
+      l3: l3Row?.content_yaml,
+      schemaSnapshot,
+      gitMemory,
+      specBrief: l4SpecBrief || '',
+      storyAnnotations: l5Annotations || undefined,
+    });
 
-  res.json({ synthesized });
+    res.json({ synthesized });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -683,7 +722,7 @@ router.post('/synthesize', (req: Request, res: Response) => {
  *       502: { description: "LLM returned invalid JSON or missing l1/l2/l3 keys" }
  *       500: { description: "Wizard generation failed" }
  */
-router.post('/wizard', async (req: Request, res: Response) => {
+router.post('/wizard', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { answers } = req.body as { answers: Record<string, string> };
 

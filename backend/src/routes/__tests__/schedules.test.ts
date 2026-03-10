@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -17,7 +17,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -36,26 +35,18 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-sched-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES ('ws-sched', 'Sched WS', ?)"
-  ).run(tmpDir);
+await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-sched', 'Sched WS', $1)`, [tmpDir]);
 
   authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 describe('POST /api/pipeline/schedules', () => {
@@ -231,19 +222,15 @@ describe('DELETE /api/pipeline/schedules/:id', () => {
 });
 
 describe('pipeline_runs trigger_type', () => {
-  it('pipeline_runs table has trigger_type column defaulting to manual', () => {
-    db.prepare(
-      "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('spec.json', 'ws-sched', 'running')"
-    ).run();
-    const run = db.prepare('SELECT * FROM pipeline_runs WHERE workspace_id = ?').get('ws-sched') as Record<string, unknown>;
+  it('pipeline_runs table has trigger_type column defaulting to manual', async () => {
+    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('spec.json', 'ws-sched', 'running')`);
+    const run = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1`, ['ws-sched']) as Record<string, unknown>;
     expect(run.trigger_type).toBe('manual');
   });
 
-  it('can insert pipeline_runs with trigger_type=scheduled', () => {
-    db.prepare(
-      "INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES ('spec.json', 'ws-sched', 'running', 'scheduled')"
-    ).run();
-    const run = db.prepare('SELECT * FROM pipeline_runs WHERE workspace_id = ?').get('ws-sched') as Record<string, unknown>;
+  it('can insert pipeline_runs with trigger_type=scheduled', async () => {
+    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES ('spec.json', 'ws-sched', 'running', 'scheduled')`);
+    const run = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1`, ['ws-sched']) as Record<string, unknown>;
     expect(run.trigger_type).toBe('scheduled');
   });
 });

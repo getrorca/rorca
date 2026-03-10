@@ -5,7 +5,7 @@ import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
 import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../lib/claude-auth';
 import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
-import { db } from '../db';
+import { query, queryOne, execute } from '../db/index';
 import { getVaultKey } from './vault';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,23 +13,27 @@ import * as path from 'path';
 const router = Router();
 
 // ─── In-memory mutable config (hot-reloaded via PUT /agent) ──────────────────
-// Load persisted config from DB if available, otherwise fall back to env vars
-function loadPersistedConfig(): { agentType: AgentType; agentModel: string | null } {
+// On startup we use env-var defaults; the first request to GET /config will
+// lazy-load persisted values from the DB (async).  PUT /agent always persists.
+let currentAgentType: AgentType = agentType;
+let currentAgentModel: string | null = agentModel;
+let _persistedLoaded = false;
+
+async function ensurePersistedConfig(): Promise<void> {
+  if (_persistedLoaded) return;
+  _persistedLoaded = true;
   try {
-    const row = db.prepare('SELECT agent_type, agent_model FROM agent_config WHERE id = ?').get('default') as
-      { agent_type: string; agent_model: string | null } | undefined;
+    const row = await queryOne<{ agent_type: string; agent_model: string | null }>(
+      'SELECT agent_type, agent_model FROM agent_config WHERE id = $1', ['default']
+    );
     if (row && (VALID_AGENT_TYPES as readonly string[]).includes(row.agent_type)) {
-      return { agentType: row.agent_type as AgentType, agentModel: row.agent_model };
+      currentAgentType = row.agent_type as AgentType;
+      currentAgentModel = row.agent_model;
     }
   } catch {
     // Table may not exist yet on first run — fall through to env defaults
   }
-  return { agentType, agentModel };
 }
-
-const persisted = loadPersistedConfig();
-let currentAgentType: AgentType = persisted.agentType;
-let currentAgentModel: string | null = persisted.agentModel;
 
 export function getActiveAgentType(): AgentType { return currentAgentType; }
 export function getActiveAgentModel(): string | null { return currentAgentModel; }
@@ -95,7 +99,9 @@ const PROVIDER_KEY_MAP: Record<string, string[]> = {
  *       200:
  *         description: Current agent configuration
  */
-router.get('/', (_req: Request, res: Response) => {
+router.get('/', async (_req: Request, res: Response) => {
+  await ensurePersistedConfig();
+
   // Always detect both — UI needs status to show install badges when user toggles
   const opencode = detectOpenCode();
   const codex = detectCodex();
@@ -114,9 +120,9 @@ router.get('/', (_req: Request, res: Response) => {
         const orModelId = currentAgentModel.slice('openrouter/'.length); // e.g. "meta-llama/llama-3.3-70b"
         modelDisplayName = orModelId;
         // Check for OpenRouter API key
-        const orKeyRow = db.prepare(
+        const orKeyRow = await queryOne<{ count: number }>(
           `SELECT 1 FROM api_key_vault WHERE provider = 'openrouter' LIMIT 1`
-        ).get();
+        );
         hasApiKey = !!orKeyRow || !!process.env.OPENROUTER_API_KEY;
       } else {
         modelDisplayName = modelEntry?.name ?? currentAgentModel.split('/').pop() ?? currentAgentModel;
@@ -124,19 +130,20 @@ router.get('/', (_req: Request, res: Response) => {
       if (modelEntry) {
         if (modelEntry.provider === 'GitHub Copilot') {
           // Copilot uses integration_credentials, not api_key_vault
-          const copilotRow = db.prepare(
+          const copilotRow = await queryOne<{ provider_username: string | null }>(
             `SELECT provider_username FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
-          ).get() as { provider_username: string | null } | undefined;
+          );
           hasApiKey = !!copilotRow;
           copilotConnected = !!copilotRow;
           copilotUsername = copilotRow?.provider_username ?? null;
         } else {
           const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
           if (requiredProviders.length > 0) {
-            const placeholders = requiredProviders.map(() => '?').join(',');
-            const row = db.prepare(
-              `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`
-            ).get(...requiredProviders);
+            const placeholders = requiredProviders.map((_, i) => `$${i + 1}`).join(',');
+            const row = await queryOne<Record<string, unknown>>(
+              `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`,
+              requiredProviders
+            );
             hasApiKey = !!row;
           }
           // Local models don't need a key
@@ -149,9 +156,9 @@ router.get('/', (_req: Request, res: Response) => {
 
   // Always check Copilot connection status for UI display
   if (!copilotConnected) {
-    const copilotRow = db.prepare(
+    const copilotRow = await queryOne<{ provider_username: string | null }>(
       `SELECT provider_username FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
-    ).get() as { provider_username: string | null } | undefined;
+    );
     copilotConnected = !!copilotRow;
     copilotUsername = copilotRow?.provider_username ?? null;
   }
@@ -336,12 +343,12 @@ function getOpenRouterProviderFamily(modelId: string): string {
 /**
  * Resolve OpenRouter API key from vault (any user) or env var.
  */
-function resolveOpenRouterKey(): string | null {
+async function resolveOpenRouterKey(): Promise<string | null> {
   // Check vault first (any user — auth is bypassed globally)
   try {
-    const userId = (db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined)?.id;
-    if (userId) {
-      const vaultResult = getVaultKey(userId, 'openrouter');
+    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+    if (userRow) {
+      const vaultResult = getVaultKey(userRow.id, 'openrouter');
       if (vaultResult) return vaultResult.key;
     }
   } catch { /* table may not exist */ }
@@ -373,7 +380,7 @@ router.get('/openrouter-models', async (_req: Request, res: Response) => {
     return;
   }
 
-  const apiKey = resolveOpenRouterKey();
+  const apiKey = await resolveOpenRouterKey();
   if (!apiKey) {
     res.status(401).json({ error: 'No OpenRouter API key configured. Add one in Settings > Provider Configuration.' });
     return;
@@ -468,7 +475,7 @@ router.get('/openrouter-models', async (_req: Request, res: Response) => {
  */
 router.post('/openrouter-test', async (req: Request, res: Response) => {
   const { key } = req.body as { key?: string };
-  const apiKey = key || resolveOpenRouterKey();
+  const apiKey = key || await resolveOpenRouterKey();
 
   if (!apiKey) {
     res.status(400).json({ ok: false, error: 'No API key provided or stored.' });
@@ -552,6 +559,8 @@ router.post('/openrouter-test', async (req: Request, res: Response) => {
  *         description: Validation error
  */
 router.put('/agent', async (req: Request, res: Response) => {
+  await ensurePersistedConfig();
+
   const { agentType: newType, agentModel: newModel } = req.body;
 
   // Validate agentType
@@ -606,7 +615,7 @@ router.put('/agent', async (req: Request, res: Response) => {
 
     // OC-027: OpenRouter models from live catalog (not in OPENCODE_MODELS) need key validation
     if (effectiveModel.startsWith('openrouter/') && !OPENCODE_MODELS.find(m => m.id === effectiveModel)) {
-      const orKey = resolveOpenRouterKey();
+      const orKey = await resolveOpenRouterKey();
       if (!orKey) {
         res.status(400).json({
           error: 'OpenRouter models require an API key. Add one in the OpenRouter card above.',
@@ -619,9 +628,9 @@ router.put('/agent', async (req: Request, res: Response) => {
     if (modelEntry) {
       if (modelEntry.provider === 'GitHub Copilot') {
         // Copilot uses integration_credentials, not api_key_vault
-        const copilotRow = db.prepare(
+        const copilotRow = await queryOne<Record<string, unknown>>(
           `SELECT 1 FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
-        ).get();
+        );
         if (!copilotRow) {
           res.status(400).json({
             error: 'GitHub Copilot requires connecting your GitHub account first. Use "Sign in with GitHub" below.',
@@ -632,10 +641,11 @@ router.put('/agent', async (req: Request, res: Response) => {
         const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
         if (requiredProviders.length > 0) {
           // Check if user has any vault key for the required providers
-          const placeholders = requiredProviders.map(() => '?').join(',');
-          const hasKey = db.prepare(
-            `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`
-          ).get(...requiredProviders);
+          const placeholders = requiredProviders.map((_, i) => `$${i + 1}`).join(',');
+          const hasKey = await queryOne<Record<string, unknown>>(
+            `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`,
+            requiredProviders
+          );
           if (!hasKey) {
             res.status(400).json({
               error: `Model "${effectiveModel}" requires a ${modelEntry.provider} API key. Add one in Provider Configuration above.`,
@@ -652,14 +662,14 @@ router.put('/agent', async (req: Request, res: Response) => {
   if (newModel !== undefined) currentAgentModel = newModel || null;
 
   // Persist to DB (agent_config row) for survival across restarts
-  db.prepare(`
+  await execute(`
     INSERT INTO agent_config (id, agent_type, agent_model, updated_at)
-    VALUES ('default', ?, ?, datetime('now'))
+    VALUES ('default', $1, $2, NOW())
     ON CONFLICT(id) DO UPDATE SET
       agent_type = excluded.agent_type,
       agent_model = excluded.agent_model,
       updated_at = excluded.updated_at
-  `).run(currentAgentType, currentAgentModel);
+  `, [currentAgentType, currentAgentModel]);
 
   res.json({
     agentType: currentAgentType,
@@ -669,10 +679,12 @@ router.put('/agent', async (req: Request, res: Response) => {
 
 // ─── Orchestration Config (OC-021) ────────────────────────────────────────────
 
-function resolveWorkspacePath(workspaceId: string | undefined): string | null {
+async function resolveWorkspacePath(workspaceId: string | undefined): Promise<string | null> {
   if (!workspaceId) return null;
   try {
-    const row = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined;
+    const row = await queryOne<{ path: string }>(
+      'SELECT path FROM workspaces WHERE id = $1', [workspaceId]
+    );
     return row?.path ?? null;
   } catch {
     return null;
@@ -697,9 +709,9 @@ function resolveWorkspacePath(workspaceId: string | undefined): string | null {
  *       200:
  *         description: Orchestration config with defaults applied
  */
-router.get('/orchestration', (req: Request, res: Response) => {
+router.get('/orchestration', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string | undefined;
-  const cwd = resolveWorkspacePath(workspaceId);
+  const cwd = await resolveWorkspacePath(workspaceId);
   const config = loadOrchestrationConfig(cwd ?? undefined);
 
   // Return threshold ranges for frontend display
@@ -743,10 +755,10 @@ router.get('/orchestration', (req: Request, res: Response) => {
  *       404:
  *         description: Workspace not found
  */
-router.put('/orchestration', (req: Request, res: Response) => {
+router.put('/orchestration', async (req: Request, res: Response) => {
   const { workspaceId, orchestration } = req.body;
 
-  const cwd = resolveWorkspacePath(workspaceId);
+  const cwd = await resolveWorkspacePath(workspaceId);
   if (!cwd) {
     res.status(404).json({ error: 'Workspace not found. Select a workspace first.' });
     return;

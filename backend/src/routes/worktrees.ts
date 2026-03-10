@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import simpleGit from 'simple-git';
 import path from 'path';
-import { db } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 
@@ -26,20 +26,19 @@ interface WorkspaceRow {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function getWorkspace(workspaceId: string): WorkspaceRow | undefined {
-  return db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+async function getWorkspace(workspaceId: string): Promise<WorkspaceRow | undefined> {
+  return await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [workspaceId]);
 }
 
-function emitWalEvent(eventType: string, workspaceId: string, payload: Record<string, unknown>): void {
-  const result = db.prepare(
-    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, ?, ?)'
-  ).run(eventType, workspaceId, JSON.stringify(payload));
+async function emitWalEvent(eventType: string, workspaceId: string, payload: Record<string, unknown>): Promise<void> {
+  const inserted = await queryOne<WalEvent>(
+    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ($1, $2, $3) RETURNING *',
+    [eventType, workspaceId, JSON.stringify(payload)]
+  );
 
-  const walEvent = db.prepare(
-    'SELECT * FROM wal_events WHERE id = ?'
-  ).get(result.lastInsertRowid) as WalEvent;
-
-  broadcastAll(walEvent);
+  if (inserted) {
+    broadcastAll(inserted);
+  }
 }
 
 /**
@@ -152,7 +151,7 @@ router.get('/', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -185,7 +184,7 @@ router.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -202,7 +201,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     await git.raw(['worktree', 'add', '-b', branchName, targetPath, base]);
 
-    emitWalEvent('worktree_created', workspaceId, { branchName, worktreePath: targetPath });
+    await emitWalEvent('worktree_created', workspaceId, { branchName, worktreePath: targetPath });
 
     res.status(201).json({ ok: true, worktreePath: targetPath, branchName });
   } catch (error: any) {
@@ -248,7 +247,7 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -266,7 +265,7 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
 
     await git.raw(args);
 
-    emitWalEvent('worktree_removed', workspaceId, { worktreePath: decodedPath });
+    await emitWalEvent('worktree_removed', workspaceId, { worktreePath: decodedPath });
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -367,7 +366,7 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -488,7 +487,7 @@ router.post('/merge', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -555,7 +554,7 @@ router.post('/merge', async (req: Request, res: Response) => {
     const logOutput = await git.raw(['rev-parse', 'HEAD']);
     const mergeCommitSha = logOutput.trim();
 
-    emitWalEvent('worktree_merged', workspaceId, { branchName, mergeCommitSha });
+    await emitWalEvent('worktree_merged', workspaceId, { branchName, mergeCommitSha });
 
     res.json({ ok: true, mergeCommitSha, stashedAndRestored: stashed });
   } catch (error: any) {
@@ -606,7 +605,7 @@ router.get('/status', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;

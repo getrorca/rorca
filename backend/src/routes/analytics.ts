@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -65,7 +65,7 @@ interface TimeSeriesRow {
  *                 dateRange: { type: object }
  *                 groupBy: { type: string }
  */
-router.get('/usage', (req: Request, res: Response) => {
+router.get('/usage', async (req: Request, res: Response) => {
   try {
     const groupBy = (req.query.group_by as string) || 'model';
     const workspaceId = req.query.workspace_id as string | undefined;
@@ -93,6 +93,7 @@ router.get('/usage', (req: Request, res: Response) => {
     const groupCol = groupColumn[groupBy];
     const needsJoin = groupBy === 'spec';
 
+    let paramIdx = 1;
     let sql = `
       SELECT
         ${groupCol} AS group_key,
@@ -107,19 +108,20 @@ router.get('/usage', (req: Request, res: Response) => {
     }
 
     const params: (string | number)[] = [];
-    sql += ' WHERE tu.recorded_at >= ? AND tu.recorded_at <= ?';
+    sql += ` WHERE tu.recorded_at >= $${paramIdx++} AND tu.recorded_at <= $${paramIdx++}`;
     params.push(from, to);
 
     if (workspaceId) {
-      sql += ' AND tu.workspace_id = ?';
+      sql += ` AND tu.workspace_id = $${paramIdx++}`;
       params.push(workspaceId);
     }
 
     sql += ` GROUP BY group_key ORDER BY total_cost_usd DESC`;
 
-    const grouped = db.prepare(sql).all(...params) as UsageRow[];
+    const grouped = await query<UsageRow>(sql, params);
 
     // Time series: daily aggregation
+    let tsParamIdx = 1;
     let timeSeriesSql = `
       SELECT
         DATE(tu.recorded_at) AS date,
@@ -127,18 +129,19 @@ router.get('/usage', (req: Request, res: Response) => {
         SUM(tu.output_tokens) AS total_output_tokens,
         SUM(tu.cost_usd) AS total_cost_usd
       FROM token_usage tu
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ?
+      WHERE tu.recorded_at >= $${tsParamIdx++} AND tu.recorded_at <= $${tsParamIdx++}
     `;
     const tsParams: (string | number)[] = [from, to];
     if (workspaceId) {
-      timeSeriesSql += ' AND tu.workspace_id = ?';
+      timeSeriesSql += ` AND tu.workspace_id = $${tsParamIdx++}`;
       tsParams.push(workspaceId);
     }
     timeSeriesSql += ' GROUP BY DATE(tu.recorded_at) ORDER BY date ASC';
 
-    const timeSeries = db.prepare(timeSeriesSql).all(...tsParams) as TimeSeriesRow[];
+    const timeSeries = await query<TimeSeriesRow>(timeSeriesSql, tsParams);
 
     // Summary totals
+    let totParamIdx = 1;
     let totalSql = `
       SELECT
         COALESCE(SUM(tu.input_tokens), 0) AS total_input_tokens,
@@ -146,31 +149,31 @@ router.get('/usage', (req: Request, res: Response) => {
         COALESCE(SUM(tu.cost_usd), 0) AS total_cost_usd,
         COUNT(*) AS total_records
       FROM token_usage tu
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ?
+      WHERE tu.recorded_at >= $${totParamIdx++} AND tu.recorded_at <= $${totParamIdx++}
     `;
     const totParams: (string | number)[] = [from, to];
     if (workspaceId) {
-      totalSql += ' AND tu.workspace_id = ?';
+      totalSql += ` AND tu.workspace_id = $${totParamIdx++}`;
       totParams.push(workspaceId);
     }
 
-    const totals = db.prepare(totalSql).get(...totParams) as {
+    const totals = await queryOne<{
       total_input_tokens: number;
       total_output_tokens: number;
       total_cost_usd: number;
       total_records: number;
-    };
+    }>(totalSql, totParams);
 
     // Active runs check (for auto-refresh hint)
-    const activeRuns = db.prepare(
+    const activeRuns = await queryOne<{ count: number }>(
       `SELECT COUNT(*) AS count FROM pipeline_runs WHERE status = 'running'`
-    ).get() as { count: number };
+    );
 
     res.json({
       grouped,
       timeSeries,
       totals,
-      hasActiveRuns: activeRuns.count > 0,
+      hasActiveRuns: (activeRuns?.count ?? 0) > 0,
       dateRange: { from, to },
       groupBy,
     });
@@ -241,7 +244,7 @@ interface PeriodCostRow {
  *                 totals: { type: object }
  *                 dateRange: { type: object }
  */
-router.get('/costs', (req: Request, res: Response) => {
+router.get('/costs', async (req: Request, res: Response) => {
   try {
     const groupBy = (req.query.group_by as string) || 'spec';
     const workspaceId = req.query.workspace_id as string | undefined;
@@ -260,14 +263,15 @@ router.get('/costs', (req: Request, res: Response) => {
     // Cost calculation uses model_pricing join for actual provider rates
     // Formula: (input_tokens / 1,000,000) * input_cost_per_1m + (output_tokens / 1,000,000) * output_cost_per_1m
 
-    const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
+    let wsParamIdx = 3;
+    const wsFilter = workspaceId ? `AND tu.workspace_id = $${wsParamIdx++}` : '';
     const wsParams: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
 
     if (groupBy === 'period') {
-      // Group by week
+      // Group by week — PostgreSQL: to_char for ISO year-week
       const sql = `
         SELECT
-          strftime('%Y-W%W', tu.recorded_at) AS period,
+          to_char(tu.recorded_at, 'IYYY-"W"IW') AS period,
           SUM(tu.input_tokens) AS total_input_tokens,
           SUM(tu.output_tokens) AS total_output_tokens,
           SUM(CASE WHEN mp.input_cost_per_1m IS NOT NULL
@@ -282,13 +286,13 @@ router.get('/costs', (req: Request, res: Response) => {
           COUNT(*) AS story_count
         FROM token_usage tu
         LEFT JOIN model_pricing mp ON tu.model = mp.model_id
-        WHERE tu.recorded_at >= ? AND tu.recorded_at <= ?
+        WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2
         ${wsFilter}
         GROUP BY period
         ORDER BY period ASC
       `;
 
-      const periods = db.prepare(sql).all(...wsParams) as PeriodCostRow[];
+      const periods = await query<PeriodCostRow>(sql, wsParams);
 
       res.json({ groupBy, periods, dateRange: { from, to } });
       return;
@@ -321,13 +325,13 @@ router.get('/costs', (req: Request, res: Response) => {
       FROM token_usage tu
       LEFT JOIN model_pricing mp ON tu.model = mp.model_id
       ${needsRunJoin ? 'JOIN pipeline_runs pr ON tu.run_id = pr.id' : ''}
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ?
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2
       ${wsFilter}
       GROUP BY group_key
       ORDER BY total_cost_usd DESC
     `;
 
-    const breakdown = db.prepare(sql).all(...wsParams) as CostRow[];
+    const breakdown = await query<CostRow>(sql, wsParams);
 
     // Summary totals
     const totalSql = `
@@ -346,18 +350,18 @@ router.get('/costs', (req: Request, res: Response) => {
         COUNT(*) AS total_stories
       FROM token_usage tu
       LEFT JOIN model_pricing mp ON tu.model = mp.model_id
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ?
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2
       ${wsFilter}
     `;
 
-    const totals = db.prepare(totalSql).get(...wsParams) as {
+    const totals = await queryOne<{
       total_input_tokens: number;
       total_output_tokens: number;
       total_input_cost_usd: number;
       total_output_cost_usd: number;
       total_cost_usd: number;
       total_stories: number;
-    };
+    }>(totalSql, wsParams);
 
     res.json({ groupBy, breakdown, totals, dateRange: { from, to } });
   } catch (error: any) {
@@ -409,11 +413,11 @@ interface ModelPricingFullRow {
  *       500:
  *         description: Internal server error
  */
-router.get('/pricing', (_req: Request, res: Response) => {
+router.get('/pricing', async (_req: Request, res: Response) => {
   try {
-    const rows = db.prepare(
+    const rows = await query<ModelPricingFullRow>(
       'SELECT * FROM model_pricing ORDER BY model_id'
-    ).all() as ModelPricingFullRow[];
+    );
 
     // Normalize to per-1M for display (use per-1M if available, else compute from per-1k)
     const pricing = rows.map(r => ({
@@ -478,7 +482,7 @@ router.get('/pricing', (_req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.put('/pricing/:modelId', (req: Request, res: Response) => {
+router.put('/pricing/:modelId', async (req: Request, res: Response) => {
   try {
     const modelId = req.params.modelId;
     const {
@@ -509,27 +513,28 @@ router.put('/pricing/:modelId', (req: Request, res: Response) => {
     const effDate = effective_date || new Date().toISOString();
     const prov = provider || 'anthropic';
 
-    const existing = db.prepare(
-      'SELECT model_id FROM model_pricing WHERE model_id = ?'
-    ).get(modelId);
+    const existing = await queryOne<{ model_id: string }>(
+      'SELECT model_id FROM model_pricing WHERE model_id = $1',
+      [modelId]
+    );
 
     if (existing) {
-      db.prepare(`
+      await execute(`
         UPDATE model_pricing
-        SET provider = ?,
-            input_cost_per_1k = ?,
-            output_cost_per_1k = ?,
-            input_cost_per_1m = ?,
-            output_cost_per_1m = ?,
-            effective_date = ?,
-            updated_at = datetime('now')
-        WHERE model_id = ?
-      `).run(prov, inputPer1k, outputPer1k, input_cost_per_1m_tokens, output_cost_per_1m_tokens, effDate, modelId);
+        SET provider = $1,
+            input_cost_per_1k = $2,
+            output_cost_per_1k = $3,
+            input_cost_per_1m = $4,
+            output_cost_per_1m = $5,
+            effective_date = $6,
+            updated_at = NOW()
+        WHERE model_id = $7
+      `, [prov, inputPer1k, outputPer1k, input_cost_per_1m_tokens, output_cost_per_1m_tokens, effDate, modelId]);
     } else {
-      db.prepare(`
+      await execute(`
         INSERT INTO model_pricing (model_id, provider, input_cost_per_1k, output_cost_per_1k, input_cost_per_1m, output_cost_per_1m, effective_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(modelId, prov, inputPer1k, outputPer1k, input_cost_per_1m_tokens, output_cost_per_1m_tokens, effDate);
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [modelId, prov, inputPer1k, outputPer1k, input_cost_per_1m_tokens, output_cost_per_1m_tokens, effDate]);
     }
 
     res.json({
@@ -575,12 +580,12 @@ router.put('/pricing/:modelId', (req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.delete('/pricing/:modelId', (req: Request, res: Response) => {
+router.delete('/pricing/:modelId', async (req: Request, res: Response) => {
   try {
     const modelId = req.params.modelId;
-    const result = db.prepare('DELETE FROM model_pricing WHERE model_id = ?').run(modelId);
+    const result = await execute('DELETE FROM model_pricing WHERE model_id = $1', [modelId]);
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       res.status(404).json({ error: 'Model pricing not found' });
       return;
     }
@@ -660,7 +665,7 @@ interface ModelComparisonRow {
  *       500:
  *         description: Internal server error
  */
-router.get('/models', (req: Request, res: Response) => {
+router.get('/models', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string | undefined;
 
@@ -669,7 +674,8 @@ router.get('/models', (req: Request, res: Response) => {
     const from = (req.query.from as string) || thirtyDaysAgo.toISOString();
     const to = (req.query.to as string) || now.toISOString();
 
-    const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
+    let paramIdx = 3;
+    const wsFilter = workspaceId ? `AND tu.workspace_id = $${paramIdx++}` : '';
     const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
 
     // Join token_usage with story_results to get pass/fail + elapsed_seconds per story
@@ -687,14 +693,14 @@ router.get('/models', (req: Request, res: Response) => {
         AVG(tu.output_tokens) AS avg_output_tokens
       FROM token_usage tu
       JOIN story_results sr ON tu.run_id = sr.run_id AND tu.story_id = sr.story_id
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ?
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2
       ${wsFilter}
       AND sr.status IN ('pass', 'fail')
       GROUP BY tu.model
       ORDER BY total_stories DESC
     `;
 
-    const rows = db.prepare(sql).all(...params) as ModelComparisonRow[];
+    const rows = await query<ModelComparisonRow>(sql, params);
 
     // Enrich with pass rate and insufficient data flag
     const models = rows.map(r => ({
@@ -786,7 +792,7 @@ interface VelocityWeek {
  *       500:
  *         description: Internal server error
  */
-router.get('/velocity', (req: Request, res: Response) => {
+router.get('/velocity', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string | undefined;
     const specId = req.query.spec_id as string | undefined;
@@ -797,26 +803,28 @@ router.get('/velocity', (req: Request, res: Response) => {
     const to = (req.query.to as string) || now.toISOString();
 
     // Build dynamic WHERE clauses
-    const conditions: string[] = ['sr.finished_at >= ?', 'sr.finished_at <= ?'];
+    let paramIdx = 1;
+    const conditions: string[] = [`sr.finished_at >= $${paramIdx++}`, `sr.finished_at <= $${paramIdx++}`];
     const params: (string | number)[] = [from, to];
 
     if (workspaceId) {
-      conditions.push('pr.workspace_id = ?');
+      conditions.push(`pr.workspace_id = $${paramIdx++}`);
       params.push(workspaceId);
     }
 
     if (specId) {
-      conditions.push("REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') = ?");
+      conditions.push(`REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') = $${paramIdx++}`);
       params.push(specId);
     }
 
     const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
 
     // Weekly story counts grouped by status
+    // PostgreSQL: to_char for ISO year-week, date_trunc('week', ...) for week start (Monday)
     const sql = `
       SELECT
-        strftime('%Y-W%W', sr.finished_at) AS week,
-        DATE(sr.finished_at, 'weekday 1', '-7 days') AS week_start,
+        to_char(sr.finished_at, 'IYYY-"W"IW') AS week,
+        date_trunc('week', sr.finished_at)::date AS week_start,
         SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END) AS passed,
         SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END) AS failed,
         SUM(CASE WHEN sr.status = 'skip' THEN 1 ELSE 0 END) AS skipped,
@@ -824,16 +832,16 @@ router.get('/velocity', (req: Request, res: Response) => {
       FROM story_results sr
       JOIN pipeline_runs pr ON sr.run_id = pr.id
       ${whereClause}
-      GROUP BY week
+      GROUP BY week, week_start
       ORDER BY week ASC
     `;
 
-    const weeks = db.prepare(sql).all(...params) as VelocityWeek[];
+    const weeks = await query<VelocityWeek>(sql, params);
 
     // Fetch notable specs per week (distinct spec slugs that had stories finish)
     const specsSql = `
       SELECT
-        strftime('%Y-W%W', sr.finished_at) AS week,
+        to_char(sr.finished_at, 'IYYY-"W"IW') AS week,
         REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug
       FROM story_results sr
       JOIN pipeline_runs pr ON sr.run_id = pr.id
@@ -842,7 +850,7 @@ router.get('/velocity', (req: Request, res: Response) => {
       ORDER BY week ASC
     `;
 
-    const specRows = db.prepare(specsSql).all(...params) as { week: string; spec_slug: string }[];
+    const specRows = await query<{ week: string; spec_slug: string }>(specsSql, params);
 
     // Build a map of week → spec slugs
     const specsByWeek = new Map<string, string[]>();
@@ -867,16 +875,21 @@ router.get('/velocity', (req: Request, res: Response) => {
     });
 
     // Available specs for the filter dropdown
-    const specListSql = `
+    let specListParamIdx = 1;
+    let specListSql = `
       SELECT DISTINCT
         REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug
       FROM pipeline_runs pr
       WHERE pr.spec_path IS NOT NULL
-      ${workspaceId ? 'AND pr.workspace_id = ?' : ''}
-      ORDER BY spec_slug ASC
     `;
-    const specListParams: string[] = workspaceId ? [workspaceId] : [];
-    const availableSpecs = db.prepare(specListSql).all(...specListParams) as { spec_slug: string }[];
+    const specListParams: string[] = [];
+    if (workspaceId) {
+      specListSql += ` AND pr.workspace_id = $${specListParamIdx++}`;
+      specListParams.push(workspaceId);
+    }
+    specListSql += ' ORDER BY spec_slug ASC';
+
+    const availableSpecs = await query<{ spec_slug: string }>(specListSql, specListParams);
 
     res.json({
       velocity: velocityData,
@@ -975,7 +988,7 @@ interface CompletionGroup {
  *       500:
  *         description: Internal server error
  */
-router.get('/completion-rates', (req: Request, res: Response) => {
+router.get('/completion-rates', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string | undefined;
 
@@ -985,7 +998,8 @@ router.get('/completion-rates', (req: Request, res: Response) => {
     const to = (req.query.to as string) || now.toISOString();
 
     // Fetch all story results in range joined with pipeline_runs for spec_path + workspace
-    const wsFilter = workspaceId ? 'AND pr.workspace_id = ?' : '';
+    let paramIdx = 3;
+    const wsFilter = workspaceId ? `AND pr.workspace_id = $${paramIdx++}` : '';
     const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
 
     const sql = `
@@ -998,12 +1012,12 @@ router.get('/completion-rates', (req: Request, res: Response) => {
       FROM story_results sr
       JOIN pipeline_runs pr ON sr.run_id = pr.id
       JOIN workspaces w ON pr.workspace_id = w.id
-      WHERE sr.finished_at >= ? AND sr.finished_at <= ?
+      WHERE sr.finished_at >= $1 AND sr.finished_at <= $2
       ${wsFilter}
       AND sr.status IN ('pass', 'fail', 'skip')
     `;
 
-    const rows = db.prepare(sql).all(...params) as StoryResultRow[];
+    const rows = await query<StoryResultRow>(sql, params);
 
     // Build a cache of spec JSON files: specPath → parsed stories
     const specCache = new Map<string, { stories: any[]; tags: string[] }>();
@@ -1022,9 +1036,10 @@ router.get('/completion-rates', (req: Request, res: Response) => {
             .replace('forge/specs/approved/', '')
             .replace('forge/specs/pending/', '')
             .replace('.json', '');
-          const tagRows = db.prepare(
-            'SELECT tag_name FROM spec_tags WHERE spec_id = ? AND workspace_id = ? ORDER BY tag_name'
-          ).all(specId, row.workspace_id) as { tag_name: string }[];
+          const tagRows = await query<{ tag_name: string }>(
+            'SELECT tag_name FROM spec_tags WHERE spec_id = $1 AND workspace_id = $2 ORDER BY tag_name',
+            [specId, row.workspace_id]
+          );
 
           specCache.set(row.spec_path, {
             stories,
@@ -1174,17 +1189,22 @@ function toCsvRows(headers: string[], rows: Record<string, unknown>[]): string {
 
 interface ExportRow { [key: string]: unknown }
 
-function buildUsageExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): { rows: ExportRow[]; headers: string[]; total: number } {
-  const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
-  const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
+async function buildUsageExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): Promise<{ rows: ExportRow[]; headers: string[]; total: number }> {
+  let paramIdx = 1;
+  const baseParams: (string | number)[] = [from, to];
+  const wsFilter = workspaceId ? `AND tu.workspace_id = $${paramIdx + 2}` : '';
+  if (workspaceId) baseParams.push(workspaceId);
 
   // Count total rows
   const countSql = `
     SELECT COUNT(*) AS total FROM token_usage tu
-    WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+    WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
   `;
-  const { total } = db.prepare(countSql).get(...params) as { total: number };
+  const countResult = await queryOne<{ total: number }>(countSql, baseParams);
+  const total = countResult?.total ?? 0;
 
+  const limitIdx = baseParams.length + 1;
+  const offsetIdx = baseParams.length + 2;
   const sql = `
     SELECT
       tu.model,
@@ -1196,28 +1216,32 @@ function buildUsageExport(from: string, to: string, workspaceId?: string, limit?
       tu.workspace_id,
       COALESCE(tu.user_id, 'system') AS user_id
     FROM token_usage tu
-    WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+    WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
     ORDER BY tu.recorded_at ASC
-    LIMIT ? OFFSET ?
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
 
-  const rows = db.prepare(sql).all(...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0) as ExportRow[];
+  const rows = await query<ExportRow>(sql, [...baseParams, limit ?? EXPORT_MAX_ROWS, offset ?? 0]);
   const headers = ['model', 'story_id', 'input_tokens', 'output_tokens', 'cost_usd', 'recorded_at', 'workspace_id', 'user_id'];
   return { rows, headers, total };
 }
 
-function buildCostsExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): { rows: ExportRow[]; headers: string[]; total: number } {
-  const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
-  const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
+async function buildCostsExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): Promise<{ rows: ExportRow[]; headers: string[]; total: number }> {
+  const baseParams: (string | number)[] = [from, to];
+  const wsFilter = workspaceId ? `AND tu.workspace_id = $${baseParams.length + 1}` : '';
+  if (workspaceId) baseParams.push(workspaceId);
 
   const countSql = `
     SELECT COUNT(*) AS total FROM token_usage tu
     LEFT JOIN model_pricing mp ON tu.model = mp.model_id
     JOIN pipeline_runs pr ON tu.run_id = pr.id
-    WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+    WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
   `;
-  const { total } = db.prepare(countSql).get(...params) as { total: number };
+  const countResult = await queryOne<{ total: number }>(countSql, baseParams);
+  const total = countResult?.total ?? 0;
 
+  const limitIdx = baseParams.length + 1;
+  const offsetIdx = baseParams.length + 2;
   const sql = `
     SELECT
       tu.model,
@@ -1239,22 +1263,23 @@ function buildCostsExport(from: string, to: string, workspaceId?: string, limit?
     FROM token_usage tu
     LEFT JOIN model_pricing mp ON tu.model = mp.model_id
     JOIN pipeline_runs pr ON tu.run_id = pr.id
-    WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+    WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
     ORDER BY tu.recorded_at ASC
-    LIMIT ? OFFSET ?
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
 
-  const rows = db.prepare(sql).all(...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0) as ExportRow[];
+  const rows = await query<ExportRow>(sql, [...baseParams, limit ?? EXPORT_MAX_ROWS, offset ?? 0]);
   const headers = ['model', 'spec_slug', 'story_id', 'input_tokens', 'output_tokens', 'input_cost_usd', 'output_cost_usd', 'total_cost_usd', 'recorded_at', 'workspace_id'];
   return { rows, headers, total };
 }
 
-function buildVelocityExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): { rows: ExportRow[]; headers: string[]; total: number } {
-  const conditions: string[] = ['sr.finished_at >= ?', 'sr.finished_at <= ?'];
+async function buildVelocityExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): Promise<{ rows: ExportRow[]; headers: string[]; total: number }> {
+  let paramIdx = 1;
+  const conditions: string[] = [`sr.finished_at >= $${paramIdx++}`, `sr.finished_at <= $${paramIdx++}`];
   const params: (string | number)[] = [from, to];
 
   if (workspaceId) {
-    conditions.push('pr.workspace_id = ?');
+    conditions.push(`pr.workspace_id = $${paramIdx++}`);
     params.push(workspaceId);
   }
 
@@ -1266,8 +1291,11 @@ function buildVelocityExport(from: string, to: string, workspaceId?: string, lim
     JOIN pipeline_runs pr ON sr.run_id = pr.id
     ${whereClause}
   `;
-  const { total } = db.prepare(countSql).get(...params) as { total: number };
+  const countResult = await queryOne<{ total: number }>(countSql, params);
+  const total = countResult?.total ?? 0;
 
+  const limitIdx = params.length + 1;
+  const offsetIdx = params.length + 2;
   const sql = `
     SELECT
       sr.story_id,
@@ -1275,33 +1303,37 @@ function buildVelocityExport(from: string, to: string, workspaceId?: string, lim
       sr.finished_at,
       sr.elapsed_seconds,
       REPLACE(REPLACE(pr.spec_path, 'forge/specs/approved/', ''), '.json', '') AS spec_slug,
-      strftime('%Y-W%W', sr.finished_at) AS week,
+      to_char(sr.finished_at, 'IYYY-"W"IW') AS week,
       pr.workspace_id
     FROM story_results sr
     JOIN pipeline_runs pr ON sr.run_id = pr.id
     ${whereClause}
     ORDER BY sr.finished_at ASC
-    LIMIT ? OFFSET ?
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
 
-  const rows = db.prepare(sql).all(...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0) as ExportRow[];
+  const rows = await query<ExportRow>(sql, [...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0]);
   const headers = ['story_id', 'status', 'finished_at', 'elapsed_seconds', 'spec_slug', 'week', 'workspace_id'];
   return { rows, headers, total };
 }
 
-function buildCompletionExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): { rows: ExportRow[]; headers: string[]; total: number } {
-  const wsFilter = workspaceId ? 'AND pr.workspace_id = ?' : '';
+async function buildCompletionExport(from: string, to: string, workspaceId?: string, limit?: number, offset?: number): Promise<{ rows: ExportRow[]; headers: string[]; total: number }> {
+  let paramIdx = 3;
+  const wsFilter = workspaceId ? `AND pr.workspace_id = $${paramIdx++}` : '';
   const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
 
   const countSql = `
     SELECT COUNT(*) AS total
     FROM story_results sr
     JOIN pipeline_runs pr ON sr.run_id = pr.id
-    WHERE sr.finished_at >= ? AND sr.finished_at <= ? ${wsFilter}
+    WHERE sr.finished_at >= $1 AND sr.finished_at <= $2 ${wsFilter}
     AND sr.status IN ('pass', 'fail', 'skip')
   `;
-  const { total } = db.prepare(countSql).get(...params) as { total: number };
+  const countResult = await queryOne<{ total: number }>(countSql, params);
+  const total = countResult?.total ?? 0;
 
+  const limitIdx = params.length + 1;
+  const offsetIdx = params.length + 2;
   const sql = `
     SELECT
       sr.story_id,
@@ -1314,13 +1346,13 @@ function buildCompletionExport(from: string, to: string, workspaceId?: string, l
       pr.workspace_id
     FROM story_results sr
     JOIN pipeline_runs pr ON sr.run_id = pr.id
-    WHERE sr.finished_at >= ? AND sr.finished_at <= ? ${wsFilter}
+    WHERE sr.finished_at >= $1 AND sr.finished_at <= $2 ${wsFilter}
     AND sr.status IN ('pass', 'fail', 'skip')
     ORDER BY sr.finished_at ASC
-    LIMIT ? OFFSET ?
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
 
-  const rows = db.prepare(sql).all(...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0) as ExportRow[];
+  const rows = await query<ExportRow>(sql, [...params, limit ?? EXPORT_MAX_ROWS, offset ?? 0]);
   const headers = ['story_id', 'status', 'finished_at', 'elapsed_seconds', 'input_tokens', 'output_tokens', 'spec_slug', 'workspace_id'];
   return { rows, headers, total };
 }
@@ -1360,7 +1392,7 @@ function buildCompletionExport(from: string, to: string, workspaceId?: string, l
  *           application/json:
  *             schema: { type: object }
  */
-router.get('/export', (req: Request, res: Response) => {
+router.get('/export', async (req: Request, res: Response) => {
   try {
     const format = req.query.format as string;
     const dataType = req.query.data_type as string;
@@ -1393,16 +1425,16 @@ router.get('/export', (req: Request, res: Response) => {
 
     switch (dataType) {
       case 'usage':
-        result = buildUsageExport(from, to, workspaceId, limit, offset);
+        result = await buildUsageExport(from, to, workspaceId, limit, offset);
         break;
       case 'costs':
-        result = buildCostsExport(from, to, workspaceId, limit, offset);
+        result = await buildCostsExport(from, to, workspaceId, limit, offset);
         break;
       case 'velocity':
-        result = buildVelocityExport(from, to, workspaceId, limit, offset);
+        result = await buildVelocityExport(from, to, workspaceId, limit, offset);
         break;
       case 'completion':
-        result = buildCompletionExport(from, to, workspaceId, limit, offset);
+        result = await buildCompletionExport(from, to, workspaceId, limit, offset);
         break;
       default:
         res.status(400).json({ error: 'Invalid data_type' });
@@ -1517,7 +1549,7 @@ interface ROITimeSeriesRow {
  *       400: { description: "Missing workspace_id" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/roi', (req: Request, res: Response) => {
+router.get('/roi', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string;
     if (!workspaceId) {
@@ -1526,9 +1558,10 @@ router.get('/roi', (req: Request, res: Response) => {
     }
 
     // Fetch workspace ROI config
-    const workspace = db.prepare(
-      'SELECT id, roi_hours_per_story, roi_hourly_rate FROM workspaces WHERE id = ?'
-    ).get(workspaceId) as WorkspaceROIConfig | undefined;
+    const workspace = await queryOne<WorkspaceROIConfig>(
+      'SELECT id, roi_hours_per_story, roi_hourly_rate FROM workspaces WHERE id = $1',
+      [workspaceId]
+    );
 
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -1548,32 +1581,32 @@ router.get('/roi', (req: Request, res: Response) => {
     // For each (run, story_id), take only the LATEST result (highest id).
     // Then only count stories whose latest status is 'pass'.
     // Also exclude retry runs' copied passes by grouping across all runs.
-    const passedResult = db.prepare(`
+    const passedResult = await queryOne<{ total_stories_passed: number }>(`
       SELECT COUNT(*) AS total_stories_passed
       FROM (
         SELECT sr.story_id, sr.status
         FROM story_results sr
         JOIN pipeline_runs pr ON sr.run_id = pr.id
-        WHERE pr.workspace_id = ?
-          AND sr.finished_at >= ? AND sr.finished_at <= ?
+        WHERE pr.workspace_id = $1
+          AND sr.finished_at >= $2 AND sr.finished_at <= $3
           AND sr.status IN ('pass', 'fail', 'skip', 'retry', 'timeout')
         GROUP BY pr.id, sr.story_id
         HAVING sr.id = MAX(sr.id)
       ) latest
       WHERE latest.status = 'pass'
-    `).get(workspaceId, from, to) as { total_stories_passed: number };
+    `, [workspaceId, from, to]);
 
-    const totalStoriesPassed = passedResult.total_stories_passed;
+    const totalStoriesPassed = passedResult?.total_stories_passed ?? 0;
 
     // Get total LLM cost from token_usage for this workspace + date range
-    const costResult = db.prepare(`
+    const costResult = await queryOne<{ total_llm_cost: number }>(`
       SELECT COALESCE(SUM(tu.cost_usd), 0) AS total_llm_cost
       FROM token_usage tu
-      WHERE tu.workspace_id = ?
-        AND tu.recorded_at >= ? AND tu.recorded_at <= ?
-    `).get(workspaceId, from, to) as { total_llm_cost: number };
+      WHERE tu.workspace_id = $1
+        AND tu.recorded_at >= $2 AND tu.recorded_at <= $3
+    `, [workspaceId, from, to]);
 
-    const totalLlmCost = costResult.total_llm_cost;
+    const totalLlmCost = costResult?.total_llm_cost ?? 0;
 
     // Calculate ROI metrics
     const estimatedHoursSaved = totalStoriesPassed * hoursPerStory;
@@ -1584,30 +1617,30 @@ router.get('/roi', (req: Request, res: Response) => {
       : totalStoriesPassed > 0 ? Infinity : 0;
 
     // Time series: daily breakdown for trend chart
-    const timeSeries = db.prepare(`
+    const timeSeries = await query<{ date: string; stories_passed: number }>(`
       SELECT
         DATE(sr.finished_at) AS date,
         COUNT(DISTINCT sr.story_id || '-' || sr.run_id) AS stories_passed
       FROM story_results sr
       JOIN pipeline_runs pr ON sr.run_id = pr.id
-      WHERE pr.workspace_id = ?
-        AND sr.finished_at >= ? AND sr.finished_at <= ?
+      WHERE pr.workspace_id = $1
+        AND sr.finished_at >= $2 AND sr.finished_at <= $3
         AND sr.status = 'pass'
       GROUP BY DATE(sr.finished_at)
       ORDER BY date ASC
-    `).all(workspaceId, from, to) as { date: string; stories_passed: number }[];
+    `, [workspaceId, from, to]);
 
     // Get daily LLM cost
-    const dailyCosts = db.prepare(`
+    const dailyCosts = await query<{ date: string; llm_cost: number }>(`
       SELECT
         DATE(tu.recorded_at) AS date,
         COALESCE(SUM(tu.cost_usd), 0) AS llm_cost
       FROM token_usage tu
-      WHERE tu.workspace_id = ?
-        AND tu.recorded_at >= ? AND tu.recorded_at <= ?
+      WHERE tu.workspace_id = $1
+        AND tu.recorded_at >= $2 AND tu.recorded_at <= $3
       GROUP BY DATE(tu.recorded_at)
       ORDER BY date ASC
-    `).all(workspaceId, from, to) as { date: string; llm_cost: number }[];
+    `, [workspaceId, from, to]);
 
     // Merge daily stories + costs into unified time series
     const costByDate = new Map(dailyCosts.map(r => [r.date, r.llm_cost]));
@@ -1681,7 +1714,7 @@ router.get('/roi', (req: Request, res: Response) => {
  *       400: { description: "Invalid input" }
  *       404: { description: "Workspace not found" }
  */
-router.put('/roi/config', (req: Request, res: Response) => {
+router.put('/roi/config', async (req: Request, res: Response) => {
   try {
     const { workspace_id, hours_per_story, hourly_rate } = req.body as {
       workspace_id: string;
@@ -1694,7 +1727,10 @@ router.put('/roi/config', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspace_id);
+    const workspace = await queryOne<{ id: string }>(
+      'SELECT id FROM workspaces WHERE id = $1',
+      [workspace_id]
+    );
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -1705,8 +1741,10 @@ router.put('/roi/config', (req: Request, res: Response) => {
         res.status(400).json({ error: 'hours_per_story must be between 0 and 100' });
         return;
       }
-      db.prepare('UPDATE workspaces SET roi_hours_per_story = ? WHERE id = ?')
-        .run(hours_per_story, workspace_id);
+      await execute(
+        'UPDATE workspaces SET roi_hours_per_story = $1 WHERE id = $2',
+        [hours_per_story, workspace_id]
+      );
     }
 
     if (hourly_rate != null) {
@@ -1714,18 +1752,21 @@ router.put('/roi/config', (req: Request, res: Response) => {
         res.status(400).json({ error: 'hourly_rate must be between 0 and 1000' });
         return;
       }
-      db.prepare('UPDATE workspaces SET roi_hourly_rate = ? WHERE id = ?')
-        .run(hourly_rate, workspace_id);
+      await execute(
+        'UPDATE workspaces SET roi_hourly_rate = $1 WHERE id = $2',
+        [hourly_rate, workspace_id]
+      );
     }
 
-    const updated = db.prepare(
-      'SELECT roi_hours_per_story, roi_hourly_rate FROM workspaces WHERE id = ?'
-    ).get(workspace_id) as { roi_hours_per_story: number; roi_hourly_rate: number };
+    const updated = await queryOne<{ roi_hours_per_story: number; roi_hourly_rate: number }>(
+      'SELECT roi_hours_per_story, roi_hourly_rate FROM workspaces WHERE id = $1',
+      [workspace_id]
+    );
 
     res.json({
       workspace_id,
-      hours_per_story: updated.roi_hours_per_story,
-      hourly_rate: updated.roi_hourly_rate,
+      hours_per_story: updated?.roi_hours_per_story,
+      hourly_rate: updated?.roi_hourly_rate,
     });
   } catch (error: any) {
     logger.error('[Analytics] ROI config update error:', error);
@@ -1800,7 +1841,7 @@ function tierFromModel(model: string): string {
  *       500:
  *         description: Internal server error
  */
-router.get('/finops/run/:runId', (req: Request, res: Response) => {
+router.get('/finops/run/:runId', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(req.params.runId as string, 10);
     if (isNaN(runId)) {
@@ -1809,9 +1850,10 @@ router.get('/finops/run/:runId', (req: Request, res: Response) => {
     }
 
     // Check run exists and get agent info
-    const run = db.prepare(
-      'SELECT id, agent, agent_model, workspace_id, spec_path FROM pipeline_runs WHERE id = ?'
-    ).get(runId) as { id: number; agent: string | null; agent_model: string | null; workspace_id: string; spec_path: string } | undefined;
+    const run = await queryOne<{ id: number; agent: string | null; agent_model: string | null; workspace_id: string; spec_path: string }>(
+      'SELECT id, agent, agent_model, workspace_id, spec_path FROM pipeline_runs WHERE id = $1',
+      [runId]
+    );
 
     if (!run) {
       res.status(404).json({ error: 'Run not found' });
@@ -1822,17 +1864,17 @@ router.get('/finops/run/:runId', (req: Request, res: Response) => {
     const isSubscription = agentType === 'claude' || agentType === 'codex';
 
     // Per-story token usage
-    const stories = db.prepare(`
+    const stories = await query<FinOpsStoryRow>(`
       SELECT story_id, model, input_tokens, output_tokens, cost_usd
       FROM token_usage
-      WHERE run_id = ?
+      WHERE run_id = $1
       ORDER BY recorded_at ASC
-    `).all(runId) as FinOpsStoryRow[];
+    `, [runId]);
 
     // Get model pricing for calculating costs from tokens
-    const pricingRows = db.prepare(
+    const pricingRows = await query<{ model_id: string; input_cost_per_1m: number | null; output_cost_per_1m: number | null; input_cost_per_1k: number; output_cost_per_1k: number }>(
       'SELECT model_id, input_cost_per_1m, output_cost_per_1m, input_cost_per_1k, output_cost_per_1k FROM model_pricing'
-    ).all() as { model_id: string; input_cost_per_1m: number | null; output_cost_per_1m: number | null; input_cost_per_1k: number; output_cost_per_1k: number }[];
+    );
 
     const pricingMap = new Map<string, { input: number; output: number }>();
     for (const p of pricingRows) {
@@ -1902,13 +1944,14 @@ router.get('/finops/run/:runId', (req: Request, res: Response) => {
       }));
 
     // Escalation log from WAL events
-    const escalationEvents = db.prepare(`
+    // Use parameterized query with text search pattern
+    const escalationEvents = await query<EscalationWalRow>(`
       SELECT story_id, payload, ts
       FROM wal_events
       WHERE event_type = 'story_escalated'
-        AND payload LIKE '%"run_id":${runId}%'
+        AND payload::text LIKE '%"run_id":' || $1::text || '%'
       ORDER BY ts ASC
-    `).all() as EscalationWalRow[];
+    `, [runId]);
 
     const escalationLog = escalationEvents.map(e => {
       const payload = JSON.parse(e.payload || '{}');
@@ -2008,7 +2051,7 @@ router.get('/finops/run/:runId', (req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.get('/finops/historical', (req: Request, res: Response) => {
+router.get('/finops/historical', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string | undefined;
     const now = new Date();
@@ -2016,7 +2059,8 @@ router.get('/finops/historical', (req: Request, res: Response) => {
     const from = (req.query.from as string) || ninetyDaysAgo.toISOString();
     const to = (req.query.to as string) || now.toISOString();
 
-    const wsFilter = workspaceId ? 'AND tu.workspace_id = ?' : '';
+    let paramIdx = 3;
+    const wsFilter = workspaceId ? `AND tu.workspace_id = $${paramIdx++}` : '';
     const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
 
     // Daily cost trend (last 30 days for chart)
@@ -2028,13 +2072,13 @@ router.get('/finops/historical', (req: Request, res: Response) => {
         SUM(tu.cost_usd) AS cost_usd,
         COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count
       FROM token_usage tu
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
       GROUP BY DATE(tu.recorded_at)
       ORDER BY date ASC
     `;
-    const dailyTrend = db.prepare(dailySql).all(...params) as {
+    const dailyTrend = await query<{
       date: string; input_tokens: number; output_tokens: number; cost_usd: number; story_count: number;
-    }[];
+    }>(dailySql, params);
 
     // By workspace
     const byWorkspaceSql = `
@@ -2047,14 +2091,14 @@ router.get('/finops/historical', (req: Request, res: Response) => {
         COUNT(DISTINCT tu.run_id) AS run_count
       FROM token_usage tu
       LEFT JOIN workspaces w ON tu.workspace_id = w.id
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
-      GROUP BY tu.workspace_id
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
+      GROUP BY tu.workspace_id, w.label
       ORDER BY total_cost DESC
     `;
-    const byWorkspace = db.prepare(byWorkspaceSql).all(...params) as {
+    const byWorkspace = await query<{
       workspace_id: string; workspace_label: string; total_cost: number;
       input_tokens: number; output_tokens: number; run_count: number;
-    }[];
+    }>(byWorkspaceSql, params);
 
     // By spec
     const bySpecSql = `
@@ -2066,34 +2110,34 @@ router.get('/finops/historical', (req: Request, res: Response) => {
         COUNT(DISTINCT tu.run_id) AS run_count
       FROM token_usage tu
       JOIN pipeline_runs pr ON tu.run_id = pr.id
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
       GROUP BY spec_slug
       ORDER BY total_cost DESC
       LIMIT 20
     `;
-    const bySpec = db.prepare(bySpecSql).all(...params) as {
+    const bySpec = await query<{
       spec_slug: string; total_cost: number; input_tokens: number;
       output_tokens: number; run_count: number;
-    }[];
+    }>(bySpecSql, params);
 
-    // By month
+    // By month — PostgreSQL: to_char for year-month
     const byMonthSql = `
       SELECT
-        strftime('%Y-%m', tu.recorded_at) AS month,
+        to_char(tu.recorded_at, 'YYYY-MM') AS month,
         SUM(tu.cost_usd) AS total_cost,
         SUM(tu.input_tokens) AS input_tokens,
         SUM(tu.output_tokens) AS output_tokens,
         COUNT(DISTINCT tu.run_id) AS run_count,
         COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count
       FROM token_usage tu
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
       GROUP BY month
       ORDER BY month ASC
     `;
-    const byMonth = db.prepare(byMonthSql).all(...params) as {
+    const byMonth = await query<{
       month: string; total_cost: number; input_tokens: number;
       output_tokens: number; run_count: number; story_count: number;
-    }[];
+    }>(byMonthSql, params);
 
     // Model distribution across all runs
     const modelDistSql = `
@@ -2102,13 +2146,13 @@ router.get('/finops/historical', (req: Request, res: Response) => {
         COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count,
         SUM(tu.cost_usd) AS total_cost
       FROM token_usage tu
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
       GROUP BY tu.model
       ORDER BY story_count DESC
     `;
-    const modelDist = db.prepare(modelDistSql).all(...params) as {
+    const modelDist = await query<{
       model: string; story_count: number; total_cost: number;
-    }[];
+    }>(modelDistSql, params);
 
     const totalStories = modelDist.reduce((sum, m) => sum + m.story_count, 0);
     const modelDistribution = modelDist.map(m => ({
@@ -2131,23 +2175,23 @@ router.get('/finops/historical', (req: Request, res: Response) => {
         SUM((tu.input_tokens * 1.0 / 1000000) * ${OPUS_INPUT_PER_1M} + (tu.output_tokens * 1.0 / 1000000) * ${OPUS_OUTPUT_PER_1M}) AS opus_baseline,
         SUM(tu.cost_usd) AS actual_cost
       FROM token_usage tu
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
     `;
-    const baselineResult = db.prepare(opusBaselineSql).get(...params) as {
+    const baselineResult = await queryOne<{
       opus_baseline: number | null; actual_cost: number | null;
-    };
+    }>(opusBaselineSql, params);
 
-    const opusBaseline = baselineResult.opus_baseline || 0;
-    const actualCost = baselineResult.actual_cost || 0;
+    const opusBaseline = baselineResult?.opus_baseline || 0;
+    const actualCost = baselineResult?.actual_cost || 0;
 
     // Detect if all runs are subscription (claude)
     const agentCheckSql = `
       SELECT DISTINCT pr.agent
       FROM pipeline_runs pr
       JOIN token_usage tu ON tu.run_id = pr.id
-      WHERE tu.recorded_at >= ? AND tu.recorded_at <= ? ${wsFilter}
+      WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
     `;
-    const agents = db.prepare(agentCheckSql).all(...params) as { agent: string | null }[];
+    const agents = await query<{ agent: string | null }>(agentCheckSql, params);
     const allSubscription = agents.length > 0 && agents.every(a => !a.agent || a.agent === 'claude' || a.agent === 'codex');
 
     res.json({
@@ -2235,7 +2279,7 @@ router.get('/finops/historical', (req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.get('/finops/export', (req: Request, res: Response) => {
+router.get('/finops/export', async (req: Request, res: Response) => {
   try {
     const runId = req.query.run_id ? parseInt(req.query.run_id as string, 10) : undefined;
     const workspaceId = req.query.workspace_id as string | undefined;
@@ -2245,15 +2289,16 @@ router.get('/finops/export', (req: Request, res: Response) => {
     const from = (req.query.from as string) || thirtyDaysAgo.toISOString();
     const to = (req.query.to as string) || now.toISOString();
 
-    const conditions: string[] = ['tu.recorded_at >= ?', 'tu.recorded_at <= ?'];
+    let paramIdx = 1;
+    const conditions: string[] = [`tu.recorded_at >= $${paramIdx++}`, `tu.recorded_at <= $${paramIdx++}`];
     const sqlParams: (string | number)[] = [from, to];
 
     if (runId) {
-      conditions.push('tu.run_id = ?');
+      conditions.push(`tu.run_id = $${paramIdx++}`);
       sqlParams.push(runId);
     }
     if (workspaceId) {
-      conditions.push('tu.workspace_id = ?');
+      conditions.push(`tu.workspace_id = $${paramIdx++}`);
       sqlParams.push(workspaceId);
     }
 
@@ -2277,7 +2322,7 @@ router.get('/finops/export', (req: Request, res: Response) => {
       ORDER BY tu.run_id ASC, tu.recorded_at ASC
     `;
 
-    const rows = db.prepare(sql).all(...sqlParams) as ExportRow[];
+    const rows = await query<ExportRow>(sql, sqlParams);
 
     // Add computed columns
     const enrichedRows = rows.map(row => {
@@ -2382,7 +2427,7 @@ interface SkillEffectivenessResult {
  *       400:
  *         description: Missing workspaceId parameter
  */
-router.get('/skills/effectiveness', (req: Request, res: Response) => {
+router.get('/skills/effectiveness', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string | undefined;
     if (!workspaceId) {
@@ -2395,36 +2440,41 @@ router.get('/skills/effectiveness', (req: Request, res: Response) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 20, 1), 50);
 
     // Total runs in window
-    const totalRunsRow = db.prepare(
-      `SELECT COUNT(DISTINCT id) AS cnt FROM pipeline_runs WHERE workspace_id = ? AND started_at >= ?`
-    ).get(workspaceId, since) as { cnt: number } | undefined;
+    const totalRunsRow = await queryOne<{ cnt: number }>(
+      `SELECT COUNT(DISTINCT id) AS cnt FROM pipeline_runs WHERE workspace_id = $1 AND started_at >= $2`,
+      [workspaceId, since]
+    );
     const totalRuns = totalRunsRow?.cnt ?? 0;
 
     // Total stories in window
-    const totalStoriesRow = db.prepare(
+    const totalStoriesRow = await queryOne<{ cnt: number }>(
       `SELECT COUNT(*) AS cnt FROM story_results sr
        JOIN pipeline_runs pr ON sr.run_id = pr.id
-       WHERE pr.workspace_id = ? AND sr.started_at >= ?`
-    ).get(workspaceId, since) as { cnt: number } | undefined;
+       WHERE pr.workspace_id = $1 AND sr.started_at >= $2`,
+      [workspaceId, since]
+    );
     const totalStories = totalStoriesRow?.cnt ?? 0;
 
-    // Try json_each() approach first (SQLite 3.38+, bundled with better-sqlite3)
+    // Use jsonb_array_elements_text() for PostgreSQL (replaces SQLite json_each())
     let rows: SkillEffectivenessRow[];
     try {
-      rows = db.prepare(
+      rows = await query<SkillEffectivenessRow>(
         `SELECT je.value AS skill_name, sr.status, sr.elapsed_seconds, sr.run_id
-         FROM story_results sr, json_each(sr.active_skills) je
+         FROM story_results sr
+         CROSS JOIN LATERAL jsonb_array_elements_text(sr.active_skills::jsonb) AS je(value)
          JOIN pipeline_runs pr ON sr.run_id = pr.id
-         WHERE pr.workspace_id = ? AND sr.started_at >= ? AND sr.active_skills IS NOT NULL`
-      ).all(workspaceId, since) as SkillEffectivenessRow[];
+         WHERE pr.workspace_id = $1 AND sr.started_at >= $2 AND sr.active_skills IS NOT NULL`,
+        [workspaceId, since]
+      );
     } catch {
       // Fallback: JS-side JSON parsing
-      const rawRows = db.prepare(
+      const rawRows = await query<{ story_id: string; status: string; active_skills: string; elapsed_seconds: number | null; run_id: number }>(
         `SELECT sr.story_id, sr.status, sr.active_skills, sr.elapsed_seconds, sr.run_id
          FROM story_results sr
          JOIN pipeline_runs pr ON sr.run_id = pr.id
-         WHERE pr.workspace_id = ? AND sr.started_at >= ? AND sr.active_skills IS NOT NULL`
-      ).all(workspaceId, since) as Array<{ story_id: string; status: string; active_skills: string; elapsed_seconds: number | null; run_id: number }>;
+         WHERE pr.workspace_id = $1 AND sr.started_at >= $2 AND sr.active_skills IS NOT NULL`,
+        [workspaceId, since]
+      );
 
       rows = [];
       for (const row of rawRows) {

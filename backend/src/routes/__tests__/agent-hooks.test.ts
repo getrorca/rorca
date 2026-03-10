@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -17,26 +16,18 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hooks-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, 'Test Workspace', ?)"
-  ).run(WORKSPACE_ID, tmpDir);
+await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2)`, [WORKSPACE_ID, tmpDir]);
 
   authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 describe('GET /api/workspaces/:id/agent-hooks', () => {
@@ -50,12 +41,8 @@ describe('GET /api/workspaces/:id/agent-hooks', () => {
   });
 
   it('returns hooks ordered by event_type and id', async () => {
-    db.prepare(
-      "INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES (?, ?, ?, 1, 30)"
-    ).run(WORKSPACE_ID, 'on_run_start', 'echo start');
-    db.prepare(
-      "INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES (?, ?, ?, 1, 30)"
-    ).run(WORKSPACE_ID, 'on_generate', 'echo generate');
+    await execute(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, $2, $3, 1, 30)`, [WORKSPACE_ID, 'on_run_start', 'echo start']);
+    await execute(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, $2, $3, 1, 30)`, [WORKSPACE_ID, 'on_generate', 'echo generate']);
 
     const res = await request(app)
       .get(`/api/workspaces/${WORKSPACE_ID}/agent-hooks`)
@@ -127,10 +114,8 @@ describe('POST /api/workspaces/:id/agent-hooks', () => {
 
 describe('PUT /api/workspaces/:id/agent-hooks/:hookId', () => {
   it('updates an existing hook', async () => {
-    const result = db.prepare(
-      "INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES (?, 'on_generate', 'echo old', 1, 30)"
-    ).run(WORKSPACE_ID);
-    const hookId = result.lastInsertRowid;
+    const result = await queryOne<{ id: number }>(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, 'on_generate', 'echo old', 1, 30) RETURNING id`, [WORKSPACE_ID]);
+    const hookId = result!.id;
 
     const res = await request(app)
       .put(`/api/workspaces/${WORKSPACE_ID}/agent-hooks/${hookId}`)
@@ -166,10 +151,8 @@ describe('PUT /api/workspaces/:id/agent-hooks/:hookId', () => {
 
 describe('DELETE /api/workspaces/:id/agent-hooks/:hookId', () => {
   it('deletes an existing hook', async () => {
-    const result = db.prepare(
-      "INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES (?, 'on_approve', 'echo approved', 1, 30)"
-    ).run(WORKSPACE_ID);
-    const hookId = result.lastInsertRowid;
+    const result = await queryOne<{ id: number }>(`INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, 'on_approve', 'echo approved', 1, 30) RETURNING id`, [WORKSPACE_ID]);
+    const hookId = result!.id;
 
     const res = await request(app)
       .delete(`/api/workspaces/${WORKSPACE_ID}/agent-hooks/${hookId}`)
@@ -177,7 +160,7 @@ describe('DELETE /api/workspaces/:id/agent-hooks/:hookId', () => {
 
     expect(res.status).toBe(204);
 
-    const gone = db.prepare('SELECT id FROM agent_hooks WHERE id = ?').get(hookId);
+    const gone = await queryOne(`SELECT id FROM agent_hooks WHERE id = $1`, [hookId]);
     expect(gone).toBeUndefined();
   });
 

@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -39,27 +38,20 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pr-body-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)"
-  ).run(WORKSPACE_ID, 'PR Body Test', tmpDir);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'PR Body Test', tmpDir]);
 });
 
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 100));
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── POST /api/specs/:specId/stories/:storyId/pr-body ──────────────────────
@@ -150,8 +142,7 @@ test('uses custom workspace pr_template when set', async () => {
     },
   ]);
 
-  db.prepare('UPDATE workspaces SET pr_template = ? WHERE id = ?')
-    .run('# PR: {{storyId}}\n\n{{storyTitle}}\n\nChecklist:\n{{acceptanceCriteriaChecklist}}', WORKSPACE_ID);
+  await execute(`UPDATE workspaces SET pr_template = $1 WHERE id = $2`, ['# PR: {{storyId}}\n\n{{storyTitle}}\n\nChecklist:\n{{acceptanceCriteriaChecklist}}', WORKSPACE_ID]);
 
   const res = await request(app)
     .post('/api/specs/custom-spec/stories/US-001/pr-body')
@@ -226,13 +217,12 @@ test('PATCH workspace updates pr_template', async () => {
   expect(res.body.workspace.pr_template).toBe('# Custom\n{{storyTitle}}');
 
   // Verify persisted
-  const row = db.prepare('SELECT pr_template FROM workspaces WHERE id = ?').get(WORKSPACE_ID) as any;
+  const row = await queryOne(`SELECT pr_template FROM workspaces WHERE id = $1`, [WORKSPACE_ID]) as any;
   expect(row.pr_template).toBe('# Custom\n{{storyTitle}}');
 });
 
 test('PATCH workspace clears pr_template with null', async () => {
-  db.prepare('UPDATE workspaces SET pr_template = ? WHERE id = ?')
-    .run('old template', WORKSPACE_ID);
+  await execute(`UPDATE workspaces SET pr_template = $1 WHERE id = $2`, ['old template', WORKSPACE_ID]);
 
   const res = await request(app)
     .patch(`/api/workspaces/${WORKSPACE_ID}`)

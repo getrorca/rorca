@@ -2,15 +2,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -61,48 +60,35 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-gh-import-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
-  db.prepare('DELETE FROM wal_events').run();
+  await execute(`DELETE FROM wal_events`);
 
   // Create workspace
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)"
-  ).run(WORKSPACE_ID, 'Import Test', tmpDir);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'Import Test', tmpDir]);
 
   // Store GitHub webhook connection
   const authMod = require('../auth');
   const encryptedSecret = authMod.encryptToken('test-secret');
-  db.prepare(
-    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret);
+  await execute(`INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES ($1, $2, $3, $4, $5)`, [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret]);
 
   // Store GitHub OAuth token — must reference the real user created by getAuthToken
-  const user = db.prepare(
-    "SELECT id FROM users WHERE email = 'testauth@example.com'"
-  ).get() as { id: string };
+  const user = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
   const encryptedToken = authMod.encryptToken('gho_test_token_123');
-  db.prepare(
-    `INSERT INTO github_connections (id, user_id, github_user_id, encrypted_token, scopes, github_username)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run('gc-test', user.id, '12345', encryptedToken, 'repo', 'octocat');
+  await execute(`INSERT INTO github_connections (id, user_id, github_user_id, encrypted_token, scopes, github_username)
+     VALUES ($1, $2, $3, $4, $5, $6)`, ['gc-test', user.id, '12345', encryptedToken, 'repo', 'octocat']);
 });
 
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 50));
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── Validation ──────────────────────────────────────────────────────────────
@@ -139,7 +125,7 @@ test('returns 404 when spec not found', async () => {
 
 test('returns 400 when no GitHub connection exists', async () => {
   // Remove the webhook connection
-  db.prepare('DELETE FROM workspace_github_webhooks WHERE workspace_id = ?').run(WORKSPACE_ID);
+  await execute(`DELETE FROM workspace_github_webhooks WHERE workspace_id = $1`, [WORKSPACE_ID]);
 
   createSpecFile('test-spec');
 
@@ -153,7 +139,7 @@ test('returns 400 when no GitHub connection exists', async () => {
 });
 
 test('returns 400 when no GitHub OAuth token exists', async () => {
-  db.prepare('DELETE FROM github_connections').run();
+  await execute(`DELETE FROM github_connections`);
   createSpecFile('test-spec');
 
   const res = await request(app)
@@ -246,9 +232,7 @@ test('import mode appends stories and writes to disk', async () => {
   expect(spec.userStories[2].githubIssueUrl).toBe('https://github.com/acme/my-repo/issues/11');
 
   // Verify WAL event was emitted
-  const walEvents = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'github_issues_imported'"
-  ).all() as any[];
+  const walEvents = await query(`SELECT * FROM wal_events WHERE event_type = 'github_issues_imported'`) as any[];
   expect(walEvents).toHaveLength(1);
   const payload = JSON.parse(walEvents[0].payload);
   expect(payload.issueCount).toBe(2);

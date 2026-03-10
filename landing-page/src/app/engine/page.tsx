@@ -86,7 +86,7 @@ export default function EnginePage() {
                                 <div className="p-5 bg-zinc-900 border border-fizz/20 rounded-xl relative overflow-hidden">
                                     <div className="absolute top-0 right-0 p-3 opacity-20"><TerminalSquare /></div>
                                     <div className="text-xs font-mono text-fizz mb-2">Category: Gotcha</div>
-                                    <p className="text-sm text-zinc-300">better-sqlite3 is strictly synchronous. Never await db operations.</p>
+                                    <p className="text-sm text-zinc-300">pg Pool is async — always await DB calls. Use $1, $2 placeholders.</p>
                                     <div className="mt-3 text-[10px] text-zinc-600 font-mono">2026-02-21T09:14:33Z</div>
                                 </div>
                             </div>

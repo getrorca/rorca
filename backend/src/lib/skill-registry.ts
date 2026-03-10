@@ -17,7 +17,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import { db } from '../db/index';
+import { query, execute } from '../db/index';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -147,7 +147,7 @@ export class SkillRegistry {
    * @param workspacePath - Root path of the workspace.
    * @returns This registry instance (for chaining).
    */
-  discover(workspacePath: string): SkillRegistry {
+  async discover(workspacePath: string): Promise<SkillRegistry> {
     this.skills = [];
     this.byName = new Map();
     this.warnings = [];
@@ -167,14 +167,14 @@ export class SkillRegistry {
     }
 
     // Merge DB-persisted skills (don't overwrite filesystem-discovered ones)
-    const dbSkills = db.prepare('SELECT name, description, source, content, category, tags FROM installed_skills').all() as {
+    const dbSkills = await query<{
       name: string;
       description: string;
       source: string;
       content: string;
       category: string | null;
       tags: string | null;
-    }[];
+    }>('SELECT name, description, source, content, category, tags FROM installed_skills');
 
     for (const row of dbSkills) {
       const key = row.name.toLowerCase();
@@ -202,7 +202,7 @@ export class SkillRegistry {
    * Install a skill into the DB.
    * If a skill with the same name exists, it's updated.
    */
-  install(name: string, content: string, source: string = 'user'): Skill {
+  async install(name: string, content: string, source: string = 'user'): Promise<Skill> {
     // Parse frontmatter to extract description, category, tags
     let description = '';
     let category = '';
@@ -238,17 +238,17 @@ export class SkillRegistry {
 
     const tagsJson = JSON.stringify(tags);
 
-    db.prepare(`
+    await execute(`
       INSERT INTO installed_skills (name, description, source, content, category, tags, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
       ON CONFLICT(name) DO UPDATE SET
         description = excluded.description,
         source = excluded.source,
         content = excluded.content,
         category = excluded.category,
         tags = excluded.tags,
-        updated_at = datetime('now')
-    `).run(name, description, source, content, category, tagsJson);
+        updated_at = NOW()
+    `, [name, description, source, content, category, tagsJson]);
 
     const skill: Skill = {
       metadata: { name, description, category, tags },
@@ -274,14 +274,14 @@ export class SkillRegistry {
    * Remove a skill from the DB by name.
    * Returns true if a row was deleted.
    */
-  remove(name: string): boolean {
-    const result = db.prepare('DELETE FROM installed_skills WHERE LOWER(name) = LOWER(?)').run(name);
+  async remove(name: string): Promise<boolean> {
+    const result = await execute('DELETE FROM installed_skills WHERE LOWER(name) = LOWER($1)', [name]);
     const key = name.toLowerCase();
     if (this.byName.has(key)) {
       this.byName.delete(key);
       this.skills = this.skills.filter(s => s.metadata.name.toLowerCase() !== key);
     }
-    return result.changes > 0;
+    return result.rowCount > 0;
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────
