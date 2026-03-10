@@ -5,7 +5,7 @@
  * Returns 402 if the feature is disabled (quota_limit = 0) or usage exceeds quota.
  */
 import { Request, Response, NextFunction } from 'express';
-import { db } from '../db/index';
+import { queryOne, query } from '../db/index';
 import { getEffectiveUser } from './get-user';
 import type { PlanId } from '../routes/billing';
 
@@ -18,40 +18,42 @@ interface QuotaRow {
 /** Plan hierarchy — higher index = higher tier */
 const PLAN_TIER: Record<string, number> = { free: 0, solo: 1, pro: 2, team: 3 };
 
-function getUserPlan(userId: string): PlanId {
-  const row = db.prepare('SELECT plan FROM users WHERE id = ?').get(userId) as { plan: string } | undefined;
+async function getUserPlan(userId: string): Promise<PlanId> {
+  const row = await queryOne<{ plan: string }>('SELECT plan FROM users WHERE id = $1', [userId]);
   return (row?.plan as PlanId) || 'free';
 }
 
-function getQuotaLimit(plan: PlanId, feature: string): number {
-  const row = db.prepare(
-    'SELECT quota_limit FROM plan_quotas WHERE plan_name = ? AND feature = ?'
-  ).get(plan, feature) as QuotaRow | undefined;
+async function getQuotaLimit(plan: PlanId, feature: string): Promise<number> {
+  const row = await queryOne<QuotaRow>(
+    'SELECT quota_limit FROM plan_quotas WHERE plan_name = $1 AND feature = $2',
+    [plan, feature]
+  );
   // Default to unlimited if no row exists (graceful fallback)
   return row?.quota_limit ?? -1;
 }
 
 /** Count current usage for a feature. */
-function getCurrentUsage(userId: string, feature: string): number {
+async function getCurrentUsage(userId: string, feature: string): Promise<number> {
   switch (feature) {
     case 'workspaces': {
-      const row = db.prepare('SELECT COUNT(*) as cnt FROM workspaces').get() as { cnt: number };
-      return row.cnt;
+      const row = await queryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM workspaces');
+      return row!.cnt;
     }
     case 'specs_per_month': {
-      const row = db.prepare(
+      const row = await queryOne<{ cnt: number }>(
         `SELECT COUNT(*) as cnt FROM wal_events
-         WHERE event_type = 'generate' AND ts >= datetime('now', '-30 days')`
-      ).get() as { cnt: number };
-      return row.cnt;
+         WHERE event_type = 'generate' AND ts >= NOW() - INTERVAL '30 days'`
+      );
+      return row!.cnt;
     }
     case 'team_members': {
-      const row = db.prepare(
+      const row = await queryOne<{ cnt: number }>(
         `SELECT COUNT(DISTINCT tm.user_id) as cnt
          FROM teams t
          JOIN team_members tm ON tm.team_id = t.id
-         WHERE t.owner_id = ?`
-      ).get(userId) as { cnt: number };
+         WHERE t.owner_id = $1`,
+        [userId]
+      );
       return (row?.cnt ?? 0) + 1; // +1 for owner
     }
     // Binary features (0 = disabled, -1 = unlimited): no usage count needed
@@ -64,10 +66,11 @@ function getCurrentUsage(userId: string, feature: string): number {
 }
 
 /** Find the minimum plan that allows this feature. */
-function findRequiredPlan(feature: string): PlanId {
-  const rows = db.prepare(
-    'SELECT plan_name, quota_limit FROM plan_quotas WHERE feature = ? ORDER BY quota_limit ASC'
-  ).all(feature) as QuotaRow[];
+async function findRequiredPlan(feature: string): Promise<PlanId> {
+  const rows = await query<QuotaRow>(
+    'SELECT plan_name, quota_limit FROM plan_quotas WHERE feature = $1 ORDER BY quota_limit ASC',
+    [feature]
+  );
 
   // Find first plan with non-zero quota
   for (const row of rows) {
@@ -87,45 +90,49 @@ function findRequiredPlan(feature: string): PlanId {
  * For counted features (workspaces, specs_per_month): blocks if current usage >= quota_limit.
  */
 export function requirePlan(feature: string) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    const user = getEffectiveUser(req);
-    const userId = user?.id || 'local-admin';
-    const plan = getUserPlan(userId);
-    const limit = getQuotaLimit(plan, feature);
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const user = await getEffectiveUser(req);
+      const userId = user?.id || 'local-admin';
+      const plan = await getUserPlan(userId);
+      const limit = await getQuotaLimit(plan, feature);
 
-    // -1 = unlimited
-    if (limit === -1) {
+      // -1 = unlimited
+      if (limit === -1) {
+        next();
+        return;
+      }
+
+      // 0 = feature disabled for this plan
+      if (limit === 0) {
+        const requiredPlan = await findRequiredPlan(feature);
+        res.status(402).json({
+          error: 'Upgrade required',
+          feature,
+          currentPlan: plan,
+          requiredPlan,
+        });
+        return;
+      }
+
+      // Counted quota — check current usage
+      const usage = await getCurrentUsage(userId, feature);
+      if (usage >= limit) {
+        const requiredPlan = await findRequiredPlan(feature);
+        res.status(402).json({
+          error: 'Upgrade required',
+          feature,
+          currentPlan: plan,
+          requiredPlan,
+          currentUsage: usage,
+          quotaLimit: limit,
+        });
+        return;
+      }
+
       next();
-      return;
+    } catch (err) {
+      next(err);
     }
-
-    // 0 = feature disabled for this plan
-    if (limit === 0) {
-      const requiredPlan = findRequiredPlan(feature);
-      res.status(402).json({
-        error: 'Upgrade required',
-        feature,
-        currentPlan: plan,
-        requiredPlan,
-      });
-      return;
-    }
-
-    // Counted quota — check current usage
-    const usage = getCurrentUsage(userId, feature);
-    if (usage >= limit) {
-      const requiredPlan = findRequiredPlan(feature);
-      res.status(402).json({
-        error: 'Upgrade required',
-        feature,
-        currentPlan: plan,
-        requiredPlan,
-        currentUsage: usage,
-        quotaLimit: limit,
-      });
-      return;
-    }
-
-    next();
   };
 }

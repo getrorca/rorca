@@ -2,14 +2,14 @@
  * CA-001: Convention Pack Registry
  *
  * Defines the canonical pack.json schema, a local pack registry that reads
- * from .rorca/packs/, and cross-references the convention_packs SQLite table
+ * from .rorca/packs/, and cross-references the convention_packs PostgreSQL table
  * for installed-pack metadata.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { ValidationError, NotFoundError } from './errors';
 
 // ─── pack.json Zod Schema ───────────────────────────────────────────────────
@@ -124,11 +124,12 @@ export class PackRegistry {
    * List all installed packs by scanning .rorca/packs/ and cross-referencing DB.
    * Returns packs that exist both on disk and in the DB.
    */
-  listInstalled(): Array<InstalledPackRow & { packJson: PackJson | null }> {
+  async listInstalled(): Promise<Array<InstalledPackRow & { packJson: PackJson | null }>> {
     // Get DB records for this workspace
-    const dbRows = db.prepare(
-      'SELECT * FROM convention_packs WHERE workspace_id = ? ORDER BY installed_at DESC',
-    ).all(this.workspaceId) as InstalledPackRow[];
+    const dbRows = await query<InstalledPackRow>(
+      'SELECT * FROM convention_packs WHERE workspace_id = $1 ORDER BY installed_at DESC',
+      [this.workspaceId],
+    );
 
     // Cross-reference with filesystem
     return dbRows.map(row => {
@@ -151,10 +152,11 @@ export class PackRegistry {
    * Get the absolute filesystem path for an installed pack by name.
    * Throws NotFoundError if the pack is not installed.
    */
-  getPackPath(name: string): string {
-    const row = db.prepare(
-      'SELECT pack_path FROM convention_packs WHERE workspace_id = ? AND pack_name = ?',
-    ).get(this.workspaceId, name) as { pack_path: string } | undefined;
+  async getPackPath(name: string): Promise<string> {
+    const row = await queryOne<{ pack_path: string }>(
+      'SELECT pack_path FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2',
+      [this.workspaceId, name],
+    );
 
     if (!row) {
       throw new NotFoundError('Convention pack', name);
@@ -169,7 +171,7 @@ export class PackRegistry {
    * Register a pack in the DB after installation.
    * Validates pack.json first — throws ValidationError on invalid pack.
    */
-  register(packDir: string): InstalledPackRow {
+  async register(packDir: string): Promise<InstalledPackRow> {
     const validation = this.validatePack(packDir);
     if (!validation.valid || !validation.pack) {
       const details: Record<string, string> = {};
@@ -183,41 +185,46 @@ export class PackRegistry {
     const relativePath = path.relative(this.workspacePath, packDir);
 
     // Upsert — update version if pack already registered
-    const existing = db.prepare(
-      'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?',
-    ).get(this.workspaceId, pack.name) as { id: number } | undefined;
+    const existing = await queryOne<{ id: number }>(
+      'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2',
+      [this.workspaceId, pack.name],
+    );
 
     if (existing) {
-      db.prepare(
+      await execute(
         `UPDATE convention_packs
-         SET pack_version = ?, pack_path = ?, installed_at = datetime('now')
-         WHERE id = ?`,
-      ).run(pack.version, relativePath, existing.id);
+         SET pack_version = $1, pack_path = $2, installed_at = NOW()
+         WHERE id = $3`,
+        [pack.version, relativePath, existing.id],
+      );
 
-      return db.prepare(
-        'SELECT * FROM convention_packs WHERE id = ?',
-      ).get(existing.id) as InstalledPackRow;
+      const updated = await queryOne<InstalledPackRow>(
+        'SELECT * FROM convention_packs WHERE id = $1',
+        [existing.id],
+      );
+      return updated!;
     }
 
-    const result = db.prepare(
+    const inserted = await queryOne<InstalledPackRow>(
       `INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path)
-       VALUES (?, ?, ?, ?)`,
-    ).run(this.workspaceId, pack.name, pack.version, relativePath);
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [this.workspaceId, pack.name, pack.version, relativePath],
+    );
 
-    return db.prepare(
-      'SELECT * FROM convention_packs WHERE id = ?',
-    ).get(result.lastInsertRowid) as InstalledPackRow;
+    return inserted!;
   }
 
   /**
    * Unregister a pack from the DB. Does NOT delete files.
    */
-  unregister(name: string): void {
-    const result = db.prepare(
-      'DELETE FROM convention_packs WHERE workspace_id = ? AND pack_name = ?',
-    ).run(this.workspaceId, name);
+  async unregister(name: string): Promise<void> {
+    const result = await execute(
+      'DELETE FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2',
+      [this.workspaceId, name],
+    );
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       throw new NotFoundError('Convention pack', name);
     }
   }
@@ -226,7 +233,7 @@ export class PackRegistry {
    * Scan .rorca/packs/ for pack directories that have a valid pack.json
    * but are NOT registered in the DB (orphaned packs).
    */
-  scanUnregistered(): Array<{ dir: string; pack: PackJson }> {
+  async scanUnregistered(): Promise<Array<{ dir: string; pack: PackJson }>> {
     if (!fs.existsSync(this.packsDir)) {
       return [];
     }
@@ -242,9 +249,10 @@ export class PackRegistry {
       if (!validation.valid || !validation.pack) continue;
 
       // Check if already registered
-      const exists = db.prepare(
-        'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?',
-      ).get(this.workspaceId, validation.pack.name) as { id: number } | undefined;
+      const exists = await queryOne<{ id: number }>(
+        'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2',
+        [this.workspaceId, validation.pack.name],
+      );
 
       if (!exists) {
         unregistered.push({ dir: packDir, pack: validation.pack });

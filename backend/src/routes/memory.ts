@@ -6,7 +6,7 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { db } from '../db/index';
+import { db, execute, query as dbQuery, queryOne } from '../db/index';
 import {
   readMemory,
   append,
@@ -541,7 +541,7 @@ router.post('/proposals', (req: Request, res: Response) => {
  *                 dismissed: { type: integer, description: "Number of proposals dismissed" }
  *       400: { description: "Missing workspaceId or proposalIds" }
  */
-router.post('/proposals/dismiss', (req: Request, res: Response) => {
+router.post('/proposals/dismiss', async (req: Request, res: Response) => {
   const { workspaceId, proposalIds } = req.body as {
     workspaceId: string;
     proposalIds: string[];
@@ -551,14 +551,13 @@ router.post('/proposals/dismiss', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'workspaceId and proposalIds array required' });
   }
 
-  const stmt = db.prepare(
-    `UPDATE memory_proposals SET status = 'dismissed', resolved_at = datetime('now') WHERE proposal_id = ? AND workspace_id = ?`
-  );
-
   let dismissed = 0;
   for (const id of proposalIds) {
-    const r = stmt.run(id, workspaceId);
-    dismissed += r.changes;
+    const r = await execute(
+      `UPDATE memory_proposals SET status = 'dismissed', resolved_at = NOW() WHERE proposal_id = $1 AND workspace_id = $2`,
+      [id, workspaceId]
+    );
+    dismissed += r.rowCount;
   }
 
   res.json({ dismissed });
@@ -593,7 +592,7 @@ router.post('/proposals/dismiss', (req: Request, res: Response) => {
  *                 restored: { type: integer, description: "Number of proposals restored to pending" }
  *       400: { description: "Missing workspaceId" }
  */
-router.post('/proposals/undismiss', (req: Request, res: Response) => {
+router.post('/proposals/undismiss', async (req: Request, res: Response) => {
   const { workspaceId, proposalIds } = req.body as {
     workspaceId: string;
     proposalIds?: string[];
@@ -605,19 +604,20 @@ router.post('/proposals/undismiss', (req: Request, res: Response) => {
 
   let restored = 0;
   if (proposalIds && proposalIds.length > 0) {
-    const stmt = db.prepare(
-      `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE proposal_id = ? AND workspace_id = ? AND status = 'dismissed'`
-    );
     for (const id of proposalIds) {
-      const r = stmt.run(id, workspaceId);
-      restored += r.changes;
+      const r = await execute(
+        `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE proposal_id = $1 AND workspace_id = $2 AND status = 'dismissed'`,
+        [id, workspaceId]
+      );
+      restored += r.rowCount;
     }
   } else {
     // Restore all dismissed for this workspace
-    const r = db.prepare(
-      `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE workspace_id = ? AND status = 'dismissed'`
-    ).run(workspaceId);
-    restored = r.changes;
+    const r = await execute(
+      `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE workspace_id = $1 AND status = 'dismissed'`,
+      [workspaceId]
+    );
+    restored = r.rowCount;
   }
 
   res.json({ restored });
@@ -859,15 +859,16 @@ router.post('/rotate', (req: Request, res: Response) => {
  *       404: { description: "Run not found" }
  */
 // POST /api/memory/synthesize — synthesize memory proposals from all recent runs for a workspace
-router.post('/synthesize', (req: Request, res: Response) => {
+router.post('/synthesize', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId is required' });
 
   // Find recent completed runs for this workspace (last 10)
-  const runs = db.prepare(
-    `SELECT id FROM pipeline_runs WHERE workspace_id = ? AND status IN ('passed','failed','finished')
-     ORDER BY finished_at DESC LIMIT 10`
-  ).all(String(workspaceId)) as { id: number }[];
+  const runs = await dbQuery<{ id: number }>(
+    `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('passed','failed','finished')
+     ORDER BY finished_at DESC LIMIT 10`,
+    [String(workspaceId)]
+  );
 
   if (runs.length === 0) {
     return res.json({ proposals: [], total: 0 });
@@ -878,17 +879,18 @@ router.post('/synthesize', (req: Request, res: Response) => {
     title: string; rule: string; context: string; source: string; status: string;
   }> = [];
   const today = new Date().toISOString().slice(0, 10);
-  const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
-  );
 
   for (const run of runs) {
-    const candidates = analyzeRunEvents(run.id);
+    const candidates = await analyzeRunEvents(run.id);
     for (let i = 0; i < candidates.length; i++) {
       const c = candidates[i];
       const proposalId = `wal-feedback-${run.id}-${i}`;
-      insertStmt.run(proposalId, run.id, String(workspaceId), c.category, c.title, c.rule, c.context, c.source);
+      await execute(
+        `INSERT INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
+         ON CONFLICT DO NOTHING`,
+        [proposalId, run.id, String(workspaceId), c.category, c.title, c.rule, c.context, c.source]
+      );
       allProposals.push({
         proposalId, date: today, category: c.category,
         title: c.title, rule: c.rule, context: c.context,
@@ -899,11 +901,12 @@ router.post('/synthesize', (req: Request, res: Response) => {
 
   if (allProposals.length > 0) {
     const walPayload = JSON.stringify({ workspace_id: workspaceId, proposals: allProposals });
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', ?, ?)`
-    ).run(String(workspaceId), walPayload);
+    const walRow = await queryOne<{ id: number }>(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', $1, $2) RETURNING id`,
+      [String(workspaceId), walPayload]
+    );
     broadcastAll({
-      id: Number(walResult.lastInsertRowid),
+      id: walRow?.id ?? 0,
       ts: new Date().toISOString(),
       event_type: 'memory_proposals',
       workspace_id: String(workspaceId),
@@ -915,18 +918,19 @@ router.post('/synthesize', (req: Request, res: Response) => {
   res.json({ proposals: allProposals, total: allProposals.length });
 });
 
-router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
+router.post('/synthesize-from-run/:runId', async (req: Request, res: Response) => {
   const runId = parseInt(req.params.runId as string, 10);
   if (isNaN(runId)) return res.status(400).json({ error: 'Invalid runId' });
 
-  const run = db.prepare(
-    'SELECT id, workspace_id, status FROM pipeline_runs WHERE id = ?'
-  ).get(runId) as { id: number; workspace_id: string; status: string } | undefined;
+  const run = await queryOne<{ id: number; workspace_id: string; status: string }>(
+    'SELECT id, workspace_id, status FROM pipeline_runs WHERE id = $1',
+    [runId]
+  );
 
   if (!run) return res.status(404).json({ error: 'Run not found' });
 
   // Generate candidates from WAL event analysis
-  const candidates = analyzeRunEvents(runId);
+  const candidates = await analyzeRunEvents(runId);
 
   if (candidates.length === 0) {
     return res.json({ proposals: [], total: 0 });
@@ -934,15 +938,18 @@ router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
 
   // Persist as proposals in memory_proposals table
   const today = new Date().toISOString().slice(0, 10);
-  const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
-  );
 
-  const proposals = candidates.map((c, i) => {
+  const proposals = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
     const proposalId = `wal-feedback-${runId}-${i}`;
-    insertStmt.run(proposalId, runId, run.workspace_id, c.category, c.title, c.rule, c.context, c.source);
-    return {
+    await execute(
+      `INSERT INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
+       ON CONFLICT DO NOTHING`,
+      [proposalId, runId, run.workspace_id, c.category, c.title, c.rule, c.context, c.source]
+    );
+    proposals.push({
       proposalId,
       date: today,
       category: c.category,
@@ -951,8 +958,8 @@ router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
       context: c.context,
       source: c.source,
       status: 'pending',
-    };
-  });
+    });
+  }
 
   // Broadcast via SSE
   const walPayload = JSON.stringify({
@@ -961,12 +968,13 @@ router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
     proposals,
   });
 
-  const walResult = db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', ?, ?)`
-  ).run(run.workspace_id, walPayload);
+  const walRow = await queryOne<{ id: number }>(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', $1, $2) RETURNING id`,
+    [run.workspace_id, walPayload]
+  );
 
   broadcastAll({
-    id: Number(walResult.lastInsertRowid),
+    id: walRow?.id ?? 0,
     ts: new Date().toISOString(),
     event_type: 'memory_proposals',
     workspace_id: run.workspace_id,

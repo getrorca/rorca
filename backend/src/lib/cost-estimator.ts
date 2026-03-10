@@ -1,4 +1,4 @@
-import { db } from '../db/index';
+import { queryOne } from '../db/index';
 import { synthesize } from './direction-stack';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -51,18 +51,18 @@ function estimateTokens(text: string): number {
  * elapsed time likely produce similar output volumes.
  * Falls back to a default estimate if no history exists.
  */
-function getHistoricalOutputEstimate(workspaceId: string): number {
+async function getHistoricalOutputEstimate(workspaceId: string): Promise<number> {
   const DEFAULT_OUTPUT_TOKENS = 4000;
 
   // Get average elapsed_seconds from completed stories in this workspace
-  const avg = db.prepare(`
+  const avg = await queryOne<{ avg_elapsed: number | null }>(`
     SELECT AVG(sr.elapsed_seconds) as avg_elapsed
     FROM story_results sr
     JOIN pipeline_runs pr ON sr.run_id = pr.id
-    WHERE pr.workspace_id = ?
+    WHERE pr.workspace_id = $1
       AND sr.status = 'pass'
       AND sr.elapsed_seconds IS NOT NULL
-  `).get(workspaceId) as { avg_elapsed: number | null } | undefined;
+  `, [workspaceId]);
 
   if (!avg?.avg_elapsed) return DEFAULT_OUTPUT_TOKENS;
 
@@ -73,42 +73,47 @@ function getHistoricalOutputEstimate(workspaceId: string): number {
 
 // ─── Main Estimator ──────────────────────────────────────────────────────────
 
-export function estimateDryRunCost(
+export async function estimateDryRunCost(
   specJson: { userStories: UserStory[]; model?: string },
   workspaceId: string,
   model: string,
-): DryRunEstimate {
+): Promise<DryRunEstimate> {
   // 1. Fetch model pricing
-  const pricing = db.prepare(
-    'SELECT * FROM model_pricing WHERE model_id = ?'
-  ).get(model) as ModelPricingRow | undefined;
+  const pricing = await queryOne<ModelPricingRow>(
+    'SELECT * FROM model_pricing WHERE model_id = $1',
+    [model]
+  );
 
   if (!pricing) {
     throw new Error(`No pricing data for model: ${model}. Add it to model_pricing table.`);
   }
 
   // 2. Build direction stack context to estimate base input size
-  const workspace = db.prepare(
-    'SELECT * FROM workspaces WHERE id = ?'
-  ).get(workspaceId) as { id: string; path: string; domain?: string } | undefined;
+  const workspace = await queryOne<{ id: string; path: string; domain?: string }>(
+    'SELECT * FROM workspaces WHERE id = $1',
+    [workspaceId]
+  );
 
   const domain = (workspace as any)?.domain || '';
 
-  const l1Row = db.prepare(
+  const l1Row = await queryOne<{ content_yaml: string }>(
     `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-  ).get() as { content_yaml: string } | undefined;
+  );
 
-  const l2Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = ? AND COALESCE(workspace_id, '') = ''`
-  ).get(domain) as { content_yaml: string } | undefined;
+  const l2Row = await queryOne<{ content_yaml: string }>(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`,
+    [domain]
+  );
 
-  const l3Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-  ).get(workspaceId) as { content_yaml: string } | undefined;
+  const l3Row = await queryOne<{ content_yaml: string }>(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+    [workspaceId]
+  );
 
-  const ctx = db.prepare(
-    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
-  ).get(workspaceId) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+  const ctx = await queryOne<{ schema_snapshot: string | null; git_memory: string | null }>(
+    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`,
+    [workspaceId]
+  );
 
   // Synthesize a minimal direction stack (using empty spec brief as placeholder)
   const directionContext = synthesize({
@@ -123,7 +128,7 @@ export function estimateDryRunCost(
   const directionTokens = estimateTokens(directionContext);
 
   // 3. Get historical output estimate
-  const avgOutputTokens = getHistoricalOutputEstimate(workspaceId);
+  const avgOutputTokens = await getHistoricalOutputEstimate(workspaceId);
 
   // 4. Estimate per-story costs (skip excluded stories)
   const activeStories = specJson.userStories.filter((s) => s.excluded !== true);

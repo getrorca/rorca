@@ -50,7 +50,7 @@ import { publicReviewRouter, specReviewRouter } from './routes/review';
 import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
-import { db } from './db/index';
+import { queryOne } from './db/index';
 import runQueueRouter from './routes/run-queue';
 import configRouter from './routes/config';
 import copilotRouter from './routes/copilot';
@@ -266,13 +266,15 @@ startMemorySynthesis();
 // PR-019: Auto-rotate memory after each pipeline run completion
 subscribe((event: WalEvent) => {
   if (event.event_type !== 'run_finished' || !event.workspace_id) return;
-  const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(event.workspace_id) as { path: string } | undefined;
-  if (!ws) return;
-  try {
-    rotateMemory(ws.path);
-  } catch {
-    // Non-fatal — rotation failure must not affect the run result
-  }
+  (async () => {
+    try {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [event.workspace_id]);
+      if (!ws) return;
+      rotateMemory(ws.path);
+    } catch {
+      // Non-fatal — rotation failure must not affect the run result
+    }
+  })();
 });
 
 /* istanbul ignore next -- only when run directly, not in tests */
@@ -284,7 +286,7 @@ if (process.env.NODE_ENV !== 'test') {
     startScheduler();
     cleanupOldLogs();
     // V2-099: Run EXPLAIN QUERY PLAN audit at startup
-    runQueryPlanAudit(db);
+    runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
   });

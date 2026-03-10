@@ -8,7 +8,7 @@
  */
 
 import { execSync } from 'child_process';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { subscribe, broadcastAll, type WalEvent } from './sse-hub';
 import {
   readMemory,
@@ -58,10 +58,14 @@ export function startMemorySynthesis(): void {
     if (!workspaceId) return;
 
     // PR-020: Auto-synthesis is opt-in via workspace setting AUTO_MEMORY_SYNTHESIS=true
-    if (!isAutoSynthesisEnabled(workspaceId)) return;
+    isAutoSynthesisEnabled(workspaceId).then(enabled => {
+      if (!enabled) return;
 
-    synthesizeMemory(workspaceId, payload.run_id, payload.status).catch(err => {
-      logger.error(`[memory-synthesis] Error for run ${payload.run_id}:`, err);
+      synthesizeMemory(workspaceId, payload.run_id!, payload.status!).catch(err => {
+        logger.error(`[memory-synthesis] Error for run ${payload.run_id}:`, err);
+      });
+    }).catch(err => {
+      logger.error(`[memory-synthesis] Error checking auto-synthesis for workspace ${workspaceId}:`, err);
     });
   });
 }
@@ -70,24 +74,28 @@ export function startMemorySynthesis(): void {
  * Collect git diffs for commits made during a pipeline run.
  * Returns a truncated diff string.
  */
-function collectRunDiffs(workspacePath: string, runId: number): string {
+async function collectRunDiffs(workspacePath: string, runId: number): Promise<string> {
   // Get commit SHAs from story_commits for this run's stories
-  const storyIds = (db.prepare(
-    'SELECT DISTINCT story_id FROM story_results WHERE run_id = ?'
-  ).all(runId) as { story_id: string }[]).map(r => r.story_id);
+  const storyRows = await query<{ story_id: string }>(
+    'SELECT DISTINCT story_id FROM story_results WHERE run_id = $1',
+    [runId]
+  );
+  const storyIds = storyRows.map(r => r.story_id);
 
   if (storyIds.length === 0) return '';
 
-  const placeholders = storyIds.map(() => '?').join(',');
-  const commits = db.prepare(
-    `SELECT DISTINCT commit_sha FROM story_commits WHERE story_id IN (${placeholders}) ORDER BY id DESC LIMIT 20`
-  ).all(...storyIds) as { commit_sha: string }[];
+  const placeholders = storyIds.map((_, i) => `$${i + 1}`).join(',');
+  const commits = await query<{ commit_sha: string }>(
+    `SELECT DISTINCT commit_sha FROM story_commits WHERE story_id IN (${placeholders}) ORDER BY id DESC LIMIT 20`,
+    storyIds
+  );
 
   if (commits.length === 0) {
     // Fallback: get recent commits from git log with the run timeframe
-    const run = db.prepare(
-      'SELECT started_at, finished_at FROM pipeline_runs WHERE id = ?'
-    ).get(runId) as { started_at: string; finished_at: string | null } | undefined;
+    const run = await queryOne<{ started_at: string; finished_at: string | null }>(
+      'SELECT started_at, finished_at FROM pipeline_runs WHERE id = $1',
+      [runId]
+    );
 
     if (!run) return '';
 
@@ -123,25 +131,27 @@ function collectRunDiffs(workspacePath: string, runId: number): string {
 /**
  * Collect WAL events from a specific run for synthesis context.
  */
-function collectRunWalEvents(workspaceId: string, runId: number): string {
-  const events = db.prepare(
+async function collectRunWalEvents(workspaceId: string, runId: number): Promise<string> {
+  const events = await query<WalEventRow>(
     `SELECT event_type, story_id, payload, ts FROM wal_events
-     WHERE workspace_id = ? AND payload LIKE ?
-     ORDER BY id ASC LIMIT 100`
-  ).all(workspaceId, `%"run_id":${runId}%`) as WalEventRow[];
+     WHERE workspace_id = $1 AND payload LIKE $2
+     ORDER BY id ASC LIMIT 100`,
+    [workspaceId, `%"run_id":${runId}%`]
+  );
 
   // Also get story-level events
-  const storyEvents = db.prepare(
+  const storyEvents = await query<WalEventRow>(
     `SELECT event_type, story_id, payload, ts FROM wal_events
-     WHERE workspace_id = ? AND event_type IN ('story_started', 'story_passed', 'story_failed', 'story_skipped', 'story_escalated')
-     AND id >= (SELECT COALESCE(MIN(id), 0) FROM wal_events WHERE workspace_id = ? AND event_type = 'run_started' AND payload LIKE ?)
-     AND id <= (SELECT COALESCE(MAX(id), 999999999) FROM wal_events WHERE workspace_id = ? AND event_type = 'run_finished' AND payload LIKE ?)
-     ORDER BY id ASC LIMIT 100`
-  ).all(
-    workspaceId,
-    workspaceId, `%"run_id":${runId}%`,
-    workspaceId, `%"run_id":${runId}%`,
-  ) as WalEventRow[];
+     WHERE workspace_id = $1 AND event_type IN ('story_started', 'story_passed', 'story_failed', 'story_skipped', 'story_escalated')
+     AND id >= (SELECT COALESCE(MIN(id), 0) FROM wal_events WHERE workspace_id = $2 AND event_type = 'run_started' AND payload LIKE $3)
+     AND id <= (SELECT COALESCE(MAX(id), 999999999) FROM wal_events WHERE workspace_id = $4 AND event_type = 'run_finished' AND payload LIKE $5)
+     ORDER BY id ASC LIMIT 100`,
+    [
+      workspaceId,
+      workspaceId, `%"run_id":${runId}%`,
+      workspaceId, `%"run_id":${runId}%`,
+    ]
+  );
 
   const allEvents = [...events, ...storyEvents];
   // Deduplicate by ts+event_type
@@ -174,19 +184,21 @@ function collectRunWalEvents(workspaceId: string, runId: number): string {
 /**
  * Extract error messages from failed stories.
  */
-function collectErrorMessages(runId: number): string {
-  const failedStories = db.prepare(
-    `SELECT story_id, status, log_path FROM story_results WHERE run_id = ? AND status IN ('fail', 'timeout')`
-  ).all(runId) as StoryResultRow[];
+async function collectErrorMessages(runId: number): Promise<string> {
+  const failedStories = await query<StoryResultRow>(
+    `SELECT story_id, status, log_path FROM story_results WHERE run_id = $1 AND status IN ('fail', 'timeout')`,
+    [runId]
+  );
 
   if (failedStories.length === 0) return '';
 
   // Get error details from WAL events for failed stories
   const errors: string[] = [];
   for (const story of failedStories) {
-    const walEvent = db.prepare(
-      `SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = ? ORDER BY id DESC LIMIT 1`
-    ).get(story.story_id) as { payload: string | null } | undefined;
+    const walEvent = await queryOne<{ payload: string | null }>(
+      `SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = $1 ORDER BY id DESC LIMIT 1`,
+      [story.story_id]
+    );
 
     let errorDetail = `${story.story_id}: status=${story.status}`;
     if (walEvent?.payload) {
@@ -209,22 +221,23 @@ function collectErrorMessages(runId: number): string {
  * persists proposals in memory_proposals table, and broadcasts via SSE.
  */
 async function synthesizeMemory(workspaceId: string, runId: number, runStatus: string): Promise<void> {
-  const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined;
+  const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
   if (!ws) return;
 
   // Get story results for this run
-  const storyResults = db.prepare(
-    'SELECT story_id, status, log_path, started_at, finished_at FROM story_results WHERE run_id = ?'
-  ).all(runId) as StoryResultRow[];
+  const storyResults = await query<StoryResultRow>(
+    'SELECT story_id, status, log_path, started_at, finished_at FROM story_results WHERE run_id = $1',
+    [runId]
+  );
 
   // Skip synthesis for runs with 0 completed stories (pass or fail)
   const completedStories = storyResults.filter(s => s.status === 'pass' || s.status === 'fail');
   if (completedStories.length === 0) return;
 
   // Collect rich context for synthesis
-  const diffs = collectRunDiffs(ws.path, runId);
-  const walEventsContext = collectRunWalEvents(workspaceId, runId);
-  const errorMessages = collectErrorMessages(runId);
+  const diffs = await collectRunDiffs(ws.path, runId);
+  const walEventsContext = await collectRunWalEvents(workspaceId, runId);
+  const errorMessages = await collectErrorMessages(runId);
 
   // Get existing memory entries
   const existingEntries = readMemory(ws.path);
@@ -267,13 +280,13 @@ async function synthesizeMemory(workspaceId: string, runId: number, runStatus: s
   }));
 
   // Persist each proposal in the memory_proposals table
-  const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
-  );
-
   for (const p of proposals) {
-    insertStmt.run(p.proposalId, runId, workspaceId, p.category, p.title, p.rule, p.context, p.source);
+    await execute(
+      `INSERT INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
+       ON CONFLICT DO NOTHING`,
+      [p.proposalId, runId, workspaceId, p.category, p.title, p.rule, p.context, p.source]
+    );
   }
 
   // Broadcast as WAL event for SSE (Hub picks this up in real time)
@@ -283,13 +296,14 @@ async function synthesizeMemory(workspaceId: string, runId: number, runStatus: s
     proposals,
   });
 
-  const walResult = db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', ?, ?)`
-  ).run(workspaceId, walPayload);
+  const walRow = await queryOne<{ id: number }>(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', $1, $2) RETURNING id`,
+    [workspaceId, walPayload]
+  );
 
   // Broadcast to SSE subscribers
   broadcastAll({
-    id: Number(walResult.lastInsertRowid),
+    id: walRow?.id ?? 0,
     ts: new Date().toISOString(),
     event_type: 'memory_proposals',
     workspace_id: workspaceId,
