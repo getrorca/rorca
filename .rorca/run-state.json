@@ -2,7 +2,7 @@
   "specId": "rorca-distribution",
   "runId": 17,
   "startedAt": "2026-03-10T13:18:22.929Z",
-  "lastUpdatedAt": "2026-03-10T14:10:27.255Z",
+  "lastUpdatedAt": "2026-03-10T14:38:08.442Z",
   "completedStories": [
     {
       "storyId": "DIST-001",
@@ -48,9 +48,30 @@
       "finishedAt": "2026-03-10T14:10:27.255Z",
       "agentType": "claude",
       "elapsedMs": 246641
+    },
+    {
+      "storyId": "DIST-009",
+      "title": "First-Run Experience",
+      "status": "passed",
+      "startedAt": "2026-03-10T14:14:33.022Z",
+      "finishedAt": "2026-03-10T14:38:08.442Z",
+      "agentType": "claude",
+      "elapsedMs": 1415420
     }
   ],
-  "failedStories": [],
+  "failedStories": [
+    {
+      "storyId": "DIST-006",
+      "title": "LICENSE & Legal Files",
+      "status": "failed",
+      "startedAt": "2026-03-10T14:13:20.284Z",
+      "finishedAt": "2026-03-10T14:14:18.625Z",
+      "agentType": "claude",
+      "failReason": "max_retries",
+      "retries": 3,
+      "elapsedMs": 58341
+    }
+  ],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
