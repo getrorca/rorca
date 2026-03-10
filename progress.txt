@@ -3,9 +3,9 @@
 Spec: rorca-curated-skills-library
 Run ID: 14
 Started: 2026-03-10T02:18:43.908Z
-Last Updated: 2026-03-10T05:05:51.232Z
+Last Updated: 2026-03-10T05:08:59.395Z
 
-## Completed Stories (16)
+## Completed Stories (17)
 - SL-002: Explicit Match & Inject Skills API — DONE (claude, 194s)
 - SL-008: Match & Inject Button in Spec Review — DONE (claude, 330s)
 - SL-001: GitHub Repository Skill Browser API — DONE (claude, 284s)
@@ -22,3 +22,4 @@ Last Updated: 2026-03-10T05:05:51.232Z
 - SL-012: Skill Content Preview in Run View Skills Tab — DONE (claude, 113s)
 - SL-013: WAL Events for Skill Lifecycle — DONE (claude, 376s)
 - SL-014: Skill Effectiveness Analytics API — DONE (claude, 190s)
+- SL-015: Skill Effectiveness Widget in Analytics Panel — DONE (claude, 174s)
