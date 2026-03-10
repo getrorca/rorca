@@ -1,710 +1,288 @@
-import Database, { Database as DatabaseType } from 'better-sqlite3';
-import * as fs from 'fs';
-import * as path from 'path';
+/**
+ * db/index.ts — PostgreSQL connection pool + async query helpers for Rorca
+ *
+ * Replaces the previous better-sqlite3 synchronous interface with an async
+ * pg Pool. Helpers mirror the old API shape so route conversion is mechanical:
+ *
+ *   db.prepare(sql).all(...)   →  await query<T>(sql, params)
+ *   db.prepare(sql).get(...)   →  await queryOne<T>(sql, params)
+ *   db.prepare(sql).run(...)   →  await execute(sql, params)
+ *   db.transaction(fn)()       →  await transaction(fn)
+ *
+ * All queries use $1, $2, ... numbered placeholders natively.
+ * A rewritePlaceholders() utility is available for incremental migration.
+ */
+
+import { Pool, PoolClient, PoolConfig } from 'pg';
 import { logger } from '../lib/logger';
+import { runPgMigrations } from './pg-index';
 
-const DB_PATH = process.env.DB_PATH || './rorca.db';
-export const db: DatabaseType = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+// ── Configuration ────────────────────────────────────────────────────────
 
-export function runMigrations() {
-  // Migrations are .sql files in src/db/migrations/ — resolve for both dev (tsx) and compiled (dist/) modes
-  let migrationsDir = path.join(__dirname, 'migrations');
-  if (!fs.existsSync(migrationsDir)) {
-    // Running from compiled backend/dist/db/ — look at source directory
-    migrationsDir = path.join(__dirname, '..', '..', 'src', 'db', 'migrations');
-  }
-  // Pre-migration: ensure spec_publications has all columns that 044 migration expects
-  // (042 created the table without publisher_id, title, sanitized_spec_json, redaction_count, source, deleted_at)
-  const spExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='spec_publications'`).get();
-  if (spExists) {
-    const spCols = db.pragma('table_info(spec_publications)') as { name: string }[];
-    const spColNames = spCols.map(c => c.name);
-    if (!spColNames.includes('deleted_at')) db.exec('ALTER TABLE spec_publications ADD COLUMN deleted_at TEXT');
-    if (!spColNames.includes('publisher_id')) db.exec('ALTER TABLE spec_publications ADD COLUMN publisher_id TEXT');
-    if (!spColNames.includes('title')) db.exec('ALTER TABLE spec_publications ADD COLUMN title TEXT');
-    if (!spColNames.includes('sanitized_spec_json')) db.exec('ALTER TABLE spec_publications ADD COLUMN sanitized_spec_json TEXT');
-    if (!spColNames.includes('redaction_count')) db.exec('ALTER TABLE spec_publications ADD COLUMN redaction_count INTEGER NOT NULL DEFAULT 0');
-    if (!spColNames.includes('source')) db.exec("ALTER TABLE spec_publications ADD COLUMN source TEXT NOT NULL DEFAULT 'local'");
-  }
+const SLOW_QUERY_THRESHOLD_MS = parseInt(process.env.SLOW_QUERY_THRESHOLD_MS || '500', 10);
 
-  const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
-  for (const file of files) {
-    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-    db.exec(sql);
-  }
+function buildPoolConfig(): PoolConfig {
+  const databaseUrl = process.env.DATABASE_URL;
 
-  // US-003: Add preferred_model column idempotently (SQLite lacks ADD COLUMN IF NOT EXISTS)
-  const cols = db.pragma('table_info(direction_layers)') as { name: string }[];
-  if (!cols.some(c => c.name === 'preferred_model')) {
-    db.exec('ALTER TABLE direction_layers ADD COLUMN preferred_model TEXT');
-  }
-
-  // 006: Add branch_name + worktree_path to pipeline_runs (idempotent)
-  const runCols = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runCols.some(c => c.name === 'branch_name')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN branch_name TEXT');
-  }
-  if (!runCols.some(c => c.name === 'worktree_path')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN worktree_path TEXT');
-  }
-
-  // US-005: FTS5 virtual table for full-text spec search
-  const ftsExists = db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='spec_search_index'`
-  ).get();
-  if (!ftsExists) {
-    db.exec(`
-      CREATE VIRTUAL TABLE spec_search_index USING fts5(
-        spec_slug UNINDEXED,
-        workspace_id UNINDEXED,
-        spec_title,
-        story_titles,
-        story_descriptions,
-        acceptance_criteria,
-        status UNINDEXED,
-        generated_at UNINDEXED,
-        tokenize='unicode61'
-      )
-    `);
-  }
-
-  // V2-002: Add revoked_at column to refresh_tokens (idempotent)
-  const rtCols = db.pragma('table_info(refresh_tokens)') as { name: string }[];
-  if (!rtCols.some(c => c.name === 'revoked_at')) {
-    db.exec('ALTER TABLE refresh_tokens ADD COLUMN revoked_at TEXT');
-  }
-
-  // V2-003: Add github_id column to users for account linking (idempotent)
-  const userCols = db.pragma('table_info(users)') as { name: string }[];
-  if (!userCols.some(c => c.name === 'github_id')) {
-    db.exec('ALTER TABLE users ADD COLUMN github_id TEXT');
-  }
-
-  // V2-004: Add role column to users (idempotent)
-  const userColsV2004 = db.pragma('table_info(users)') as { name: string }[];
-  if (!userColsV2004.some(c => c.name === 'role')) {
-    db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
-  }
-
-  // V2-005: Add avatar_url column to users (idempotent)
-  const userColsV2005 = db.pragma('table_info(users)') as { name: string }[];
-  if (!userColsV2005.some(c => c.name === 'avatar_url')) {
-    db.exec('ALTER TABLE users ADD COLUMN avatar_url TEXT');
-  }
-
-  // V2-110: Add email_verified_at column to users (idempotent)
-  const userColsV2110 = db.pragma('table_info(users)') as { name: string }[];
-  if (!userColsV2110.some(c => c.name === 'email_verified_at')) {
-    db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT');
-  }
-
-  // V2-111: Add plan column to users (idempotent)
-  const userColsV2111 = db.pragma('table_info(users)') as { name: string }[];
-  if (!userColsV2111.some(c => c.name === 'plan')) {
-    db.exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'");
-  }
-
-  // V2-017: Add 'timeout' to story_results status CHECK + elapsed_seconds column (idempotent)
-  const storyResultsSql = (db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_results'`
-  ).get() as { sql: string } | undefined)?.sql || '';
-  if (!storyResultsSql.includes('timeout')) {
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      CREATE TABLE story_results_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id INTEGER NOT NULL REFERENCES pipeline_runs(id),
-        story_id TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pass','fail','skip','retry','timeout')),
-        retries INTEGER NOT NULL DEFAULT 0,
-        log_path TEXT,
-        started_at TEXT NOT NULL DEFAULT (datetime('now')),
-        finished_at TEXT,
-        elapsed_seconds INTEGER
-      );
-      INSERT INTO story_results_new (id, run_id, story_id, status, retries, log_path, started_at, finished_at)
-        SELECT id, run_id, story_id, status, retries, log_path, started_at, finished_at FROM story_results;
-      DROP TABLE story_results;
-      ALTER TABLE story_results_new RENAME TO story_results;
-    `);
-    db.pragma('foreign_keys = ON');
-  }
-
-  // Also add elapsed_seconds if story_results exists but without it (edge case: table was already recreated above)
-  const srCols = db.pragma('table_info(story_results)') as { name: string }[];
-  if (!srCols.some(c => c.name === 'elapsed_seconds')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN elapsed_seconds INTEGER');
-  }
-
-  // V2-025: Add input_tokens and output_tokens columns to story_results (idempotent)
-  const srColsV2025 = db.pragma('table_info(story_results)') as { name: string }[];
-  if (!srColsV2025.some(c => c.name === 'input_tokens')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN input_tokens INTEGER');
-  }
-  if (!srColsV2025.some(c => c.name === 'output_tokens')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN output_tokens INTEGER');
-  }
-
-  // OC-022: Add model_used and cost_usd columns to story_results (idempotent)
-  const srColsOC022 = db.pragma('table_info(story_results)') as { name: string }[];
-  if (!srColsOC022.some(c => c.name === 'model_used')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN model_used TEXT');
-  }
-  if (!srColsOC022.some(c => c.name === 'cost_usd')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN cost_usd REAL');
-  }
-
-  // V2-083: Add 'excluded' to story_results status CHECK (idempotent)
-  const storyResultsSqlExcl = (db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_results'`
-  ).get() as { sql: string } | undefined)?.sql || '';
-  if (!storyResultsSqlExcl.includes('excluded')) {
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      CREATE TABLE story_results_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id INTEGER NOT NULL REFERENCES pipeline_runs(id),
-        story_id TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pass','fail','skip','retry','timeout','excluded')),
-        retries INTEGER NOT NULL DEFAULT 0,
-        log_path TEXT,
-        started_at TEXT NOT NULL DEFAULT (datetime('now')),
-        finished_at TEXT,
-        elapsed_seconds INTEGER,
-        input_tokens INTEGER,
-        output_tokens INTEGER
-      );
-      INSERT INTO story_results_new (id, run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens)
-        SELECT id, run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens FROM story_results;
-      DROP TABLE story_results;
-      ALTER TABLE story_results_new RENAME TO story_results;
-    `);
-    db.pragma('foreign_keys = ON');
-  }
-
-  // V2-020: Add trigger_type column to pipeline_runs (idempotent)
-  const runColsV2020 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsV2020.some(c => c.name === 'trigger_type')) {
-    db.exec("ALTER TABLE pipeline_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'");
-  }
-
-  // US-004: Add 'partial_failure' to pipeline_runs status CHECK constraint (idempotent)
-  const tableSql = (db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
-  ).get() as { sql: string } | undefined)?.sql || '';
-  if (!tableSql.includes('partial_failure')) {
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      CREATE TABLE pipeline_runs_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        spec_path TEXT NOT NULL,
-        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-        status TEXT NOT NULL CHECK(status IN ('running','paused','done','failed','partial_failure')),
-        pid INTEGER,
-        started_at TEXT NOT NULL DEFAULT (datetime('now')),
-        finished_at TEXT,
-        branch_name TEXT,
-        worktree_path TEXT,
-        trigger_type TEXT NOT NULL DEFAULT 'manual'
-      );
-      INSERT INTO pipeline_runs_new SELECT id, spec_path, workspace_id, status, pid, started_at, finished_at, branch_name, worktree_path, COALESCE(trigger_type, 'manual') FROM pipeline_runs;
-      DROP TABLE pipeline_runs;
-      ALTER TABLE pipeline_runs_new RENAME TO pipeline_runs;
-    `);
-    db.pragma('foreign_keys = ON');
-  }
-
-  // V2-101: Add 'cancelled' to pipeline_runs status CHECK constraint (idempotent)
-  const tableSqlV101 = (db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
-  ).get() as { sql: string } | undefined)?.sql || '';
-  if (!tableSqlV101.includes('cancelled')) {
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      CREATE TABLE pipeline_runs_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        spec_path TEXT NOT NULL,
-        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-        status TEXT NOT NULL CHECK(status IN ('running','paused','done','failed','partial_failure','cancelled')),
-        pid INTEGER,
-        started_at TEXT NOT NULL DEFAULT (datetime('now')),
-        finished_at TEXT,
-        branch_name TEXT,
-        worktree_path TEXT,
-        trigger_type TEXT NOT NULL DEFAULT 'manual'
-      );
-      INSERT INTO pipeline_runs_new SELECT id, spec_path, workspace_id, status, pid, started_at, finished_at, branch_name, worktree_path, trigger_type FROM pipeline_runs;
-      DROP TABLE pipeline_runs;
-      ALTER TABLE pipeline_runs_new RENAME TO pipeline_runs;
-    `);
-    db.pragma('foreign_keys = ON');
-
-    // Re-add columns that were added after the initial table definition
-    const colsAfterRebuild = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-    if (!colsAfterRebuild.some(c => c.name === 'retried_from_run_id')) {
-      db.exec('ALTER TABLE pipeline_runs ADD COLUMN retried_from_run_id INTEGER REFERENCES pipeline_runs(id)');
-    }
-    if (!colsAfterRebuild.some(c => c.name === 'log_path')) {
-      db.exec('ALTER TABLE pipeline_runs ADD COLUMN log_path TEXT');
-    }
-  }
-
-  // V2-020: Ensure trigger_type exists after potential rebuild (idempotent)
-  const runColsPost = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsPost.some(c => c.name === 'trigger_type')) {
-    db.exec("ALTER TABLE pipeline_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'");
-  }
-
-  // V2-078: Add retried_from_run_id column to pipeline_runs (idempotent)
-  const runColsV2078 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsV2078.some(c => c.name === 'retried_from_run_id')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN retried_from_run_id INTEGER REFERENCES pipeline_runs(id)');
-  }
-
-  // V2-080: Add log_path column to pipeline_runs (idempotent)
-  const runColsV2080 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsV2080.some(c => c.name === 'log_path')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN log_path TEXT');
-  }
-
-  // EQ-004: Add agent column to pipeline_runs (idempotent) — 'claude' | 'opencode'
-  const runColsEQ004 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsEQ004.some(c => c.name === 'agent')) {
-    db.exec("ALTER TABLE pipeline_runs ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'");
-  }
-
-  // V2-031: Add pr_template column to workspaces (idempotent)
-  const wsCols = db.pragma('table_info(workspaces)') as { name: string }[];
-  if (!wsCols.some(c => c.name === 'pr_template')) {
-    db.exec('ALTER TABLE workspaces ADD COLUMN pr_template TEXT');
-  }
-
-  // V2-086: Add pipeline_config column to workspaces (idempotent)
-  const wsColsV86 = db.pragma('table_info(workspaces)') as { name: string }[];
-  if (!wsColsV86.some(c => c.name === 'pipeline_config')) {
-    db.exec("ALTER TABLE workspaces ADD COLUMN pipeline_config TEXT NOT NULL DEFAULT '{}'");
-  }
-
-  // V2-084: Add ROI calculator config columns to workspaces (idempotent)
-  const wsColsROI = db.pragma('table_info(workspaces)') as { name: string }[];
-  if (!wsColsROI.some(c => c.name === 'roi_hours_per_story')) {
-    db.exec('ALTER TABLE workspaces ADD COLUMN roi_hours_per_story REAL NOT NULL DEFAULT 4.0');
-  }
-  if (!wsColsROI.some(c => c.name === 'roi_hourly_rate')) {
-    db.exec('ALTER TABLE workspaces ADD COLUMN roi_hourly_rate REAL NOT NULL DEFAULT 75.0');
-  }
-
-  // V2-035: Add last_active_at column to team_members (idempotent)
-  const tmCols = db.pragma('table_info(team_members)') as { name: string }[];
-  if (!tmCols.some(c => c.name === 'last_active_at')) {
-    db.exec('ALTER TABLE team_members ADD COLUMN last_active_at TEXT');
-  }
-
-  // V2-041: Add team_id + author_id + usage_count to templates (idempotent)
-  const tplCols = db.pragma('table_info(templates)') as { name: string }[];
-  if (!tplCols.some(c => c.name === 'team_id')) {
-    db.exec('ALTER TABLE templates ADD COLUMN team_id TEXT REFERENCES teams(id) ON DELETE SET NULL');
-  }
-  if (!tplCols.some(c => c.name === 'author_id')) {
-    db.exec('ALTER TABLE templates ADD COLUMN author_id TEXT REFERENCES users(id) ON DELETE SET NULL');
-  }
-  if (!tplCols.some(c => c.name === 'usage_count')) {
-    db.exec('ALTER TABLE templates ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0');
-  }
-  if (!tplCols.some(c => c.name === 'last_used_at')) {
-    db.exec('ALTER TABLE templates ADD COLUMN last_used_at TEXT');
-  }
-
-  // V2-044: Enhance model_pricing with provider, per-1M costs, effective_date (idempotent)
-  const mpCols = db.pragma('table_info(model_pricing)') as { name: string }[];
-  if (!mpCols.some(c => c.name === 'provider')) {
-    db.exec("ALTER TABLE model_pricing ADD COLUMN provider TEXT NOT NULL DEFAULT 'anthropic'");
-  }
-  if (!mpCols.some(c => c.name === 'input_cost_per_1m')) {
-    db.exec('ALTER TABLE model_pricing ADD COLUMN input_cost_per_1m REAL');
-    // Backfill from existing per-1k values (multiply by 1000)
-    db.exec('UPDATE model_pricing SET input_cost_per_1m = input_cost_per_1k * 1000 WHERE input_cost_per_1m IS NULL');
-  }
-  if (!mpCols.some(c => c.name === 'output_cost_per_1m')) {
-    db.exec('ALTER TABLE model_pricing ADD COLUMN output_cost_per_1m REAL');
-    db.exec('UPDATE model_pricing SET output_cost_per_1m = output_cost_per_1k * 1000 WHERE output_cost_per_1m IS NULL');
-  }
-  if (!mpCols.some(c => c.name === 'effective_date')) {
-    db.exec("ALTER TABLE model_pricing ADD COLUMN effective_date TEXT DEFAULT ''");
-    db.exec("UPDATE model_pricing SET effective_date = datetime('now') WHERE effective_date = ''");
-  }
-
-  // V2-115: Add base_url column to api_key_vault for OpenAI-compat configurable endpoints (idempotent)
-  const vaultCols = db.pragma('table_info(api_key_vault)') as { name: string }[];
-  if (!vaultCols.some(c => c.name === 'base_url')) {
-    db.exec('ALTER TABLE api_key_vault ADD COLUMN base_url TEXT');
-  }
-
-  // EQ-009: Add parallelism column to pipeline_runs (integer, default 1)
-  const runColsEQ009 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsEQ009.some(c => c.name === 'parallelism')) {
-    db.exec("ALTER TABLE pipeline_runs ADD COLUMN parallelism INTEGER NOT NULL DEFAULT 1");
-  }
-
-  // EQ-010: Add worktree_path and worktree_branch columns to story_results (idempotent)
-  const srColsEQ010 = db.pragma('table_info(story_results)') as { name: string }[];
-  if (!srColsEQ010.some(c => c.name === 'worktree_path')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN worktree_path TEXT');
-  }
-  if (!srColsEQ010.some(c => c.name === 'worktree_branch')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN worktree_branch TEXT');
-  }
-
-  // WE-003: Add blocked_by column to story_results for tracking upstream blockers (idempotent)
-  const srColsWE003 = db.pragma('table_info(story_results)') as { name: string }[];
-  if (!srColsWE003.some(c => c.name === 'blocked_by')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN blocked_by TEXT');
-  }
-
-  // SK-003: Add active_skills column to story_results for tracking injected skills (idempotent)
-  const srColsSK003 = db.pragma('table_info(story_results)') as { name: string }[];
-  if (!srColsSK003.some(c => c.name === 'active_skills')) {
-    db.exec('ALTER TABLE story_results ADD COLUMN active_skills TEXT');
-  }
-
-  // EQ-007: Add author_name column to story_comments for guest reviewers (idempotent)
-  const scCols = db.pragma('table_info(story_comments)') as { name: string }[];
-  if (!scCols.some(c => c.name === 'author_name')) {
-    db.exec('ALTER TABLE story_comments ADD COLUMN author_name TEXT');
-  }
-
-  // EQ-007: Make user_id nullable for guest comments (story_comments was NOT NULL)
-  // SQLite doesn't allow ALTER COLUMN, but new rows can insert NULL via the review route
-  // because the NOT NULL constraint applies at INSERT time and we handle it in code.
-  // We need to rebuild the table to allow NULL user_id.
-  const scSql = (db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='story_comments'`
-  ).get() as { sql: string } | undefined)?.sql || '';
-  if (scSql.includes('user_id TEXT NOT NULL')) {
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      CREATE TABLE story_comments_new (
-        id TEXT PRIMARY KEY,
-        spec_id TEXT NOT NULL,
-        story_id TEXT NOT NULL,
-        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
-        body TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        resolved_at TEXT,
-        author_name TEXT
-      );
-      INSERT INTO story_comments_new (id, spec_id, story_id, user_id, body, created_at, resolved_at, author_name)
-        SELECT id, spec_id, story_id, user_id, body, created_at, resolved_at, author_name FROM story_comments;
-      DROP TABLE story_comments;
-      ALTER TABLE story_comments_new RENAME TO story_comments;
-      CREATE INDEX IF NOT EXISTS idx_story_comments_spec_story ON story_comments(spec_id, story_id);
-    `);
-    db.pragma('foreign_keys = ON');
-  }
-
-  // UI-031: Add auto-PR settings columns to workspace_github_webhooks (idempotent)
-  const ghCols = db.pragma('table_info(workspace_github_webhooks)') as { name: string }[];
-  if (!ghCols.some(c => c.name === 'auto_pr_enabled')) {
-    db.exec("ALTER TABLE workspace_github_webhooks ADD COLUMN auto_pr_enabled INTEGER NOT NULL DEFAULT 0");
-  }
-  if (!ghCols.some(c => c.name === 'auto_pr_target_branch')) {
-    db.exec("ALTER TABLE workspace_github_webhooks ADD COLUMN auto_pr_target_branch TEXT NOT NULL DEFAULT 'main'");
-  }
-  if (!ghCols.some(c => c.name === 'auto_pr_reviewers')) {
-    db.exec("ALTER TABLE workspace_github_webhooks ADD COLUMN auto_pr_reviewers TEXT NOT NULL DEFAULT '[]'");
-  }
-
-  // EQ-012: Add default_parallelism column to workspaces (integer 1-10, default 1)
-  const wsColsEQ012 = db.pragma('table_info(workspaces)') as { name: string }[];
-  if (!wsColsEQ012.some(c => c.name === 'default_parallelism')) {
-    db.exec("ALTER TABLE workspaces ADD COLUMN default_parallelism INTEGER NOT NULL DEFAULT 1");
-  }
-
-  // RQ-001: Create run_queue table (idempotent)
-  const rqExists = db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='run_queue'`
-  ).get();
-  if (!rqExists) {
-    db.exec(`
-      CREATE TABLE run_queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
-        spec_id TEXT NOT NULL,
-        spec_path TEXT NOT NULL,
-        parallelism INTEGER NOT NULL DEFAULT 1,
-        auto_worktree INTEGER NOT NULL DEFAULT 0,
-        position INTEGER NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        triggered_at TEXT
-      );
-      CREATE INDEX idx_run_queue_workspace_status ON run_queue(workspace_id, status);
-    `);
-  }
-
-  // RQ-002: Add error_message column to run_queue (idempotent)
-  const rqCols = db.pragma('table_info(run_queue)') as { name: string }[];
-  if (rqCols.length > 0 && !rqCols.some(c => c.name === 'error_message')) {
-    db.exec("ALTER TABLE run_queue ADD COLUMN error_message TEXT");
-  }
-
-  // OC-003: Add opencode_server_pid column to pipeline_runs (idempotent)
-  const runColsOC003 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsOC003.some(c => c.name === 'opencode_server_pid')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN opencode_server_pid INTEGER');
-  }
-
-  // OC-006: Add agent_model column to pipeline_runs (idempotent)
-  const runColsOC006 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsOC006.some(c => c.name === 'agent_model')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN agent_model TEXT');
-  }
-
-  // OC-007: Add agent_type column to pipeline_runs (idempotent)
-  // Canonical column for agent type ('claude' | 'opencode'). Supersedes the earlier 'agent' column (EQ-004).
-  const runColsOC007 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsOC007.some(c => c.name === 'agent_type')) {
-    db.exec("ALTER TABLE pipeline_runs ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'claude'");
-    // Backfill from existing 'agent' column so historical rows stay consistent
-    db.exec("UPDATE pipeline_runs SET agent_type = agent WHERE agent IS NOT NULL AND agent != ''");
-  }
-
-  // OC-022: Add total_input_tokens, total_output_tokens, total_cost_usd to pipeline_runs (idempotent)
-  const runColsOC022 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsOC022.some(c => c.name === 'total_input_tokens')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_input_tokens INTEGER');
-  }
-  if (!runColsOC022.some(c => c.name === 'total_output_tokens')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_output_tokens INTEGER');
-  }
-  if (!runColsOC022.some(c => c.name === 'total_cost_usd')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN total_cost_usd REAL');
-  }
-
-  // CIE-016: Add context_preview JSON column to pipeline_runs (predicted context for post-run comparison)
-  const runColsCIE016 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsCIE016.some(c => c.name === 'context_preview')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN context_preview TEXT');
-  }
-
-  // PR-RQ-1: Add 'queued' to pipeline_runs status CHECK constraint (idempotent)
-  const tableSqlRQ1 = (db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`
-  ).get() as { sql: string } | undefined)?.sql || '';
-  if (!tableSqlRQ1.includes('queued')) {
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      CREATE TABLE pipeline_runs_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        spec_path TEXT NOT NULL,
-        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-        status TEXT NOT NULL CHECK(status IN ('running','paused','done','failed','partial_failure','cancelled','queued')),
-        pid INTEGER,
-        started_at TEXT NOT NULL DEFAULT (datetime('now')),
-        finished_at TEXT,
-        branch_name TEXT,
-        worktree_path TEXT,
-        trigger_type TEXT NOT NULL DEFAULT 'manual'
-      );
-      INSERT INTO pipeline_runs_new SELECT id, spec_path, workspace_id, status, pid, started_at, finished_at, branch_name, worktree_path, trigger_type FROM pipeline_runs;
-      DROP TABLE pipeline_runs;
-      ALTER TABLE pipeline_runs_new RENAME TO pipeline_runs;
-    `);
-    db.pragma('foreign_keys = ON');
-
-    // Re-add columns that were added after the initial table definition
-    const colsRQ1 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-    const addIfMissing = (col: string, ddl: string) => {
-      if (!colsRQ1.some(c => c.name === col)) db.exec(ddl);
+  if (databaseUrl) {
+    const needsSsl = databaseUrl.includes('sslmode=require');
+    return {
+      connectionString: databaseUrl,
+      max: 20,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
+      statement_timeout: 30_000,
+      ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     };
-    addIfMissing('retried_from_run_id', 'ALTER TABLE pipeline_runs ADD COLUMN retried_from_run_id INTEGER REFERENCES pipeline_runs(id)');
-    addIfMissing('log_path', 'ALTER TABLE pipeline_runs ADD COLUMN log_path TEXT');
-    addIfMissing('agent', "ALTER TABLE pipeline_runs ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'");
-    addIfMissing('agent_type', "ALTER TABLE pipeline_runs ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'claude'");
-    addIfMissing('agent_model', 'ALTER TABLE pipeline_runs ADD COLUMN agent_model TEXT');
-    addIfMissing('opencode_server_pid', 'ALTER TABLE pipeline_runs ADD COLUMN opencode_server_pid INTEGER');
-    addIfMissing('total_input_tokens', 'ALTER TABLE pipeline_runs ADD COLUMN total_input_tokens INTEGER');
-    addIfMissing('total_output_tokens', 'ALTER TABLE pipeline_runs ADD COLUMN total_output_tokens INTEGER');
-    addIfMissing('total_cost_usd', 'ALTER TABLE pipeline_runs ADD COLUMN total_cost_usd REAL');
-    addIfMissing('parallelism', "ALTER TABLE pipeline_runs ADD COLUMN parallelism INTEGER NOT NULL DEFAULT 1");
-    addIfMissing('context_preview', 'ALTER TABLE pipeline_runs ADD COLUMN context_preview TEXT');
-    addIfMissing('queued_at', 'ALTER TABLE pipeline_runs ADD COLUMN queued_at TEXT');
-    addIfMissing('queue_position', 'ALTER TABLE pipeline_runs ADD COLUMN queue_position INTEGER');
   }
 
-  // PR-RQ-1: Add queued_at and queue_position columns to pipeline_runs (idempotent)
-  const runColsRQ1 = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-  if (!runColsRQ1.some(c => c.name === 'queued_at')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN queued_at TEXT');
-  }
-  if (!runColsRQ1.some(c => c.name === 'queue_position')) {
-    db.exec('ALTER TABLE pipeline_runs ADD COLUMN queue_position INTEGER');
-  }
+  const needsSsl = process.env.PGSSLMODE === 'require';
+  return {
+    host: process.env.PGHOST || 'localhost',
+    port: parseInt(process.env.PGPORT || '5432', 10),
+    user: process.env.PGUSER || 'rorca',
+    password: process.env.PGPASSWORD || 'rorca',
+    database: process.env.PGDATABASE || 'rorca',
+    max: 20,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+    statement_timeout: 30_000,
+    ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+  };
+}
 
-  // OC-009: agent_config table for persisting execution engine settings (hot-reloadable)
-  const agentConfigExists = db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_config'`
-  ).get();
-  if (!agentConfigExists) {
-    db.exec(`
-      CREATE TABLE agent_config (
-        id TEXT PRIMARY KEY,
-        agent_type TEXT NOT NULL DEFAULT 'claude',
-        agent_model TEXT,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      )
-    `);
-  }
+// ── Lazy Pool ────────────────────────────────────────────────────────────
 
-  // CA-001: convention_packs table for pack registry metadata (idempotent)
-  const conventionPacksExists = db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='convention_packs'`
-  ).get();
-  if (!conventionPacksExists) {
-    db.exec(`
-      CREATE TABLE convention_packs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-        pack_name TEXT NOT NULL,
-        pack_version TEXT NOT NULL,
-        installed_at TEXT NOT NULL DEFAULT (datetime('now')),
-        pack_path TEXT NOT NULL,
-        UNIQUE(workspace_id, pack_name)
-      );
-      CREATE INDEX idx_convention_packs_workspace ON convention_packs(workspace_id);
-    `);
-  }
+let _pool: Pool | null = null;
+let _migrationsDone = false;
+let _migrationsRunning: Promise<void> | null = null;
 
-  // SK-001: installed_skills table for SkillRegistry persistence (idempotent)
-  const installedSkillsExists = db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='installed_skills'`
-  ).get();
-  if (!installedSkillsExists) {
-    db.exec(`
-      CREATE TABLE installed_skills (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        description TEXT NOT NULL DEFAULT '',
-        source TEXT NOT NULL DEFAULT 'user',
-        content TEXT NOT NULL,
-        installed_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-      CREATE INDEX idx_installed_skills_name ON installed_skills(name);
-    `);
-  }
+function getPool(): Pool {
+  if (!_pool) {
+    _pool = new Pool(buildPoolConfig());
 
-  // CA-003: Expand direction_layers CHECK constraint to allow layer 0 (L0 = pack conventions)
-  const dirLayersSql = (db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='direction_layers'`
-  ).get() as { sql: string } | undefined)?.sql || '';
-  if (dirLayersSql && !dirLayersSql.includes('0,1,2,3')) {
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      CREATE TABLE direction_layers_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        workspace_id TEXT,
-        domain TEXT,
-        team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
-        layer INTEGER NOT NULL CHECK(layer IN (0,1,2,3)),
-        content_yaml TEXT NOT NULL DEFAULT '',
-        preferred_model TEXT,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_direction_layers_new_unique
-        ON direction_layers_new(layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''));
-      INSERT INTO direction_layers_new (id, workspace_id, domain, team_id, layer, content_yaml, preferred_model, updated_at)
-        SELECT id, workspace_id, domain, team_id, layer, content_yaml, preferred_model, updated_at FROM direction_layers;
-      DROP TABLE direction_layers;
-      ALTER TABLE direction_layers_new RENAME TO direction_layers;
-    `);
-    db.pragma('foreign_keys = ON');
+    _pool.on('error', (err) => {
+      logger.error({ err }, '[db] Unexpected pool error');
+    });
   }
+  return _pool;
+}
 
-  // Ensure direction_layers unique index exists (required for ON CONFLICT upsert in PUT /api/direction)
-  db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_direction_layers_unique
-      ON direction_layers(layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''));
-  `);
+/** Ensure migrations have run exactly once. Awaited before first query. */
+async function ensureMigrations(): Promise<void> {
+  if (_migrationsDone) return;
+  if (_migrationsRunning) {
+    await _migrationsRunning;
+    return;
+  }
+  _migrationsRunning = (async () => {
+    const pool = getPool();
+    logger.info('[db] Running PostgreSQL migrations...');
+    await runPgMigrations(pool);
+    _migrationsDone = true;
+    logger.info('[db] Migrations complete');
+  })();
+  await _migrationsRunning;
+}
 
-  // CA-004: Add forked_from column to convention_packs (for pack fork tracking)
-  const cpCols = db.prepare(`PRAGMA table_info(convention_packs)`).all() as Array<{ name: string }>;
-  if (cpCols.length > 0 && !cpCols.some(c => c.name === 'forked_from')) {
-    db.exec(`ALTER TABLE convention_packs ADD COLUMN forked_from TEXT`);
-  }
+// ── Exported Pool ────────────────────────────────────────────────────────
 
-  // SL-006: Add category and tags columns to installed_skills (idempotent)
-  const isCols = db.pragma('table_info(installed_skills)') as { name: string }[];
-  if (isCols.length > 0 && !isCols.some(c => c.name === 'category')) {
-    db.exec('ALTER TABLE installed_skills ADD COLUMN category TEXT');
-  }
-  if (isCols.length > 0 && !isCols.some(c => c.name === 'tags')) {
-    db.exec('ALTER TABLE installed_skills ADD COLUMN tags TEXT');
-  }
+/** The pg Pool instance. Prefer using query/queryOne/execute/transaction helpers. */
+export const pool: Pool = new Proxy({} as Pool, {
+  get(_target, prop, receiver) {
+    // Intercept to ensure pool exists lazily
+    const real = getPool();
+    const val = Reflect.get(real, prop, receiver);
+    return typeof val === 'function' ? val.bind(real) : val;
+  },
+});
 
-  // CA-011: Add review_persona and review_type columns to story_comments for adversarial review (idempotent)
-  const scColsCA011 = db.pragma('table_info(story_comments)') as { name: string }[];
-  if (scColsCA011.length > 0 && !scColsCA011.some(c => c.name === 'review_persona')) {
-    db.exec('ALTER TABLE story_comments ADD COLUMN review_persona TEXT');
-  }
-  if (scColsCA011.length > 0 && !scColsCA011.some(c => c.name === 'review_type')) {
-    db.exec("ALTER TABLE story_comments ADD COLUMN review_type TEXT");
-  }
+// ── Placeholder Rewriter ─────────────────────────────────────────────────
 
-  // FR-005: Add 'completed' to spec_versions status CHECK constraint (idempotent)
-  const specVersionsSql = (db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type='table' AND name='spec_versions'`
-  ).get() as { sql: string } | undefined)?.sql || '';
-  if (specVersionsSql && !specVersionsSql.includes('completed')) {
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      CREATE TABLE spec_versions_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        spec_slug TEXT NOT NULL,
-        version INTEGER NOT NULL,
-        content_json TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','completed')),
-        rejection_reason TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE(spec_slug, version)
-      );
-      INSERT INTO spec_versions_new (id, spec_slug, version, content_json, status, rejection_reason, created_at)
-        SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at FROM spec_versions;
-      DROP TABLE spec_versions;
-      ALTER TABLE spec_versions_new RENAME TO spec_versions;
-    `);
-    db.pragma('foreign_keys = ON');
-  }
+/**
+ * Converts ? placeholders to $1, $2, ... numbered placeholders.
+ * Available for incremental migration but should NOT be used in final code.
+ */
+export function rewritePlaceholders(sql: string): string {
+  let idx = 0;
+  return sql.replace(/\?/g, () => `$${++idx}`);
+}
 
-  // PR-010: Add webhook_url and encrypted_webhook_secret columns to pipeline_hooks (idempotent)
-  const hookCols = db.pragma('table_info(pipeline_hooks)') as { name: string }[];
-  if (hookCols.length > 0 && !hookCols.some(c => c.name === 'webhook_url')) {
-    db.exec('ALTER TABLE pipeline_hooks ADD COLUMN webhook_url TEXT');
-  }
-  if (hookCols.length > 0 && !hookCols.some(c => c.name === 'encrypted_webhook_secret')) {
-    db.exec('ALTER TABLE pipeline_hooks ADD COLUMN encrypted_webhook_secret TEXT');
+// ── Slow Query Logger ────────────────────────────────────────────────────
+
+function logSlowQuery(sql: string, params: unknown[] | undefined, durationMs: number): void {
+  if (durationMs >= SLOW_QUERY_THRESHOLD_MS) {
+    // Sanitize params: mask anything that looks like a secret
+    const sanitized = params?.map((p) => {
+      if (typeof p === 'string' && p.length > 20) {
+        const lower = p.toLowerCase();
+        if (lower.includes('password') || lower.includes('secret') || lower.includes('key') || lower.includes('token')) {
+          return '[REDACTED]';
+        }
+      }
+      return p;
+    });
+    logger.warn({ sql: sql.slice(0, 200), params: sanitized, durationMs }, '[db] Slow query');
   }
 }
 
-runMigrations();
+// ── Query Helpers ────────────────────────────────────────────────────────
 
-// ── Seed default local admin user (idempotent) ────────────────────────────
-// Self-hosted: always ensure a local admin user exists with plan='pro' so
-// billing gates never block pipeline runs. Safe to run on every startup.
-{
-  const existingAdmin = db.prepare("SELECT id FROM users WHERE email = 'admin@rorca.local'").get();
-  if (!existingAdmin) {
+/**
+ * Execute a query and return all matching rows.
+ * Replaces: db.prepare(sql).all(...params)
+ */
+export async function query<T = Record<string, unknown>>(
+  sql: string,
+  params?: unknown[],
+): Promise<T[]> {
+  await ensureMigrations();
+  const p = getPool();
+  const start = Date.now();
+  const result = await p.query(sql, params);
+  logSlowQuery(sql, params, Date.now() - start);
+  return result.rows as T[];
+}
+
+/**
+ * Execute a query and return the first row, or undefined.
+ * Replaces: db.prepare(sql).get(...params)
+ */
+export async function queryOne<T = Record<string, unknown>>(
+  sql: string,
+  params?: unknown[],
+): Promise<T | undefined> {
+  await ensureMigrations();
+  const p = getPool();
+  const start = Date.now();
+  const result = await p.query(sql, params);
+  logSlowQuery(sql, params, Date.now() - start);
+  return (result.rows[0] as T) ?? undefined;
+}
+
+/**
+ * Execute a statement (INSERT/UPDATE/DELETE) and return affected row count.
+ * Replaces: db.prepare(sql).run(...params)
+ */
+export async function execute(
+  sql: string,
+  params?: unknown[],
+): Promise<{ rowCount: number }> {
+  await ensureMigrations();
+  const p = getPool();
+  const start = Date.now();
+  const result = await p.query(sql, params);
+  logSlowQuery(sql, params, Date.now() - start);
+  return { rowCount: result.rowCount ?? 0 };
+}
+
+/**
+ * Run a function inside a transaction.
+ * Acquires a client, BEGINs, runs fn, COMMITs on success, ROLLBACKs on error.
+ * Replaces: db.transaction(() => { ... })()
+ */
+export async function transaction<T>(
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  await ensureMigrations();
+  const p = getPool();
+  const client = await p.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ── Health Check ─────────────────────────────────────────────────────────
+
+export interface DbHealthResult {
+  ok: boolean;
+  latencyMs: number;
+  poolStats: { total: number; idle: number; waiting: number };
+}
+
+/**
+ * Runs SELECT 1 and returns pool diagnostics.
+ * Used by GET /api/health.
+ */
+export async function dbHealthCheck(): Promise<DbHealthResult> {
+  const p = getPool();
+  const start = Date.now();
+  try {
+    await p.query('SELECT 1');
+    const latencyMs = Date.now() - start;
+    return {
+      ok: true,
+      latencyMs,
+      poolStats: {
+        total: p.totalCount,
+        idle: p.idleCount,
+        waiting: p.waitingCount,
+      },
+    };
+  } catch {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      poolStats: {
+        total: p.totalCount,
+        idle: p.idleCount,
+        waiting: p.waitingCount,
+      },
+    };
+  }
+}
+
+// ── Initialization ───────────────────────────────────────────────────────
+
+/**
+ * Explicitly initialize the pool and run migrations.
+ * Call from server startup to ensure DB is ready before accepting requests.
+ */
+export async function initDb(): Promise<void> {
+  await ensureMigrations();
+  await seedDefaultAdmin();
+}
+
+// ── Seed Default Admin ───────────────────────────────────────────────────
+
+async function seedDefaultAdmin(): Promise<void> {
+  const existing = await queryOne<{ id: string }>(
+    "SELECT id FROM users WHERE email = 'admin@rorca.local'",
+  );
+  if (!existing) {
     // bcrypt hash of 'rorca123' (cost 10)
     const defaultHash = '$2b$10$BMXqmRMejhhifW5gs6Ju.eI.cxoG/k7iW5sGJ86Nb4WloLowY.qxy';
-    db.prepare(
+    await execute(
       `INSERT INTO users (id, email, display_name, password_hash, role, plan, email_verified_at)
-       VALUES ('local-admin', 'admin@rorca.local', 'Admin', ?, 'admin', 'pro', datetime('now'))`
-    ).run(defaultHash);
+       VALUES ('local-admin', 'admin@rorca.local', 'Admin', $1, 'admin', 'pro', NOW())`,
+      [defaultHash],
+    );
     logger.info('[db] Seeded default admin user (admin@rorca.local)');
   } else {
-    // Ensure plan is never 'free' — billing gate should never appear on self-hosted
-    db.prepare("UPDATE users SET plan = 'pro' WHERE email = 'admin@rorca.local' AND plan = 'free'").run();
+    await execute(
+      "UPDATE users SET plan = 'pro' WHERE email = 'admin@rorca.local' AND plan = 'free'",
+    );
   }
 }
+
+// ── Graceful Shutdown ────────────────────────────────────────────────────
+
+async function shutdown(): Promise<void> {
+  if (_pool) {
+    logger.info('[db] Closing pool...');
+    await _pool.end();
+    _pool = null;
+    logger.info('[db] Pool closed');
+  }
+}
+
+process.on('SIGTERM', () => { shutdown().catch(() => {}); });
+process.on('SIGINT', () => { shutdown().catch(() => {}); });
