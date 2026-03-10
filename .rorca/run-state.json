@@ -2,7 +2,7 @@
   "specId": "rorca-live-spec-terminal",
   "runId": 13,
   "startedAt": "2026-03-10T01:19:16.575Z",
-  "lastUpdatedAt": "2026-03-10T01:30:37.760Z",
+  "lastUpdatedAt": "2026-03-10T01:31:04.515Z",
   "completedStories": [
     {
       "storyId": "LST-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-10T01:30:37.760Z",
       "agentType": "claude",
       "elapsedMs": 671892
+    },
+    {
+      "storyId": "LST-002",
+      "title": "Real Progress Bar — Replace Simulated Stages with Actual Elapsed Time",
+      "status": "passed",
+      "startedAt": "2026-03-10T01:30:51.727Z",
+      "finishedAt": "2026-03-10T01:31:04.514Z",
+      "agentType": "claude",
+      "elapsedMs": 12787
     }
   ],
   "failedStories": [],
