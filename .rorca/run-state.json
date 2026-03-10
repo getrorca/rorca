@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T11:59:36.316Z",
+  "lastUpdatedAt": "2026-03-10T12:07:41.313Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -129,6 +129,15 @@
       "finishedAt": "2026-03-10T11:59:36.316Z",
       "agentType": "claude",
       "elapsedMs": 384913
+    },
+    {
+      "storyId": "PG-015",
+      "title": "Apache AGE Extension + Knowledge Graph Schema",
+      "status": "passed",
+      "startedAt": "2026-03-10T11:59:44.955Z",
+      "finishedAt": "2026-03-10T12:07:41.313Z",
+      "agentType": "claude",
+      "elapsedMs": 476358
     }
   ],
   "failedStories": [],
