@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -15,35 +14,28 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-wal-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
   // Clear WAL events from user registration so tests start with a clean slate
-  db.prepare('DELETE FROM wal_events').run();
+  await execute(`DELETE FROM wal_events`);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
-function insertWalEvent(eventType: string, workspaceId?: string) {
-  db.prepare(
-    'INSERT INTO wal_events (event_type, workspace_id) VALUES (?, ?)'
-  ).run(eventType, workspaceId || null);
+async function insertWalEvent(eventType: string, workspaceId?: string) {
+  await execute(`INSERT INTO wal_events (event_type, workspace_id) VALUES ($1, $2)`, [eventType, workspaceId || null]);
 }
 
 test('GET /api/wal returns all 3 inserted events, newest first', async () => {
-  insertWalEvent('workspace_create', 'ws-1');
-  insertWalEvent('direction_update', 'ws-1');
-  insertWalEvent('generate', 'ws-1');
+  await insertWalEvent('workspace_create', 'ws-1');
+  await insertWalEvent('direction_update', 'ws-1');
+  await insertWalEvent('generate', 'ws-1');
 
   const res = await request(app).get('/api/wal').set('Authorization', `Bearer ${authToken}`);
 
@@ -57,9 +49,9 @@ test('GET /api/wal returns all 3 inserted events, newest first', async () => {
 });
 
 test('limit=2 returns only 2 events, total still reflects full count', async () => {
-  insertWalEvent('workspace_create', 'ws-1');
-  insertWalEvent('direction_update', 'ws-1');
-  insertWalEvent('generate', 'ws-1');
+  await insertWalEvent('workspace_create', 'ws-1');
+  await insertWalEvent('direction_update', 'ws-1');
+  await insertWalEvent('generate', 'ws-1');
 
   const res = await request(app).get('/api/wal?limit=2').set('Authorization', `Bearer ${authToken}`);
 
@@ -69,9 +61,9 @@ test('limit=2 returns only 2 events, total still reflects full count', async () 
 });
 
 test('offset=1 skips the newest event', async () => {
-  insertWalEvent('workspace_create', 'ws-1');
-  insertWalEvent('direction_update', 'ws-1');
-  insertWalEvent('generate', 'ws-1');
+  await insertWalEvent('workspace_create', 'ws-1');
+  await insertWalEvent('direction_update', 'ws-1');
+  await insertWalEvent('generate', 'ws-1');
 
   const res = await request(app).get('/api/wal?offset=1').set('Authorization', `Bearer ${authToken}`);
 

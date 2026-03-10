@@ -5,7 +5,7 @@ import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
-import { db } from '../db/index';
+import { query, queryOne, execute, transaction } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
@@ -20,6 +20,8 @@ import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
 import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
+import { hybridSearch } from '../lib/search';
+import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -267,14 +269,14 @@ function safeReadFile(filePath: string): string {
  * Build skill + persona catalog context for spec generation prompts.
  * Discovers installed skills and personas from the workspace, reads MEMORY.md and AGENTS.md.
  */
-function buildCatalogContext(workspacePath: string): {
+async function buildCatalogContext(workspacePath: string): Promise<{
   skillCatalog: string;
   personaCatalog: string;
   memoryMd: string;
   agentsMd: string;
   skillNames: Set<string>;
-} {
-  const skillRegistry = new SkillRegistry().discover(workspacePath);
+}> {
+  const skillRegistry = await new SkillRegistry().discover(workspacePath);
   const rorcaDir = path.join(workspacePath, '.rorca');
   const personaRegistry = new PersonaRegistry().discover(rorcaDir);
 
@@ -314,8 +316,8 @@ function validateSuggestedSkills(
   }
 }
 
-function getWorkspace(workspaceId: string): WorkspaceRow | undefined {
-  return db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+async function getWorkspace(workspaceId: string): Promise<WorkspaceRow | undefined> {
+  return await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as WorkspaceRow | undefined;
 }
 
 function specsDirs(workspacePath: string) {
@@ -356,36 +358,34 @@ function computeReadiness(stories: any[]): number {
   return Math.round((readyCount / stories.length) * 100);
 }
 
-function getSpecTags(specId: string, workspaceId: string): string[] {
-  const rows = db.prepare(
-    'SELECT tag_name FROM spec_tags WHERE spec_id = ? AND workspace_id = ? ORDER BY tag_name'
-  ).all(specId, workspaceId) as { tag_name: string }[];
+async function getSpecTags(specId: string, workspaceId: string): Promise<string[]> {
+  const rows = await query('SELECT tag_name FROM spec_tags WHERE spec_id = $1 AND workspace_id = $2 ORDER BY tag_name', [specId, workspaceId]) as { tag_name: string }[];
   return rows.map(r => r.tag_name);
 }
 
-function getSpecAssignee(specId: string, workspaceId: string): AssigneeInfo | undefined {
-  const row = db.prepare(`
+async function getSpecAssignee(specId: string, workspaceId: string): Promise<AssigneeInfo | undefined> {
+  const row = await queryOne(`
     SELECT u.id, u.display_name, u.email, u.avatar_url
     FROM spec_assignments sa
     JOIN users u ON u.id = sa.assignee_id
-    WHERE sa.spec_id = ? AND sa.workspace_id = ? AND sa.story_id = ''
-  `).get(specId, workspaceId) as { id: string; display_name: string; email: string; avatar_url: string | null } | undefined;
+    WHERE sa.spec_id = $1 AND sa.workspace_id = $2 AND sa.story_id = ''
+  `, [specId, workspaceId]) as { id: string; display_name: string; email: string; avatar_url: string | null } | undefined;
   if (!row) return undefined;
   return { id: row.id, displayName: row.display_name, email: row.email, avatarUrl: row.avatar_url };
 }
 
-function buildSummary(
+async function buildSummary(
   filePath: string,
   fileName: string,
   status: 'pending' | 'approved' | 'completed',
   workspacePath: string,
   workspaceId?: string,
-): SpecSummary {
+): Promise<SpecSummary> {
   const content = parseSpecFile(filePath);
   const stat = fs.statSync(filePath);
   const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
   const specId = fileName.replace('.json', '');
-  const assignee = workspaceId ? getSpecAssignee(specId, workspaceId) : undefined;
+  const assignee = workspaceId ? await getSpecAssignee(specId, workspaceId) : undefined;
   return {
     id: specId,
     specName: content.title ?? specId,
@@ -395,7 +395,7 @@ function buildSummary(
     ...(status === 'approved' ? { approvedAt: stat.mtime.toISOString() } : {}),
     workspacePath,
     readinessPercent: computeReadiness(stories),
-    tags: workspaceId ? getSpecTags(specId, workspaceId) : [],
+    tags: workspaceId ? await getSpecTags(specId, workspaceId) : [],
     ...(content.forkedFrom ? { forkedFrom: content.forkedFrom } : {}),
     reviewStatus: content.reviewStatus ?? 'draft',
     ...(assignee ? { assignee } : {}),
@@ -405,19 +405,15 @@ function buildSummary(
 }
 
 /** Get the next version number for a spec slug */
-function nextVersion(specSlug: string): number {
-  const row = db.prepare(
-    'SELECT MAX(version) as max_ver FROM spec_versions WHERE spec_slug = ?'
-  ).get(specSlug) as { max_ver: number | null } | undefined;
+async function nextVersion(specSlug: string): Promise<number> {
+  const row = await queryOne('SELECT MAX(version) as max_ver FROM spec_versions WHERE spec_slug = $1', [specSlug]) as { max_ver: number | null } | undefined;
   return (row?.max_ver ?? 0) + 1;
 }
 
 /** Snapshot a spec's current content into spec_versions */
-function snapshotVersion(specSlug: string, contentJson: string, status: string, rejectionReason?: string): number {
-  const version = nextVersion(specSlug);
-  db.prepare(
-    `INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES (?, ?, ?, ?, ?)`
-  ).run(specSlug, version, contentJson, status, rejectionReason ?? null);
+async function snapshotVersion(specSlug: string, contentJson: string, status: string, rejectionReason?: string): Promise<number> {
+  const version = await nextVersion(specSlug);
+  await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status, rejection_reason) VALUES ($1, $2, $3, $4, $5)`, [specSlug, version, contentJson, status, rejectionReason ?? null]);
   return version;
 }
 
@@ -588,18 +584,16 @@ function parseLLMJson(raw: string): unknown {
 }
 
 /** Emit a spec_generation_pass WAL event and broadcast via SSE. */
-function emitPassEvent(
+async function emitPassEvent(
   specId: string,
   pass: number,
   status: 'started' | 'completed',
   workspaceId?: string,
-): void {
+): Promise<void> {
   const payload = JSON.stringify({ pass, status });
-  const result = db.prepare(
-    `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_generation_pass', ?, ?, ?)`
-  ).run(specId, workspaceId ?? null, payload);
+  const result = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_generation_pass', $1, $2, $3) RETURNING *`, [specId, workspaceId ?? null, payload]);
   broadcastAll({
-    id: Number(result.lastInsertRowid),
+    id: result!.id,
     ts: new Date().toISOString(),
     event_type: 'spec_generation_pass',
     workspace_id: workspaceId ?? null,
@@ -686,7 +680,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // No validation gate — any model string is accepted. Unknown models route to openai-compat.
 
     // 2. Fetch workspace from DB
-    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as Record<string, unknown> | undefined;
+    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as Record<string, unknown> | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -698,33 +692,23 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       resolvedModel = requestedModel;
     } else {
       // Check workspace L3 for preferred_model
-      const l3Pref = db.prepare(
-        `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-      ).get(workspaceId) as { preferred_model: string | null } | undefined;
+      const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
       if (l3Pref?.preferred_model) {
         resolvedModel = l3Pref.preferred_model;
       }
     }
 
     // 3. Fetch L1: global brain (no workspace, no domain)
-    const l1Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-    ).get() as { content_yaml: string } | undefined;
+    const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
 
     // 4. Fetch L2: domain profile
-    const l2Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = ? AND COALESCE(workspace_id, '') = ''`
-    ).get(domain) as { content_yaml: string } | undefined;
+    const l2Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined;
 
     // 5. Fetch L3: project brief
-    const l3Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-    ).get(workspaceId) as { content_yaml: string } | undefined;
+    const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
     // 5b. Fetch auto-hydrated context from workspace_context
-    const ctx = db.prepare(
-      `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
-    ).get(workspaceId) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+    const ctx = await queryOne(`SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
 
     const schemaSnapshot = ctx?.schema_snapshot || undefined;
     const gitMemory = ctx?.git_memory || undefined;
@@ -744,7 +728,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // 6b. Fetch template if templateId provided
     let templateContext = '';
     if (templateId) {
-      const tpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(templateId) as
+      const tpl = await queryOne('SELECT * FROM templates WHERE id = $1', [templateId]) as
         { brief: string; story_structure: string; direction_layers: string | null } | undefined;
       if (tpl) {
         const stories = JSON.parse(tpl.story_structure);
@@ -765,7 +749,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 6c. Discover skill + persona catalogs and read context files
-    const catalogs = buildCatalogContext(workspace.path as string);
+    const catalogs = await buildCatalogContext(workspace.path as string);
 
     // 6d. Pre-compute contextSummary for error responses (also used in success response)
     const skillNamesList = catalogs.skillCatalog
@@ -942,12 +926,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         return;
       }
 
-      const user = getEffectiveUser(req);
+      const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
       const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
 
       // ── Pass 1: PM Agent — coarse high-level stories ──
-      emitPassEvent(slug, 1, 'started', workspaceId);
+      await emitPassEvent(slug, 1, 'started', workspaceId);
 
       const pass1Prompt = [
         '=== INSTRUCTIONS: READ THIS FIRST ===',
@@ -1023,13 +1007,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         multiPassStage: 'pass1-pm',
         userStories: pass1Result.stories,
       };
-      snapshotVersion(slug, JSON.stringify(pass1Spec), 'pending');
-      emitPassEvent(slug, 1, 'completed', workspaceId);
+      await snapshotVersion(slug, JSON.stringify(pass1Spec), 'pending');
+      await emitPassEvent(slug, 1, 'completed', workspaceId);
 
       logger.info(`[Specs] Pass 1 complete: ${pass1Result.stories.length} coarse stories`);
 
       // ── Pass 2: Spec Writer Agent — decompose into micro-stories ──
-      emitPassEvent(slug, 2, 'started', workspaceId);
+      await emitPassEvent(slug, 2, 'started', workspaceId);
 
       // Discover installed skills for prompt context
       let skillCatalog = '';
@@ -1131,18 +1115,18 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         multiPassStage: 'pass2-spec-writer',
         userStories: parsed.stories,
       };
-      snapshotVersion(slug, JSON.stringify(pass2Spec), 'pending');
-      emitPassEvent(slug, 2, 'completed', workspaceId);
+      await snapshotVersion(slug, JSON.stringify(pass2Spec), 'pending');
+      await emitPassEvent(slug, 2, 'completed', workspaceId);
 
       logger.info(`[Specs] Pass 2 complete: ${parsed.stories.length} micro-stories (decomposed from ${pass1Result.stories.length} coarse stories)`);
 
       // ── Pass 3: UX Designer Agent — add visual descriptions ──
-      emitPassEvent(slug, 3, 'started', workspaceId);
+      await emitPassEvent(slug, 3, 'started', workspaceId);
 
       const uxDesignerPromptText = loadDefaultPersonaPrompt('ux-designer');
       if (!uxDesignerPromptText) {
         logger.warn('[Specs] UX Designer persona not found — skipping Pass 3');
-        emitPassEvent(slug, 3, 'completed', workspaceId);
+        await emitPassEvent(slug, 3, 'completed', workspaceId);
       }
 
       let pass3Usage = { inputTokens: 0, outputTokens: 0 };
@@ -1231,19 +1215,19 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass3-ux-designer',
           userStories: parsed.stories,
         };
-        snapshotVersion(slug, JSON.stringify(pass3Spec), 'pending');
-        emitPassEvent(slug, 3, 'completed', workspaceId);
+        await snapshotVersion(slug, JSON.stringify(pass3Spec), 'pending');
+        await emitPassEvent(slug, 3, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 3 complete: ${parsed.stories.length} stories enriched with visual descriptions`);
       }
 
       // ── Pass 4: Best Practices Agent — library convention annotations ──
-      emitPassEvent(slug, 4, 'started', workspaceId);
+      await emitPassEvent(slug, 4, 'started', workspaceId);
 
       const bestPracticesPromptText = loadDefaultPersonaPrompt('best-practices');
       if (!bestPracticesPromptText) {
         logger.warn('[Specs] Best Practices persona not found — skipping Pass 4');
-        emitPassEvent(slug, 4, 'completed', workspaceId);
+        await emitPassEvent(slug, 4, 'completed', workspaceId);
       }
 
       let pass4Usage = { inputTokens: 0, outputTokens: 0 };
@@ -1361,14 +1345,14 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass4-best-practices',
           userStories: parsed.stories,
         };
-        snapshotVersion(slug, JSON.stringify(pass4Spec), 'pending');
-        emitPassEvent(slug, 4, 'completed', workspaceId);
+        await snapshotVersion(slug, JSON.stringify(pass4Spec), 'pending');
+        await emitPassEvent(slug, 4, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 4 complete: ${parsed.stories.length} stories annotated with convention guidance`);
       }
 
       // ── Pass 5: Adversarial Review — Assumption Buster + Devil's Advocate ──
-      emitPassEvent(slug, 5, 'started', workspaceId);
+      await emitPassEvent(slug, 5, 'started', workspaceId);
 
       const assumptionBusterPrompt = loadDefaultPersonaPrompt('assumption-buster');
       const devilsAdvocatePrompt = loadDefaultPersonaPrompt('devils-advocate');
@@ -1377,7 +1361,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
       if (!assumptionBusterPrompt && !devilsAdvocatePrompt) {
         logger.warn('[Specs] Adversarial personas not found — skipping Pass 5');
-        emitPassEvent(slug, 5, 'completed', workspaceId);
+        await emitPassEvent(slug, 5, 'completed', workspaceId);
       } else {
         const pass4StoriesJson = JSON.stringify(parsed.stories, null, 2);
 
@@ -1526,21 +1510,21 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           multiPassStage: 'pass5-adversarial-review',
           userStories: parsed.stories,
         };
-        snapshotVersion(slug, JSON.stringify(pass5Spec), 'pending');
-        emitPassEvent(slug, 5, 'completed', workspaceId);
+        await snapshotVersion(slug, JSON.stringify(pass5Spec), 'pending');
+        await emitPassEvent(slug, 5, 'completed', workspaceId);
 
         logger.info(`[Specs] Pass 5 complete: ${parsed.stories.length} stories after adversarial review`);
       }
 
       // ── Pass 6: Spec Verifier — final consistency check + verification report ──
-      emitPassEvent(slug, 6, 'started', workspaceId);
+      await emitPassEvent(slug, 6, 'started', workspaceId);
 
       const specVerifierPrompt = loadDefaultPersonaPrompt('spec-verifier');
       let pass6Usage = { inputTokens: 0, outputTokens: 0 };
 
       if (!specVerifierPrompt) {
         logger.warn('[Specs] Spec Verifier persona not found — skipping Pass 6');
-        emitPassEvent(slug, 6, 'completed', workspaceId);
+        await emitPassEvent(slug, 6, 'completed', workspaceId);
       } else {
         const pass5StoriesJson = JSON.stringify(parsed.stories, null, 2);
 
@@ -1642,8 +1626,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
           userStories: parsed.stories,
           ...(verificationReport ? { verificationReport } : {}),
         };
-        snapshotVersion(slug, JSON.stringify(pass6Spec), 'pending');
-        emitPassEvent(slug, 6, 'completed', workspaceId);
+        await snapshotVersion(slug, JSON.stringify(pass6Spec), 'pending');
+        await emitPassEvent(slug, 6, 'completed', workspaceId);
 
         // Attach verification report to parsed output for the response
         if (verificationReport) {
@@ -1680,7 +1664,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         // Fallback to SDK path on OpenCode failure
         logger.warn(`[Specs] OpenCode spec gen failed (${ocResult.error}), falling back to SDK path`);
 
-        const user = getEffectiveUser(req);
+        const user = await getEffectiveUser(req);
         if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
         const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
         const llmResult = await chatComplete(
@@ -1717,7 +1701,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       }
     } else {
       // ── SDK path: direct LLM call via chatComplete ──
-      const user = getEffectiveUser(req);
+      const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
       const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
       const llmResult = await chatComplete(
@@ -1764,25 +1748,19 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // 12. WAL event
     const model = resolvedModel;
-    db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', ?, ?)`
-    ).run(slug, JSON.stringify({
+    await execute(`INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', $1, $2)`, [slug, JSON.stringify({
       title: effectiveTitle, domain, storyCount: parsed.stories.length, provider: usedProvider, model,
       hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
       inputTokens: tokenUsage.inputTokens, outputTokens: tokenUsage.outputTokens,
       multiPass,
-    }));
+    })]);
 
     // 12b. Persist generation log
-    db.prepare(
-      `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'completed')`
-    ).run(
-      slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+    await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'completed')`, [slug, model, typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
       Date.now() - genStartTime,
       tokenUsage.inputTokens, tokenUsage.outputTokens,
-      JSON.stringify(precomputedContextSummary ?? {}),
-    );
+      JSON.stringify(precomputedContextSummary ?? {}),]);
 
     // 13. Snapshot existing spec as a version if regenerating same slug
     const { pendingDir: genPendingDir, approvedDir: genApprovedDir } = specsDirs(workspace.path as string);
@@ -1791,11 +1769,11 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     if (fs.existsSync(existingPending)) {
       const existingContent = fs.readFileSync(existingPending, 'utf8');
-      snapshotVersion(slug, existingContent, 'pending');
+      await snapshotVersion(slug, existingContent, 'pending');
       fs.unlinkSync(existingPending);
     } else if (fs.existsSync(existingApproved)) {
       const existingContent = fs.readFileSync(existingApproved, 'utf8');
-      snapshotVersion(slug, existingContent, 'approved');
+      await snapshotVersion(slug, existingContent, 'approved');
       fs.unlinkSync(existingApproved);
     }
 
@@ -1851,6 +1829,15 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         ...((parsed as Record<string, unknown>).verificationReport ? { verificationReport: (parsed as Record<string, unknown>).verificationReport } : {}),
       } : {}),
     });
+
+    // 17. Fire-and-forget spec memory capture (PG-023)
+    autoSynthesizeSpecMemory(
+      slug,
+      workspaceId,
+      brief,
+      { stories: parsed.stories as unknown[] },
+      (contextSummary ?? {}) as Record<string, unknown>,
+    ).catch(() => { /* non-blocking — errors logged internally */ });
   } catch (error: any) {
     logger.error('[Specs] Generate error:', error);
     const category = categorizeSpecError(error);
@@ -1863,16 +1850,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // Persist failed generation log
     try {
-      db.prepare(
-        `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, error, error_category, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'failed')`
-      ).run(
-        genSlug, resolvedModel,
+      await execute(`INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, context_summary, error, error_category, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed')`, [genSlug, resolvedModel,
         typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
         Date.now() - genStartTime,
         JSON.stringify(precomputedContextSummary ?? {}),
-        error.message, category,
-      );
+        error.message, category,]);
     } catch { /* best-effort logging */ }
 
     res.status(500).json({
@@ -1903,7 +1886,7 @@ interface BatchRequestItem {
  * but captures errors per-brief rather than returning HTTP errors.
  */
 async function processBatchBrief(item: BatchBriefItem): Promise<void> {
-  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(item.workspaceId) as WorkspaceRow | undefined;
+  const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [item.workspaceId]) as WorkspaceRow | undefined;
   if (!workspace) {
     item.status = 'failed';
     item.error = 'Workspace not found';
@@ -1915,9 +1898,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   if (item.model) {
     resolvedModel = item.model;
   } else {
-    const l3Pref = db.prepare(
-      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-    ).get(item.workspaceId) as { preferred_model: string | null } | undefined;
+    const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [item.workspaceId]) as { preferred_model: string | null } | undefined;
     if (l3Pref?.preferred_model) {
       resolvedModel = l3Pref.preferred_model;
     }
@@ -1929,18 +1910,10 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const storyCount = rawBatchCount === 0 ? 0 : Math.min(500, Math.max(1, rawBatchCount || 8));
 
   // Fetch direction layers
-  const l1Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-  ).get() as { content_yaml: string } | undefined;
-  const l2Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = ? AND COALESCE(workspace_id, '') = ''`
-  ).get(item.domain ?? '') as { content_yaml: string } | undefined;
-  const l3Row = db.prepare(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-  ).get(item.workspaceId) as { content_yaml: string } | undefined;
-  const ctx = db.prepare(
-    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
-  ).get(item.workspaceId) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
+  const l2Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [item.domain ?? '']) as { content_yaml: string } | undefined;
+  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [item.workspaceId]) as { content_yaml: string } | undefined;
+  const ctx = await queryOne(`SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`, [item.workspaceId]) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
 
   const synthesized = synthesize({
     l1: l1Row?.content_yaml,
@@ -1954,7 +1927,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   // Template context
   let templateContext = '';
   if (item.templateId) {
-    const tpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(item.templateId) as
+    const tpl = await queryOne('SELECT * FROM templates WHERE id = $1', [item.templateId]) as
       { brief: string; story_structure: string } | undefined;
     if (tpl) {
       const stories = JSON.parse(tpl.story_structure);
@@ -1974,7 +1947,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const storyPrefix = 'US';
 
   // Discover skill + persona catalogs for batch brief
-  const batchCatalogs = buildCatalogContext(workspace.path);
+  const batchCatalogs = await buildCatalogContext(workspace.path);
   const batchCatalogSections: string[] = [];
   if (batchCatalogs.memoryMd) {
     batchCatalogSections.push('=== PROJECT MEMORY ===', batchCatalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
@@ -2062,23 +2035,21 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
 
   // WAL event
   const provider = getActiveProvider();
-  db.prepare(
-    `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', ?, ?)`
-  ).run(slug, JSON.stringify({
+  await execute(`INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', $1, $2)`, [slug, JSON.stringify({
     title, domain: item.domain, storyCount: parsed.stories.length, provider, model: resolvedModel,
     hasSchema: !!ctx?.schema_snapshot, hasGitMemory: !!ctx?.git_memory,
     inputTokens: llmResult.usage.inputTokens, outputTokens: llmResult.usage.outputTokens,
-  }));
+  })]);
 
   // Snapshot existing spec if regenerating
   const { pendingDir, approvedDir } = specsDirs(workspace.path);
   const existingPending = path.join(pendingDir, `${slug}.json`);
   const existingApproved = path.join(approvedDir, `${slug}.json`);
   if (fs.existsSync(existingPending)) {
-    snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
+    await snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
     fs.unlinkSync(existingPending);
   } else if (fs.existsSync(existingApproved)) {
-    snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
+    await snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
     fs.unlinkSync(existingApproved);
   }
 
@@ -2104,18 +2075,13 @@ async function processBatch(batch: BatchState): Promise<void> {
     item.status = 'generating';
 
     // Broadcast progress: generating
-    const genWalResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('batch_progress', ?, ?)`
-    ).run(item.workspaceId, JSON.stringify({
+    const genWalEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('batch_progress', $1, $2)` + ' RETURNING *', [item.workspaceId, JSON.stringify({
       batchId: batch.id,
       briefIndex: i,
       totalBriefs: batch.items.length,
       status: 'generating',
-    }));
-    const genWalEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      genWalResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(genWalEvent);
+    })]);
+    broadcastAll(genWalEvent!);
 
     try {
       await processBatchBrief(item);
@@ -2129,20 +2095,15 @@ async function processBatch(batch: BatchState): Promise<void> {
     }
 
     // Broadcast progress: completed or failed
-    const doneWalResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('batch_progress', ?, ?)`
-    ).run(item.workspaceId, JSON.stringify({
+    const doneWalEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('batch_progress', $1, $2)` + ' RETURNING *', [item.workspaceId, JSON.stringify({
       batchId: batch.id,
       briefIndex: i,
       totalBriefs: batch.items.length,
       status: item.status,
       slug: item.slug,
       error: item.error,
-    }));
-    const doneWalEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      doneWalResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(doneWalEvent);
+    })]);
+    broadcastAll(doneWalEvent!);
   }
 
   batch.finishedAt = new Date().toISOString();
@@ -2150,16 +2111,11 @@ async function processBatch(batch: BatchState): Promise<void> {
   // Emit batch_finished WAL event
   const completed = batch.items.filter(i => i.status === 'completed').length;
   const failed = batch.items.filter(i => i.status === 'failed').length;
-  const finishWalResult = db.prepare(
-    `INSERT INTO wal_events (event_type, payload) VALUES ('batch_finished', ?)`
-  ).run(JSON.stringify({
+  const finishWalEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, payload) VALUES ('batch_finished', $1)` + ' RETURNING *', [JSON.stringify({
     batchId: batch.id,
     summary: { completed, failed, total: batch.items.length },
-  }));
-  const finishWalEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-    finishWalResult.lastInsertRowid
-  ) as WalEvent;
-  broadcastAll(finishWalEvent);
+  })]);
+  broadcastAll(finishWalEvent!);
 
   // Auto-clean batch from memory after 1 hour
   setTimeout(() => batchQueue.delete(batch.id), 60 * 60 * 1000);
@@ -2207,7 +2163,7 @@ async function processBatch(batch: BatchState): Promise<void> {
  *       400: { description: "Missing or empty briefs array, or brief missing required fields" }
  *       500: { description: "Internal server error" }
  */
-router.post('/generate/batch', (req: Request, res: Response) => {
+router.post('/generate/batch', async (req: Request, res: Response) => {
   try {
     const { briefs } = req.body as { briefs?: BatchRequestItem[] };
 
@@ -2227,7 +2183,7 @@ router.post('/generate/batch', (req: Request, res: Response) => {
     }
 
     const batchId = crypto.randomUUID();
-    const batchUser = getEffectiveUser(req);
+    const batchUser = await getEffectiveUser(req);
     if (!batchUser) { res.status(500).json({ error: 'No user configured' }); return; }
     const batch: BatchState = {
       id: batchId,
@@ -2253,13 +2209,8 @@ router.post('/generate/batch', (req: Request, res: Response) => {
     });
 
     // Emit WAL event for batch start
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, payload) VALUES ('batch_started', ?)`
-    ).run(JSON.stringify({ batchId, briefCount: briefs.length }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, payload) VALUES ('batch_started', $1)` + ' RETURNING *', [JSON.stringify({ batchId, briefCount: briefs.length })]);
+    broadcastAll(walEvent!);
 
     res.status(201).json({ batchId, briefCount: briefs.length });
   } catch (error: any) {
@@ -2491,7 +2442,7 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
  *                       tags: { type: array, items: { type: string } }
  *                       reviewStatus: { type: string }
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     const statusFilter = (req.query.status as string) || 'all';
@@ -2501,7 +2452,7 @@ router.get('/', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -2517,7 +2468,7 @@ router.get('/', (req: Request, res: Response) => {
     if (statusFilter !== 'approved') {
       for (const file of safeReaddir(pendingDir)) {
         try {
-          specs.push(buildSummary(path.join(pendingDir, file), file, 'pending', workspace.path, workspaceId));
+          specs.push(await buildSummary(path.join(pendingDir, file), file, 'pending', workspace.path, workspaceId));
         } catch {
           // skip unparseable files
         }
@@ -2527,7 +2478,7 @@ router.get('/', (req: Request, res: Response) => {
     if (statusFilter !== 'pending') {
       for (const file of safeReaddir(approvedDir)) {
         try {
-          specs.push(buildSummary(path.join(approvedDir, file), file, 'approved', workspace.path, workspaceId));
+          specs.push(await buildSummary(path.join(approvedDir, file), file, 'approved', workspace.path, workspaceId));
         } catch {
           // skip unparseable files
         }
@@ -2549,9 +2500,7 @@ router.get('/', (req: Request, res: Response) => {
     const assigneeFilter = req.query.assignee as string | undefined;
     if (assigneeFilter) {
       const assignedSpecIds = new Set(
-        (db.prepare(
-          "SELECT DISTINCT spec_id FROM spec_assignments WHERE workspace_id = ? AND assignee_id = ? AND story_id = ''"
-        ).all(workspaceId, assigneeFilter) as { spec_id: string }[]).map(r => r.spec_id)
+        (await query("SELECT DISTINCT spec_id FROM spec_assignments WHERE workspace_id = $1 AND assignee_id = $2 AND story_id = ''", [workspaceId, assigneeFilter]) as { spec_id: string }[]).map(r => r.spec_id)
       );
       filtered = filtered.filter(s => assignedSpecIds.has(s.id));
     }
@@ -2589,7 +2538,7 @@ interface KanbanSpec {
   model?: string;
 }
 
-router.get('/kanban', (req: Request, res: Response) => {
+router.get('/kanban', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
@@ -2597,7 +2546,7 @@ router.get('/kanban', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -2611,7 +2560,7 @@ router.get('/kanban', (req: Request, res: Response) => {
       try {
         const filePath = path.join(pendingDir, file);
         const content = parseSpecFile(filePath);
-        const s = buildSummary(filePath, file, 'pending', workspace.path, workspaceId);
+        const s = await buildSummary(filePath, file, 'pending', workspace.path, workspaceId);
         pendingSpecs.push({
           id: s.id,
           title: s.specName,
@@ -2631,7 +2580,7 @@ router.get('/kanban', (req: Request, res: Response) => {
       try {
         const filePath = path.join(approvedDir, file);
         const content = parseSpecFile(filePath);
-        const s = buildSummary(filePath, file, 'approved', workspace.path, workspaceId);
+        const s = await buildSummary(filePath, file, 'approved', workspace.path, workspaceId);
         approvedSpecs.push({
           id: s.id,
           title: s.specName,
@@ -2648,9 +2597,7 @@ router.get('/kanban', (req: Request, res: Response) => {
     }
 
     // Detect active runs and completed runs per spec
-    const runs = db.prepare(
-      `SELECT id, spec_path, status, queue_position FROM pipeline_runs WHERE workspace_id = ? ORDER BY id DESC`
-    ).all(workspaceId) as { id: number; spec_path: string; status: string; queue_position: number | null }[];
+    const runs = await query(`SELECT id, spec_path, status, queue_position FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC`, [workspaceId]) as { id: number; spec_path: string; status: string; queue_position: number | null }[];
 
     const activeRunBySlug = new Map<string, { id: number; status: 'running' | 'queued'; queuePosition?: number }>();
     const completedSlugs = new Set<string>();
@@ -2675,13 +2622,9 @@ router.get('/kanban', (req: Request, res: Response) => {
           r.spec_path.replace(/^.*\//, '').replace(/\.json$/, '') === slug
         );
         if (latestRun) {
-          const passCount = db.prepare(
-            `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status = 'pass'`
-          ).get(latestRun.id) as { cnt: number } | undefined;
+          const passCount = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status = 'pass'`, [latestRun.id]) as { cnt: number } | undefined;
           if (passCount) storyProgress.set(slug, passCount.cnt);
-          const failCount = db.prepare(
-            `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status = 'fail'`
-          ).get(latestRun.id) as { cnt: number } | undefined;
+          const failCount = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status = 'fail'`, [latestRun.id]) as { cnt: number } | undefined;
           if (failCount) storyFailed.set(slug, failCount.cnt);
         }
       }
@@ -2721,13 +2664,9 @@ router.get('/kanban', (req: Request, res: Response) => {
     done.sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime());
 
     // Fetch custom columns and their spec assignments
-    const customColumns = db.prepare(
-      `SELECT id, name, color, position FROM kanban_columns WHERE workspace_id = ? ORDER BY position ASC`
-    ).all(workspaceId) as { id: number; name: string; color: string; position: number }[];
+    const customColumns = await query(`SELECT id, name, color, position FROM kanban_columns WHERE workspace_id = $1 ORDER BY position ASC`, [workspaceId]) as { id: number; name: string; color: string; position: number }[];
 
-    const assignments = db.prepare(
-      `SELECT spec_id, column_id FROM kanban_spec_assignments WHERE workspace_id = ?`
-    ).all(workspaceId) as { spec_id: string; column_id: number }[];
+    const assignments = await query(`SELECT spec_id, column_id FROM kanban_spec_assignments WHERE workspace_id = $1`, [workspaceId]) as { spec_id: string; column_id: number }[];
 
     const assignmentBySpec = new Map<string, number>();
     for (const a of assignments) assignmentBySpec.set(a.spec_id, a.column_id);
@@ -2761,108 +2700,98 @@ router.get('/kanban', (req: Request, res: Response) => {
 
 const MAX_CUSTOM_COLUMNS = 8;
 
-router.get('/kanban/columns', (req: Request, res: Response) => {
+router.get('/kanban/columns', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string;
   if (!workspaceId) { res.status(400).json({ error: 'Missing workspaceId' }); return; }
-  const columns = db.prepare(
-    `SELECT id, name, color, position FROM kanban_columns WHERE workspace_id = ? ORDER BY position ASC`
-  ).all(workspaceId);
+  const columns = await query(`SELECT id, name, color, position FROM kanban_columns WHERE workspace_id = $1 ORDER BY position ASC`, [workspaceId]);
   res.json({ columns });
 });
 
-router.post('/kanban/columns', (req: Request, res: Response) => {
+router.post('/kanban/columns', async (req: Request, res: Response) => {
   const { workspaceId, name, color } = req.body;
   if (!workspaceId || !name) { res.status(400).json({ error: 'Missing workspaceId or name' }); return; }
 
-  const count = (db.prepare(`SELECT COUNT(*) as cnt FROM kanban_columns WHERE workspace_id = ?`).get(workspaceId) as { cnt: number }).cnt;
+  const count = (await queryOne(`SELECT COUNT(*) as cnt FROM kanban_columns WHERE workspace_id = $1`, [workspaceId]) as { cnt: number }).cnt;
   if (count >= MAX_CUSTOM_COLUMNS) { res.status(422).json({ error: `Maximum ${MAX_CUSTOM_COLUMNS} custom columns reached` }); return; }
 
-  const maxPos = (db.prepare(`SELECT COALESCE(MAX(position), -1) as maxPos FROM kanban_columns WHERE workspace_id = ?`).get(workspaceId) as { maxPos: number }).maxPos;
-  const result = db.prepare(
-    `INSERT INTO kanban_columns (workspace_id, name, color, position) VALUES (?, ?, ?, ?)`
-  ).run(workspaceId, name.trim(), color || 'indigo', maxPos + 1);
+  const maxPos = (await queryOne(`SELECT COALESCE(MAX(position), -1) as maxPos FROM kanban_columns WHERE workspace_id = $1`, [workspaceId]) as { maxPos: number }).maxPos;
+  const result = await queryOne<{ id: number }>(`INSERT INTO kanban_columns (workspace_id, name, color, position) VALUES ($1, $2, $3, $4) RETURNING id`, [workspaceId, name.trim(), color || 'indigo', maxPos + 1]);
 
-  res.json({ id: result.lastInsertRowid, name: name.trim(), color: color || 'indigo', position: maxPos + 1 });
+  res.json({ id: result!.id, name: name.trim(), color: color || 'indigo', position: maxPos + 1 });
 });
 
-router.put('/kanban/columns/:id', (req: Request, res: Response) => {
+router.put('/kanban/columns/:id', async (req: Request, res: Response) => {
   const colId = Number(req.params.id);
   const { name, color, position } = req.body;
 
-  const col = db.prepare(`SELECT id, workspace_id, position FROM kanban_columns WHERE id = ?`).get(colId) as { id: number; workspace_id: string; position: number } | undefined;
+  const col = await queryOne(`SELECT id, workspace_id, position FROM kanban_columns WHERE id = $1`, [colId]) as { id: number; workspace_id: string; position: number } | undefined;
   if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
 
   if (name !== undefined) {
-    db.prepare(`UPDATE kanban_columns SET name = ? WHERE id = ?`).run(name.trim(), colId);
+    await execute(`UPDATE kanban_columns SET name = $1 WHERE id = $2`, [name.trim(), colId]);
   }
   if (color !== undefined) {
-    db.prepare(`UPDATE kanban_columns SET color = ? WHERE id = ?`).run(color, colId);
+    await execute(`UPDATE kanban_columns SET color = $1 WHERE id = $2`, [color, colId]);
   }
   if (position !== undefined) {
     // Reorder: shift other columns to make room
-    const allCols = db.prepare(
-      `SELECT id, position FROM kanban_columns WHERE workspace_id = ? ORDER BY position ASC`
-    ).all(col.workspace_id) as { id: number; position: number }[];
+    const allCols = await query(`SELECT id, position FROM kanban_columns WHERE workspace_id = $1 ORDER BY position ASC`, [col.workspace_id]) as { id: number; position: number }[];
 
     const filtered = allCols.filter(c => c.id !== colId);
     filtered.splice(position, 0, { id: colId, position });
 
-    const update = db.prepare(`UPDATE kanban_columns SET position = ? WHERE id = ?`);
-    const reorderTx = db.transaction(() => {
-      filtered.forEach((c, i) => update.run(i, c.id));
+    await transaction(async (client) => {
+      for (let i = 0; i < filtered.length; i++) {
+        await client.query(`UPDATE kanban_columns SET position = $1 WHERE id = $2`, [i, filtered[i].id]);
+      }
     });
-    reorderTx();
   }
 
-  const updated = db.prepare(`SELECT id, name, color, position FROM kanban_columns WHERE id = ?`).get(colId);
+  const updated = await queryOne(`SELECT id, name, color, position FROM kanban_columns WHERE id = $1`, [colId]);
   res.json(updated);
 });
 
-router.delete('/kanban/columns/:id', (req: Request, res: Response) => {
+router.delete('/kanban/columns/:id', async (req: Request, res: Response) => {
   const colId = Number(req.params.id);
 
-  const col = db.prepare(`SELECT id, workspace_id FROM kanban_columns WHERE id = ?`).get(colId) as { id: number; workspace_id: string } | undefined;
+  const col = await queryOne(`SELECT id, workspace_id FROM kanban_columns WHERE id = $1`, [colId]) as { id: number; workspace_id: string } | undefined;
   if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
 
   // Count assigned specs before deleting
-  const assignedCount = (db.prepare(`SELECT COUNT(*) as cnt FROM kanban_spec_assignments WHERE column_id = ?`).get(colId) as { cnt: number }).cnt;
+  const assignedCount = (await queryOne(`SELECT COUNT(*) as cnt FROM kanban_spec_assignments WHERE column_id = $1`, [colId]) as { cnt: number }).cnt;
 
   // Remove assignments (specs go back to In Progress)
-  db.prepare(`DELETE FROM kanban_spec_assignments WHERE column_id = ?`).run(colId);
-  db.prepare(`DELETE FROM kanban_columns WHERE id = ?`).run(colId);
+  await execute(`DELETE FROM kanban_spec_assignments WHERE column_id = $1`, [colId]);
+  await execute(`DELETE FROM kanban_columns WHERE id = $1`, [colId]);
 
   // Recompact positions
-  const remaining = db.prepare(
-    `SELECT id FROM kanban_columns WHERE workspace_id = ? ORDER BY position ASC`
-  ).all(col.workspace_id) as { id: number }[];
+  const remaining = await query(`SELECT id FROM kanban_columns WHERE workspace_id = $1 ORDER BY position ASC`, [col.workspace_id]) as { id: number }[];
 
-  const update = db.prepare(`UPDATE kanban_columns SET position = ? WHERE id = ?`);
-  const recompactTx = db.transaction(() => {
-    remaining.forEach((c, i) => update.run(i, c.id));
+  await transaction(async (client) => {
+    for (let i = 0; i < remaining.length; i++) {
+      await client.query(`UPDATE kanban_columns SET position = $1 WHERE id = $2`, [i, remaining[i].id]);
+    }
   });
-  recompactTx();
 
   res.json({ ok: true, reassignedCount: assignedCount });
 });
 
 // Move a spec to a custom column (or back to in-progress by passing columnId: null)
-router.post('/kanban/columns/assign', (req: Request, res: Response) => {
+router.post('/kanban/columns/assign', async (req: Request, res: Response) => {
   const { workspaceId, specId, columnId } = req.body;
   if (!workspaceId || !specId) { res.status(400).json({ error: 'Missing workspaceId or specId' }); return; }
 
   if (columnId === null || columnId === undefined) {
     // Remove assignment — spec goes back to In Progress
-    db.prepare(`DELETE FROM kanban_spec_assignments WHERE workspace_id = ? AND spec_id = ?`).run(workspaceId, specId);
+    await execute(`DELETE FROM kanban_spec_assignments WHERE workspace_id = $1 AND spec_id = $2`, [workspaceId, specId]);
   } else {
     // Verify column exists
-    const col = db.prepare(`SELECT id FROM kanban_columns WHERE id = ? AND workspace_id = ?`).get(columnId, workspaceId);
+    const col = await queryOne(`SELECT id FROM kanban_columns WHERE id = $1 AND workspace_id = $2`, [columnId, workspaceId]);
     if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
 
     // Upsert assignment
-    db.prepare(
-      `INSERT INTO kanban_spec_assignments (workspace_id, spec_id, column_id) VALUES (?, ?, ?)
-       ON CONFLICT(workspace_id, spec_id) DO UPDATE SET column_id = excluded.column_id, assigned_at = datetime('now')`
-    ).run(workspaceId, specId, columnId);
+    await execute(`INSERT INTO kanban_spec_assignments (workspace_id, spec_id, column_id) VALUES ($1, $2, $3)
+       ON CONFLICT(workspace_id, spec_id) DO UPDATE SET column_id = excluded.column_id, assigned_at = NOW()`, [workspaceId, specId, columnId]);
   }
 
   res.json({ ok: true });
@@ -2910,15 +2839,13 @@ interface MatchSnippet {
   storyId?: string;
 }
 
-function getRunTelemetry(specSlug: string, workspaceId: string): RunTelemetry | null {
-  const run = db.prepare(
-    `SELECT id, status, started_at, finished_at,
+async function getRunTelemetry(specSlug: string, workspaceId: string): Promise<RunTelemetry | null> {
+  const run = await queryOne(`SELECT id, status, started_at, finished_at,
             total_input_tokens, total_output_tokens, total_cost_usd,
             COALESCE(agent_type, agent, 'claude') AS agent_type, agent_model
      FROM pipeline_runs
-     WHERE workspace_id = ? AND spec_path LIKE '%' || ? || '.json'
-     ORDER BY id DESC LIMIT 1`
-  ).get(workspaceId, specSlug) as {
+     WHERE workspace_id = $1 AND spec_path LIKE '%' || $2 || '.json'
+     ORDER BY id DESC LIMIT 1`, [workspaceId, specSlug]) as {
     id: number; status: string;
     started_at: string; finished_at: string | null;
     total_input_tokens: number | null; total_output_tokens: number | null;
@@ -2935,9 +2862,7 @@ function getRunTelemetry(specSlug: string, workspaceId: string): RunTelemetry | 
     );
   }
 
-  const outcomes = db.prepare(
-    `SELECT status, COUNT(*) as cnt FROM story_results WHERE run_id = ? GROUP BY status`
-  ).all(run.id) as { status: string; cnt: number }[];
+  const outcomes = await query(`SELECT status, COUNT(*) as cnt FROM story_results WHERE run_id = $1 GROUP BY status`, [run.id]) as { status: string; cnt: number }[];
 
   const storyOutcomes = { pass: 0, fail: 0, skip: 0, timeout: 0, excluded: 0 };
   for (const row of outcomes) {
@@ -2961,7 +2886,7 @@ function getRunTelemetry(specSlug: string, workspaceId: string): RunTelemetry | 
   };
 }
 
-function buildArchiveSummary(
+async function buildArchiveSummary(
   filePath: string,
   fileName: string,
   status: 'pending' | 'approved' | 'completed',
@@ -2969,8 +2894,8 @@ function buildArchiveSummary(
   branchName?: string,
   workspaceId?: string,
   agentInfo?: { agentType?: string; agentModel?: string | null },
-): ArchiveSpecSummary {
-  const base = buildSummary(filePath, fileName, status, workspacePath, workspaceId);
+): Promise<ArchiveSpecSummary> {
+  const base = await buildSummary(filePath, fileName, status, workspacePath, workspaceId);
   const content = parseSpecFile(filePath);
   const stories = (content as any).userStories ?? (content as any).stories ?? [];
   const storyTitles = stories.map((s: any) => s.title ?? s.id ?? '').filter(Boolean);
@@ -2980,7 +2905,7 @@ function buildArchiveSummary(
 
   // Fetch run telemetry for completed/approved specs
   const runTelemetry = (status === 'completed' || status === 'approved') && workspaceId
-    ? getRunTelemetry(slug, workspaceId)
+    ? await getRunTelemetry(slug, workspaceId)
     : null;
 
   return {
@@ -3012,9 +2937,9 @@ function extractSearchableFields(content: any): {
 }
 
 /** Rebuild FTS index for a workspace's specs from filesystem + WAL rejected specs */
-function rebuildSearchIndex(workspaceId: string, workspacePath: string): void {
+async function rebuildSearchIndex(workspaceId: string, workspacePath: string): Promise<void> {
   // Clear existing entries for this workspace
-  db.prepare(`DELETE FROM spec_search_index WHERE workspace_id = ?`).run(workspaceId);
+  await execute(`DELETE FROM spec_search_index WHERE workspace_id = $1`, [workspaceId]);
 
   const { pendingDir, approvedDir } = specsDirs(workspacePath);
 
@@ -3026,10 +2951,8 @@ function rebuildSearchIndex(workspaceId: string, workspacePath: string): void {
       const slug = file.replace('.json', '');
       const fields = extractSearchableFields(content);
       const stat = fs.statSync(filePath);
-      db.prepare(
-        `INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(slug, workspaceId, content.title ?? slug, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'pending', content.generatedAt ?? stat.birthtime.toISOString());
+      await execute(`INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [slug, workspaceId, content.title ?? slug, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'pending', content.generatedAt ?? stat.birthtime.toISOString()]);
     } catch {
       // skip unparseable
     }
@@ -3043,21 +2966,17 @@ function rebuildSearchIndex(workspaceId: string, workspacePath: string): void {
       const slug = file.replace('.json', '');
       const fields = extractSearchableFields(content);
       const stat = fs.statSync(filePath);
-      db.prepare(
-        `INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(slug, workspaceId, content.title ?? slug, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'approved', content.generatedAt ?? stat.birthtime.toISOString());
+      await execute(`INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [slug, workspaceId, content.title ?? slug, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'approved', content.generatedAt ?? stat.birthtime.toISOString()]);
     } catch {
       // skip unparseable
     }
   }
 
   // Index rejected specs from WAL (most recent rejection per slug only)
-  const rejectedEvents = db.prepare(
-    `SELECT spec_id, ts, payload FROM wal_events
-     WHERE event_type = 'spec_rejected' AND payload LIKE '%' || ? || '%'
-     ORDER BY ts DESC`
-  ).all(workspaceId) as { spec_id: string; ts: string; payload: string }[];
+  const rejectedEvents = await query(`SELECT spec_id, ts, payload FROM wal_events
+     WHERE event_type = 'spec_rejected' AND payload::text LIKE '%' || $1 || '%'
+     ORDER BY ts DESC`, [workspaceId]) as { spec_id: string; ts: string; payload: string }[];
 
   const seenRejected = new Set<string>();
   for (const evt of rejectedEvents) {
@@ -3065,29 +2984,21 @@ function rebuildSearchIndex(workspaceId: string, workspacePath: string): void {
     seenRejected.add(evt.spec_id);
 
     // Skip if a pending/approved spec already covers this slug
-    const existing = db.prepare(
-      `SELECT spec_slug FROM spec_search_index WHERE spec_slug = ? AND workspace_id = ?`
-    ).get(evt.spec_id, workspaceId);
+    const existing = await queryOne(`SELECT spec_slug FROM spec_search_index WHERE spec_slug = $1 AND workspace_id = $2`, [evt.spec_id, workspaceId]);
     if (existing) continue;
 
     // Try to get content from spec_versions for richer indexing
-    const versionRow = db.prepare(
-      `SELECT content_json FROM spec_versions WHERE spec_slug = ? ORDER BY version DESC LIMIT 1`
-    ).get(evt.spec_id) as { content_json: string } | undefined;
+    const versionRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [evt.spec_id]) as { content_json: string } | undefined;
 
     if (versionRow) {
       const content = JSON.parse(versionRow.content_json);
       const fields = extractSearchableFields(content);
-      db.prepare(
-        `INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(evt.spec_id, workspaceId, content.title ?? evt.spec_id, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'rejected', evt.ts);
+      await execute(`INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [evt.spec_id, workspaceId, content.title ?? evt.spec_id, fields.storyTitles, fields.storyDescriptions, fields.acceptanceCriteria, 'rejected', evt.ts]);
     } else {
       // Minimal entry from WAL event only
-      db.prepare(
-        `INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(evt.spec_id, workspaceId, evt.spec_id, '', '', '', 'rejected', evt.ts);
+      await execute(`INSERT INTO spec_search_index (spec_slug, workspace_id, spec_title, story_titles, story_descriptions, acceptance_criteria, status, generated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [evt.spec_id, workspaceId, evt.spec_id, '', '', '', 'rejected', evt.ts]);
     }
   }
 }
@@ -3199,7 +3110,7 @@ function computeRelevanceScore(snippets: MatchSnippet[]): number {
  *                 total: { type: integer }
  *                 hasMore: { type: boolean }
  */
-router.get('/archive', (req: Request, res: Response) => {
+router.get('/archive', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     const q = (req.query.q as string) || '';
@@ -3216,7 +3127,7 @@ router.get('/archive', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -3225,14 +3136,12 @@ router.get('/archive', (req: Request, res: Response) => {
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
 
     // Rebuild FTS index for this workspace (fast: synchronous SQLite ops on local files)
-    rebuildSearchIndex(workspaceId, workspace.path);
+    await rebuildSearchIndex(workspaceId, workspace.path);
 
     // Look up most recent branch_name per spec slug from pipeline_runs
-    const branchRows = db.prepare(
-      `SELECT spec_path, branch_name FROM pipeline_runs
-       WHERE workspace_id = ? AND branch_name IS NOT NULL
-       ORDER BY id DESC`
-    ).all(workspaceId) as { spec_path: string; branch_name: string }[];
+    const branchRows = await query(`SELECT spec_path, branch_name FROM pipeline_runs
+       WHERE workspace_id = $1 AND branch_name IS NOT NULL
+       ORDER BY id DESC`, [workspaceId]) as { spec_path: string; branch_name: string }[];
     const branchBySlug = new Map<string, string>();
     for (const row of branchRows) {
       const slug = path.basename(row.spec_path, '.json');
@@ -3240,11 +3149,9 @@ router.get('/archive', (req: Request, res: Response) => {
     }
 
     // OC-007: Look up most recent agent_type + agent_model per spec slug from pipeline_runs
-    const agentRows = db.prepare(
-      `SELECT spec_path, COALESCE(agent_type, agent, 'claude') AS agent_type, agent_model FROM pipeline_runs
-       WHERE workspace_id = ?
-       ORDER BY id DESC`
-    ).all(workspaceId) as { spec_path: string; agent_type: string; agent_model: string | null }[];
+    const agentRows = await query(`SELECT spec_path, COALESCE(agent_type, agent, 'claude') AS agent_type, agent_model FROM pipeline_runs
+       WHERE workspace_id = $1
+       ORDER BY id DESC`, [workspaceId]) as { spec_path: string; agent_type: string; agent_model: string | null }[];
     const agentBySlug = new Map<string, { agentType: string; agentModel: string | null }>();
     for (const row of agentRows) {
       const slug = path.basename(row.spec_path, '.json');
@@ -3252,10 +3159,8 @@ router.get('/archive', (req: Request, res: Response) => {
     }
 
     // FR-005: Build set of spec slugs that have at least one successful pipeline run (status='done')
-    const completedRows = db.prepare(
-      `SELECT DISTINCT spec_path FROM pipeline_runs
-       WHERE workspace_id = ? AND status = 'done'`
-    ).all(workspaceId) as { spec_path: string }[];
+    const completedRows = await query(`SELECT DISTINCT spec_path FROM pipeline_runs
+       WHERE workspace_id = $1 AND status = 'done'`, [workspaceId]) as { spec_path: string }[];
     const completedSlugs = new Set<string>();
     for (const row of completedRows) {
       completedSlugs.add(path.basename(row.spec_path, '.json'));
@@ -3270,16 +3175,25 @@ router.get('/archive', (req: Request, res: Response) => {
       if (branch && branch !== 'HEAD') currentBranch = branch;
     } catch { /* not a git repo or git unavailable */ }
 
-    // Determine matching slugs via FTS or collect all
+    // PG-008: Determine matching slugs via hybrid search (keyword + semantic) or collect all
     let matchingSlugs: Set<string> | null = null;
     if (q) {
-      // Use FTS5 for full-text search — escape quotes in query
-      const ftsQuery = q.replace(/"/g, '""');
-      const ftsRows = db.prepare(
+      const hybridResults = await hybridSearch(q, {
+        sourceTypes: ['archive'],
+        workspaceId,
+        limit: 100,
+      });
+      matchingSlugs = new Set(hybridResults.map(r => r.sourceId));
+
+      // Fallback: also include pure FTS matches to catch anything hybrid might miss
+      const ftsRows = await query<{ spec_slug: string }>(
         `SELECT spec_slug FROM spec_search_index
-         WHERE workspace_id = ? AND spec_search_index MATCH ?`
-      ).all(workspaceId, `"${ftsQuery}"`) as { spec_slug: string }[];
-      matchingSlugs = new Set(ftsRows.map(r => r.spec_slug));
+         WHERE workspace_id = $1 AND search_vector @@ plainto_tsquery('english', $2)`,
+        [workspaceId, q]
+      );
+      for (const row of ftsRows) {
+        matchingSlugs.add(row.spec_slug);
+      }
     }
 
     const allSpecs: ArchiveSpecSummary[] = [];
@@ -3290,7 +3204,7 @@ router.get('/archive', (req: Request, res: Response) => {
         try {
           const slug = path.basename(file, '.json');
           if (matchingSlugs && !matchingSlugs.has(slug)) continue;
-          allSpecs.push(buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
+          allSpecs.push(await buildArchiveSummary(path.join(pendingDir, file), file, 'pending', workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
@@ -3308,7 +3222,7 @@ router.get('/archive', (req: Request, res: Response) => {
           if (statusFilter === 'approved' && isCompleted) continue;
           if (statusFilter === 'completed' && !isCompleted) continue;
           const effectiveStatus = isCompleted ? 'completed' as const : 'approved' as const;
-          allSpecs.push(buildArchiveSummary(path.join(approvedDir, file), file, effectiveStatus, workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
+          allSpecs.push(await buildArchiveSummary(path.join(approvedDir, file), file, effectiveStatus, workspace.path, branchBySlug.get(slug) ?? currentBranch, workspaceId, agentBySlug.get(slug)));
         } catch {
           // skip unparseable files
         }
@@ -3317,12 +3231,10 @@ router.get('/archive', (req: Request, res: Response) => {
 
     // Collect rejected specs from WAL events
     if (statusFilter === 'all' || statusFilter === 'rejected') {
-      const rejectedEvents = db.prepare(
-        `SELECT spec_id, ts, payload FROM wal_events
+      const rejectedEvents = await query(`SELECT spec_id, ts, payload FROM wal_events
          WHERE event_type = 'spec_rejected'
-         AND payload LIKE '%' || ? || '%'
-         ORDER BY ts DESC`
-      ).all(workspaceId) as { spec_id: string; ts: string; payload: string }[];
+         AND payload::text LIKE '%' || $1 || '%'
+         ORDER BY ts DESC`, [workspaceId]) as { spec_id: string; ts: string; payload: string }[];
 
       const seenRejected = new Set<string>();
       for (const evt of rejectedEvents) {
@@ -3344,7 +3256,7 @@ router.get('/archive', (req: Request, res: Response) => {
           repoName: path.basename(workspace.path),
           storyTitles: [],
           readinessPercent: 0,
-          tags: getSpecTags(evt.spec_id, workspaceId),
+          tags: await getSpecTags(evt.spec_id, workspaceId),
           reviewStatus: 'draft' as ReviewStatus,
         });
       }
@@ -3386,9 +3298,7 @@ router.get('/archive', (req: Request, res: Response) => {
           else if (fs.existsSync(approvedFile)) content = parseSpecFile(approvedFile);
           else {
             // Rejected spec — try spec_versions
-            const vRow = db.prepare(
-              `SELECT content_json FROM spec_versions WHERE spec_slug = ? ORDER BY version DESC LIMIT 1`
-            ).get(spec.id) as { content_json: string } | undefined;
+            const vRow = await queryOne(`SELECT content_json FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [spec.id]) as { content_json: string } | undefined;
             if (vRow) content = JSON.parse(vRow.content_json);
           }
         } catch {
@@ -3463,7 +3373,7 @@ router.get('/archive', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId or q query params" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/search/stories', (req: Request, res: Response) => {
+router.get('/search/stories', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string | undefined;
     const query = req.query.q as string | undefined;
@@ -3477,7 +3387,7 @@ router.get('/search/stories', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -3580,7 +3490,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -3606,12 +3516,8 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     }, 0);
     const startN = maxN + 1;
 
-    const l1Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-    ).get() as { content_yaml: string } | undefined;
-    const l3Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-    ).get(workspaceId) as { content_yaml: string } | undefined;
+    const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
+    const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
     const { synthesize } = await import('../lib/direction-stack');
     const synthesized = synthesize({ l1: l1Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: specContent.title ?? specId });
@@ -3642,7 +3548,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     ].filter(Boolean).join('\n');
 
     const { chatComplete: chatCompleteFn } = await import('../lib/llm-client');
-    const addStoriesUser = getEffectiveUser(req);
+    const addStoriesUser = await getEffectiveUser(req);
     if (!addStoriesUser) { res.status(500).json({ error: 'No user configured' }); return; }
     const addStoriesVaultCreds = resolveVaultCreds(addStoriesUser.id, DEFAULT_MODEL);
     const rawResponse = await chatCompleteFn(
@@ -3721,14 +3627,12 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
  *                       storyCount: { type: integer }
  *                 total: { type: integer }
  */
-router.get('/:specId/versions', (req: Request, res: Response) => {
+router.get('/:specId/versions', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
 
-    const rows = db.prepare(
-      `SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
-       FROM spec_versions WHERE spec_slug = ? ORDER BY version ASC`
-    ).all(specId) as SpecVersionRow[];
+    const rows = await query(`SELECT id, spec_slug, version, content_json, status, rejection_reason, created_at
+       FROM spec_versions WHERE spec_slug = $1 ORDER BY version ASC`, [specId]) as SpecVersionRow[];
 
     const versions = rows.map(row => {
       const content = JSON.parse(row.content_json);
@@ -3802,7 +3706,7 @@ router.get('/:specId/versions', (req: Request, res: Response) => {
  *       400: { description: "Missing or invalid v1/v2 params, or v1 equals v2" }
  *       404: { description: "Version(s) not found" }
  */
-router.get('/:specId/diff', (req: Request, res: Response) => {
+router.get('/:specId/diff', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const v1 = parseInt(req.query.v1 as string);
@@ -3818,13 +3722,9 @@ router.get('/:specId/diff', (req: Request, res: Response) => {
       return;
     }
 
-    const row1 = db.prepare(
-      'SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = ? AND version = ?'
-    ).get(specId, v1) as { content_json: string; status: string; rejection_reason: string | null; created_at: string } | undefined;
+    const row1 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v1]) as { content_json: string; status: string; rejection_reason: string | null; created_at: string } | undefined;
 
-    const row2 = db.prepare(
-      'SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = ? AND version = ?'
-    ).get(specId, v2) as { content_json: string; status: string; rejection_reason: string | null; created_at: string } | undefined;
+    const row2 = await queryOne('SELECT content_json, status, rejection_reason, created_at FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, v2]) as { content_json: string; status: string; rejection_reason: string | null; created_at: string } | undefined;
 
     if (!row1 || !row2) {
       const missing = !row1 && !row2 ? `v${v1} and v${v2}` : !row1 ? `v${v1}` : `v${v2}`;
@@ -3892,7 +3792,7 @@ router.get('/:specId/diff', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId or invalid version number" }
  *       404: { description: "Workspace or version not found" }
  */
-router.post('/:specId/versions/:version/restore', (req: Request, res: Response) => {
+router.post('/:specId/versions/:version/restore', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const version = req.params.version as string;
@@ -3909,16 +3809,14 @@ router.post('/:specId/versions/:version/restore', (req: Request, res: Response) 
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
     }
 
     // Fetch the version to restore
-    const row = db.prepare(
-      'SELECT content_json, status FROM spec_versions WHERE spec_slug = ? AND version = ?'
-    ).get(specId, versionNum) as { content_json: string; status: string } | undefined;
+    const row = await queryOne('SELECT content_json, status FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, versionNum]) as { content_json: string; status: string } | undefined;
 
     if (!row) {
       res.status(404).json({ error: `Version ${versionNum} not found for spec ${specId}` });
@@ -3937,7 +3835,7 @@ router.post('/:specId/versions/:version/restore', (req: Request, res: Response) 
     if (currentPath) {
       // Snapshot current state before overwriting
       const currentContent = fs.readFileSync(currentPath, 'utf8');
-      snapshotVersion(specId, currentContent, currentStatus);
+      await snapshotVersion(specId, currentContent, currentStatus);
     }
 
     // Write restored content to the current location (or pending if no file exists)
@@ -3954,15 +3852,13 @@ router.post('/:specId/versions/:version/restore', (req: Request, res: Response) 
     fs.writeFileSync(targetPath, JSON.stringify(restoredContent, null, 2), 'utf8');
 
     // Snapshot the restored version
-    const newVersion = snapshotVersion(specId, JSON.stringify(restoredContent), currentStatus);
+    const newVersion = await snapshotVersion(specId, JSON.stringify(restoredContent), currentStatus);
 
     // Emit WAL event
-    db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
-    ).run('version_restored', specId, workspaceId, JSON.stringify({
+    await execute(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)`, ['version_restored', specId, workspaceId, JSON.stringify({
       restoredFromVersion: versionNum,
       newVersion,
-    }));
+    })]);
 
     res.json({ ok: true, newVersion, restoredFromVersion: versionNum });
   } catch (error: any) {
@@ -4018,7 +3914,7 @@ router.post('/:specId/versions/:version/restore', (req: Request, res: Response) 
  *       403: { description: "Cannot edit stories in an approved spec" }
  *       404: { description: "Workspace, spec, or story not found" }
  */
-router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
+router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
@@ -4029,7 +3925,7 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -4064,7 +3960,7 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
       }
 
       // Snapshot pre-edit state as a new version
-      const version = snapshotVersion(specId, raw, 'pending');
+      const version = await snapshotVersion(specId, raw, 'pending');
 
       // Apply only provided fields
       if (title !== undefined) stories[storyIndex].title = title;
@@ -4075,15 +3971,13 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
       fs.writeFileSync(pendingFile, JSON.stringify(content, null, 2) + '\n');
 
       // WAL event
-      const walResult = db.prepare(
-        `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
-      ).run('story_edited', workspaceId, specId, storyId, JSON.stringify({
+      const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, ['story_edited', workspaceId, specId, storyId, JSON.stringify({
         title: stories[storyIndex].title,
         version,
-      }));
+      })]);
 
       broadcastAll({
-        id: walResult.lastInsertRowid as number,
+        id: walResult!.id,
         ts: new Date().toISOString(),
         event_type: 'story_edited',
         workspace_id: workspaceId as string,
@@ -4121,12 +4015,10 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
 
     const eventType = excluded ? 'story_excluded' : 'story_included';
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
-    ).run(eventType, workspaceId, specId, storyId, JSON.stringify({ excluded: story.excluded }));
+    const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, [eventType, workspaceId, specId, storyId, JSON.stringify({ excluded: story.excluded })]);
 
     broadcastAll({
-      id: walResult.lastInsertRowid as number,
+      id: walResult!.id,
       ts: new Date().toISOString(),
       event_type: eventType,
       workspace_id: workspaceId as string,
@@ -4191,7 +4083,7 @@ router.patch('/:specId/stories/:storyId', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId or invalid complexity/priority/timeoutMinutes values" }
  *       404: { description: "Workspace, spec, or story not found" }
  */
-router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
+router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
@@ -4217,7 +4109,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -4249,7 +4141,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
     // Snapshot pre-edit state as a new version
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(specId, raw, status);
 
     // Apply edits — only update provided fields
     if (title !== undefined) stories[storyIndex].title = title;
@@ -4264,15 +4156,13 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
 
     // WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
-    ).run('story_edited', workspaceId, specId, storyId, JSON.stringify({
+    const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, ['story_edited', workspaceId, specId, storyId, JSON.stringify({
       title: stories[storyIndex].title,
       version,
-    }));
+    })]);
 
     broadcastAll({
-      id: walResult.lastInsertRowid as number,
+      id: walResult!.id,
       ts: new Date().toISOString(),
       event_type: 'story_edited',
       workspace_id: workspaceId as string,
@@ -4327,7 +4217,7 @@ router.put('/:specId/stories/:storyId', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace, spec, or story not found" }
  */
-router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
+router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
@@ -4338,7 +4228,7 @@ router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -4372,7 +4262,7 @@ router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
 
     // Snapshot pre-delete state
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(specId, raw, status);
 
     // Remove and reindex
     stories.splice(storyIndex, 1);
@@ -4392,15 +4282,13 @@ router.delete('/:specId/stories/:storyId', (req: Request, res: Response) => {
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
 
     // WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
-    ).run('story_deleted', workspaceId, specId, storyId, JSON.stringify({
+    const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, ['story_deleted', workspaceId, specId, storyId, JSON.stringify({
       deletedTitle: deletedStory.title,
       version,
-    }));
+    })]);
 
     broadcastAll({
-      id: walResult.lastInsertRowid as number,
+      id: walResult!.id,
       ts: new Date().toISOString(),
       event_type: 'story_deleted',
       workspace_id: workspaceId,
@@ -4478,7 +4366,7 @@ router.post('/:specId/stories/:storyId/rewrite', async (req: Request, res: Respo
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -4529,7 +4417,7 @@ User instructions: ${instructions || 'Improve clarity and completeness.'}
 Rewrite the story following the user instructions. Keep the same scope unless told otherwise. Return ONLY the JSON object.`;
 
     const resolvedModel = model || undefined;
-    const rewriteUser = getEffectiveUser(req);
+    const rewriteUser = await getEffectiveUser(req);
     if (!rewriteUser) { res.status(500).json({ error: 'No user configured' }); return; }
     const rewriteVaultCreds = resolveVaultCreds(rewriteUser.id, resolvedModel ?? DEFAULT_MODEL);
     const llmResult = await chatComplete(
@@ -4601,7 +4489,7 @@ Rewrite the story following the user instructions. Keep the same scope unless to
  *                       count: { type: integer }
  *       400: { description: "Missing workspaceId" }
  */
-router.get('/tags/autocomplete', (req: Request, res: Response) => {
+router.get('/tags/autocomplete', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     const q = (req.query.q as string) || '';
@@ -4613,17 +4501,13 @@ router.get('/tags/autocomplete', (req: Request, res: Response) => {
 
     let rows: { tag_name: string; count: number }[];
     if (q) {
-      rows = db.prepare(
-        `SELECT tag_name, COUNT(*) as count FROM spec_tags
-         WHERE workspace_id = ? AND tag_name LIKE ? || '%'
-         GROUP BY tag_name ORDER BY count DESC, tag_name ASC LIMIT 20`
-      ).all(workspaceId, q.trim().toLowerCase()) as { tag_name: string; count: number }[];
+      rows = await query(`SELECT tag_name, COUNT(*) as count FROM spec_tags
+         WHERE workspace_id = $1 AND tag_name LIKE $2 || '%'
+         GROUP BY tag_name ORDER BY count DESC, tag_name ASC LIMIT 20`, [workspaceId, q.trim().toLowerCase()]) as { tag_name: string; count: number }[];
     } else {
-      rows = db.prepare(
-        `SELECT tag_name, COUNT(*) as count FROM spec_tags
-         WHERE workspace_id = ?
-         GROUP BY tag_name ORDER BY count DESC, tag_name ASC LIMIT 20`
-      ).all(workspaceId) as { tag_name: string; count: number }[];
+      rows = await query(`SELECT tag_name, COUNT(*) as count FROM spec_tags
+         WHERE workspace_id = $1
+         GROUP BY tag_name ORDER BY count DESC, tag_name ASC LIMIT 20`, [workspaceId]) as { tag_name: string; count: number }[];
     }
 
     res.json({ tags: rows.map(r => ({ name: r.tag_name, count: r.count })) });
@@ -4655,7 +4539,7 @@ router.get('/tags/autocomplete', (req: Request, res: Response) => {
  *             schema: { $ref: '#/components/schemas/Spec' }
  *       404: { description: "Spec not found" }
  */
-router.get('/:specId', (req: Request, res: Response) => {
+router.get('/:specId', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const workspaceId = req.query.workspaceId as string;
@@ -4665,7 +4549,7 @@ router.get('/:specId', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -4737,7 +4621,7 @@ router.get('/:specId', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace or source spec not found" }
  */
-router.post('/:specId/fork', (req: Request, res: Response) => {
+router.post('/:specId/fork', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const workspaceId = req.body.workspaceId as string;
@@ -4749,7 +4633,7 @@ router.post('/:specId/fork', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -4811,25 +4695,17 @@ router.post('/:specId/fork', (req: Request, res: Response) => {
     fs.writeFileSync(forkFile, JSON.stringify(forkedSpec, null, 2));
 
     // Copy tags from source spec
-    const sourceTags = getSpecTags(specId, workspaceId);
+    const sourceTags = await getSpecTags(specId, workspaceId);
     for (const tag of sourceTags) {
-      db.prepare(
-        'INSERT OR IGNORE INTO spec_tags (spec_id, workspace_id, tag_name) VALUES (?, ?, ?)'
-      ).run(forkSlug, workspaceId, tag);
+      await execute('INSERT INTO spec_tags (spec_id, workspace_id, tag_name) VALUES ($1, $2, $3)', [forkSlug, workspaceId, tag]);
     }
 
     // Snapshot version
-    snapshotVersion(forkSlug, JSON.stringify(forkedSpec), 'pending');
+    await snapshotVersion(forkSlug, JSON.stringify(forkedSpec), 'pending');
 
     // Emit WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_forked', ?, ?, 'user', ?)`
-    ).run(forkSlug, workspaceId, JSON.stringify({ forkedFrom: specId, title: forkedSpec.title }));
-
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_forked', $1, $2, 'user', $3)` + ' RETURNING *', [forkSlug, workspaceId, JSON.stringify({ forkedFrom: specId, title: forkedSpec.title })]);
+    broadcastAll(walEvent!);
 
     res.json({
       ok: true,
@@ -4877,7 +4753,7 @@ router.post('/:specId/fork', (req: Request, res: Response) => {
  *                 specPath: { type: string }
  *       404: { description: "Spec not found in pending/" }
  */
-router.post('/:specId/approve', (req: Request, res: Response) => {
+router.post('/:specId/approve', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const { workspaceId } = req.body;
@@ -4887,7 +4763,7 @@ router.post('/:specId/approve', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -4907,9 +4783,7 @@ router.post('/:specId/approve', (req: Request, res: Response) => {
     fs.renameSync(pendingFile, approvedFile);
 
     // Emit WAL event
-    db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_approved', ?, 'user', ?)`
-    ).run(specId, JSON.stringify({ workspaceId }));
+    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_approved', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId })]);
 
     res.json({ ok: true, approvedPath: approvedFile });
   } catch (error: any) {
@@ -4945,7 +4819,7 @@ router.post('/:specId/approve', (req: Request, res: Response) => {
  *       200: { description: "Spec rejected", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
  *       404: { description: "Spec not found" }
  */
-router.post('/:specId/reject', (req: Request, res: Response) => {
+router.post('/:specId/reject', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const { workspaceId, reason } = req.body;
@@ -4955,7 +4829,7 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -4971,14 +4845,12 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
 
     // Snapshot the spec content before deletion so it appears in version history
     const content = fs.readFileSync(pendingFile, 'utf8');
-    snapshotVersion(specId as string, content, 'rejected', (reason as string) ?? undefined);
+    await snapshotVersion(specId as string, content, 'rejected', (reason as string) ?? undefined);
 
     fs.unlinkSync(pendingFile);
 
     // Emit WAL event
-    db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_rejected', ?, 'user', ?)`
-    ).run(specId, JSON.stringify({ workspaceId, reason: reason ?? null }));
+    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_rejected', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId, reason: reason ?? null })]);
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -5012,28 +4884,28 @@ router.post('/:specId/reject', (req: Request, res: Response) => {
  *       404:
  *         description: No generation log found
  */
-router.get('/:specId/generation-log', (req: Request, res: Response) => {
-  const { specId } = req.params;
-  const all = req.query.all === 'true';
+router.get('/:specId/generation-log', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const all = req.query.all === 'true';
 
-  if (all) {
-    const logs = db.prepare(
-      `SELECT * FROM spec_generation_logs WHERE spec_slug = ? ORDER BY created_at DESC`
-    ).all(specId);
-    res.json({ logs });
-    return;
+    if (all) {
+      const logs = await query(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC`, [specId]);
+      res.json({ logs });
+      return;
+    }
+
+    const log = await queryOne(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC LIMIT 1`, [specId]);
+
+    if (!log) {
+      res.status(404).json({ error: 'No generation log found' });
+      return;
+    }
+
+    res.json(log);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch generation log' });
   }
-
-  const log = db.prepare(
-    `SELECT * FROM spec_generation_logs WHERE spec_slug = ? ORDER BY created_at DESC LIMIT 1`
-  ).get(specId);
-
-  if (!log) {
-    res.status(404).json({ error: 'No generation log found' });
-    return;
-  }
-
-  res.json(log);
 });
 
 // ─── DELETE /:specId — Hard-delete a spec (any status) ──────────────────────
@@ -5066,7 +4938,7 @@ router.get('/:specId/generation-log', (req: Request, res: Response) => {
  *       404:
  *         description: Spec not found
  */
-router.delete('/:specId', (req: Request, res: Response) => {
+router.delete('/:specId', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const { workspaceId } = req.body;
@@ -5076,7 +4948,7 @@ router.delete('/:specId', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -5102,11 +4974,9 @@ router.delete('/:specId', (req: Request, res: Response) => {
     }
 
     // Clean up generation logs for this spec
-    db.prepare(`DELETE FROM spec_generation_logs WHERE spec_slug = ?`).run(specId);
+    await execute(`DELETE FROM spec_generation_logs WHERE spec_slug = $1`, [specId]);
 
-    db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_deleted', ?, 'user', ?)`
-    ).run(specId, JSON.stringify({ workspaceId }));
+    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_deleted', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId })]);
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -5155,7 +5025,7 @@ const VALID_REVIEW_STATUSES: ReviewStatus[] = ['draft', 'review_requested', 'app
  *       404: { description: "Workspace or spec not found in pending" }
  *       409: { description: "Spec is not in draft or changes_requested status" }
  */
-router.post('/:specId/request-review', (req: Request, res: Response) => {
+router.post('/:specId/request-review', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const { workspaceId } = req.body;
@@ -5165,7 +5035,7 @@ router.post('/:specId/request-review', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -5195,14 +5065,8 @@ router.post('/:specId/request-review', (req: Request, res: Response) => {
     fs.writeFileSync(specFile, JSON.stringify(spec, null, 2), 'utf8');
 
     // Emit WAL event for audit trail
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('review_requested', ?, ?, 'user', ?)`
-    ).run(specId, workspaceId, JSON.stringify({ previousStatus: currentStatus }));
-
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('review_requested', $1, $2, 'user', $3)` + ' RETURNING *', [specId, workspaceId, JSON.stringify({ previousStatus: currentStatus })]);
+    broadcastAll(walEvent!);
 
     res.json({ ok: true, reviewStatus: 'review_requested' });
   } catch (error: any) {
@@ -5252,7 +5116,7 @@ router.post('/:specId/request-review', (req: Request, res: Response) => {
  *       404: { description: "Workspace or spec not found in pending" }
  *       409: { description: "Spec is not in review_requested status" }
  */
-router.post('/:specId/review', (req: Request, res: Response) => {
+router.post('/:specId/review', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const { workspaceId, action, comment, reviewerId } = req.body;
@@ -5267,7 +5131,7 @@ router.post('/:specId/review', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -5299,10 +5163,7 @@ router.post('/:specId/review', (req: Request, res: Response) => {
 
     // Emit WAL event with reviewer info and comment for audit trail
     const eventType = action === 'approve' ? 'review_approved' : 'review_changes_requested';
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES (?, ?, ?, ?, ?)`
-    ).run(
-      eventType,
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ($1, $2, $3, $4, $5)` + ' RETURNING *', [eventType,
       specId,
       workspaceId,
       reviewerId ?? 'user',
@@ -5311,13 +5172,8 @@ router.post('/:specId/review', (req: Request, res: Response) => {
         comment: comment ?? null,
         reviewerId: reviewerId ?? null,
         previousStatus: currentStatus,
-      }),
-    );
-
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+      }),]);
+    broadcastAll(walEvent!);
 
     res.json({ ok: true, reviewStatus: newStatus });
   } catch (error: any) {
@@ -5462,7 +5318,7 @@ function computeParallelGroups(stories: UserStory[]): string[][] {
  *       400: { description: "Missing workspaceId, invalid action, empty storyIds, or invalid priority" }
  *       404: { description: "Workspace, spec, or stories not found" }
  */
-router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
+router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const { workspaceId, action, storyIds, priority } = req.body;
@@ -5492,7 +5348,7 @@ router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
       }
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -5527,7 +5383,7 @@ router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
 
     // Snapshot pre-mutation state
     const status = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-    const version = snapshotVersion(specId, raw, status);
+    const version = await snapshotVersion(specId, raw, status);
 
     let eventType: string;
 
@@ -5581,17 +5437,15 @@ router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
     fs.writeFileSync(specPath, JSON.stringify(content, null, 2) + '\n');
 
     // WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, 'api', ?)`
-    ).run(eventType, workspaceId, specId, null, JSON.stringify({
+    const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, 'api', $5) RETURNING *`, [eventType, workspaceId, specId, null, JSON.stringify({
       action,
       storyIds,
       version,
       ...(action === 'set_priority' ? { priority } : {}),
-    }));
+    })]);
 
     broadcastAll({
-      id: walResult.lastInsertRowid as number,
+      id: walResult!.id,
       ts: new Date().toISOString(),
       event_type: eventType,
       workspace_id: workspaceId as string,
@@ -5664,7 +5518,7 @@ router.post('/:specId/stories/bulk', (req: Request, res: Response) => {
  *       404: { description: "Workspace or spec not found" }
  *       422: { description: "Circular dependency detected" }
  */
-router.get('/:specId/graph', (req: Request, res: Response) => {
+router.get('/:specId/graph', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const workspaceId = req.query.workspaceId as string;
@@ -5675,7 +5529,7 @@ router.get('/:specId/graph', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -5716,9 +5570,7 @@ router.get('/:specId/graph', (req: Request, res: Response) => {
     // Build status map from story_results if runId provided
     const statusMap = new Map<string, string>();
     if (runId) {
-      const results = db.prepare(
-        `SELECT story_id, status FROM story_results WHERE run_id = ? ORDER BY id DESC`
-      ).all(Number(runId)) as StoryResultRow[];
+      const results = await query(`SELECT story_id, status FROM story_results WHERE run_id = $1 ORDER BY id DESC`, [Number(runId)]) as StoryResultRow[];
 
       // Latest result per story wins (ORDER BY id DESC + first-seen)
       for (const r of results) {
@@ -5831,7 +5683,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -5910,7 +5762,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
       '- Return empty array if no missing dependencies found',
     ].join('\n');
 
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
     const depVaultCreds = resolveVaultCreds(user.id, DEFAULT_MODEL);
     const llmResult = await chatComplete(
@@ -5969,12 +5821,10 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
     }
 
     // Emit WAL event
-    db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
-    ).run('dependencies_detected', specId, workspaceId, JSON.stringify({
+    await execute(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)`, ['dependencies_detected', specId, workspaceId, JSON.stringify({
       suggestedCount: validSuggestions.length,
       filteredCount: filtered.length - validSuggestions.length,
-    }));
+    })]);
 
     res.json({
       suggestions: validSuggestions,
@@ -6032,7 +5882,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
  *       404: { description: "Workspace or spec not found" }
  *       422: { description: "Accepting dependencies would create a circular dependency" }
  */
-router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
+router.post('/:specId/apply-dependencies', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
     const { workspaceId, dependencies } = req.body as {
@@ -6045,7 +5895,7 @@ router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -6110,12 +5960,10 @@ router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
     // Emit WAL event
-    db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
-    ).run('dependencies_applied', specId, workspaceId, JSON.stringify({
+    await execute(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)`, ['dependencies_applied', specId, workspaceId, JSON.stringify({
       appliedCount,
       edges: dependencies.slice(0, 20),
-    }));
+    })]);
 
     res.json({ ok: true, appliedCount });
   } catch (error: any) {
@@ -6162,7 +6010,7 @@ router.post('/:specId/apply-dependencies', (req: Request, res: Response) => {
  *       404: { description: "Workspace not found" }
  */
 // POST /:specId/tags — Add one or more tags to a spec
-router.post('/:specId/tags', (req: Request, res: Response) => {
+router.post('/:specId/tags', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const { workspaceId, tags } = req.body;
@@ -6176,32 +6024,27 @@ router.post('/:specId/tags', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
     }
 
-    const insert = db.prepare(
-      'INSERT OR IGNORE INTO spec_tags (spec_id, workspace_id, tag_name) VALUES (?, ?, ?)'
-    );
     const added: string[] = [];
     for (const tag of tags) {
       const name = String(tag).trim().toLowerCase();
       if (!name) continue;
-      const result = insert.run(specId, workspaceId, name);
-      if (result.changes > 0) added.push(name);
+      const result = await execute(
+        'INSERT INTO spec_tags (spec_id, workspace_id, tag_name) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [specId, workspaceId, name]
+      );
+      if (result.rowCount > 0) added.push(name);
     }
 
     // Emit WAL event for tag changes
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
-       VALUES ('tags_updated', ?, ?, ?, datetime('now'))`
-    ).run(specId, workspaceId, JSON.stringify({ added, action: 'add' }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
+       VALUES ('tags_updated', $1, $2, $3, NOW())` + ' RETURNING *', [specId, workspaceId, JSON.stringify({ added, action: 'add' })]);
+    broadcastAll(walEvent!);
 
     res.json({ tags: getSpecTags(specId, workspaceId) });
   } catch (error: any) {
@@ -6244,7 +6087,7 @@ router.post('/:specId/tags', (req: Request, res: Response) => {
  *       404: { description: "Tag not found on this spec" }
  */
 // DELETE /:specId/tags/:tag — Remove a tag from a spec
-router.delete('/:specId/tags/:tag', (req: Request, res: Response) => {
+router.delete('/:specId/tags/:tag', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const tag = req.params.tag as string;
@@ -6256,24 +6099,17 @@ router.delete('/:specId/tags/:tag', (req: Request, res: Response) => {
     }
 
     const tagName = tag.trim().toLowerCase();
-    const result = db.prepare(
-      'DELETE FROM spec_tags WHERE spec_id = ? AND workspace_id = ? AND tag_name = ?'
-    ).run(specId, workspaceId, tagName);
+    const result = await execute('DELETE FROM spec_tags WHERE spec_id = $1 AND workspace_id = $2 AND tag_name = $3', [specId, workspaceId, tagName]);
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       res.status(404).json({ error: 'Tag not found on this spec' });
       return;
     }
 
     // Emit WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
-       VALUES ('tags_updated', ?, ?, ?, datetime('now'))`
-    ).run(specId, workspaceId, JSON.stringify({ removed: [tagName], action: 'remove' }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
+       VALUES ('tags_updated', $1, $2, $3, NOW()) RETURNING *`, [specId, workspaceId, JSON.stringify({ removed: [tagName], action: 'remove' })]);
+    broadcastAll(walEvent!);
 
     res.json({ tags: getSpecTags(specId, workspaceId) });
   } catch (error: any) {
@@ -6338,7 +6174,7 @@ interface StoryCommitRow {
  *                       pushed_at: { type: string, format: date-time }
  *       400: { description: "Missing workspaceId" }
  */
-router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) => {
+router.get('/:specId/stories/:storyId/commits', async (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;
     const workspaceId = req.query.workspaceId as string;
@@ -6348,11 +6184,9 @@ router.get('/:specId/stories/:storyId/commits', (req: Request, res: Response) =>
       return;
     }
 
-    const commits = db.prepare(
-      `SELECT * FROM story_commits
-       WHERE spec_id = ? AND story_id = ? AND workspace_id = ?
-       ORDER BY pushed_at DESC`
-    ).all(specId, storyId, workspaceId) as StoryCommitRow[];
+    const commits = await query(`SELECT * FROM story_commits
+       WHERE spec_id = $1 AND story_id = $2 AND workspace_id = $3
+       ORDER BY pushed_at DESC`, [specId, storyId, workspaceId]) as StoryCommitRow[];
 
     res.json({ commits });
   } catch (error: any) {
@@ -6415,7 +6249,7 @@ router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Respon
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -6549,7 +6383,7 @@ function renderPrTemplate(template: string, vars: Record<string, string>): strin
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace, spec, or story not found" }
  */
-router.post('/:specId/stories/:storyId/pr-body', (req: Request, res: Response) => {
+router.post('/:specId/stories/:storyId/pr-body', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
@@ -6560,7 +6394,7 @@ router.post('/:specId/stories/:storyId/pr-body', (req: Request, res: Response) =
       return;
     }
 
-    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
       (WorkspaceRow & { pr_template?: string | null }) | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -6798,16 +6632,14 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
     }
 
     // Resolve GitHub connection for this workspace
-    const ghConn = db.prepare(
-      'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = ?'
-    ).get(workspaceId) as GithubWebhookRow | undefined;
+    const ghConn = await queryOne('SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]) as GithubWebhookRow | undefined;
 
     if (!ghConn) {
       res.status(400).json({ error: 'No GitHub connection for this workspace. Connect via workspace settings first.' });
@@ -6815,9 +6647,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
     }
 
     // Resolve GitHub token from OAuth connections
-    const tokenRow = db.prepare(
-      'SELECT encrypted_token FROM github_connections LIMIT 1'
-    ).get() as GitHubConnectionRow | undefined;
+    const tokenRow = await queryOne('SELECT encrypted_token FROM github_connections LIMIT 1') as GitHubConnectionRow | undefined;
 
     if (!tokenRow) {
       res.status(400).json({ error: 'No GitHub OAuth token available. Connect your GitHub account first.' });
@@ -6887,18 +6717,13 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
     // Emit WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('github_issues_imported', ?, ?, ?)`
-    ).run(specId, workspaceId, JSON.stringify({
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('github_issues_imported', $1, $2, $3)` + ' RETURNING *', [specId, workspaceId, JSON.stringify({
       issueCount: newStories.length,
       issueNumbers: issues.map(i => i.number),
       repoOwner: ghConn.repo_owner,
       repoName: ghConn.repo_name,
-    }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    })]);
+    broadcastAll(walEvent!);
 
     res.json({
       ok: true,
@@ -7156,7 +6981,7 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -7260,16 +7085,11 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
     // Emit WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('issues_imported', ?, ?, ?)`
-    ).run(specId, workspaceId, JSON.stringify({
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('issues_imported', $1, $2, $3)` + ' RETURNING *', [specId, workspaceId, JSON.stringify({
       source,
       issueCount: newStories.length,
-    }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    })]);
+    broadcastAll(walEvent!);
 
     res.json({
       ok: true,
@@ -7340,20 +7160,20 @@ interface StoryCommentRow {
  *                       avatar_url: { type: string }
  */
 // GET /api/specs/:specId/stories/:storyId/comments — list all comments for a story
-router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) => {
+router.get('/:specId/stories/:storyId/comments', async (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;
 
-    const comments = db.prepare(`
+    const comments = await query(`
       SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
              sc.created_at, sc.resolved_at,
              COALESCE(u.display_name, sc.author_name, 'Guest') as display_name,
              u.avatar_url
       FROM story_comments sc
       LEFT JOIN users u ON u.id = sc.user_id
-      WHERE sc.spec_id = ? AND sc.story_id = ?
+      WHERE sc.spec_id = $1 AND sc.story_id = $2
       ORDER BY sc.created_at ASC
-    `).all(specId, storyId) as StoryCommentRow[];
+    `, [specId, storyId]) as StoryCommentRow[];
 
     res.json({ comments });
   } catch (error: any) {
@@ -7406,11 +7226,11 @@ router.get('/:specId/stories/:storyId/comments', (req: Request, res: Response) =
  *       500: { description: "No user configured" }
  */
 // POST /api/specs/:specId/stories/:storyId/comments — create a comment
-router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) => {
+router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Response) => {
   try {
     const { specId, storyId } = req.params;
     const { body } = req.body;
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!body || typeof body !== 'string' || body.trim().length === 0) {
@@ -7419,31 +7239,28 @@ router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) 
     }
 
     const id = crypto.randomUUID();
-    db.prepare(`
+    await execute(`
       INSERT INTO story_comments (id, spec_id, story_id, user_id, body)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, specId, storyId, user.id, body.trim());
+      VALUES ($1, $2, $3, $4, $5)
+    `, [id, specId, storyId, user.id, body.trim()]);
 
     // Emit WAL event
-    const walResult = db.prepare(`
+    const walEvent = await queryOne<WalEvent>(`
       INSERT INTO wal_events (ts, event_type, spec_id, story_id, actor, payload)
-      VALUES (datetime('now'), 'comment_added', ?, ?, ?, ?)
-    `).run(specId, storyId, user.email, JSON.stringify({ commentId: id }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+      VALUES (NOW(), 'comment_added', $1, $2, $3, $4)
+    ` + ' RETURNING *', [specId, storyId, user.email, JSON.stringify({ commentId: id })]);
+    broadcastAll(walEvent!);
 
     // Return the created comment with author info
-    const comment = db.prepare(`
+    const comment = await queryOne(`
       SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
              sc.created_at, sc.resolved_at,
              COALESCE(u.display_name, sc.author_name, 'Guest') as display_name,
              u.avatar_url
       FROM story_comments sc
       LEFT JOIN users u ON u.id = sc.user_id
-      WHERE sc.id = ?
-    `).get(id) as StoryCommentRow;
+      WHERE sc.id = $1
+    `, [id]) as StoryCommentRow;
 
     // Parse @mentions and create notifications for each mentioned user
     const mentionPattern = /@([\w.\-]+(?:\s[\w.\-]+)?)/g;
@@ -7454,9 +7271,7 @@ router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) 
     }
 
     if (mentionedNames.size > 0) {
-      const allUsers = db.prepare(
-        'SELECT id, display_name FROM users'
-      ).all() as { id: string; display_name: string }[];
+      const allUsers = await query('SELECT id, display_name FROM users') as { id: string; display_name: string }[];
 
       const userByName = new Map(allUsers.map(u => [u.display_name.toLowerCase(), u.id]));
 
@@ -7517,15 +7332,13 @@ router.post('/:specId/stories/:storyId/comments', (req: Request, res: Response) 
  *       500: { description: "No user configured" }
  */
 // POST /api/specs/:specId/stories/:storyId/comments/:commentId/resolve — resolve a comment
-router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Request, res: Response) => {
+router.post('/:specId/stories/:storyId/comments/:commentId/resolve', async (req: Request, res: Response) => {
   try {
     const { specId, storyId, commentId } = req.params;
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
-    const existing = db.prepare(
-      'SELECT id, resolved_at FROM story_comments WHERE id = ? AND spec_id = ? AND story_id = ?'
-    ).get(commentId, specId, storyId) as { id: string; resolved_at: string | null } | undefined;
+    const existing = await queryOne('SELECT id, resolved_at FROM story_comments WHERE id = $1 AND spec_id = $2 AND story_id = $3', [commentId, specId, storyId]) as { id: string; resolved_at: string | null } | undefined;
 
     if (!existing) {
       res.status(404).json({ error: 'Comment not found' });
@@ -7537,29 +7350,24 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Reque
       return;
     }
 
-    db.prepare(
-      "UPDATE story_comments SET resolved_at = datetime('now') WHERE id = ?"
-    ).run(commentId);
+    await execute("UPDATE story_comments SET resolved_at = NOW() WHERE id = $1", [commentId]);
 
     // Emit WAL event
-    const walResult = db.prepare(`
+    const walEvent = await queryOne<WalEvent>(`
       INSERT INTO wal_events (ts, event_type, spec_id, story_id, actor, payload)
-      VALUES (datetime('now'), 'comment_resolved', ?, ?, ?, ?)
-    `).run(specId, storyId, user.email, JSON.stringify({ commentId }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+      VALUES (NOW(), 'comment_resolved', $1, $2, $3, $4)
+    ` + ' RETURNING *', [specId, storyId, user.email, JSON.stringify({ commentId })]);
+    broadcastAll(walEvent!);
 
-    const comment = db.prepare(`
+    const comment = await queryOne(`
       SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
              sc.created_at, sc.resolved_at,
              COALESCE(u.display_name, sc.author_name, 'Guest') as display_name,
              u.avatar_url
       FROM story_comments sc
       LEFT JOIN users u ON u.id = sc.user_id
-      WHERE sc.id = ?
-    `).get(commentId) as StoryCommentRow;
+      WHERE sc.id = $1
+    `, [commentId]) as StoryCommentRow;
 
     res.json(comment);
   } catch (error: any) {
@@ -7594,16 +7402,16 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', (req: Reque
  *                   additionalProperties: { type: integer }
  */
 // GET /api/specs/:specId/comments/counts — unresolved comment counts per story
-router.get('/:specId/comments/counts', (req: Request, res: Response) => {
+router.get('/:specId/comments/counts', async (req: Request, res: Response) => {
   try {
     const { specId } = req.params;
 
-    const rows = db.prepare(`
+    const rows = await query(`
       SELECT story_id, COUNT(*) as count
       FROM story_comments
-      WHERE spec_id = ? AND resolved_at IS NULL
+      WHERE spec_id = $1 AND resolved_at IS NULL
       GROUP BY story_id
-    `).all(specId) as { story_id: string; count: number }[];
+    `, [specId]) as { story_id: string; count: number }[];
 
     const counts: Record<string, number> = {};
     for (const row of rows) {
@@ -7671,11 +7479,11 @@ interface AssignmentRow {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace, spec, or assignee user not found" }
  */
-router.put('/:specId/assign', (req: Request, res: Response) => {
+router.put('/:specId/assign', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const { workspaceId, assigneeId } = req.body;
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!workspaceId) {
@@ -7683,7 +7491,7 @@ router.put('/:specId/assign', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -7699,16 +7507,12 @@ router.put('/:specId/assign', (req: Request, res: Response) => {
 
     // If assigneeId is null/empty, remove assignment
     if (!assigneeId) {
-      db.prepare(
-        "DELETE FROM spec_assignments WHERE spec_id = ? AND story_id = '' AND workspace_id = ?"
-      ).run(specId, workspaceId);
+      await execute("DELETE FROM spec_assignments WHERE spec_id = $1 AND story_id = '' AND workspace_id = $2", [specId, workspaceId]);
 
-      const walResult = db.prepare(
-        `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES (?, ?, ?, ?, ?)`
-      ).run('spec_unassigned', workspaceId, specId, user?.id ?? 'api', JSON.stringify({ specId }));
+      const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`, ['spec_unassigned', workspaceId, specId, user?.id ?? 'api', JSON.stringify({ specId })]);
 
       broadcastAll({
-        id: walResult.lastInsertRowid as number,
+        id: walResult!.id,
         ts: new Date().toISOString(),
         event_type: 'spec_unassigned',
         workspace_id: workspaceId,
@@ -7723,7 +7527,7 @@ router.put('/:specId/assign', (req: Request, res: Response) => {
     }
 
     // Verify assignee exists
-    const assignee = db.prepare('SELECT id, display_name, email, avatar_url FROM users WHERE id = ?').get(assigneeId) as
+    const assignee = await queryOne('SELECT id, display_name, email, avatar_url FROM users WHERE id = $1', [assigneeId]) as
       | { id: string; display_name: string; email: string; avatar_url: string | null }
       | undefined;
     if (!assignee) {
@@ -7732,25 +7536,23 @@ router.put('/:specId/assign', (req: Request, res: Response) => {
     }
 
     // Upsert assignment
-    db.prepare(`
+    await execute(`
       INSERT INTO spec_assignments (spec_id, story_id, workspace_id, assignee_id, assigned_by)
-      VALUES (?, '', ?, ?, ?)
+      VALUES ($1, '', $2, $3, $4)
       ON CONFLICT(spec_id, story_id, workspace_id) DO UPDATE SET
         assignee_id = excluded.assignee_id,
         assigned_by = excluded.assigned_by,
-        assigned_at = datetime('now')
-    `).run(specId, workspaceId, assigneeId, user?.id ?? null);
+        assigned_at = NOW()
+    `, [specId, workspaceId, assigneeId, user?.id ?? null]);
 
     // WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES (?, ?, ?, ?, ?)`
-    ).run('spec_assigned', workspaceId, specId, user?.id ?? 'api', JSON.stringify({
+    const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`, ['spec_assigned', workspaceId, specId, user?.id ?? 'api', JSON.stringify({
       assigneeId,
       assigneeName: assignee.display_name,
-    }));
+    })]);
 
     broadcastAll({
-      id: walResult.lastInsertRowid as number,
+      id: walResult!.id,
       ts: new Date().toISOString(),
       event_type: 'spec_assigned',
       workspace_id: workspaceId,
@@ -7815,12 +7617,12 @@ router.put('/:specId/assign', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace, spec, story, or assignee user not found" }
  */
-router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => {
+router.put('/:specId/stories/:storyId/assign', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
     const { workspaceId, assigneeId } = req.body;
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!workspaceId) {
@@ -7828,7 +7630,7 @@ router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => 
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -7857,16 +7659,12 @@ router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => 
 
     // If assigneeId is null/empty, remove assignment
     if (!assigneeId) {
-      db.prepare(
-        'DELETE FROM spec_assignments WHERE spec_id = ? AND story_id = ? AND workspace_id = ?'
-      ).run(specId, storyId, workspaceId);
+      await execute('DELETE FROM spec_assignments WHERE spec_id = $1 AND story_id = $2 AND workspace_id = $3', [specId, storyId, workspaceId]);
 
-      const walResult = db.prepare(
-        `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, ?, ?)`
-      ).run('story_unassigned', workspaceId, specId, storyId, user?.id ?? 'api', JSON.stringify({ storyId }));
+      const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`, ['story_unassigned', workspaceId, specId, storyId, user?.id ?? 'api', JSON.stringify({ storyId })]);
 
       broadcastAll({
-        id: walResult.lastInsertRowid as number,
+        id: walResult!.id,
         ts: new Date().toISOString(),
         event_type: 'story_unassigned',
         workspace_id: workspaceId,
@@ -7881,7 +7679,7 @@ router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => 
     }
 
     // Verify assignee exists
-    const assignee = db.prepare('SELECT id, display_name, email, avatar_url FROM users WHERE id = ?').get(assigneeId) as
+    const assignee = await queryOne('SELECT id, display_name, email, avatar_url FROM users WHERE id = $1', [assigneeId]) as
       | { id: string; display_name: string; email: string; avatar_url: string | null }
       | undefined;
     if (!assignee) {
@@ -7890,25 +7688,23 @@ router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => 
     }
 
     // Upsert assignment
-    db.prepare(`
+    await execute(`
       INSERT INTO spec_assignments (spec_id, story_id, workspace_id, assignee_id, assigned_by)
-      VALUES (?, ?, ?, ?, ?)
+      VALUES ($1, $2, $3, $4, $5)
       ON CONFLICT(spec_id, story_id, workspace_id) DO UPDATE SET
         assignee_id = excluded.assignee_id,
         assigned_by = excluded.assigned_by,
-        assigned_at = datetime('now')
-    `).run(specId, storyId, workspaceId, assigneeId, user?.id ?? null);
+        assigned_at = NOW()
+    `, [specId, storyId, workspaceId, assigneeId, user?.id ?? null]);
 
     // WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES (?, ?, ?, ?, ?, ?)`
-    ).run('story_assigned', workspaceId, specId, storyId, user?.id ?? 'api', JSON.stringify({
+    const walResult = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`, ['story_assigned', workspaceId, specId, storyId, user?.id ?? 'api', JSON.stringify({
       assigneeId,
       assigneeName: assignee.display_name,
-    }));
+    })]);
 
     broadcastAll({
-      id: walResult.lastInsertRowid as number,
+      id: walResult!.id,
       ts: new Date().toISOString(),
       event_type: 'story_assigned',
       workspace_id: workspaceId,
@@ -7969,7 +7765,7 @@ router.put('/:specId/stories/:storyId/assign', (req: Request, res: Response) => 
  *                       assignedAt: { type: string, format: date-time }
  *       400: { description: "Missing workspaceId" }
  */
-router.get('/:specId/assignments', (req: Request, res: Response) => {
+router.get('/:specId/assignments', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const workspaceId = req.query.workspaceId as string;
@@ -7979,13 +7775,13 @@ router.get('/:specId/assignments', (req: Request, res: Response) => {
       return;
     }
 
-    const rows = db.prepare(`
+    const rows = await query(`
       SELECT sa.spec_id, sa.story_id, sa.assignee_id, sa.assigned_at,
              u.display_name, u.email, u.avatar_url
       FROM spec_assignments sa
       JOIN users u ON u.id = sa.assignee_id
-      WHERE sa.spec_id = ? AND sa.workspace_id = ?
-    `).all(specId, workspaceId) as {
+      WHERE sa.spec_id = $1 AND sa.workspace_id = $2
+    `, [specId, workspaceId]) as {
       spec_id: string;
       story_id: string | null;
       assignee_id: string;
@@ -8074,7 +7870,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -8109,12 +7905,8 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
       : 'None';
 
     // Synthesize direction stack context
-    const l1Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-    ).get() as { content_yaml: string } | undefined;
-    const l3Row = db.prepare(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-    ).get(workspaceId) as { content_yaml: string } | undefined;
+    const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
+    const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
     const synthesized = synthesize({ l1: l1Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: specContent.title ?? specId });
 
@@ -8149,7 +7941,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
       'Each suggestion has the criterion text and a brief rationale explaining why it was added.',
     ].filter(Boolean).join('\n');
 
-    const enhanceUser = getEffectiveUser(req);
+    const enhanceUser = await getEffectiveUser(req);
     if (!enhanceUser) { res.status(500).json({ error: 'No user configured' }); return; }
     const enhanceVaultCreds = resolveVaultCreds(enhanceUser.id, DEFAULT_MODEL);
     const rawResponse = await chatComplete(
@@ -8244,7 +8036,7 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -8361,7 +8153,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -8389,7 +8181,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     }
 
     // Build skill catalog context
-    const catalogs = buildCatalogContext(workspace.path as string);
+    const catalogs = await buildCatalogContext(workspace.path as string);
     if (catalogs.skillNames.size === 0) {
       res.status(422).json({ error: 'No skills installed. Install skills from the Marketplace before matching.' });
       return;
@@ -8406,9 +8198,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
 
     // Resolve model: workspace L3 preferred_model > DEFAULT_MODEL
     let resolvedModel: string = DEFAULT_MODEL;
-    const l3Pref = db.prepare(
-      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-    ).get(workspaceId) as { preferred_model: string | null } | undefined;
+    const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
     if (l3Pref?.preferred_model) {
       resolvedModel = l3Pref.preferred_model;
     }
@@ -8492,20 +8282,14 @@ ${storyList}`;
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
     // Create spec version for audit trail
-    snapshotVersion(specId, JSON.stringify(specContent), specStatus === 'approved' ? 'approved' : 'pending');
+    await snapshotVersion(specId, JSON.stringify(specContent), specStatus === 'approved' ? 'approved' : 'pending');
 
     // Emit WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
-    ).run('skill_matched', specId, workspaceId, JSON.stringify({
+    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)` + ' RETURNING *', ['skill_matched', specId, workspaceId, JSON.stringify({
       matched_count: totalSkillsMatched,
       stories_affected: storiesAffected,
-    }));
-
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    })]);
+    broadcastAll(walEvent!);
 
     res.json({
       matched: totalSkillsMatched,
@@ -8565,7 +8349,7 @@ router.post('/:specId/suggest-models', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -8615,9 +8399,7 @@ router.post('/:specId/suggest-models', async (req: Request, res: Response) => {
 
     // Resolve model for this LLM call
     let resolvedModel: string = DEFAULT_MODEL;
-    const l3Pref = db.prepare(
-      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
-    ).get(workspaceId) as { preferred_model: string | null } | undefined;
+    const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
     if (l3Pref?.preferred_model) {
       resolvedModel = l3Pref.preferred_model;
     }
@@ -8673,11 +8455,9 @@ ${storyList}`;
       }));
 
     // Emit WAL event
-    db.prepare(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
-    ).run('model_suggested', specId, workspaceId, JSON.stringify({
+    await execute(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4)`, ['model_suggested', specId, workspaceId, JSON.stringify({
       suggestion_count: suggestions.length,
-    }));
+    })]);
 
     res.json({ suggestions });
   } catch (error: any) {

@@ -15,7 +15,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
@@ -147,11 +147,11 @@ function findSpecsWithStories(
  * Handle pull_request events: when a PR is merged, extract story IDs
  * and mark matching stories as passed in the spec JSON on disk.
  */
-export function handlePullRequestMerge(
+export async function handlePullRequestMerge(
   payload: Record<string, any>,
   _event: string,
   workspaceId: string,
-): void {
+): Promise<void> {
   // Only handle merged PRs
   if (payload.action !== 'closed' || !payload.pull_request?.merged) {
     return;
@@ -172,7 +172,10 @@ export function handlePullRequestMerge(
   logger.info(`[Webhook] PR merged: ${prUrl} — stories: ${storyIds.join(', ')}`);
 
   // Look up workspace path
-  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT * FROM workspaces WHERE id = $1',
+    [workspaceId]
+  );
   if (!workspace) {
     logger.error(`[Webhook] Workspace ${workspaceId} not found`);
     return;
@@ -213,21 +216,20 @@ export function handlePullRequestMerge(
 
   // Emit a single WAL event for the PR merge
   if (allUpdatedStoryIds.length > 0) {
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_pr_merged', ?, 'github', ?)`
-    ).run(workspaceId, JSON.stringify({
-      pr_url: prUrl,
-      story_ids: allUpdatedStoryIds,
-      merge_sha: mergeSha,
-      branch: branchName,
-      title: prTitle,
-    }));
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_pr_merged', $1, 'github', $2) RETURNING *`,
+      [workspaceId, JSON.stringify({
+        pr_url: prUrl,
+        story_ids: allUpdatedStoryIds,
+        merge_sha: mergeSha,
+        branch: branchName,
+        title: prTitle,
+      })]
+    );
 
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-
-    broadcastAll(walEvent);
+    if (walEvent) {
+      broadcastAll(walEvent);
+    }
   }
 }
 
@@ -279,24 +281,22 @@ interface PushCommit {
  * Handle push events: parse commit messages for story ID patterns
  * and store mappings in the story_commits table.
  */
-export function handlePush(
+export async function handlePush(
   payload: Record<string, any>,
   _event: string,
   workspaceId: string,
-): void {
+): Promise<void> {
   const commits: PushCommit[] = payload.commits ?? [];
   if (commits.length === 0) return;
 
-  const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT * FROM workspaces WHERE id = $1',
+    [workspaceId]
+  );
   if (!workspace) {
     logger.error(`[Webhook] Workspace ${workspaceId} not found`);
     return;
   }
-
-  const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO story_commits (story_id, spec_id, workspace_id, commit_sha, commit_message, author, pushed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  );
 
   let totalLinked = 0;
 
@@ -311,7 +311,11 @@ export function handlePush(
       for (const storyId of matchedStoryIds) {
         const author = commit.author?.username || commit.author?.name || 'unknown';
         const pushedAt = commit.timestamp || new Date().toISOString();
-        insertStmt.run(storyId, specId, workspaceId, commit.id, commit.message, author, pushedAt);
+        await execute(
+          `INSERT INTO story_commits (story_id, spec_id, workspace_id, commit_sha, commit_message, author, pushed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
+          [storyId, specId, workspaceId, commit.id, commit.message, author, pushedAt]
+        );
         totalLinked++;
       }
     }
@@ -320,19 +324,18 @@ export function handlePush(
   if (totalLinked > 0) {
     logger.info(`[Webhook] Push: linked ${totalLinked} commit-story mappings for workspace ${workspaceId}`);
 
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_push_commits', ?, 'github', ?)`
-    ).run(workspaceId, JSON.stringify({
-      commits_count: commits.length,
-      linked_count: totalLinked,
-      ref: payload.ref ?? '',
-    }));
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_push_commits', $1, 'github', $2) RETURNING *`,
+      [workspaceId, JSON.stringify({
+        commits_count: commits.length,
+        linked_count: totalLinked,
+        ref: payload.ref ?? '',
+      })]
+    );
 
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-
-    broadcastAll(walEvent);
+    if (walEvent) {
+      broadcastAll(walEvent);
+    }
   }
 }
 

@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -18,26 +17,18 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-queue-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, 'Test Workspace', ?)"
-  ).run(WORKSPACE_ID, tmpDir);
+await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2)`, [WORKSPACE_ID, tmpDir]);
 
   authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 describe('GET /api/run-queue', () => {
@@ -51,12 +42,8 @@ describe('GET /api/run-queue', () => {
   });
 
   it('returns pending queue entries ordered by position', async () => {
-    db.prepare(
-      "INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES (?, 'spec-b', 'path/b.json', 2, 'pending')"
-    ).run(WORKSPACE_ID);
-    db.prepare(
-      "INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES (?, 'spec-a', 'path/a.json', 1, 'pending')"
-    ).run(WORKSPACE_ID);
+    await execute(`INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES ($1, 'spec-b', 'path/b.json', 2, 'pending')`, [WORKSPACE_ID]);
+    await execute(`INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES ($1, 'spec-a', 'path/a.json', 1, 'pending')`, [WORKSPACE_ID]);
 
     const res = await request(app)
       .get(`/api/run-queue?workspaceId=${WORKSPACE_ID}`)
@@ -91,12 +78,8 @@ describe('GET /api/run-queue/status', () => {
   });
 
   it('returns queue length and next spec', async () => {
-    db.prepare(
-      "INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES (?, 'spec-1', 'path/1.json', 1, 'pending')"
-    ).run(WORKSPACE_ID);
-    db.prepare(
-      "INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES (?, 'spec-2', 'path/2.json', 2, 'pending')"
-    ).run(WORKSPACE_ID);
+    await execute(`INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES ($1, 'spec-1', 'path/1.json', 1, 'pending')`, [WORKSPACE_ID]);
+    await execute(`INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES ($1, 'spec-2', 'path/2.json', 2, 'pending')`, [WORKSPACE_ID]);
 
     const res = await request(app)
       .get(`/api/run-queue/status?workspaceId=${WORKSPACE_ID}`)
@@ -177,10 +160,8 @@ describe('POST /api/run-queue', () => {
 
 describe('DELETE /api/run-queue/:id', () => {
   it('removes an entry from the queue', async () => {
-    const result = db.prepare(
-      "INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES (?, 'spec-x', 'path/x.json', 1, 'pending')"
-    ).run(WORKSPACE_ID);
-    const entryId = result.lastInsertRowid;
+    const result = await queryOne<{ id: number }>(`INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES ($1, 'spec-x', 'path/x.json', 1, 'pending') RETURNING id`, [WORKSPACE_ID]);
+    const entryId = result!.id;
 
     const res = await request(app)
       .delete(`/api/run-queue/${entryId}`)
@@ -189,7 +170,7 @@ describe('DELETE /api/run-queue/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
 
-    const gone = db.prepare('SELECT id FROM run_queue WHERE id = ?').get(entryId);
+    const gone = await queryOne(`SELECT id FROM run_queue WHERE id = $1`, [entryId]);
     expect(gone).toBeUndefined();
   });
 
@@ -212,15 +193,11 @@ describe('DELETE /api/run-queue/:id', () => {
 
 describe('PUT /api/run-queue/reorder', () => {
   it('reorders entries by given ID order', async () => {
-    const r1 = db.prepare(
-      "INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES (?, 'spec-a', 'a.json', 1, 'pending')"
-    ).run(WORKSPACE_ID);
-    const r2 = db.prepare(
-      "INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES (?, 'spec-b', 'b.json', 2, 'pending')"
-    ).run(WORKSPACE_ID);
+    const r1 = await queryOne<{ id: number }>(`INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES ($1, 'spec-a', 'a.json', 1, 'pending') RETURNING id`, [WORKSPACE_ID]);
+    const r2 = await queryOne<{ id: number }>(`INSERT INTO run_queue (workspace_id, spec_id, spec_path, position, status) VALUES ($1, 'spec-b', 'b.json', 2, 'pending') RETURNING id`, [WORKSPACE_ID]);
 
-    const id1 = r1.lastInsertRowid as number;
-    const id2 = r2.lastInsertRowid as number;
+    const id1 = r1!.id;
+    const id2 = r2!.id;
 
     const res = await request(app)
       .put('/api/run-queue/reorder')
@@ -230,8 +207,8 @@ describe('PUT /api/run-queue/reorder', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
 
-    const updated1 = db.prepare('SELECT position FROM run_queue WHERE id = ?').get(id1) as { position: number };
-    const updated2 = db.prepare('SELECT position FROM run_queue WHERE id = ?').get(id2) as { position: number };
+    const updated1 = await queryOne(`SELECT position FROM run_queue WHERE id = $1`, [id1]) as { position: number };
+    const updated2 = await queryOne(`SELECT position FROM run_queue WHERE id = $1`, [id2]) as { position: number };
 
     expect(updated2.position).toBe(1);
     expect(updated1.position).toBe(2);

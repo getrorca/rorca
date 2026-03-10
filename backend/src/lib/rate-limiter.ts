@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import type { AuthUser } from '../routes/auth';
-import { db } from '../db';
+import { query, queryOne } from '../db/index';
 
 // ─── In-memory sliding window store ───
 interface WindowEntry {
@@ -43,25 +43,67 @@ let configCache: RateLimitConfig[] | null = null;
 let configCacheTime = 0;
 const CONFIG_CACHE_TTL_MS = 30_000; // Reload from DB every 30s
 
-function loadConfig(): RateLimitConfig[] {
-  const now = Date.now();
-  if (configCache && now - configCacheTime < CONFIG_CACHE_TTL_MS) {
-    return configCache;
-  }
+// ─── Fallback user cache (pre-loaded at startup) ───
+let fallbackUserId: string | null = null;
+
+/**
+ * Load rate limit config from DB into in-memory cache (async).
+ * Called at startup and periodically via invalidateRateLimitCache().
+ */
+async function loadConfigAsync(): Promise<RateLimitConfig[]> {
   try {
-    configCache = db.prepare('SELECT endpoint_pattern, tier, max_requests, window_seconds FROM rate_limits').all() as RateLimitConfig[];
+    configCache = await query<RateLimitConfig>(
+      'SELECT endpoint_pattern, tier, max_requests, window_seconds FROM rate_limits'
+    );
   } catch {
     // Table may not exist yet during initial migration
     configCache = [];
   }
-  configCacheTime = now;
+  configCacheTime = Date.now();
   return configCache;
+}
+
+/**
+ * Get config from cache synchronously (for use in middleware).
+ * If cache is stale, triggers an async reload but returns stale data immediately.
+ */
+function getConfigSync(): RateLimitConfig[] {
+  const now = Date.now();
+  if (configCache && now - configCacheTime < CONFIG_CACHE_TTL_MS) {
+    return configCache;
+  }
+  // Trigger async reload in background, return stale data (or empty if first call)
+  loadConfigAsync().catch(() => {});
+  return configCache ?? [];
 }
 
 /** Invalidate the config cache (e.g. after admin changes limits) */
 export function invalidateRateLimitCache(): void {
   configCache = null;
   configCacheTime = 0;
+  // Trigger async reload
+  loadConfigAsync().catch(() => {});
+}
+
+/**
+ * Pre-load the fallback user ID at startup.
+ * Must be called during server init before requests are served.
+ */
+export async function initFallbackUser(): Promise<void> {
+  try {
+    const row = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+    fallbackUserId = row?.id ?? null;
+  } catch {
+    fallbackUserId = null;
+  }
+}
+
+/**
+ * Initialize rate limiter caches at startup.
+ * Loads rate limit config and fallback user from DB.
+ */
+export async function initRateLimiterCache(): Promise<void> {
+  await Promise.all([loadConfigAsync(), initFallbackUser()]);
 }
 
 /** Clear all in-memory windows (useful for testing) */
@@ -111,7 +153,7 @@ function matchesPattern(method: string, path: string, pattern: string): boolean 
  * More specific patterns take priority over '*' wildcard.
  */
 function findLimit(method: string, path: string, tier: string): { maxRequests: number; windowSeconds: number } {
-  const configs = loadConfig();
+  const configs = getConfigSync();
 
   // Find specific endpoint match first, then fall back to wildcard
   let specific: RateLimitConfig | undefined;
@@ -184,13 +226,10 @@ export function rateLimiter(req: Request, res: Response, next: NextFunction): vo
   }
 
   let user = (req as Request & { user?: AuthUser }).user;
-  // Auth is globally bypassed in single-user mode — fall back to first DB user
+  // Auth is globally bypassed in single-user mode — fall back to cached user
   // so all requests count as authenticated (100/min vs 20/min unauthenticated).
-  if (!user) {
-    const fallback = db.prepare('SELECT id FROM users LIMIT 1').get() as { id: string } | undefined;
-    if (fallback) {
-      user = { id: fallback.id, email: '', displayName: '', role: 'user' } as AuthUser;
-    }
+  if (!user && fallbackUserId) {
+    user = { id: fallbackUserId, email: '', displayName: '', role: 'user' } as AuthUser;
   }
   const tier = user ? 'authenticated' : 'unauthenticated';
 

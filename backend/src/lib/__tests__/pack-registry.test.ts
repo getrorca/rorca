@@ -11,27 +11,23 @@ import { z } from 'zod';
 
 const mockRows: Record<string, unknown[]> = {};
 const mockSingleRows: Record<string, unknown> = {};
-let lastInsertRowid = 1;
 let lastChanges = 1;
 
-const mockDbPrepare = jest.fn().mockImplementation((sql: string) => ({
-  all: jest.fn((..._args: unknown[]) => mockRows[sql] ?? []),
-  get: jest.fn((..._args: unknown[]) => mockSingleRows[sql] ?? undefined),
-  run: jest.fn((..._args: unknown[]) => ({
-    lastInsertRowid: lastInsertRowid++,
-    changes: lastChanges,
-  })),
-}));
-
-const mockDbExec = jest.fn();
-const mockDbPragma = jest.fn();
+/** Normalize whitespace in SQL for lookup-key matching. */
+function normSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim();
+}
 
 jest.mock('../../db/index', () => ({
-  db: {
-    prepare: (...args: unknown[]) => mockDbPrepare(...args),
-    exec: (...args: unknown[]) => mockDbExec(...args),
-    pragma: (...args: unknown[]) => mockDbPragma(...args),
-  },
+  query: jest.fn(async (sql: string, ..._args: unknown[]) => {
+    const key = Object.keys(mockRows).find(k => normSql(k) === normSql(sql));
+    return key ? mockRows[key] : [];
+  }),
+  queryOne: jest.fn(async (sql: string, ..._args: unknown[]) => {
+    const key = Object.keys(mockSingleRows).find(k => normSql(k) === normSql(sql));
+    return key !== undefined ? mockSingleRows[key] : undefined;
+  }),
+  execute: jest.fn(async (_sql: string, ..._args: unknown[]) => ({ rowCount: lastChanges })),
 }));
 
 // ─── Imports (after mocks) ──────────────────────────────────────────────────
@@ -60,7 +56,6 @@ beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pack-registry-test-'));
   fs.mkdirSync(path.join(tmpDir, '.rorca', 'packs'), { recursive: true });
   jest.clearAllMocks();
-  lastInsertRowid = 1;
   lastChanges = 1;
   // Clear row maps
   for (const key of Object.keys(mockRows)) delete mockRows[key];
@@ -227,20 +222,20 @@ describe('PackRegistry.listInstalled', () => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('returns empty array when no packs installed', () => {
+  it('returns empty array when no packs installed', async () => {
     // DB returns empty
-    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = ? ORDER BY installed_at DESC';
+    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = $1 ORDER BY installed_at DESC';
     mockRows[selectSql] = [];
 
-    const result = registry.listInstalled();
+    const result = await registry.listInstalled();
     expect(result).toEqual([]);
   });
 
-  it('cross-references DB rows with filesystem pack.json', () => {
+  it('cross-references DB rows with filesystem pack.json', async () => {
     const packDir = path.join(tmpDir, '.rorca', 'packs', 'react-saas');
     writePackJson(packDir, validPack);
 
-    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = ? ORDER BY installed_at DESC';
+    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = $1 ORDER BY installed_at DESC';
     mockRows[selectSql] = [{
       id: 1,
       workspace_id: 'ws-1',
@@ -250,13 +245,13 @@ describe('PackRegistry.listInstalled', () => {
       pack_path: '.rorca/packs/react-saas',
     }];
 
-    const result = registry.listInstalled();
+    const result = await registry.listInstalled();
     expect(result).toHaveLength(1);
     expect(result[0].packJson?.name).toBe('react-saas');
   });
 
-  it('returns null packJson when pack dir is missing from disk', () => {
-    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = ? ORDER BY installed_at DESC';
+  it('returns null packJson when pack dir is missing from disk', async () => {
+    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = $1 ORDER BY installed_at DESC';
     mockRows[selectSql] = [{
       id: 1,
       workspace_id: 'ws-1',
@@ -266,7 +261,7 @@ describe('PackRegistry.listInstalled', () => {
       pack_path: '.rorca/packs/gone-pack',
     }];
 
-    const result = registry.listInstalled();
+    const result = await registry.listInstalled();
     expect(result).toHaveLength(1);
     expect(result[0].packJson).toBeNull();
   });
@@ -281,27 +276,27 @@ describe('PackRegistry.getPackPath', () => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('returns absolute path for installed pack', () => {
-    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+  it('returns absolute path for installed pack', async () => {
+    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
     mockSingleRows[selectSql] = { pack_path: '.rorca/packs/react-saas' };
 
-    const result = registry.getPackPath('react-saas');
+    const result = await registry.getPackPath('react-saas');
     expect(result).toBe(path.join(tmpDir, '.rorca/packs/react-saas'));
   });
 
-  it('returns absolute path as-is if pack_path is absolute', () => {
-    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+  it('returns absolute path as-is if pack_path is absolute', async () => {
+    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
     mockSingleRows[selectSql] = { pack_path: '/abs/path/to/pack' };
 
-    const result = registry.getPackPath('react-saas');
+    const result = await registry.getPackPath('react-saas');
     expect(result).toBe('/abs/path/to/pack');
   });
 
-  it('throws NotFoundError for unknown pack', () => {
-    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+  it('throws NotFoundError for unknown pack', async () => {
+    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
     mockSingleRows[selectSql] = undefined;
 
-    expect(() => registry.getPackPath('nonexistent')).toThrow(/not found/i);
+    await expect(registry.getPackPath('nonexistent')).rejects.toThrow(/not found/i);
   });
 });
 
@@ -314,17 +309,17 @@ describe('PackRegistry.register', () => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('registers a valid pack and returns DB row', () => {
+  it('registers a valid pack and returns DB row', async () => {
     const packDir = path.join(tmpDir, '.rorca', 'packs', 'react-saas');
     writePackJson(packDir, validPack);
 
     // No existing row
-    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
     mockSingleRows[existsSql] = undefined;
 
-    // After insert, get returns the new row
-    const getByIdSql = 'SELECT * FROM convention_packs WHERE id = ?';
-    mockSingleRows[getByIdSql] = {
+    // After insert, RETURNING * returns the new row
+    const insertSql = 'INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path) VALUES ($1, $2, $3, $4) RETURNING *';
+    mockSingleRows[insertSql] = {
       id: 1,
       workspace_id: 'ws-1',
       pack_name: 'react-saas',
@@ -333,16 +328,16 @@ describe('PackRegistry.register', () => {
       pack_path: '.rorca/packs/react-saas',
     };
 
-    const result = registry.register(packDir);
+    const result = await registry.register(packDir);
     expect(result.pack_name).toBe('react-saas');
     expect(result.pack_version).toBe('1.0.0');
   });
 
-  it('throws ValidationError for invalid pack', () => {
+  it('throws ValidationError for invalid pack', async () => {
     const packDir = path.join(tmpDir, '.rorca', 'packs', 'bad');
     writePackJson(packDir, { name: 'INVALID!', version: 'nope' });
 
-    expect(() => registry.register(packDir)).toThrow(/Invalid pack\.json/);
+    await expect(registry.register(packDir)).rejects.toThrow(/Invalid pack\.json/);
   });
 });
 
@@ -355,9 +350,9 @@ describe('PackRegistry.unregister', () => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('throws NotFoundError when pack is not registered', () => {
+  it('throws NotFoundError when pack is not registered', async () => {
     lastChanges = 0;
-    expect(() => registry.unregister('ghost-pack')).toThrow(/not found/i);
+    await expect(registry.unregister('ghost-pack')).rejects.toThrow(/not found/i);
   });
 });
 
@@ -370,42 +365,42 @@ describe('PackRegistry.scanUnregistered', () => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('returns empty when packs dir does not exist', () => {
+  it('returns empty when packs dir does not exist', async () => {
     const reg = new PackRegistry('/nonexistent', 'ws-1');
-    expect(reg.scanUnregistered()).toEqual([]);
+    expect(await reg.scanUnregistered()).toEqual([]);
   });
 
-  it('finds unregistered packs on disk', () => {
+  it('finds unregistered packs on disk', async () => {
     const packDir = path.join(tmpDir, '.rorca', 'packs', 'my-pack');
     writePackJson(packDir, { name: 'my-pack', version: '0.1.0' });
 
     // Not in DB
-    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
     mockSingleRows[existsSql] = undefined;
 
-    const result = registry.scanUnregistered();
+    const result = await registry.scanUnregistered();
     expect(result).toHaveLength(1);
     expect(result[0].pack.name).toBe('my-pack');
     expect(result[0].dir).toBe(packDir);
   });
 
-  it('skips packs that are already registered', () => {
+  it('skips packs that are already registered', async () => {
     const packDir = path.join(tmpDir, '.rorca', 'packs', 'registered-pack');
     writePackJson(packDir, { name: 'registered-pack', version: '1.0.0' });
 
     // Already in DB
-    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
     mockSingleRows[existsSql] = { id: 42 };
 
-    const result = registry.scanUnregistered();
+    const result = await registry.scanUnregistered();
     expect(result).toHaveLength(0);
   });
 
-  it('skips invalid pack directories', () => {
+  it('skips invalid pack directories', async () => {
     const packDir = path.join(tmpDir, '.rorca', 'packs', 'invalid-pack');
     writePackJson(packDir, { name: 'BAD!', version: 'nope' });
 
-    const result = registry.scanUnregistered();
+    const result = await registry.scanUnregistered();
     expect(result).toHaveLength(0);
   });
 });

@@ -116,23 +116,21 @@ GET    /api/wal?limit=50&offset=0   — Paginated WAL event log
 2. Mount in `server.ts`: `app.use('/api/newroute', newRouter);`
 3. Follow the response pattern:
 ```typescript
-router.get('/path', (req: Request, res: Response) => {
+router.get('/path', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const row = db.prepare('SELECT ...').get(id) as RowType | undefined;
+    const row = await queryOne<RowType>('SELECT * FROM ... WHERE id = $1', [id]);
     if (!row) { res.status(404).json({ error: 'Not found' }); return; }
     res.json(row);
-  } catch (error: any) {
-    console.error('[RouteName] error:', error);
-    res.status(500).json({ error: error.message });
-  }
+  } catch (err) { next(err); }
 });
 ```
 4. Emit WAL event for every mutation (see AGENTS.md parent dir).
 
 ## Common Mistakes
 
-- **Async DB calls**: `better-sqlite3` is synchronous. Remove `await` from `.get()`, `.all()`, `.run()`.
-- **Missing workspace validation**: Always `db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId)` and 404 if not found.
+- **Forgetting `await` on DB calls**: All `query`, `queryOne`, `execute` are async. Missing `await` returns a Promise instead of data.
+- **Using `?` placeholders instead of `$1, $2, ...`**: PostgreSQL uses numbered placeholders.
+- **Missing workspace validation**: Always `await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId])` and 404 if not found.
 - **Wrong spec path**: `ralph/specs/approved/${spec.id}.json` NOT `specs/approved/${spec.specName}.json`.
 - **Missing WAL event**: state changes without `broadcastAll()` won't appear in Pipeline Monitor live feed.
 - **Spec path join**: Backend resolves `path.join(workspace.path, 'scripts', specPath)` — don't double-prefix.

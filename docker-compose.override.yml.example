@@ -1,0 +1,36 @@
+# Production overrides — copy to docker-compose.override.yml and customize
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   # Edit values below, then:
+#   docker compose up -d
+
+services:
+  db:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-production}
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+
+  rorca:
+    environment:
+      DATABASE_URL: postgres://rorca:${POSTGRES_PASSWORD:-change-me-in-production}@db:5432/rorca
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      # Execution engine
+      RORCA_AGENT: ${RORCA_AGENT:-claude}
+      RORCA_MODEL: ${RORCA_MODEL:-}
+      # API keys (spec generation / embeddings)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # Embedding provider
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      # SSL mode for external Postgres (uncomment if needed)
+      # PGSSLMODE: require
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2.0"

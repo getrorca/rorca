@@ -1,21 +1,32 @@
-import { useState, useEffect, useCallback } from 'react';
-import { BookOpen, Plus, Trash2, Pencil, Search, Filter, Save, X, Archive, RotateCcw, Bot } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { BookOpen, Trash2, Pencil, Search, Pin, Save, X, Check, Bot, Undo2 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-interface MemoryEntry {
-  date: string;
+interface MemoryItem {
+  id: number;
+  workspaceId: string;
   category: string;
-  title: string;
-  rule: string;
-  context: string;
-  source: string;
-  lineNumber?: number;
+  content: string;
+  sourceStoryId: string | null;
+  sourceRunId: number | null;
+  confidence: string;
+  relatedFiles: string[];
+  pinned: boolean;
+  createdAt: string;
 }
 
-const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha'] as const;
+interface MemoryListResponse {
+  items: MemoryItem[];
+  total: number;
+  pinned: number;
+  recentRunIds: number[];
+  categories: string[];
+}
+
+const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha', 'Run Synthesis'] as const;
 
 const CATEGORY_COLORS: Record<string, string> = {
   Architecture: 'bg-blue-500/10 text-blue-500',
@@ -24,151 +35,238 @@ const CATEGORY_COLORS: Record<string, string> = {
   Decision: 'bg-amber-500/10 text-amber-500',
   Pattern: 'bg-emerald-500/10 text-emerald-500',
   Gotcha: 'bg-orange-500/10 text-orange-500',
+  'Run Synthesis': 'bg-cyan-500/10 text-cyan-500',
 };
 
-// ─── Entry Card ─────────────────────────────────────────────────────────────
+const CONFIDENCE_COLORS: Record<string, string> = {
+  high: 'text-emerald-500',
+  medium: 'text-amber-500',
+  low: 'text-red-400',
+};
 
-function EntryCard({ entry, onEdit, onDelete }: {
-  entry: MemoryEntry;
-  onEdit: () => void;
-  onDelete: () => void;
+// ─── Undo Toast ─────────────────────────────────────────────────────────────
+
+function UndoToast({ message, onUndo, onDismiss }: {
+  message: string;
+  onUndo: () => void;
+  onDismiss: () => void;
 }) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, 10000);
+    return () => clearTimeout(timer);
+  }, [onDismiss]);
+
   return (
-    <div className="group p-4 border border-border rounded-lg hover:bg-surface-200 transition-colors">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          {/* Header: category badge + date + auto badge */}
-          <div className="flex items-center gap-2 mb-1.5">
-            <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${CATEGORY_COLORS[entry.category] ?? 'bg-gray-500/10 text-gray-500'}`}>
-              {entry.category}
-            </span>
-            {entry.source?.startsWith('auto-generated') && (
-              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded bg-cyan-500/10 text-cyan-500" title="Auto-generated from pipeline run">
-                <Bot size={10} />
-                Auto
-              </span>
-            )}
-            <span className="text-[10px] text-muted tabular-nums">{entry.date}</span>
-            {entry.source && (
-              <span className="text-[10px] text-muted font-mono">{entry.source}</span>
-            )}
-          </div>
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2.5 rounded-lg bg-[var(--text)] text-bg text-xs font-medium shadow-lg animate-in slide-in-from-bottom-2">
+      <span>{message}</span>
+      <button
+        onClick={onUndo}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/20 hover:bg-white/30 transition-colors"
+      >
+        <Undo2 size={11} />
+        Undo
+      </button>
+      <button onClick={onDismiss} className="p-0.5 hover:opacity-70">
+        <X size={12} />
+      </button>
+    </div>
+  );
+}
 
-          {/* Title */}
-          <h3 className="text-sm font-medium text-[var(--text)] mb-1">{entry.title}</h3>
+// ─── Inline Edit Textarea ───────────────────────────────────────────────────
 
-          {/* Rule */}
-          <p className="text-xs text-[var(--text)]/80 leading-relaxed">{entry.rule}</p>
+function InlineEditor({ value, onSave, onCancel }: {
+  value: string;
+  onSave: (text: string) => void;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState(value);
+  const ref = useRef<HTMLTextAreaElement>(null);
 
-          {/* Context */}
-          {entry.context && (
-            <p className="text-[11px] text-muted mt-1 leading-relaxed">{entry.context}</p>
-          )}
-        </div>
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
 
-        {/* Actions */}
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={onEdit}
-            className="p-1.5 rounded hover:bg-bg transition-colors"
-            title="Edit"
-          >
-            <Pencil size={12} className="text-muted" />
-          </button>
-          <button
-            onClick={onDelete}
-            className="p-1.5 rounded hover:bg-red-500/10 transition-colors"
-            title="Delete"
-          >
-            <Trash2 size={12} className="text-red-500/60" />
-          </button>
-        </div>
+  return (
+    <div className="space-y-2">
+      <textarea
+        ref={ref}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        className="w-full text-xs px-3 py-2 rounded border border-accent/50 bg-bg text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent resize-y"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            onSave(text);
+          }
+          if (e.key === 'Escape') onCancel();
+        }}
+      />
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => onSave(text)}
+          disabled={!text.trim()}
+          className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-50"
+        >
+          <Save size={10} />
+          Save
+        </button>
+        <button
+          onClick={onCancel}
+          className="inline-flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded border border-border text-muted hover:bg-surface-200"
+        >
+          <X size={10} />
+          Cancel
+        </button>
+        <span className="text-[9px] text-muted ml-1">Cmd+Enter to save</span>
       </div>
     </div>
   );
 }
 
-// ─── Add/Edit Form ──────────────────────────────────────────────────────────
+// ─── Entry Row ──────────────────────────────────────────────────────────────
 
-function EntryForm({ initial, onSave, onCancel }: {
-  initial?: MemoryEntry;
-  onSave: (entry: Omit<MemoryEntry, 'date' | 'lineNumber'>) => void;
-  onCancel: () => void;
+function EntryRow({ item, isSelected, isEditing, onToggleSelect, onEdit, onSaveEdit, onCancelEdit, onDelete, onTogglePin }: {
+  item: MemoryItem;
+  isSelected: boolean;
+  isEditing: boolean;
+  onToggleSelect: () => void;
+  onEdit: () => void;
+  onSaveEdit: (text: string) => void;
+  onCancelEdit: () => void;
+  onDelete: () => void;
+  onTogglePin: () => void;
 }) {
-  const [category, setCategory] = useState(initial?.category ?? 'Decision');
-  const [title, setTitle] = useState(initial?.title ?? '');
-  const [rule, setRule] = useState(initial?.rule ?? '');
-  const [context, setContext] = useState(initial?.context ?? '');
-  const [source, setSource] = useState(initial?.source ?? '');
+  const dateStr = new Date(item.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
   return (
-    <div className="border border-accent/30 rounded-lg p-4 bg-accent/5 space-y-3">
-      <div className="flex items-center gap-2">
-        <select
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-          aria-label="Category"
-          className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
-        >
-          {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-        <input
-          type="text"
-          value={source}
-          onChange={(e) => setSource(e.target.value)}
-          placeholder="Source (e.g. CIE-005)"
-          aria-label="Source"
-          className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] placeholder:text-muted w-32 focus:border-accent focus:ring-1 focus:ring-accent"
-        />
+    <div className={`group p-3 border rounded-lg transition-colors ${
+      item.pinned ? 'border-amber-500/30 bg-amber-500/5' : 'border-border hover:bg-surface-200'
+    }`}>
+      <div className="flex items-start gap-2">
+        {/* Checkbox */}
+        <label className="mt-0.5 shrink-0">
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={onToggleSelect}
+            className="w-3.5 h-3.5 rounded border-border text-accent focus:ring-accent/50 cursor-pointer"
+          />
+        </label>
+
+        <div className="flex-1 min-w-0">
+          {/* Header row */}
+          <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+            <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${CATEGORY_COLORS[item.category] ?? 'bg-gray-500/10 text-gray-500'}`}>
+              {item.category}
+            </span>
+            <span className={`text-[10px] font-medium ${CONFIDENCE_COLORS[item.confidence] ?? 'text-muted'}`}>
+              {item.confidence}
+            </span>
+            {item.pinned && (
+              <Pin size={10} className="text-amber-500 fill-amber-500" />
+            )}
+            {item.sourceStoryId && (
+              <span className="inline-flex items-center gap-0.5 px-1 py-0.5 text-[9px] font-medium rounded bg-cyan-500/10 text-cyan-500">
+                <Bot size={9} />
+                {item.sourceStoryId}
+              </span>
+            )}
+            {item.sourceRunId && (
+              <span className="text-[9px] text-muted font-mono">run #{item.sourceRunId}</span>
+            )}
+            <span className="text-[10px] text-muted tabular-nums ml-auto shrink-0">{dateStr}</span>
+          </div>
+
+          {/* Content */}
+          {isEditing ? (
+            <InlineEditor
+              value={item.content}
+              onSave={onSaveEdit}
+              onCancel={onCancelEdit}
+            />
+          ) : (
+            <p className="text-xs text-[var(--text)]/80 leading-relaxed whitespace-pre-wrap">{item.content}</p>
+          )}
+
+          {/* Related files */}
+          {item.relatedFiles.length > 0 && !isEditing && (
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {item.relatedFiles.slice(0, 3).map((f) => (
+                <span key={f} className="px-1 py-0.5 text-[9px] font-mono rounded bg-surface-200 text-muted">{f}</span>
+              ))}
+              {item.relatedFiles.length > 3 && (
+                <span className="text-[9px] text-muted">+{item.relatedFiles.length - 3} more</span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Actions */}
+        {!isEditing && (
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+            <button
+              onClick={onEdit}
+              className="p-1.5 rounded hover:bg-bg transition-colors"
+              title="Edit content"
+            >
+              <Pencil size={12} className="text-muted" />
+            </button>
+            <button
+              onClick={onTogglePin}
+              className="p-1.5 rounded hover:bg-amber-500/10 transition-colors"
+              title={item.pinned ? 'Unpin' : 'Pin — always include in prompts'}
+            >
+              <Pin size={12} className={item.pinned ? 'text-amber-500 fill-amber-500' : 'text-muted'} />
+            </button>
+            <button
+              onClick={onDelete}
+              className="p-1.5 rounded hover:bg-red-500/10 transition-colors"
+              title="Delete"
+            >
+              <Trash2 size={12} className="text-red-500/60" />
+            </button>
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
 
-      <input
-        type="text"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder="Title — short descriptive name"
-        aria-label="Title"
-        className="w-full text-sm px-3 py-2 rounded border border-border bg-bg text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
-      />
+// ─── Floating Action Bar ────────────────────────────────────────────────────
 
-      <input
-        type="text"
-        value={rule}
-        onChange={(e) => setRule(e.target.value)}
-        placeholder="Rule — the actionable pattern or convention"
-        aria-label="Rule"
-        className="w-full text-xs px-3 py-2 rounded border border-border bg-bg text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
-      />
+function BulkActionBar({ count, onDelete, onPin, onClear }: {
+  count: number;
+  onDelete: () => void;
+  onPin: () => void;
+  onClear: () => void;
+}) {
+  if (count === 0) return null;
 
-      <input
-        type="text"
-        value={context}
-        onChange={(e) => setContext(e.target.value)}
-        placeholder="Context — why this matters (optional)"
-        aria-label="Context"
-        className="w-full text-xs px-3 py-2 rounded border border-border bg-bg text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
-      />
-
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => {
-            if (!title.trim() || !rule.trim()) return;
-            onSave({ category, title, rule, context, source });
-          }}
-          disabled={!title.trim() || !rule.trim()}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <Save size={12} />
-          Save
-        </button>
-        <button
-          onClick={onCancel}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border text-muted hover:bg-bg transition-colors"
-        >
-          <X size={12} />
-          Cancel
-        </button>
-      </div>
+  return (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--text)] text-bg text-xs font-medium shadow-lg">
+      <Check size={12} />
+      <span>{count} selected</span>
+      <div className="w-px h-4 bg-bg/30 mx-1" />
+      <button
+        onClick={onDelete}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30 transition-colors"
+      >
+        <Trash2 size={11} />
+        Delete
+      </button>
+      <button
+        onClick={onPin}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition-colors"
+      >
+        <Pin size={11} />
+        Pin
+      </button>
+      <button onClick={onClear} className="p-1 hover:opacity-70">
+        <X size={12} />
+      </button>
     </div>
   );
 }
@@ -177,118 +275,143 @@ function EntryForm({ initial, onSave, onCancel }: {
 
 export default function MemoryPanel() {
   const { workspaceId } = useWorkspace();
-  const [entries, setEntries] = useState<MemoryEntry[]>([]);
-  const [filteredCategory, setFilteredCategory] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [editingEntry, setEditingEntry] = useState<MemoryEntry | null>(null);
+  const [items, setItems] = useState<MemoryItem[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [pinnedCount, setPinnedCount] = useState(0);
+  const [recentRunIds, setRecentRunIds] = useState<number[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [archiveCount, setArchiveCount] = useState(0);
-  const [rotating, setRotating] = useState(false);
 
-  const fetchEntries = useCallback(async () => {
+  // Filters
+  const [filterCategory, setFilterCategory] = useState<string>('');
+  const [filterConfidence, setFilterConfidence] = useState<string>('');
+  const [filterRunId, setFilterRunId] = useState<string>('');
+  const [searchText, setSearchText] = useState('');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // Selection
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  // Editing
+  const [editingId, setEditingId] = useState<number | null>(null);
+
+  // Undo
+  const [undoState, setUndoState] = useState<{ id: number; message: string } | null>(null);
+
+  const fetchItems = useCallback(async () => {
     if (!workspaceId) return;
+    const params = new URLSearchParams({ workspaceId });
+    if (filterCategory) params.set('category', filterCategory);
+    if (filterConfidence) params.set('confidence', filterConfidence);
+    if (filterRunId) params.set('sourceRunId', filterRunId);
+    if (searchText) params.set('search', searchText);
+
     try {
-      const params = new URLSearchParams({ workspaceId });
-      if (filteredCategory) params.set('category', filteredCategory);
-      const data = await apiFetch<{ items: MemoryEntry[] }>(`/api/memory?${params}`);
-      setEntries(data.items);
+      const data = await apiFetch<MemoryListResponse>(`/api/memory/items?${params}`);
+      setItems(data.items);
+      setTotalCount(data.total);
+      setPinnedCount(data.pinned);
+      setRecentRunIds(data.recentRunIds);
     } catch { /* ignore */ }
     setLoaded(true);
-  }, [workspaceId, filteredCategory]);
+  }, [workspaceId, filterCategory, filterConfidence, filterRunId, searchText]);
 
-  const fetchArchiveCount = useCallback(async () => {
-    if (!workspaceId) return;
+  useEffect(() => { fetchItems(); }, [fetchItems]);
+
+  // Debounced search
+  const handleSearchChange = (val: string) => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => setSearchText(val), 300);
+  };
+
+  // ── Actions ─────────────────────────────────────────────────────────────
+
+  const handleDelete = async (id: number) => {
     try {
-      const data = await apiFetch<{ count: number }>(`/api/memory/archive/count?workspaceId=${workspaceId}`);
-      setArchiveCount(data.count);
+      await apiFetch(`/api/memory/items/${id}`, { method: 'DELETE' });
+      setUndoState({ id, message: 'Memory deleted. Undo?' });
+      await fetchItems();
     } catch { /* ignore */ }
-  }, [workspaceId]);
+  };
 
-  useEffect(() => { fetchEntries(); }, [fetchEntries]);
-  useEffect(() => { fetchArchiveCount(); }, [fetchArchiveCount]);
-
-  const handleRotate = async () => {
-    if (!workspaceId || rotating) return;
-    setRotating(true);
+  const handleUndelete = async (id: number) => {
     try {
-      await apiFetch('/api/memory/rotate', {
+      await apiFetch(`/api/memory/items/${id}/undelete`, { method: 'POST' });
+      setUndoState(null);
+      await fetchItems();
+    } catch { /* ignore */ }
+  };
+
+  const handleTogglePin = async (item: MemoryItem) => {
+    try {
+      await apiFetch(`/api/memory/items/${item.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pinned: !item.pinned }),
+      });
+      await fetchItems();
+    } catch { /* ignore */ }
+  };
+
+  const handleSaveEdit = async (id: number, content: string) => {
+    try {
+      await apiFetch(`/api/memory/items/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      setEditingId(null);
+      await fetchItems();
+    } catch { /* ignore */ }
+  };
+
+  // Bulk actions
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    try {
+      await apiFetch('/api/memory/items/bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
+        body: JSON.stringify({ ids, action: 'delete' }),
       });
-      await Promise.all([fetchEntries(), fetchArchiveCount()]);
+      setSelectedIds(new Set());
+      await fetchItems();
     } catch { /* ignore */ }
-    setRotating(false);
   };
 
-  const handleAdd = async (entry: Omit<MemoryEntry, 'date' | 'lineNumber'>) => {
-    if (!workspaceId) return;
+  const handleBulkPin = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
     try {
-      await apiFetch('/api/memory', {
+      await apiFetch('/api/memory/items/bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, ...entry }),
+        body: JSON.stringify({ ids, action: 'pin' }),
       });
-      setShowAddForm(false);
-      fetchEntries();
+      setSelectedIds(new Set());
+      await fetchItems();
     } catch { /* ignore */ }
   };
 
-  const handleEdit = async (original: MemoryEntry, updates: Omit<MemoryEntry, 'date' | 'lineNumber'>) => {
-    if (!workspaceId) return;
-    try {
-      await apiFetch('/api/memory/entry', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workspaceId,
-          date: original.date,
-          title: original.title,
-          updates: {
-            category: updates.category,
-            title: updates.title,
-            rule: updates.rule,
-            context: updates.context,
-          },
-        }),
-      });
-      setEditingEntry(null);
-      fetchEntries();
-    } catch { /* ignore */ }
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
-  const handleDelete = async (entry: MemoryEntry) => {
-    if (!workspaceId) return;
-    try {
-      await apiFetch('/api/memory/entry', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workspaceId,
-          date: entry.date,
-          title: entry.title,
-        }),
-      });
-      fetchEntries();
-    } catch { /* ignore */ }
-  };
-
-  // Filter entries by search query
-  const filtered = entries.filter(e => {
-    if (!searchQuery) return true;
-    const q = searchQuery.toLowerCase();
-    return e.title.toLowerCase().includes(q) ||
-      e.rule.toLowerCase().includes(q) ||
-      e.context.toLowerCase().includes(q) ||
-      e.source.toLowerCase().includes(q);
-  });
-
-  // Group by category for the count badges
-  const categoryCounts = entries.reduce<Record<string, number>>((acc, e) => {
+  // Category counts from current items
+  const categoryCounts = items.reduce<Record<string, number>>((acc, e) => {
     acc[e.category] = (acc[e.category] ?? 0) + 1;
     return acc;
   }, {});
+
+  // Count items from the current run (most recent run)
+  const currentRunCount = recentRunIds.length > 0
+    ? items.filter(i => i.sourceRunId === recentRunIds[0]).length
+    : 0;
 
   if (!loaded) {
     return (
@@ -307,56 +430,85 @@ export default function MemoryPanel() {
       <div className="h-full overflow-y-auto">
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-4">
 
-          {/* Toolbar: search + filter + add */}
+          {/* Count badge header */}
+          <div className="flex items-center gap-3 text-[11px]">
+            <span className="font-medium text-[var(--text)]">{totalCount} memories</span>
+            {pinnedCount > 0 && (
+              <span className="inline-flex items-center gap-1 text-amber-500">
+                <Pin size={10} className="fill-amber-500" />
+                {pinnedCount} pinned
+              </span>
+            )}
+            {currentRunCount > 0 && (
+              <span className="text-cyan-500">
+                {currentRunCount} this run
+              </span>
+            )}
+          </div>
+
+          {/* Toolbar: search + filters */}
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="relative flex-1 min-w-[200px]">
+            <div className="relative flex-1 min-w-[180px]">
               <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
               <input
                 type="text"
-                placeholder="Search entries..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                aria-label="Search memory entries"
+                placeholder="Search memories..."
+                defaultValue={searchText}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                aria-label="Search memories"
                 className="w-full pl-8 pr-3 py-1.5 text-xs bg-bg border border-border rounded-md text-[var(--text)] placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent"
               />
             </div>
 
-            <div className="flex items-center gap-1">
-              <Filter size={12} className="text-muted" />
+            <select
+              value={filterCategory}
+              onChange={(e) => setFilterCategory(e.target.value)}
+              aria-label="Filter by category"
+              className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+            >
+              <option value="">All categories</option>
+              {CATEGORIES.map(c => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+
+            <select
+              value={filterConfidence}
+              onChange={(e) => setFilterConfidence(e.target.value)}
+              aria-label="Filter by confidence"
+              className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+            >
+              <option value="">All confidence</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+
+            {recentRunIds.length > 0 && (
               <select
-                value={filteredCategory ?? ''}
-                onChange={(e) => setFilteredCategory(e.target.value || null)}
-                aria-label="Filter by category"
+                value={filterRunId}
+                onChange={(e) => setFilterRunId(e.target.value)}
+                aria-label="Filter by source run"
                 className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
               >
-                <option value="">All categories</option>
-                {CATEGORIES.map(c => (
-                  <option key={c} value={c}>
-                    {c} ({categoryCounts[c] ?? 0})
-                  </option>
+                <option value="">All runs</option>
+                {recentRunIds.map(id => (
+                  <option key={id} value={id}>Run #{id}</option>
                 ))}
               </select>
-            </div>
-
-            <button
-              onClick={() => { setShowAddForm(true); setEditingEntry(null); }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent/90 transition-colors"
-            >
-              <Plus size={12} />
-              Add Entry
-            </button>
+            )}
           </div>
 
-          {/* Category pills summary */}
+          {/* Category pills */}
           <div className="flex flex-wrap gap-1.5 items-center">
             {CATEGORIES.map(c => {
               const count = categoryCounts[c] ?? 0;
               if (count === 0) return null;
-              const isActive = filteredCategory === c;
+              const isActive = filterCategory === c;
               return (
                 <button
                   key={c}
-                  onClick={() => setFilteredCategory(isActive ? null : c)}
+                  onClick={() => setFilterCategory(isActive ? '' : c)}
                   className={`px-2 py-0.5 text-[10px] font-medium rounded-full transition-colors ${
                     isActive
                       ? CATEGORY_COLORS[c]
@@ -367,81 +519,66 @@ export default function MemoryPanel() {
                 </button>
               );
             })}
-            <span className="px-2 py-0.5 text-[10px] text-muted">
-              {entries.length} total
-            </span>
           </div>
-
-          {/* Archive info + rotate */}
-          <div className="flex items-center gap-3 text-[11px] text-muted">
-            <div className="flex items-center gap-1.5">
-              <Archive size={11} />
-              <span>{archiveCount} archived</span>
-            </div>
-            <button
-              onClick={handleRotate}
-              disabled={rotating}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border hover:bg-surface-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Move old entries to archive (keeps Architecture & Convention entries)"
-            >
-              <RotateCcw size={10} className={rotating ? 'animate-spin' : ''} />
-              {rotating ? 'Rotating…' : 'Rotate now'}
-            </button>
-          </div>
-
-          {/* Add form */}
-          {showAddForm && (
-            <EntryForm
-              onSave={handleAdd}
-              onCancel={() => setShowAddForm(false)}
-            />
-          )}
 
           {/* Entries list */}
           <ul role="list" aria-label="Memory entries" className="space-y-2">
-            {filtered.length === 0 ? (
+            {items.length === 0 ? (
               <li role="listitem" className="py-12 text-center">
-                {entries.length === 0 ? (
+                {totalCount === 0 ? (
                   <div className="flex flex-col items-center max-w-[400px] mx-auto">
                     <div className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
                       <BookOpen size={28} className="text-accent" />
                     </div>
                     <h3 className="text-base font-semibold text-[var(--text)] mb-1.5">No memory entries yet</h3>
                     <p className="text-sm text-muted leading-relaxed">
-                      Memory entries are created automatically as specs run. You can also add entries manually.
+                      Memory entries are created automatically as specs run. They capture patterns, conventions, and decisions learned from each story.
                     </p>
                   </div>
                 ) : (
                   <>
                     <BookOpen size={24} className="mx-auto text-muted mb-3" />
-                    <p className="text-sm text-muted">No entries match your search.</p>
+                    <p className="text-sm text-muted">No entries match your filters.</p>
                   </>
                 )}
               </li>
             ) : (
-              filtered.map((entry, i) => (
-                editingEntry?.date === entry.date && editingEntry?.title === entry.title ? (
-                  <li key={`${entry.date}-${entry.title}`} role="listitem">
-                    <EntryForm
-                      initial={entry}
-                      onSave={(updates) => handleEdit(entry, updates)}
-                      onCancel={() => setEditingEntry(null)}
-                    />
-                  </li>
-                ) : (
-                  <li key={`${entry.date}-${entry.title}-${i}`} role="listitem">
-                    <EntryCard
-                      entry={entry}
-                      onEdit={() => { setEditingEntry(entry); setShowAddForm(false); }}
-                      onDelete={() => handleDelete(entry)}
-                    />
-                  </li>
-                )
+              items.map((item) => (
+                <li key={item.id} role="listitem">
+                  <EntryRow
+                    item={item}
+                    isSelected={selectedIds.has(item.id)}
+                    isEditing={editingId === item.id}
+                    onToggleSelect={() => toggleSelect(item.id)}
+                    onEdit={() => setEditingId(item.id)}
+                    onSaveEdit={(text) => handleSaveEdit(item.id, text)}
+                    onCancelEdit={() => setEditingId(null)}
+                    onDelete={() => handleDelete(item.id)}
+                    onTogglePin={() => handleTogglePin(item)}
+                  />
+                </li>
               ))
             )}
           </ul>
         </div>
       </div>
+
+      {/* Bulk action bar */}
+      <BulkActionBar
+        count={selectedIds.size}
+        onDelete={handleBulkDelete}
+        onPin={handleBulkPin}
+        onClear={() => setSelectedIds(new Set())}
+      />
+
+      {/* Undo toast */}
+      {undoState && (
+        <UndoToast
+          message={undoState.message}
+          onUndo={() => handleUndelete(undoState.id)}
+          onDismiss={() => setUndoState(null)}
+        />
+      )}
     </div>
   );
 }

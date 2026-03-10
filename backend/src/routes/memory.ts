@@ -6,7 +6,7 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { db } from '../db/index';
+import { execute, query as dbQuery, queryOne } from '../db/index';
 import {
   readMemory,
   append,
@@ -25,13 +25,16 @@ import {
 } from '../lib/memory-ledger';
 import { analyzeRunEvents } from '../lib/wal-feedback';
 import { broadcastAll } from '../lib/sse-hub';
+import { invalidateMemory } from '../lib/context-cache';
+import { deduplicateMemory } from '../lib/memory-dedup';
+import { embedText, prepareText } from '../lib/embedding-pipeline';
 
 const router = Router();
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function getWorkspacePath(workspaceId: string): string | null {
-  const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined;
+async function getWorkspacePath(workspaceId: string): Promise<string | null> {
+  const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
   return ws?.path ?? null;
 }
 
@@ -92,11 +95,11 @@ function todayDate(): string {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const { workspaceId, category, limit } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const ledgerPath = getLedgerPath(workspaceId as string);
@@ -160,7 +163,7 @@ router.get('/', (req: Request, res: Response) => {
  *       400: { description: "Missing required fields or invalid category" }
  *       404: { description: "Workspace not found" }
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   const { workspaceId, category, title, rule, context, source } = req.body;
 
   if (!workspaceId || !category || !title || !rule) {
@@ -171,7 +174,7 @@ router.post('/', (req: Request, res: Response) => {
     return res.status(400).json({ error: `Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}` });
   }
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const entry: MemoryEntry = {
@@ -184,6 +187,7 @@ router.post('/', (req: Request, res: Response) => {
   };
 
   const entries = append(wsPath, entry, getLedgerPath(workspaceId));
+  invalidateMemory(workspaceId); // PG-013
   res.status(201).json({ entry, total: entries.length });
 });
 
@@ -227,7 +231,7 @@ router.post('/', (req: Request, res: Response) => {
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or entry not found" }
  */
-router.put('/entry', (req: Request, res: Response) => {
+router.put('/entry', async (req: Request, res: Response) => {
   const { workspaceId, date, title, updates } = req.body;
 
   if (!workspaceId || !date || !title) {
@@ -238,12 +242,13 @@ router.put('/entry', (req: Request, res: Response) => {
     return res.status(400).json({ error: `Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}` });
   }
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const result = updateEntry(wsPath, date, title, updates ?? {}, getLedgerPath(workspaceId));
   if (!result) return res.status(404).json({ error: 'Entry not found' });
 
+  invalidateMemory(workspaceId); // PG-013
   res.json({ items: result, total: result.length });
 });
 
@@ -278,19 +283,20 @@ router.put('/entry', (req: Request, res: Response) => {
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or entry not found" }
  */
-router.delete('/entry', (req: Request, res: Response) => {
+router.delete('/entry', async (req: Request, res: Response) => {
   const { workspaceId, date, title } = req.body;
 
   if (!workspaceId || !date || !title) {
     return res.status(400).json({ error: 'workspaceId, date, and title are required' });
   }
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const removed = deleteEntry(wsPath, date, title, getLedgerPath(workspaceId));
   if (!removed) return res.status(404).json({ error: 'Entry not found' });
 
+  invalidateMemory(workspaceId); // PG-013
   res.json({ deleted: true });
 });
 
@@ -342,28 +348,31 @@ router.delete('/entry', (req: Request, res: Response) => {
  *                 total: { type: integer }
  *       400: { description: "Missing workspaceId" }
  */
-router.get('/proposals', (req: Request, res: Response) => {
+router.get('/proposals', async (req: Request, res: Response) => {
   const { workspaceId, status, runId } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  let sql = 'SELECT * FROM memory_proposals WHERE workspace_id = ?';
+  let sql = 'SELECT * FROM memory_proposals WHERE workspace_id = $1';
   const params: (string | number)[] = [workspaceId as string];
+  let paramIndex = 2;
 
   if (status) {
-    sql += ' AND status = ?';
+    sql += ` AND status = $${paramIndex}`;
     params.push(status as string);
+    paramIndex++;
   } else {
     sql += " AND status = 'pending'";
   }
 
   if (runId) {
-    sql += ' AND run_id = ?';
+    sql += ` AND run_id = $${paramIndex}`;
     params.push(parseInt(runId as string, 10));
+    paramIndex++;
   }
 
   sql += ' ORDER BY proposed_at DESC';
 
-  const rows = db.prepare(sql).all(...params) as Array<{
+  const rows = await dbQuery<{
     id: number;
     proposal_id: string;
     run_id: number;
@@ -376,7 +385,7 @@ router.get('/proposals', (req: Request, res: Response) => {
     status: string;
     proposed_at: string;
     resolved_at: string | null;
-  }>;
+  }>(sql, params);
 
   const items = rows.map(r => ({
     proposalId: r.proposal_id,
@@ -456,7 +465,7 @@ router.get('/proposals', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId or proposals array" }
  *       404: { description: "Workspace not found" }
  */
-router.post('/proposals', (req: Request, res: Response) => {
+router.post('/proposals', async (req: Request, res: Response) => {
   const { workspaceId, proposals } = req.body as {
     workspaceId: string;
     proposals: Array<{
@@ -471,15 +480,11 @@ router.post('/proposals', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'workspaceId and proposals array required' });
   }
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const ledgerPath = getLedgerPath(workspaceId);
   const results: Array<{ proposalId: string; action: string; success: boolean }> = [];
-
-  const updateStmt = db.prepare(
-    `UPDATE memory_proposals SET status = ?, resolved_at = datetime('now') WHERE proposal_id = ? AND workspace_id = ?`
-  );
 
   for (const p of proposals) {
     if (p.action === 'approve') {
@@ -488,11 +493,17 @@ router.post('/proposals', (req: Request, res: Response) => {
         date: p.entry.date || todayDate(),
       };
       append(wsPath, entryToAppend, ledgerPath);
-      updateStmt.run('approved', p.proposalId, workspaceId);
+      await execute(
+        `UPDATE memory_proposals SET status = $1, resolved_at = NOW() WHERE proposal_id = $2 AND workspace_id = $3`,
+        ['approved', p.proposalId, workspaceId]
+      );
       results.push({ proposalId: p.proposalId, action: 'approve', success: true });
     } else if (p.action === 'reject') {
       logRejected(wsPath, p.entry, p.proposalId);
-      updateStmt.run('rejected', p.proposalId, workspaceId);
+      await execute(
+        `UPDATE memory_proposals SET status = $1, resolved_at = NOW() WHERE proposal_id = $2 AND workspace_id = $3`,
+        ['rejected', p.proposalId, workspaceId]
+      );
       results.push({ proposalId: p.proposalId, action: 'reject', success: true });
     } else if (p.action === 'edit') {
       const edited: MemoryEntry = {
@@ -502,9 +513,10 @@ router.post('/proposals', (req: Request, res: Response) => {
       };
       append(wsPath, edited, ledgerPath);
       // Also update the DB row with the edited content
-      db.prepare(
-        `UPDATE memory_proposals SET status = 'approved', resolved_at = datetime('now'), title = ?, rule = ?, context = ?, category = ? WHERE proposal_id = ? AND workspace_id = ?`
-      ).run(edited.title, edited.rule, edited.context, edited.category, p.proposalId, workspaceId);
+      await execute(
+        `UPDATE memory_proposals SET status = 'approved', resolved_at = NOW(), title = $1, rule = $2, context = $3, category = $4 WHERE proposal_id = $5 AND workspace_id = $6`,
+        [edited.title, edited.rule, edited.context, edited.category, p.proposalId, workspaceId]
+      );
       results.push({ proposalId: p.proposalId, action: 'edit', success: true });
     }
   }
@@ -541,7 +553,7 @@ router.post('/proposals', (req: Request, res: Response) => {
  *                 dismissed: { type: integer, description: "Number of proposals dismissed" }
  *       400: { description: "Missing workspaceId or proposalIds" }
  */
-router.post('/proposals/dismiss', (req: Request, res: Response) => {
+router.post('/proposals/dismiss', async (req: Request, res: Response) => {
   const { workspaceId, proposalIds } = req.body as {
     workspaceId: string;
     proposalIds: string[];
@@ -551,14 +563,13 @@ router.post('/proposals/dismiss', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'workspaceId and proposalIds array required' });
   }
 
-  const stmt = db.prepare(
-    `UPDATE memory_proposals SET status = 'dismissed', resolved_at = datetime('now') WHERE proposal_id = ? AND workspace_id = ?`
-  );
-
   let dismissed = 0;
   for (const id of proposalIds) {
-    const r = stmt.run(id, workspaceId);
-    dismissed += r.changes;
+    const r = await execute(
+      `UPDATE memory_proposals SET status = 'dismissed', resolved_at = NOW() WHERE proposal_id = $1 AND workspace_id = $2`,
+      [id, workspaceId]
+    );
+    dismissed += r.rowCount;
   }
 
   res.json({ dismissed });
@@ -593,7 +604,7 @@ router.post('/proposals/dismiss', (req: Request, res: Response) => {
  *                 restored: { type: integer, description: "Number of proposals restored to pending" }
  *       400: { description: "Missing workspaceId" }
  */
-router.post('/proposals/undismiss', (req: Request, res: Response) => {
+router.post('/proposals/undismiss', async (req: Request, res: Response) => {
   const { workspaceId, proposalIds } = req.body as {
     workspaceId: string;
     proposalIds?: string[];
@@ -605,19 +616,20 @@ router.post('/proposals/undismiss', (req: Request, res: Response) => {
 
   let restored = 0;
   if (proposalIds && proposalIds.length > 0) {
-    const stmt = db.prepare(
-      `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE proposal_id = ? AND workspace_id = ? AND status = 'dismissed'`
-    );
     for (const id of proposalIds) {
-      const r = stmt.run(id, workspaceId);
-      restored += r.changes;
+      const r = await execute(
+        `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE proposal_id = $1 AND workspace_id = $2 AND status = 'dismissed'`,
+        [id, workspaceId]
+      );
+      restored += r.rowCount;
     }
   } else {
     // Restore all dismissed for this workspace
-    const r = db.prepare(
-      `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE workspace_id = ? AND status = 'dismissed'`
-    ).run(workspaceId);
-    restored = r.changes;
+    const r = await execute(
+      `UPDATE memory_proposals SET status = 'pending', resolved_at = NULL WHERE workspace_id = $1 AND status = 'dismissed'`,
+      [workspaceId]
+    );
+    restored = r.rowCount;
   }
 
   res.json({ restored });
@@ -649,11 +661,11 @@ router.post('/proposals/undismiss', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/rejected', (req: Request, res: Response) => {
+router.get('/rejected', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const rejected = readRejected(wsPath);
@@ -690,11 +702,11 @@ router.get('/rejected', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/context', (req: Request, res: Response) => {
+router.get('/context', async (req: Request, res: Response) => {
   const { workspaceId, n } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const snippet = getContextSnippet(wsPath, parseInt(n as string, 10) || 20, getLedgerPath(workspaceId as string));
@@ -751,11 +763,11 @@ router.get('/categories', (_req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.get('/archive/count', (req: Request, res: Response) => {
+router.get('/archive/count', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId as string);
+  const wsPath = await getWorkspacePath(workspaceId as string);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const count = countArchiveEntries(wsPath);
@@ -800,11 +812,11 @@ router.get('/archive/count', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace not found" }
  */
-router.post('/rotate', (req: Request, res: Response) => {
+router.post('/rotate', async (req: Request, res: Response) => {
   const { workspaceId, retentionDays, maxEntries, tokenBudget } = req.body;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
-  const wsPath = getWorkspacePath(workspaceId);
+  const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
 
   const result = rotateMemory(wsPath, {
@@ -859,15 +871,16 @@ router.post('/rotate', (req: Request, res: Response) => {
  *       404: { description: "Run not found" }
  */
 // POST /api/memory/synthesize — synthesize memory proposals from all recent runs for a workspace
-router.post('/synthesize', (req: Request, res: Response) => {
+router.post('/synthesize', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId is required' });
 
   // Find recent completed runs for this workspace (last 10)
-  const runs = db.prepare(
-    `SELECT id FROM pipeline_runs WHERE workspace_id = ? AND status IN ('passed','failed','finished')
-     ORDER BY finished_at DESC LIMIT 10`
-  ).all(String(workspaceId)) as { id: number }[];
+  const runs = await dbQuery<{ id: number }>(
+    `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('passed','failed','finished')
+     ORDER BY finished_at DESC LIMIT 10`,
+    [String(workspaceId)]
+  );
 
   if (runs.length === 0) {
     return res.json({ proposals: [], total: 0 });
@@ -878,17 +891,18 @@ router.post('/synthesize', (req: Request, res: Response) => {
     title: string; rule: string; context: string; source: string; status: string;
   }> = [];
   const today = new Date().toISOString().slice(0, 10);
-  const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
-  );
 
   for (const run of runs) {
-    const candidates = analyzeRunEvents(run.id);
+    const candidates = await analyzeRunEvents(run.id);
     for (let i = 0; i < candidates.length; i++) {
       const c = candidates[i];
       const proposalId = `wal-feedback-${run.id}-${i}`;
-      insertStmt.run(proposalId, run.id, String(workspaceId), c.category, c.title, c.rule, c.context, c.source);
+      await execute(
+        `INSERT INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
+         ON CONFLICT DO NOTHING`,
+        [proposalId, run.id, String(workspaceId), c.category, c.title, c.rule, c.context, c.source]
+      );
       allProposals.push({
         proposalId, date: today, category: c.category,
         title: c.title, rule: c.rule, context: c.context,
@@ -899,11 +913,12 @@ router.post('/synthesize', (req: Request, res: Response) => {
 
   if (allProposals.length > 0) {
     const walPayload = JSON.stringify({ workspace_id: workspaceId, proposals: allProposals });
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', ?, ?)`
-    ).run(String(workspaceId), walPayload);
+    const walRow = await queryOne<{ id: number }>(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', $1, $2) RETURNING id`,
+      [String(workspaceId), walPayload]
+    );
     broadcastAll({
-      id: Number(walResult.lastInsertRowid),
+      id: walRow?.id ?? 0,
       ts: new Date().toISOString(),
       event_type: 'memory_proposals',
       workspace_id: String(workspaceId),
@@ -915,18 +930,19 @@ router.post('/synthesize', (req: Request, res: Response) => {
   res.json({ proposals: allProposals, total: allProposals.length });
 });
 
-router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
+router.post('/synthesize-from-run/:runId', async (req: Request, res: Response) => {
   const runId = parseInt(req.params.runId as string, 10);
   if (isNaN(runId)) return res.status(400).json({ error: 'Invalid runId' });
 
-  const run = db.prepare(
-    'SELECT id, workspace_id, status FROM pipeline_runs WHERE id = ?'
-  ).get(runId) as { id: number; workspace_id: string; status: string } | undefined;
+  const run = await queryOne<{ id: number; workspace_id: string; status: string }>(
+    'SELECT id, workspace_id, status FROM pipeline_runs WHERE id = $1',
+    [runId]
+  );
 
   if (!run) return res.status(404).json({ error: 'Run not found' });
 
   // Generate candidates from WAL event analysis
-  const candidates = analyzeRunEvents(runId);
+  const candidates = await analyzeRunEvents(runId);
 
   if (candidates.length === 0) {
     return res.json({ proposals: [], total: 0 });
@@ -934,15 +950,18 @@ router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
 
   // Persist as proposals in memory_proposals table
   const today = new Date().toISOString().slice(0, 10);
-  const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`
-  );
 
-  const proposals = candidates.map((c, i) => {
+  const proposals = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
     const proposalId = `wal-feedback-${runId}-${i}`;
-    insertStmt.run(proposalId, runId, run.workspace_id, c.category, c.title, c.rule, c.context, c.source);
-    return {
+    await execute(
+      `INSERT INTO memory_proposals (proposal_id, run_id, workspace_id, category, title, rule, context, source_story, status, proposed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
+       ON CONFLICT DO NOTHING`,
+      [proposalId, runId, run.workspace_id, c.category, c.title, c.rule, c.context, c.source]
+    );
+    proposals.push({
       proposalId,
       date: today,
       category: c.category,
@@ -951,8 +970,8 @@ router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
       context: c.context,
       source: c.source,
       status: 'pending',
-    };
-  });
+    });
+  }
 
   // Broadcast via SSE
   const walPayload = JSON.stringify({
@@ -961,12 +980,13 @@ router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
     proposals,
   });
 
-  const walResult = db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', ?, ?)`
-  ).run(run.workspace_id, walPayload);
+  const walRow = await queryOne<{ id: number }>(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('memory_proposals', $1, $2) RETURNING id`,
+    [run.workspace_id, walPayload]
+  );
 
   broadcastAll({
-    id: Number(walResult.lastInsertRowid),
+    id: walRow?.id ?? 0,
     ts: new Date().toISOString(),
     event_type: 'memory_proposals',
     workspace_id: run.workspace_id,
@@ -977,6 +997,418 @@ router.post('/synthesize-from-run/:runId', (req: Request, res: Response) => {
   });
 
   res.json({ proposals, total: proposals.length });
+});
+
+/**
+ * @swagger
+ * /api/memory/deduplicate:
+ *   post:
+ *     tags: [Memory]
+ *     summary: Deduplicate memory entries using embedding similarity
+ *     operationId: deduplicateMemory
+ *     description: |
+ *       Detects semantically duplicate memory entries using pgvector embedding similarity (>0.92 cosine threshold).
+ *       When duplicates found: keeps the most recent entry, merges unique details from older entries.
+ *       Falls back to Levenshtein distance comparison when vector search is unavailable.
+ *       Use dryRun=true query param to preview what would be removed without modifying anything.
+ *     parameters:
+ *       - name: dryRun
+ *         in: query
+ *         schema: { type: boolean }
+ *         description: If true, returns what would be removed without modifying anything
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Deduplication result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 removed: { type: integer, description: "Number of duplicate entries removed" }
+ *                 merged: { type: integer, description: "Number of entries that absorbed details from duplicates" }
+ *                 total: { type: integer, description: "Total entries remaining after deduplication" }
+ *                 details:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       kept: { type: object, properties: { date: { type: string }, title: { type: string } } }
+ *                       removed: { type: array, items: { type: object, properties: { date: { type: string }, title: { type: string } } } }
+ *                       similarity: { type: number }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace not found" }
+ */
+router.post('/deduplicate', async (req: Request, res: Response) => {
+  const { workspaceId } = req.body;
+  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+
+  const wsPath = await getWorkspacePath(workspaceId);
+  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+
+  const dryRun = req.query.dryRun === 'true';
+
+  const result = await deduplicateMemory(wsPath, workspaceId, dryRun);
+  res.json(result);
+});
+
+// ─── PG-022: DB-backed memory CRUD for curation ─────────────────────────────
+
+/**
+ * @swagger
+ * /api/memory/items:
+ *   get:
+ *     tags: [Memory]
+ *     summary: List memories from the database with filters
+ *     operationId: listMemoryItems
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *       - name: category
+ *         in: query
+ *         schema: { type: string }
+ *       - name: confidence
+ *         in: query
+ *         schema: { type: string, enum: [high, medium, low] }
+ *       - name: sourceRunId
+ *         in: query
+ *         schema: { type: integer }
+ *       - name: search
+ *         in: query
+ *         schema: { type: string }
+ *         description: Full-text search query
+ *       - name: pinnedOnly
+ *         in: query
+ *         schema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Memory items list with counts
+ */
+router.get('/items', async (req: Request, res: Response) => {
+  const { workspaceId, category, confidence, sourceRunId, search, pinnedOnly } = req.query;
+  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+
+  let sql = `SELECT id, workspace_id, category, content, source_story_id, source_run_id,
+             confidence, related_files, pinned, created_at
+             FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL`;
+  const params: (string | number)[] = [workspaceId as string];
+  let paramIdx = 2;
+
+  if (category) {
+    sql += ` AND category = $${paramIdx}`;
+    params.push(category as string);
+    paramIdx++;
+  }
+
+  if (confidence) {
+    sql += ` AND confidence = $${paramIdx}`;
+    params.push(confidence as string);
+    paramIdx++;
+  }
+
+  if (sourceRunId) {
+    sql += ` AND source_run_id = $${paramIdx}`;
+    params.push(parseInt(sourceRunId as string, 10));
+    paramIdx++;
+  }
+
+  if (search) {
+    sql += ` AND tsv @@ plainto_tsquery('english', $${paramIdx})`;
+    params.push(search as string);
+    paramIdx++;
+  }
+
+  if (pinnedOnly === 'true') {
+    sql += ' AND pinned = true';
+  }
+
+  // Pinned first, then by created_at DESC
+  sql += ' ORDER BY pinned DESC, created_at DESC';
+
+  const rows = await dbQuery<{
+    id: number;
+    workspace_id: string;
+    category: string;
+    content: string;
+    source_story_id: string | null;
+    source_run_id: number | null;
+    confidence: string;
+    related_files: string;
+    pinned: boolean;
+    created_at: string;
+  }>(sql, params);
+
+  // Get counts
+  const countRows = await dbQuery<{ total: string; pinned: string }>(
+    `SELECT
+       COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE pinned = true) AS pinned
+     FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL`,
+    [workspaceId as string],
+  );
+
+  // Get recent run IDs for filter dropdown
+  const runRows = await dbQuery<{ source_run_id: number }>(
+    `SELECT DISTINCT source_run_id FROM memories
+     WHERE workspace_id = $1 AND deleted_at IS NULL AND source_run_id IS NOT NULL
+     ORDER BY source_run_id DESC LIMIT 10`,
+    [workspaceId as string],
+  );
+
+  const items = rows.map(r => ({
+    id: r.id,
+    workspaceId: r.workspace_id,
+    category: r.category,
+    content: r.content,
+    sourceStoryId: r.source_story_id,
+    sourceRunId: r.source_run_id,
+    confidence: r.confidence,
+    relatedFiles: typeof r.related_files === 'string' ? JSON.parse(r.related_files) : r.related_files,
+    pinned: r.pinned,
+    createdAt: r.created_at,
+  }));
+
+  res.json({
+    items,
+    total: parseInt(countRows[0]?.total ?? '0', 10),
+    pinned: parseInt(countRows[0]?.pinned ?? '0', 10),
+    recentRunIds: runRows.map(r => r.source_run_id),
+    categories: MEMORY_CATEGORIES,
+  });
+});
+
+/**
+ * @swagger
+ * /api/memory/items/{id}:
+ *   patch:
+ *     tags: [Memory]
+ *     summary: Update a memory entry (content, pinned status)
+ *     operationId: updateMemoryItem
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               content: { type: string }
+ *               pinned: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Updated memory item
+ *       404:
+ *         description: Memory not found
+ */
+router.patch('/items/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const { content, pinned } = req.body as { content?: string; pinned?: boolean };
+
+  // Check exists
+  const existing = await queryOne<{ id: number; workspace_id: string; content: string }>(
+    'SELECT id, workspace_id, content FROM memories WHERE id = $1 AND deleted_at IS NULL',
+    [id],
+  );
+  if (!existing) return res.status(404).json({ error: 'Memory not found' });
+
+  const setClauses: string[] = [];
+  const params: (string | number | boolean | null)[] = [];
+  let paramIdx = 1;
+
+  if (content !== undefined) {
+    setClauses.push(`content = $${paramIdx}`);
+    params.push(content);
+    paramIdx++;
+
+    // Re-compute embedding when content changes
+    try {
+      const prepared = prepareText('memory', content);
+      const embedding = await embedText(prepared);
+      if (embedding) {
+        setClauses.push(`embedding = $${paramIdx}::vector`);
+        params.push(`[${embedding.join(',')}]`);
+        paramIdx++;
+      }
+    } catch {
+      // Embedding failure is non-fatal — update content without new vector
+    }
+  }
+
+  if (pinned !== undefined) {
+    setClauses.push(`pinned = $${paramIdx}`);
+    params.push(pinned);
+    paramIdx++;
+  }
+
+  if (setClauses.length === 0) {
+    return res.status(400).json({ error: 'No fields to update' });
+  }
+
+  params.push(id);
+  const sql = `UPDATE memories SET ${setClauses.join(', ')} WHERE id = $${paramIdx} RETURNING
+    id, workspace_id, category, content, source_story_id, source_run_id,
+    confidence, related_files, pinned, created_at`;
+
+  const updated = await queryOne<{
+    id: number; workspace_id: string; category: string; content: string;
+    source_story_id: string | null; source_run_id: number | null;
+    confidence: string; related_files: string; pinned: boolean; created_at: string;
+  }>(sql, params);
+
+  invalidateMemory(existing.workspace_id);
+
+  res.json({
+    id: updated!.id,
+    workspaceId: updated!.workspace_id,
+    category: updated!.category,
+    content: updated!.content,
+    sourceStoryId: updated!.source_story_id,
+    sourceRunId: updated!.source_run_id,
+    confidence: updated!.confidence,
+    relatedFiles: typeof updated!.related_files === 'string' ? JSON.parse(updated!.related_files) : updated!.related_files,
+    pinned: updated!.pinned,
+    createdAt: updated!.created_at,
+  });
+});
+
+/**
+ * @swagger
+ * /api/memory/items/{id}:
+ *   delete:
+ *     tags: [Memory]
+ *     summary: Soft-delete a memory entry
+ *     operationId: deleteMemoryItem
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Memory soft-deleted
+ *       404:
+ *         description: Memory not found
+ */
+router.delete('/items/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const existing = await queryOne<{ id: number; workspace_id: string }>(
+    'SELECT id, workspace_id FROM memories WHERE id = $1 AND deleted_at IS NULL',
+    [id],
+  );
+  if (!existing) return res.status(404).json({ error: 'Memory not found' });
+
+  await execute('UPDATE memories SET deleted_at = NOW() WHERE id = $1', [id]);
+  invalidateMemory(existing.workspace_id);
+
+  res.json({ deleted: true, id });
+});
+
+/**
+ * @swagger
+ * /api/memory/items/{id}/undelete:
+ *   post:
+ *     tags: [Memory]
+ *     summary: Restore a soft-deleted memory entry
+ *     operationId: undeleteMemoryItem
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Memory restored
+ *       404:
+ *         description: Memory not found or not deleted
+ */
+router.post('/items/:id/undelete', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const existing = await queryOne<{ id: number; workspace_id: string }>(
+    'SELECT id, workspace_id FROM memories WHERE id = $1 AND deleted_at IS NOT NULL',
+    [id],
+  );
+  if (!existing) return res.status(404).json({ error: 'Memory not found or not deleted' });
+
+  await execute('UPDATE memories SET deleted_at = NULL WHERE id = $1', [id]);
+  invalidateMemory(existing.workspace_id);
+
+  res.json({ restored: true, id });
+});
+
+/**
+ * @swagger
+ * /api/memory/items/bulk:
+ *   post:
+ *     tags: [Memory]
+ *     summary: Bulk operations on memory items (delete, pin, unpin)
+ *     operationId: bulkMemoryAction
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [ids, action]
+ *             properties:
+ *               ids: { type: array, items: { type: integer } }
+ *               action: { type: string, enum: [delete, pin, unpin] }
+ *     responses:
+ *       200:
+ *         description: Bulk action result
+ */
+router.post('/items/bulk', async (req: Request, res: Response) => {
+  const { ids, action } = req.body as { ids: number[]; action: 'delete' | 'pin' | 'unpin' };
+
+  if (!ids || !Array.isArray(ids) || ids.length === 0 || !action) {
+    return res.status(400).json({ error: 'ids array and action required' });
+  }
+
+  // Build numbered placeholders for IN clause
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
+
+  let sql: string;
+  if (action === 'delete') {
+    sql = `UPDATE memories SET deleted_at = NOW() WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+  } else if (action === 'pin') {
+    sql = `UPDATE memories SET pinned = true WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+  } else if (action === 'unpin') {
+    sql = `UPDATE memories SET pinned = false WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+  } else {
+    return res.status(400).json({ error: 'action must be delete, pin, or unpin' });
+  }
+
+  const result = await execute(sql, ids);
+
+  // Invalidate cache for affected workspaces
+  const wsRows = await dbQuery<{ workspace_id: string }>(
+    `SELECT DISTINCT workspace_id FROM memories WHERE id IN (${placeholders})`,
+    ids,
+  );
+  for (const ws of wsRows) {
+    invalidateMemory(ws.workspace_id);
+  }
+
+  res.json({ affected: result.rowCount, action });
 });
 
 export default router;

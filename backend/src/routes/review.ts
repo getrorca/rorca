@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
@@ -98,7 +98,7 @@ function findSpecFile(workspacePath: string, specId: string): string | null {
  *       400: { description: "Missing workspaceId" }
  *       404: { description: "Workspace or spec not found" }
  */
-specReviewRouter.post('/:specId/review-link', (req: Request, res: Response) => {
+specReviewRouter.post('/:specId/review-link', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const { workspaceId } = req.body;
@@ -108,8 +108,10 @@ specReviewRouter.post('/:specId/review-link', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?')
-      .get(workspaceId) as WorkspaceRow | undefined;
+    const workspace = await queryOne<WorkspaceRow>(
+      'SELECT id, label, path FROM workspaces WHERE id = $1',
+      [workspaceId]
+    );
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -121,27 +123,29 @@ specReviewRouter.post('/:specId/review-link', (req: Request, res: Response) => {
       return;
     }
 
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     const rawToken = crypto.randomUUID();
     const tokenHash = hashToken(rawToken);
     const id = crypto.randomUUID();
 
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
-    db.prepare(`
-      INSERT INTO review_tokens (id, token_hash, spec_id, workspace_id, created_by, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, tokenHash, specId, workspaceId, user?.id ?? null, expiresAt);
+    await execute(
+      `INSERT INTO review_tokens (id, token_hash, spec_id, workspace_id, created_by, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, tokenHash, specId, workspaceId, user?.id ?? null, expiresAt]
+    );
 
     // Emit WAL event
-    const walResult = db.prepare(`
-      INSERT INTO wal_events (ts, event_type, spec_id, workspace_id, actor, payload)
-      VALUES (datetime('now'), 'review_link_created', ?, ?, ?, ?)
-    `).run(specId, workspaceId, user?.email ?? 'system', JSON.stringify({ tokenId: id }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    const walRow = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (ts, event_type, spec_id, workspace_id, actor, payload)
+       VALUES (NOW(), 'review_link_created', $1, $2, $3, $4)
+       RETURNING *`,
+      [specId, workspaceId, user?.email ?? 'system', JSON.stringify({ tokenId: id })]
+    );
+    if (walRow) {
+      broadcastAll(walRow);
+    }
 
     // Build URL from request origin
     const origin = req.headers.origin
@@ -215,14 +219,15 @@ specReviewRouter.post('/:specId/review-link', (req: Request, res: Response) => {
  *       404: { description: "Invalid review token" }
  *       410: { description: "Review link has expired" }
  */
-publicReviewRouter.get('/:token', (req: Request, res: Response) => {
+publicReviewRouter.get('/:token', async (req: Request, res: Response) => {
   try {
     const token = req.params.token as string;
     const tokenHash = hashToken(token);
 
-    const tokenRow = db.prepare(
-      'SELECT * FROM review_tokens WHERE token_hash = ?'
-    ).get(tokenHash) as ReviewTokenRow | undefined;
+    const tokenRow = await queryOne<ReviewTokenRow>(
+      'SELECT * FROM review_tokens WHERE token_hash = $1',
+      [tokenHash]
+    );
 
     if (!tokenRow) {
       res.status(404).json({ error: 'Invalid review link' });
@@ -234,8 +239,10 @@ publicReviewRouter.get('/:token', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?')
-      .get(tokenRow.workspace_id) as WorkspaceRow | undefined;
+    const workspace = await queryOne<WorkspaceRow>(
+      'SELECT id, label, path FROM workspaces WHERE id = $1',
+      [tokenRow.workspace_id]
+    );
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -250,15 +257,16 @@ publicReviewRouter.get('/:token', (req: Request, res: Response) => {
     const specContent = JSON.parse(fs.readFileSync(specFile, 'utf8'));
     const stories = specContent.userStories ?? specContent.stories ?? [];
 
-    const comments = db.prepare(`
-      SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
+    const comments = await query<StoryCommentRow>(
+      `SELECT sc.id, sc.spec_id, sc.story_id, sc.user_id, sc.body,
              sc.created_at, sc.resolved_at, sc.author_name,
              u.display_name, u.avatar_url
       FROM story_comments sc
       LEFT JOIN users u ON u.id = sc.user_id
-      WHERE sc.spec_id = ?
-      ORDER BY sc.created_at ASC
-    `).all(tokenRow.spec_id) as StoryCommentRow[];
+      WHERE sc.spec_id = $1
+      ORDER BY sc.created_at ASC`,
+      [tokenRow.spec_id]
+    );
 
     const commentsByStory: Record<string, StoryCommentRow[]> = {};
     for (const c of comments) {
@@ -326,7 +334,7 @@ publicReviewRouter.get('/:token', (req: Request, res: Response) => {
  *       404: { description: "Invalid review token" }
  *       410: { description: "Review link has expired" }
  */
-publicReviewRouter.post('/:token/comments', (req: Request, res: Response) => {
+publicReviewRouter.post('/:token/comments', async (req: Request, res: Response) => {
   try {
     const token = req.params.token as string;
     const { storyId, body, authorName } = req.body;
@@ -337,9 +345,10 @@ publicReviewRouter.post('/:token/comments', (req: Request, res: Response) => {
       return;
     }
 
-    const tokenRow = db.prepare(
-      'SELECT * FROM review_tokens WHERE token_hash = ?'
-    ).get(tokenHash) as ReviewTokenRow | undefined;
+    const tokenRow = await queryOne<ReviewTokenRow>(
+      'SELECT * FROM review_tokens WHERE token_hash = $1',
+      [tokenHash]
+    );
 
     if (!tokenRow) {
       res.status(404).json({ error: 'Invalid review link' });
@@ -356,25 +365,24 @@ publicReviewRouter.post('/:token/comments', (req: Request, res: Response) => {
       ? authorName.trim()
       : 'Guest';
 
-    db.prepare(`
-      INSERT INTO story_comments (id, spec_id, story_id, user_id, body, author_name)
-      VALUES (?, ?, ?, NULL, ?, ?)
-    `).run(id, tokenRow.spec_id, storyId, body.trim(), guestName);
+    await execute(
+      `INSERT INTO story_comments (id, spec_id, story_id, user_id, body, author_name)
+       VALUES ($1, $2, $3, NULL, $4, $5)`,
+      [id, tokenRow.spec_id, storyId, body.trim(), guestName]
+    );
 
     // Emit WAL event
-    const walResult = db.prepare(`
-      INSERT INTO wal_events (ts, event_type, spec_id, story_id, actor, payload)
-      VALUES (datetime('now'), 'review_comment_added', ?, ?, ?, ?)
-    `).run(tokenRow.spec_id, storyId, guestName, JSON.stringify({ commentId: id, authorName: guestName }));
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    const walRow = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (ts, event_type, spec_id, story_id, actor, payload)
+       VALUES (NOW(), 'review_comment_added', $1, $2, $3, $4)
+       RETURNING *`,
+      [tokenRow.spec_id, storyId, guestName, JSON.stringify({ commentId: id, authorName: guestName })]
+    );
+    if (walRow) {
+      broadcastAll(walRow);
+    }
 
-    const comment = db.prepare(`
-      SELECT id, spec_id, story_id, user_id, body, created_at, resolved_at, author_name
-      FROM story_comments WHERE id = ?
-    `).get(id) as {
+    const comment = await queryOne<{
       id: string;
       spec_id: string;
       story_id: string;
@@ -383,7 +391,11 @@ publicReviewRouter.post('/:token/comments', (req: Request, res: Response) => {
       created_at: string;
       resolved_at: string | null;
       author_name: string | null;
-    };
+    }>(
+      `SELECT id, spec_id, story_id, user_id, body, created_at, resolved_at, author_name
+       FROM story_comments WHERE id = $1`,
+      [id]
+    );
 
     res.status(201).json({
       ...comment,
@@ -438,7 +450,7 @@ publicReviewRouter.post('/:token/comments', (req: Request, res: Response) => {
  *                 review_type: { type: string, nullable: true }
  *       400: { description: "Missing spec_id, story_id, or body" }
  */
-publicReviewRouter.post('/comment', (req: Request, res: Response) => {
+publicReviewRouter.post('/comment', async (req: Request, res: Response) => {
   try {
     const { spec_id, story_id, body, author_name, review_persona, review_type } = req.body;
 
@@ -450,17 +462,18 @@ publicReviewRouter.post('/comment', (req: Request, res: Response) => {
     const id = crypto.randomUUID();
     const displayName = (author_name && typeof author_name === 'string') ? author_name.trim() : 'Review Agent';
 
-    db.prepare(`
-      INSERT INTO story_comments (id, spec_id, story_id, user_id, body, author_name, review_persona, review_type)
-      VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
-    `).run(
-      id,
-      spec_id,
-      story_id,
-      body.trim(),
-      displayName,
-      review_persona ?? null,
-      review_type ?? null,
+    await execute(
+      `INSERT INTO story_comments (id, spec_id, story_id, user_id, body, author_name, review_persona, review_type)
+       VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)`,
+      [
+        id,
+        spec_id,
+        story_id,
+        body.trim(),
+        displayName,
+        review_persona ?? null,
+        review_type ?? null,
+      ]
     );
 
     res.status(201).json({ id, spec_id, story_id, author_name: displayName, review_persona, review_type });

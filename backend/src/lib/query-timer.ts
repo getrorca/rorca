@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { query } from '../db/index';
 import { logger } from './logger';
 
 const SLOW_QUERY_THRESHOLD_MS = 100;
@@ -6,8 +7,7 @@ const SLOW_QUERY_THRESHOLD_MS = 100;
 /**
  * V2-099: Database query timing middleware.
  * Logs requests where the total handler time exceeds 100ms.
- * This captures slow DB queries indirectly (since better-sqlite3 is synchronous,
- * handler time ≈ DB query time for DB-heavy endpoints).
+ * This captures slow DB queries indirectly via total request duration.
  */
 export function queryTimerMiddleware(req: Request, res: Response, next: NextFunction): void {
   const start = performance.now();
@@ -42,70 +42,72 @@ export function queryTimerMiddleware(req: Request, res: Response, next: NextFunc
 }
 
 /**
- * V2-099: EXPLAIN QUERY PLAN audit for common queries.
- * Run at startup to verify no full table scans exist for hot paths.
- * Returns audit results — logs warnings for SCAN operations.
+ * V2-099: EXPLAIN audit for common queries.
+ * Run at startup to verify no sequential scans exist for hot paths.
+ * Returns audit results — logs warnings for Seq Scan operations.
+ *
+ * Uses the pg Pool from db/index (no parameter needed).
  */
-export function runQueryPlanAudit(db: import('better-sqlite3').Database): {
+export async function runQueryPlanAudit(): Promise<{
   query: string;
   plan: string;
   hasScan: boolean;
-}[] {
+}[]> {
   const queries = [
     // Pipeline runs: conflict check (workspace_id + status)
     {
       label: 'pipeline_runs: conflict check',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM pipeline_runs WHERE workspace_id = 'ws1' AND status IN ('running', 'paused') LIMIT 1`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM pipeline_runs WHERE workspace_id = 'ws1' AND status IN ('running', 'paused') LIMIT 1`,
     },
     // Pipeline runs: list by workspace
     {
       label: 'pipeline_runs: list by workspace',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM pipeline_runs WHERE workspace_id = 'ws1' ORDER BY id DESC LIMIT 50`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM pipeline_runs WHERE workspace_id = 'ws1' ORDER BY id DESC LIMIT 50`,
     },
     // Story results: by run_id
     {
       label: 'story_results: by run_id',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM story_results WHERE run_id = 1 ORDER BY id ASC`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM story_results WHERE run_id = 1 ORDER BY id ASC`,
     },
     // Story results: by run_id + story_id
     {
       label: 'story_results: by run_id + story_id',
-      sql: `EXPLAIN QUERY PLAN SELECT id FROM story_results WHERE run_id = 1 AND story_id = 'V2-001' ORDER BY id DESC LIMIT 1`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT id FROM story_results WHERE run_id = 1 AND story_id = 'V2-001' ORDER BY id DESC LIMIT 1`,
     },
     // WAL events: SSE polling (id > last_seen, common event types)
     {
       label: 'wal_events: SSE poll (id > N)',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM wal_events WHERE id > 0 AND event_type IN ('story_started','story_passed','story_failed','run_started','run_finished') ORDER BY id ASC LIMIT 50`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM wal_events WHERE id > 0 AND event_type IN ('story_started','story_passed','story_failed','run_started','run_finished') ORDER BY id ASC LIMIT 50`,
     },
     // WAL events: by workspace_id
     {
       label: 'wal_events: filter by workspace_id',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM wal_events WHERE workspace_id = 'ws1' ORDER BY id DESC LIMIT 50`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM wal_events WHERE workspace_id = 'ws1' ORDER BY id DESC LIMIT 50`,
     },
     // WAL events: rejected specs
     {
       label: 'wal_events: rejected spec lookup',
-      sql: `EXPLAIN QUERY PLAN SELECT spec_id, ts, payload FROM wal_events WHERE event_type = 'spec_rejected' AND payload LIKE '%ws1%' ORDER BY ts DESC`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT spec_id, ts, payload FROM wal_events WHERE event_type = 'spec_rejected' AND payload::text LIKE '%ws1%' ORDER BY ts DESC`,
     },
     // Token usage: by run_id
     {
       label: 'token_usage: by run_id',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM token_usage WHERE run_id = 1`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM token_usage WHERE run_id = 1`,
     },
     // Token usage: by workspace_id
     {
       label: 'token_usage: by workspace_id',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM token_usage WHERE workspace_id = 'ws1'`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM token_usage WHERE workspace_id = 'ws1'`,
     },
     // Spec versions: by slug
     {
       label: 'spec_versions: by slug',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM spec_versions WHERE spec_slug = 'my-spec'`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM spec_versions WHERE spec_slug = 'my-spec'`,
     },
     // Notifications: by user_id unread
     {
       label: 'notifications: unread by user',
-      sql: `EXPLAIN QUERY PLAN SELECT * FROM notifications WHERE user_id = 'u1' AND is_read = 0 ORDER BY created_at DESC`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM notifications WHERE user_id = 'u1' AND is_read = false ORDER BY created_at DESC`,
     },
   ];
 
@@ -113,13 +115,13 @@ export function runQueryPlanAudit(db: import('better-sqlite3').Database): {
 
   for (const { label, sql } of queries) {
     try {
-      const rows = db.prepare(sql).all() as { detail: string }[];
-      const plan = rows.map(r => r.detail).join('\n');
-      // SCAN TABLE = full table scan (bad). SEARCH TABLE = index scan (good).
-      const hasScan = plan.includes('SCAN TABLE') || plan.includes('SCAN wal_events') || plan.includes('SCAN pipeline_runs') || plan.includes('SCAN story_results');
+      const rows = await query<{ 'QUERY PLAN': string }>(sql);
+      const plan = rows.map(r => r['QUERY PLAN']).join('\n');
+      // Seq Scan = sequential scan (PostgreSQL equivalent of SQLite's SCAN TABLE)
+      const hasScan = plan.includes('Seq Scan');
 
       if (hasScan) {
-        logger.warn(`[QueryAudit] ⚠ FULL TABLE SCAN detected: ${label}\n  Plan: ${plan}`);
+        logger.warn(`[QueryAudit] FULL TABLE SCAN detected: ${label}\n  Plan: ${plan}`);
       }
 
       results.push({ query: label, plan, hasScan });

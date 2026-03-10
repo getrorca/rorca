@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -17,7 +17,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -71,18 +70,12 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-stories-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  // Seed workspace
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test Workspace', ?)"
-  ).run(tmpDir);
+// Seed workspace
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test Workspace', $1)`, [tmpDir]);
 
   // Create spec files on disk
   const pendingDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending');
@@ -97,10 +90,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 test('GET /api/stories/search without q returns 400', async () => {
@@ -202,9 +193,7 @@ test('pagination works correctly', async () => {
 test('search across all workspaces when workspaceId is omitted', async () => {
   // Add a second workspace
   const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-stories-ws2-'));
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES ('ws-test-2', 'Second Workspace', ?)"
-  ).run(tmpDir2);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test-2', 'Second Workspace', $1)`, [tmpDir2]);
 
   const pendingDir2 = path.join(tmpDir2, 'scripts', 'ralph', 'specs', 'pending');
   fs.mkdirSync(pendingDir2, { recursive: true });
@@ -235,9 +224,7 @@ test('search across all workspaces when workspaceId is omitted', async () => {
 
 test('filter by tags narrows results', async () => {
   // Add a tag to user-auth spec
-  db.prepare(
-    "INSERT INTO spec_tags (spec_id, workspace_id, tag_name) VALUES ('user-auth', 'ws-test', 'security')"
-  ).run();
+  await execute(`INSERT INTO spec_tags (spec_id, workspace_id, tag_name) VALUES ('user-auth', 'ws-test', 'security')`);
 
   const res = await request(app)
     .get('/api/stories/search?q=user&workspaceId=ws-test&tags=security')

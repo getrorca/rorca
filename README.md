@@ -35,13 +35,13 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 └───────────┬──────────────────────┬──────────────────────┘
             │                      │
     ┌───────▼──────┐    ┌──────────▼───────────────────────┐
-    │ SQLite (WAL) │    │  Execution Engine                 │
-    │ rorca.db     │    │  ├── claude --print  (Claude sub) │
+    │ PostgreSQL   │    │  Execution Engine                 │
+    │ 16 + pgvec   │    │  ├── claude --print  (Claude sub) │
     │              │    │  └── opencode run    (75+ models) │
     └──────────────┘    └──────────────────────────────────┘
 ```
 
-**Backend**: Express.js + SQLite (`better-sqlite3`, WAL mode)
+**Backend**: Express.js + PostgreSQL 16 (`pg` Pool, async, pgvector, Apache AGE)
 **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS
 **Execution**: Two first-class paths — `claude --print` (Claude subscription) or `opencode run` (75+ models via API key)
 **MCP**: 5 tools that expose Rorca to Claude Code for in-session spec generation
@@ -71,7 +71,7 @@ docker compose up
 - **Dashboard**: http://localhost:5210
 - **API**: http://localhost:3030/api/health
 
-SQLite data persists in the `rorca-data` Docker volume across restarts.
+PostgreSQL data persists in the `rorca-pgdata` Docker volume across restarts.
 
 To pass your API key or configure the execution engine:
 
@@ -310,7 +310,7 @@ Rorca can register its own repository as a workspace and generate specs for its 
 npm run self-register
 ```
 
-This registers `~/rorca/` in Rorca's SQLite database, seeds the Direction Stack with Rorca's own architecture context, and verifies the full loop end-to-end on Rorca's own codebase.
+This registers `~/rorca/` in Rorca's PostgreSQL database, seeds the Direction Stack with Rorca's own architecture context, and verifies the full loop end-to-end on Rorca's own codebase.
 
 ---
 
@@ -331,8 +331,7 @@ rorca/
 │   │   ├── lib/              # Core services (see below)
 │   │   ├── mcp/              # MCP stdio server
 │   │   └── db/
-│   │       └── migrations/   # SQLite migration files
-│   └── rorca.db             # SQLite database (auto-created)
+│   │       └── pg-migrations/ # PostgreSQL migration files
 └── scripts/
     └── self-register.ts      # Self-hosting bootstrap
 ```
@@ -415,7 +414,7 @@ A 45-minute per-story timeout is enforced via `gtimeout --foreground` (macOS: `b
 
 ### Database
 
-SQLite at `backend/rorca.db`, auto-created on first run. Tables:
+PostgreSQL 16 with pgvector + Apache AGE extensions. Connection via `DATABASE_URL` env var (default: `postgres://rorca:rorca@localhost:5432/rorca`). Tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -425,8 +424,9 @@ SQLite at `backend/rorca.db`, auto-created on first run. Tables:
 | `story_results` | Per-story pass/fail/skip outcomes |
 | `wal_events` | Event log (spec_generated, approved, run_started, story_passed, etc.) |
 | `workspace_context` | Cached git memory and schema snapshots |
+| `embeddings` | Vector embeddings for hybrid search (pgvector) |
 
-WAL mode and foreign key constraints are enabled on every connection.
+Connection pooling: max 20, 30s idle timeout, 5s connection timeout. FK constraints always on.
 
 ---
 

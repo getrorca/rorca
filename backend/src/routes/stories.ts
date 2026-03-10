@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
 
@@ -45,10 +45,11 @@ function safeReaddir(dir: string): string[] {
   }
 }
 
-function getSpecTags(specId: string, workspaceId: string): string[] {
-  const rows = db.prepare(
-    'SELECT tag_name FROM spec_tags WHERE spec_id = ? AND workspace_id = ? ORDER BY tag_name'
-  ).all(specId, workspaceId) as { tag_name: string }[];
+async function getSpecTags(specId: string, workspaceId: string): Promise<string[]> {
+  const rows = await query<{ tag_name: string }>(
+    'SELECT tag_name FROM spec_tags WHERE spec_id = $1 AND workspace_id = $2 ORDER BY tag_name',
+    [specId, workspaceId]
+  );
   return rows.map(r => r.tag_name);
 }
 
@@ -95,7 +96,7 @@ function getSpecTags(specId: string, workspaceId: string): string[] {
  *                 hasMore: { type: boolean }
  *       400: { description: "Missing q parameter" }
  */
-router.get('/search', (req: Request, res: Response) => {
+router.get('/search', async (req: Request, res: Response) => {
   try {
     const q = (req.query.q as string || '').trim();
     const workspaceId = req.query.workspaceId as string | undefined;
@@ -111,14 +112,14 @@ router.get('/search', (req: Request, res: Response) => {
     // Determine which workspaces to search
     let workspaces: WorkspaceRow[];
     if (workspaceId) {
-      const ws = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?').get(workspaceId) as WorkspaceRow | undefined;
+      const ws = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
       if (!ws) {
         res.status(404).json({ error: 'Workspace not found' });
         return;
       }
       workspaces = [ws];
     } else {
-      workspaces = db.prepare('SELECT id, label, path FROM workspaces ORDER BY label').all() as WorkspaceRow[];
+      workspaces = await query<WorkspaceRow>('SELECT id, label, path FROM workspaces ORDER BY label', []);
     }
 
     const lowerQ = q.toLowerCase();
@@ -145,7 +146,7 @@ router.get('/search', (req: Request, res: Response) => {
             const specTitle = content.title ?? specId;
             const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
 
-            const specTags = getSpecTags(specId, ws.id);
+            const specTags = await getSpecTags(specId, ws.id);
 
             // Apply tag filter at spec level
             if (filterTags.length > 0) {

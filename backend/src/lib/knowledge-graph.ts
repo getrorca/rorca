@@ -1,0 +1,723 @@
+/**
+ * PG-015: Knowledge Graph — Apache AGE Cypher bridge for Rorca
+ *
+ * Provides typed wrappers around Apache AGE Cypher queries executed via
+ * PostgreSQL's SQL/Cypher bridge:
+ *
+ *   SELECT * FROM cypher('rorca', $$ MATCH ... RETURN ... $$) AS (col agtype)
+ *
+ * All queries are parameterized. The graph is additive (append-only) —
+ * historical edges are preserved for temporal analysis.
+ *
+ * PG-019: Graceful degradation when Apache AGE is unavailable.
+ * On managed Postgres services (Supabase, Neon), AGE is not installed.
+ * All graph functions check `isGraphAvailable()` and return empty results
+ * gracefully when AGE is missing. Core functionality (search, memory,
+ * CAG/RAG) works without the graph layer.
+ */
+
+import { pool, query } from '../db/index';
+import { logger } from './logger';
+import type { PoolClient } from 'pg';
+
+// ── Graph Availability Flag ─────────────────────────────────────────────────
+
+/**
+ * PG-019: Track whether Apache AGE is available on this Postgres instance.
+ * Checked once on first graph operation, then cached.
+ *   - `null` = not yet checked
+ *   - `true` = AGE available
+ *   - `false` = AGE unavailable (managed service without AGE)
+ */
+let _graphAvailable: boolean | null = null;
+
+/**
+ * Check if Apache AGE is available on the current Postgres instance.
+ * Result is cached after first successful check.
+ */
+export async function isGraphAvailable(): Promise<boolean> {
+  if (_graphAvailable !== null) return _graphAvailable;
+
+  try {
+    const result = await pool.query<{ extname: string }>(
+      "SELECT extname FROM pg_extension WHERE extname = 'age'"
+    );
+    _graphAvailable = result.rows.length > 0;
+
+    if (!_graphAvailable) {
+      logger.warn(
+        '[knowledge-graph] Apache AGE not available — graph features disabled. ' +
+        'Use self-hosted Postgres for full graph support.'
+      );
+    }
+  } catch {
+    _graphAvailable = false;
+    logger.warn('[knowledge-graph] Could not check AGE extension — graph features disabled');
+  }
+
+  return _graphAvailable;
+}
+
+/**
+ * Reset the cached graph availability flag.
+ * Useful after extension installation or for testing.
+ */
+export function resetGraphAvailability(): void {
+  _graphAvailable = null;
+}
+
+// ── agtype Parsing ──────────────────────────────────────────────────────────
+
+/**
+ * Parse an Apache AGE agtype value into a JavaScript value.
+ * AGE returns results as agtype — a JSON-like string with type suffixes.
+ *
+ * Examples:
+ *   "hello"::agtype  → "hello"
+ *   42::agtype        → 42
+ *   {"id": "US-001", "title": "..."}::vertex → { id: "US-001", title: "..." }
+ */
+export function parseAgtype<T = unknown>(value: unknown): T {
+  if (value === null || value === undefined) return null as T;
+
+  // AGE returns agtype as a string in the pg driver
+  if (typeof value === 'string') {
+    // Strip trailing ::vertex, ::edge, ::path suffixes if present
+    const cleaned = value
+      .replace(/::vertex$/i, '')
+      .replace(/::edge$/i, '')
+      .replace(/::path$/i, '');
+    try {
+      return JSON.parse(cleaned) as T;
+    } catch {
+      // If it's a simple scalar string wrapped in quotes
+      if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+        return cleaned.slice(1, -1) as unknown as T;
+      }
+      return cleaned as unknown as T;
+    }
+  }
+
+  // Already parsed (shouldn't happen with pg driver but handle gracefully)
+  return value as T;
+}
+
+/**
+ * Parse a row of agtype columns into typed values.
+ */
+function parseAgtypeRow<T>(row: Record<string, unknown>): T {
+  const parsed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    parsed[key] = parseAgtype(value);
+  }
+  return parsed as T;
+}
+
+// ── Session Setup ───────────────────────────────────────────────────────────
+
+/**
+ * AGE requires LOAD 'age' and SET search_path per connection/session.
+ * This must be called before any Cypher query on a given client.
+ */
+async function setupAgeSession(client: PoolClient): Promise<void> {
+  await client.query("LOAD 'age'");
+  await client.query("SET search_path = ag_catalog, \"$user\", public");
+}
+
+// ── Cypher Query Helper ─────────────────────────────────────────────────────
+
+interface CypherColumn {
+  name: string;
+  type: string; // 'agtype' for all AGE columns
+}
+
+/**
+ * Execute a Cypher query against the 'rorca' graph.
+ *
+ * @param cypher - Cypher query string (parameterize with $param syntax)
+ * @param returnColumns - Column definitions for the RETURN clause
+ * @param params - Optional parameters passed to the Cypher query
+ *
+ * @example
+ * ```ts
+ * const rows = await cypherQuery(
+ *   "MATCH (s:Story {id: 'US-001'})-[:TOUCHES]->(f:File) RETURN f.path",
+ *   [{ name: 'path', type: 'agtype' }]
+ * );
+ * ```
+ */
+async function cypherQuery<T = Record<string, unknown>>(
+  cypher: string,
+  returnColumns: CypherColumn[],
+): Promise<T[]> {
+  const columnDef = returnColumns.map(c => `${c.name} ${c.type}`).join(', ');
+  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (${columnDef})`;
+
+  const p = pool;
+  const client = await p.connect();
+  try {
+    await setupAgeSession(client);
+    const result = await client.query(sql);
+    return result.rows.map(row => parseAgtypeRow<T>(row));
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Execute a Cypher mutation (MERGE/CREATE) that returns no results.
+ */
+async function cypherMutate(cypher: string): Promise<void> {
+  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (v agtype)`;
+
+  const p = pool;
+  const client = await p.connect();
+  try {
+    await setupAgeSession(client);
+    await client.query(sql);
+  } finally {
+    client.release();
+  }
+}
+
+// ── Escape Helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Escape a string value for use in Cypher property maps.
+ * Prevents Cypher injection by escaping single quotes and backslashes.
+ */
+function escCypher(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'");
+}
+
+// ── Node Operations ─────────────────────────────────────────────────────────
+
+export interface StoryNode {
+  id: string;
+  specId: string;
+  title: string;
+  status: string;
+}
+
+export interface FileNode {
+  path: string;
+  workspace_id: string;
+}
+
+export interface MemoryNode {
+  id: string;
+  category: string;
+  created_at: string;
+}
+
+export interface SpecNode {
+  id: string;
+  title: string;
+  status: string;
+  workspace_id: string;
+}
+
+export interface ConventionNode {
+  name: string;
+  source: string;
+  layer: string;
+}
+
+export interface WorkspaceNode {
+  id: string;
+  label: string;
+}
+
+export interface SkillNode {
+  name: string;
+  source: string;
+}
+
+/**
+ * Add or update a Story vertex in the knowledge graph.
+ * Uses MERGE to be idempotent.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addStoryNode(story: StoryNode): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (s:Story {id: '${escCypher(story.id)}'})
+    SET s.specId = '${escCypher(story.specId)}',
+        s.title = '${escCypher(story.title)}',
+        s.status = '${escCypher(story.status)}'
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ storyId: story.id }, '[knowledge-graph] Story node upserted');
+}
+
+/**
+ * Add a File vertex (if not exists) and create a TOUCHES edge from a Story.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addFileTouch(storyId: string, filePath: string, workspaceId?: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const wsId = workspaceId || '';
+  const cypher = `
+    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (f:File {path: '${escCypher(filePath)}'})
+    ON CREATE SET f.workspace_id = '${escCypher(wsId)}'
+    MERGE (s)-[:TOUCHES]->(f)
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ storyId, filePath }, '[knowledge-graph] File touch edge added');
+}
+
+/**
+ * Link a Memory entry to the Story that produced it.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addMemoryLink(memoryId: string, storyId: string, category?: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cat = category || '';
+  const cypher = `
+    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
+    ON CREATE SET m.category = '${escCypher(cat)}',
+                  m.created_at = '${new Date().toISOString()}'
+    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (m)-[:LEARNED_FROM]->(s)
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ memoryId, storyId }, '[knowledge-graph] Memory link added');
+}
+
+/**
+ * Link a Memory entry to a specific File it references.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addMemoryAboutFile(memoryId: string, filePath: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
+    MERGE (f:File {path: '${escCypher(filePath)}'})
+    MERGE (m)-[:ABOUT]->(f)
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ memoryId, filePath }, '[knowledge-graph] Memory-about-file edge added');
+}
+
+/**
+ * Link a Convention to a File pattern it governs.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addConventionLink(conventionName: string, filePath: string, source?: string, layer?: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (c:Convention {name: '${escCypher(conventionName)}'})
+    ON CREATE SET c.source = '${escCypher(source || '')}',
+                  c.layer = '${escCypher(layer || '')}'
+    MERGE (f:File {path: '${escCypher(filePath)}'})
+    MERGE (c)-[:APPLIES_TO]->(f)
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ conventionName, filePath }, '[knowledge-graph] Convention link added');
+}
+
+/**
+ * Mark a Convention as violated by a Story.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addConventionViolation(conventionName: string, storyId: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (c:Convention {name: '${escCypher(conventionName)}'})
+    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (c)-[:VIOLATED_BY]->(s)
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ conventionName, storyId }, '[knowledge-graph] Convention violation edge added');
+}
+
+/**
+ * Track which Skill was injected/used in a Story.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addSkillUsage(skillName: string, storyId: string, source?: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (sk:Skill {name: '${escCypher(skillName)}'})
+    ON CREATE SET sk.source = '${escCypher(source || '')}'
+    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (sk)-[:USED_IN]->(s)
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ skillName, storyId }, '[knowledge-graph] Skill usage edge added');
+}
+
+/**
+ * Add Spec node and link it to a Workspace.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addSpecNode(spec: SpecNode): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (sp:Spec {id: '${escCypher(spec.id)}'})
+    SET sp.title = '${escCypher(spec.title)}',
+        sp.status = '${escCypher(spec.status)}',
+        sp.workspace_id = '${escCypher(spec.workspace_id)}'
+    MERGE (w:Workspace {id: '${escCypher(spec.workspace_id)}'})
+    MERGE (sp)-[:IN_WORKSPACE]->(w)
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ specId: spec.id }, '[knowledge-graph] Spec node upserted');
+}
+
+/**
+ * Add Story BELONGS_TO Spec edge.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addStoryToSpec(storyId: string, specId: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (sp:Spec {id: '${escCypher(specId)}'})
+    MERGE (s)-[:BELONGS_TO]->(sp)
+  `;
+  await cypherMutate(cypher);
+}
+
+/**
+ * Add Story DEPENDS_ON Story edges from the spec JSON dependsOn field.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addStoryDependency(storyId: string, dependsOnId: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (d:Story {id: '${escCypher(dependsOnId)}'})
+    MERGE (s)-[:DEPENDS_ON]->(d)
+  `;
+  await cypherMutate(cypher);
+}
+
+// ── Query Operations ────────────────────────────────────────────────────────
+
+export type NodeType = 'Story' | 'File' | 'Memory' | 'Spec' | 'Convention' | 'Workspace' | 'Skill';
+export type EdgeType = 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON' | 'LEARNED_FROM' | 'ABOUT' | 'APPLIES_TO' | 'VIOLATED_BY' | 'USED_IN' | 'IN_WORKSPACE';
+
+export interface CypherResult {
+  id: unknown;
+  label: string;
+  properties: Record<string, unknown>;
+}
+
+/**
+ * Query nodes related to a given node, optionally filtering by edge types and depth.
+ *
+ * @param nodeType - The label of the starting node
+ * @param nodeId - The `id` (or `path`/`name`) property of the starting node
+ * @param depth - Max traversal depth (default 1)
+ * @param edgeTypes - Optional list of edge types to traverse
+ */
+export async function queryRelated(
+  nodeType: NodeType,
+  nodeId: string,
+  depth: number = 1,
+  edgeTypes?: EdgeType[],
+): Promise<CypherResult[]> {
+  if (!(await isGraphAvailable())) return [];
+  // Build the relationship pattern
+  const edgeFilter = edgeTypes && edgeTypes.length > 0
+    ? `:${edgeTypes.join('|')}`
+    : '';
+
+  // Determine the ID property name based on node type
+  const idProp = nodeType === 'File' ? 'path' : nodeType === 'Convention' || nodeType === 'Skill' ? 'name' : 'id';
+
+  const cypher = `
+    MATCH (start:${nodeType} {${idProp}: '${escCypher(nodeId)}'})
+          -[${edgeFilter} *1..${depth}]-
+          (related)
+    RETURN DISTINCT related
+  `;
+
+  try {
+    const rows = await cypherQuery<{ related: unknown }>(
+      cypher,
+      [{ name: 'related', type: 'agtype' }],
+    );
+
+    return rows.map(row => {
+      const val = row.related as Record<string, unknown>;
+      const props = (val?.properties as Record<string, unknown>) || {};
+      return {
+        id: val?.id ?? props.id ?? null,
+        label: (val?.label as string) || '',
+        properties: props,
+      };
+    });
+  } catch (err) {
+    logger.error({ err, nodeType, nodeId }, '[knowledge-graph] queryRelated failed');
+    return [];
+  }
+}
+
+// ── Impact Query ────────────────────────────────────────────────────────────
+
+export interface ImpactResult {
+  stories: Array<{ id: string; title: string; specId: string }>;
+  specs: Array<{ id: string; title: string }>;
+  conventions: Array<{ name: string; source: string }>;
+}
+
+/**
+ * Fan-out query: find all stories, specs, and conventions connected to a file path.
+ * Useful for understanding the blast radius of changes to a file.
+ */
+export async function queryImpact(filePath: string): Promise<ImpactResult> {
+  const result: ImpactResult = {
+    stories: [],
+    specs: [],
+    conventions: [],
+  };
+
+  if (!(await isGraphAvailable())) return result;
+
+  try {
+    // Stories that touch this file
+    const storyRows = await cypherQuery<{ id: unknown; title: unknown; specId: unknown }>(
+      `MATCH (s:Story)-[:TOUCHES]->(f:File {path: '${escCypher(filePath)}'})
+       RETURN s.id, s.title, s.specId`,
+      [
+        { name: 'id', type: 'agtype' },
+        { name: 'title', type: 'agtype' },
+        { name: 'specId', type: 'agtype' },
+      ],
+    );
+    result.stories = storyRows.map(r => ({
+      id: String(parseAgtype(r.id) ?? ''),
+      title: String(parseAgtype(r.title) ?? ''),
+      specId: String(parseAgtype(r.specId) ?? ''),
+    }));
+
+    // Specs connected through stories that touch this file
+    const specRows = await cypherQuery<{ id: unknown; title: unknown }>(
+      `MATCH (s:Story)-[:TOUCHES]->(f:File {path: '${escCypher(filePath)}'})
+       MATCH (s)-[:BELONGS_TO]->(sp:Spec)
+       RETURN DISTINCT sp.id, sp.title`,
+      [
+        { name: 'id', type: 'agtype' },
+        { name: 'title', type: 'agtype' },
+      ],
+    );
+    result.specs = specRows.map(r => ({
+      id: String(parseAgtype(r.id) ?? ''),
+      title: String(parseAgtype(r.title) ?? ''),
+    }));
+
+    // Conventions that apply to this file
+    const convRows = await cypherQuery<{ name: unknown; source: unknown }>(
+      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File {path: '${escCypher(filePath)}'})
+       RETURN c.name, c.source`,
+      [
+        { name: 'name', type: 'agtype' },
+        { name: 'source', type: 'agtype' },
+      ],
+    );
+    result.conventions = convRows.map(r => ({
+      name: String(parseAgtype(r.name) ?? ''),
+      source: String(parseAgtype(r.source) ?? ''),
+    }));
+  } catch (err) {
+    logger.error({ err, filePath }, '[knowledge-graph] queryImpact failed');
+  }
+
+  return result;
+}
+
+// ── Bulk Population from WAL Events ─────────────────────────────────────────
+
+/**
+ * Populate graph from a completed run:
+ * - Parse story_commits for file paths → Story-[:TOUCHES]->File edges
+ * - Parse spec JSON for dependsOn → Story-[:DEPENDS_ON]->Story edges
+ * - Create Story-[:BELONGS_TO]->Spec edges
+ * - Create Spec-[:IN_WORKSPACE]->Workspace edges
+ */
+export async function populateFromRun(
+  runId: number,
+  specId: string,
+  workspaceId: string,
+): Promise<{ nodesCreated: number; edgesCreated: number }> {
+  let nodesCreated = 0;
+  let edgesCreated = 0;
+
+  if (!(await isGraphAvailable())) return { nodesCreated, edgesCreated };
+
+  try {
+    // 1. Get story results for this run
+    const storyResults = await query<{
+      story_id: string;
+      status: string;
+    }>(
+      'SELECT story_id, status FROM story_results WHERE run_id = $1',
+      [runId],
+    );
+
+    if (storyResults.length === 0) {
+      logger.debug({ runId }, '[knowledge-graph] No story results for run');
+      return { nodesCreated, edgesCreated };
+    }
+
+    // 2. Add spec node
+    await addSpecNode({
+      id: specId,
+      title: specId, // We use the slug as title since we don't have the human title here
+      status: 'completed',
+      workspace_id: String(workspaceId),
+    });
+    nodesCreated++;
+
+    // 3. Process each story
+    for (const sr of storyResults) {
+      // Add story node
+      await addStoryNode({
+        id: sr.story_id,
+        specId,
+        title: sr.story_id,
+        status: sr.status,
+      });
+      nodesCreated++;
+
+      // Story belongs to spec
+      await addStoryToSpec(sr.story_id, specId);
+      edgesCreated++;
+
+      // Get file touches from story_commits
+      const commits = await query<{ commit_sha: string }>(
+        'SELECT commit_sha FROM story_commits WHERE story_id = $1 AND spec_id = $2',
+        [sr.story_id, specId],
+      );
+
+      // For each commit, we'd ideally parse the git diff for file paths.
+      // Since we don't have the diff content stored, link commits as proxy nodes.
+      for (const commit of commits) {
+        await addFileTouch(sr.story_id, `commit:${commit.commit_sha}`, String(workspaceId));
+        edgesCreated++;
+      }
+    }
+
+    logger.info(
+      { runId, specId, nodesCreated, edgesCreated },
+      '[knowledge-graph] Graph populated from run',
+    );
+  } catch (err) {
+    logger.error({ err, runId, specId }, '[knowledge-graph] populateFromRun failed');
+  }
+
+  return { nodesCreated, edgesCreated };
+}
+
+/**
+ * Populate spec-level graph relationships: BELONGS_TO and DEPENDS_ON
+ * from a parsed spec JSON.
+ */
+export async function populateFromSpec(
+  specId: string,
+  workspaceId: string,
+  stories: Array<{ id: string; title: string; dependsOn?: string[] }>,
+): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
+  try {
+    // Add spec node
+    await addSpecNode({
+      id: specId,
+      title: specId,
+      status: 'approved',
+      workspace_id: String(workspaceId),
+    });
+
+    for (const story of stories) {
+      // Add story node
+      await addStoryNode({
+        id: story.id,
+        specId,
+        title: story.title,
+        status: 'pending',
+      });
+
+      // Story belongs to spec
+      await addStoryToSpec(story.id, specId);
+
+      // Story depends on other stories
+      if (story.dependsOn) {
+        for (const depId of story.dependsOn) {
+          await addStoryDependency(story.id, depId);
+        }
+      }
+    }
+
+    logger.info(
+      { specId, storyCount: stories.length },
+      '[knowledge-graph] Graph populated from spec',
+    );
+  } catch (err) {
+    logger.error({ err, specId }, '[knowledge-graph] populateFromSpec failed');
+  }
+}
+
+// ── Graph Health Check ──────────────────────────────────────────────────────
+
+export interface GraphStats {
+  available: boolean;
+  vertexCount: number;
+  edgeCount: number;
+  labels: string[];
+}
+
+/**
+ * Check if the AGE graph is available and return basic stats.
+ * PG-019: Returns available: false immediately if AGE extension is not installed.
+ */
+export async function graphStats(): Promise<GraphStats> {
+  if (!(await isGraphAvailable())) {
+    return { available: false, vertexCount: 0, edgeCount: 0, labels: [] };
+  }
+
+  try {
+    // Check if the graph exists
+    const graphExists = await cypherQuery<{ cnt: unknown }>(
+      'MATCH (n) RETURN count(n)',
+      [{ name: 'cnt', type: 'agtype' }],
+    );
+
+    const vertexCount = Number(parseAgtype(graphExists[0]?.cnt) ?? 0);
+
+    const edgeCounts = await cypherQuery<{ cnt: unknown }>(
+      'MATCH ()-[r]->() RETURN count(r)',
+      [{ name: 'cnt', type: 'agtype' }],
+    );
+
+    const edgeCount = Number(parseAgtype(edgeCounts[0]?.cnt) ?? 0);
+
+    // Get labels from catalog
+    const labelRows = await query<{ name: string }>(
+      `SELECT name FROM ag_catalog.ag_label
+       WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph WHERE name = 'rorca')
+         AND name NOT IN ('_ag_label_vertex', '_ag_label_edge')
+       ORDER BY name`,
+    );
+
+    return {
+      available: true,
+      vertexCount,
+      edgeCount,
+      labels: labelRows.map(r => r.name),
+    };
+  } catch (err) {
+    logger.warn({ err }, '[knowledge-graph] Graph not available');
+    return {
+      available: false,
+      vertexCount: 0,
+      edgeCount: 0,
+      labels: [],
+    };
+  }
+}
