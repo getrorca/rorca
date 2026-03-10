@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { db } from '../db/index';
-import { SkillRegistry } from '../lib/skill-registry';
+import { SkillRegistry, inferCategory } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
 import { logger } from '../lib/logger';
 
@@ -91,21 +91,29 @@ router.get('/', (req: Request, res: Response) => {
       registry.discover(workspacePath);
     } else {
       // No workspace — only return DB-persisted skills
-      const dbSkills = db.prepare('SELECT name, description, source, content FROM installed_skills').all() as {
+      const dbSkills = db.prepare('SELECT name, description, source, content, category, tags FROM installed_skills').all() as {
         name: string;
         description: string;
         source: string;
         content: string;
+        category: string | null;
+        tags: string | null;
       }[];
       // Manual load into registry is not needed — discover() handles DB merge.
       // But with no workspace path we just return DB skills directly.
       res.json({
-        skills: dbSkills.map(s => ({
-          name: s.name,
-          description: s.description,
-          source: s.source,
-          filePath: '',
-        })),
+        skills: dbSkills.map(s => {
+          let parsedTags: string[] = [];
+          if (s.tags) { try { parsedTags = JSON.parse(s.tags); } catch { /* ignore */ } }
+          return {
+            name: s.name,
+            description: s.description,
+            source: s.source,
+            filePath: '',
+            category: s.category || inferCategory(s.name, s.description),
+            tags: parsedTags,
+          };
+        }),
         warnings: [],
         catalog: dbSkills.map(s => `${s.name}: ${s.description}`).join('\n'),
       });
@@ -119,6 +127,8 @@ router.get('/', (req: Request, res: Response) => {
         description: s.metadata.description,
         source: s.source,
         filePath: s.filePath,
+        category: s.metadata.category || inferCategory(s.metadata.name, s.metadata.description),
+        tags: s.metadata.tags || [],
       })),
       warnings: registry.getWarnings(),
       catalog: registry.getCatalogForPrompt(),
@@ -180,6 +190,8 @@ router.post('/install', (req: Request, res: Response) => {
       name: skill.metadata.name,
       description: skill.metadata.description,
       source: skill.source,
+      category: skill.metadata.category,
+      tags: skill.metadata.tags || [],
     });
   } catch (error: any) {
     logger.error('[Skills] Install error:', error);
@@ -1582,16 +1594,22 @@ router.get('/export', (req: Request, res: Response) => {
           name: s.metadata.name,
           description: s.metadata.description,
           source: s.source,
-          category: null as string | null,
+          category: s.metadata.category || inferCategory(s.metadata.name, s.metadata.description),
+          tags: s.metadata.tags || [],
         }))
-      : (db.prepare('SELECT name, description, source FROM installed_skills').all() as {
-          name: string; description: string; source: string;
-        }[]).map(s => ({
-          name: s.name,
-          description: s.description,
-          source: s.source,
-          category: null as string | null,
-        }));
+      : (db.prepare('SELECT name, description, source, category, tags FROM installed_skills').all() as {
+          name: string; description: string; source: string; category: string | null; tags: string | null;
+        }[]).map(s => {
+          let parsedTags: string[] = [];
+          if (s.tags) { try { parsedTags = JSON.parse(s.tags); } catch { /* ignore */ } }
+          return {
+            name: s.name,
+            description: s.description,
+            source: s.source,
+            category: s.category || inferCategory(s.name, s.description),
+            tags: parsedTags,
+          };
+        });
 
     res.json({
       skills: exportSkills,

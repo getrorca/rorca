@@ -635,6 +635,15 @@ export function runMigrations() {
     db.exec(`ALTER TABLE convention_packs ADD COLUMN forked_from TEXT`);
   }
 
+  // SL-006: Add category and tags columns to installed_skills (idempotent)
+  const isCols = db.pragma('table_info(installed_skills)') as { name: string }[];
+  if (isCols.length > 0 && !isCols.some(c => c.name === 'category')) {
+    db.exec('ALTER TABLE installed_skills ADD COLUMN category TEXT');
+  }
+  if (isCols.length > 0 && !isCols.some(c => c.name === 'tags')) {
+    db.exec('ALTER TABLE installed_skills ADD COLUMN tags TEXT');
+  }
+
   // CA-011: Add review_persona and review_type columns to story_comments for adversarial review (idempotent)
   const scColsCA011 = db.pragma('table_info(story_comments)') as { name: string }[];
   if (scColsCA011.length > 0 && !scColsCA011.some(c => c.name === 'review_persona')) {
