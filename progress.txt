@@ -3,12 +3,13 @@
 Spec: rorca-postgres-migration
 Run ID: 16
 Started: 2026-03-10T08:21:19.019Z
-Last Updated: 2026-03-10T10:10:14.016Z
+Last Updated: 2026-03-10T10:18:12.089Z
 
-## Completed Stories (6)
+## Completed Stories (7)
 - PG-001: PostgreSQL Schema — Convert All Migrations — DONE (claude, 461s)
 - PG-002: Database Connection Layer — pg Pool + Async Helpers — DONE (claude, 190s)
 - PG-003: Route Async Conversion — Wave 1 (Core Routes) — DONE (claude, 1440s)
 - PG-004: Route Async Conversion — Wave 2 (Remaining Routes) — DONE (claude, 19s)
 - PG-005: Library Module Async Conversion — DONE (claude, 417s)
 - PG-006: pgvector Extension + Embedding Store — DONE (claude, 13s)
+- PG-007: Embedding Pipeline — Generate + Store Vectors — DONE (claude, 469s)
