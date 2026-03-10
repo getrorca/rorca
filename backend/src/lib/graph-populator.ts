@@ -1,14 +1,23 @@
 /**
- * PG-015: Graph Populator — WAL event subscriber for knowledge graph population
+ * PG-015 / SW-005: Graph Populator — WAL event subscriber for knowledge graph population
  *
  * Listens to WAL events and populates the Apache AGE knowledge graph:
  *   - run_finished → parse story_commits for file paths → Story-[:TOUCHES]->File edges
  *   - spec_approved → parse spec JSON → Story-[:BELONGS_TO]->Spec, Story-[:DEPENDS_ON]->Story
- *   - Memory synthesis → Memory-[:LEARNED_FROM]->Story edges
+ *   - story_passed / story_failed → per-story graph population (nodes + file-touch + skills)
+ *   - memory_created / memory_auto_saved → Memory-[:LEARNED_FROM]->Story edges
  */
 
 import { subscribe, type WalEvent } from './sse-hub';
-import { populateFromRun, populateFromSpec, addMemoryLink } from './knowledge-graph';
+import {
+  isGraphAvailable,
+  populateFromRun,
+  populateFromSpec,
+  addStoryNode,
+  addFileTouch,
+  addSkillUsage,
+  addMemoryLink,
+} from './knowledge-graph';
 import { query, queryOne } from '../db/index';
 import { logger } from './logger';
 
@@ -33,12 +42,119 @@ async function handleWalEvent(event: WalEvent): Promise<void> {
     case 'spec_approved':
       await handleSpecApproved(event);
       break;
+    case 'story_passed':
+      await handleStoryCompleted(event, 'pass');
+      break;
+    case 'story_failed':
+      await handleStoryCompleted(event, 'fail');
+      break;
+    case 'memory_created':
+    case 'memory_auto_saved':
+      await handleMemoryCreated(event);
+      break;
     default:
       break;
   }
 }
 
+// ── Per-story graph population (SW-005) ─────────────────────────────────────
+
+async function handleStoryCompleted(event: WalEvent, status: 'pass' | 'fail'): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
+  let payload: { run_id?: number; story_id?: string; story_title?: string };
+  try {
+    payload = JSON.parse(event.payload || '{}');
+  } catch {
+    return;
+  }
+
+  const storyId = event.story_id || payload.story_id;
+  if (!storyId) return;
+
+  const runId = payload.run_id;
+  const workspaceId = event.workspace_id || '';
+  const specId = event.spec_id || '';
+  const title = payload.story_title || storyId;
+
+  let nodesCreated = 0;
+  let edgesCreated = 0;
+
+  // 1. Add story node
+  await addStoryNode({ id: storyId, specId, title, status });
+  nodesCreated++;
+
+  // 2. Query story_commits for this story's committed files (commit SHAs as proxy)
+  if (specId) {
+    const commits = await query<{ commit_sha: string }>(
+      'SELECT commit_sha FROM story_commits WHERE story_id = $1 AND spec_id = $2',
+      [storyId, specId],
+    );
+    for (const commit of commits) {
+      await addFileTouch(storyId, `commit:${commit.commit_sha}`, workspaceId);
+      edgesCreated++;
+    }
+  }
+
+  // 3. Check active_skills from story_results for matched skills
+  if (runId) {
+    const sr = await queryOne<{ active_skills: string | null }>(
+      'SELECT active_skills FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1',
+      [runId, storyId],
+    );
+    if (sr?.active_skills) {
+      try {
+        const skills: string[] = JSON.parse(sr.active_skills);
+        for (const skillName of skills) {
+          await addSkillUsage(skillName, storyId, 'auto-match');
+          edgesCreated++;
+        }
+      } catch {
+        // Malformed JSON in active_skills — skip
+      }
+    }
+  }
+
+  logger.info(
+    { storyId, status, nodesCreated, edgesCreated },
+    '[graph-populator] Story graph populated',
+  );
+}
+
+// ── Memory graph population (SW-005) ────────────────────────────────────────
+
+async function handleMemoryCreated(event: WalEvent): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
+  let payload: { storyId?: string; categories?: string[]; id?: string; category?: string };
+  try {
+    payload = JSON.parse(event.payload || '{}');
+  } catch {
+    return;
+  }
+
+  const sourceStoryId = event.story_id || payload.storyId;
+  if (!sourceStoryId) return;
+
+  // memory_auto_saved has categories array; memory_created may have a single category
+  const categories = payload.categories || (payload.category ? [payload.category] : ['unknown']);
+  const memoryId = payload.id || `mem-${event.id}`;
+
+  for (const category of categories) {
+    await addMemoryLink(memoryId, sourceStoryId, category);
+  }
+
+  logger.info(
+    { memoryId, sourceStoryId, categories },
+    '[graph-populator] Memory graph edges created',
+  );
+}
+
+// ── Existing handlers ───────────────────────────────────────────────────────
+
 async function handleRunFinished(event: WalEvent): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
   let payload: { run_id?: number; status?: string };
   try {
     payload = JSON.parse(event.payload || '{}');
@@ -65,6 +181,8 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
 }
 
 async function handleSpecApproved(event: WalEvent): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
   if (!event.spec_id || !event.workspace_id) return;
 
   // Try to load spec stories from the database (spec_versions table)
