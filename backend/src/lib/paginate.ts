@@ -1,5 +1,5 @@
 import type { Request } from 'express';
-import type { Database, Statement } from 'better-sqlite3';
+import { query, queryOne } from '../db/index';
 
 /**
  * Consistent pagination response format for all list endpoints.
@@ -66,31 +66,17 @@ export function parsePaginationParams(req: Request, defaults?: { limit?: number;
 }
 
 /**
- * Execute a paginated SQL query and return a consistent response.
+ * Execute a paginated SQL query and return a consistent response (async, pg).
  *
- * @param db - better-sqlite3 database instance
- * @param opts - Query configuration
- * @returns PaginatedResponse<T>
- *
- * Usage:
- * ```ts
- * const result = paginateQuery<RunRow>(db, {
- *   query: 'SELECT * FROM pipeline_runs WHERE workspace_id = ?',
- *   countQuery: 'SELECT COUNT(*) as total FROM pipeline_runs WHERE workspace_id = ?',
- *   params: [workspaceId],
- *   pagination: parsePaginationParams(req),
- *   orderBy: 'id DESC',
- *   cursorColumn: 'id',
- * });
- * // result = { items: RunRow[], total: number, hasMore: boolean, cursor?: string }
- * ```
+ * Uses $1, $2, ... numbered placeholders.
+ * The `params` array should already use numbered placeholders in the query/countQuery strings.
+ * This function appends cursor/limit/offset params with sequential numbering.
  */
-export function paginateQuery<T>(
-  db: Database,
+export async function paginateQuery<T>(
   opts: {
     query: string;
     countQuery: string;
-    params: (string | number)[];
+    params: unknown[];
     pagination: PaginationParams;
     orderBy: string;
     /** Column used to generate the cursor (must be part of ORDER BY). Defaults to 'id'. */
@@ -98,32 +84,33 @@ export function paginateQuery<T>(
     /** Direction for cursor filtering. Defaults to 'desc'. */
     cursorDirection?: 'asc' | 'desc';
   },
-): PaginatedResponse<T> {
-  const { query, countQuery, params, pagination, orderBy } = opts;
+): Promise<PaginatedResponse<T>> {
+  const { countQuery, params, pagination, orderBy } = opts;
   const cursorColumn = opts.cursorColumn ?? 'id';
   const cursorDirection = opts.cursorDirection ?? 'desc';
 
   // Get total count (same filters, no pagination)
-  const countRow = db.prepare(countQuery).get(...params) as { total: number };
-  const total = countRow.total;
+  const countRow = await queryOne<{ total: number }>(countQuery, params);
+  const total = Number(countRow?.total ?? 0);
 
-  // Build the paginated query
+  // Build the paginated query with sequential param numbering
+  const baseParamCount = params.length;
   let finalQuery: string;
-  let queryParams: (string | number)[];
+  let queryParams: unknown[];
 
   if (pagination.usedCursor && pagination.cursor) {
     // Cursor-based: filter by cursor column instead of using OFFSET
     const decodedCursor = decodeCursor(pagination.cursor);
     const op = cursorDirection === 'desc' ? '<' : '>';
-    finalQuery = `${query} AND ${cursorColumn} ${op} ? ORDER BY ${orderBy} LIMIT ?`;
+    finalQuery = `${opts.query} AND ${cursorColumn} ${op} $${baseParamCount + 1} ORDER BY ${orderBy} LIMIT $${baseParamCount + 2}`;
     queryParams = [...params, decodedCursor, pagination.limit];
   } else {
     // Offset-based (page param)
-    finalQuery = `${query} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
+    finalQuery = `${opts.query} ORDER BY ${orderBy} LIMIT $${baseParamCount + 1} OFFSET $${baseParamCount + 2}`;
     queryParams = [...params, pagination.limit, pagination.offset];
   }
 
-  const items = db.prepare(finalQuery).all(...queryParams) as T[];
+  const items = await query<T>(finalQuery, queryParams);
 
   // Generate cursor from last item's sort column
   let cursor: string | undefined;

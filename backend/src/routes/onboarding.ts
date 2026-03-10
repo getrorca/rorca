@@ -1,5 +1,5 @@
-import { Router, Request, Response } from 'express';
-import { db } from '../db/index';
+import { Router, Request, Response, NextFunction } from 'express';
+import { queryOne, execute } from '../db/index';
 
 const router = Router();
 
@@ -7,21 +7,22 @@ interface OnboardingRow {
   id: number;
   current_step: number;
   workspace_id: string | null;
-  direction_done: number;
-  completed: number;
+  direction_done: number | boolean;
+  completed: number | boolean;
   updated_at: string;
 }
 
-function ensureRow(): OnboardingRow {
-  let row = db.prepare('SELECT * FROM onboarding_state WHERE id = 1').get() as OnboardingRow | undefined;
+async function ensureRow(): Promise<OnboardingRow> {
+  let row = await queryOne<OnboardingRow>('SELECT * FROM onboarding_state WHERE id = 1');
   if (!row) {
-    db.prepare(
-      `INSERT OR IGNORE INTO onboarding_state (id, current_step, workspace_id, direction_done, completed)
-       VALUES (1, 0, NULL, 0, 0)`
-    ).run();
-    row = db.prepare('SELECT * FROM onboarding_state WHERE id = 1').get() as OnboardingRow;
+    await execute(
+      `INSERT INTO onboarding_state (id, current_step, workspace_id, direction_done, completed)
+       VALUES (1, 0, NULL, false, false)
+       ON CONFLICT (id) DO NOTHING`
+    );
+    row = await queryOne<OnboardingRow>('SELECT * FROM onboarding_state WHERE id = 1');
   }
-  return row;
+  return row!;
 }
 
 /**
@@ -45,14 +46,16 @@ function ensureRow(): OnboardingRow {
  *                 directionDone: { type: boolean }
  *                 completed: { type: boolean }
  */
-router.get('/', (_req: Request, res: Response) => {
-  const row = ensureRow();
-  res.json({
-    currentStep: row.current_step,
-    workspaceId: row.workspace_id,
-    directionDone: !!row.direction_done,
-    completed: !!row.completed,
-  });
+router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const row = await ensureRow();
+    res.json({
+      currentStep: row.current_step,
+      workspaceId: row.workspace_id,
+      directionDone: !!row.direction_done,
+      completed: !!row.completed,
+    });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -89,46 +92,53 @@ router.get('/', (_req: Request, res: Response) => {
  *       400:
  *         description: No fields to update
  */
-router.put('/', (req: Request, res: Response) => {
-  const { currentStep, workspaceId, directionDone, completed } = req.body;
-  ensureRow();
+router.put('/', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { currentStep, workspaceId, directionDone, completed } = req.body;
+    await ensureRow();
 
-  const updates: string[] = [];
-  const params: (string | number | null)[] = [];
+    const updates: string[] = [];
+    const params: (string | number | boolean | null)[] = [];
+    let paramIdx = 0;
 
-  if (currentStep !== undefined) {
-    updates.push('current_step = ?');
-    params.push(currentStep);
-  }
-  if (workspaceId !== undefined) {
-    updates.push('workspace_id = ?');
-    params.push(workspaceId);
-  }
-  if (directionDone !== undefined) {
-    updates.push('direction_done = ?');
-    params.push(directionDone ? 1 : 0);
-  }
-  if (completed !== undefined) {
-    updates.push('completed = ?');
-    params.push(completed ? 1 : 0);
-  }
+    if (currentStep !== undefined) {
+      paramIdx++;
+      updates.push(`current_step = $${paramIdx}`);
+      params.push(currentStep);
+    }
+    if (workspaceId !== undefined) {
+      paramIdx++;
+      updates.push(`workspace_id = $${paramIdx}`);
+      params.push(workspaceId);
+    }
+    if (directionDone !== undefined) {
+      paramIdx++;
+      updates.push(`direction_done = $${paramIdx}`);
+      params.push(directionDone ? true : false);
+    }
+    if (completed !== undefined) {
+      paramIdx++;
+      updates.push(`completed = $${paramIdx}`);
+      params.push(completed ? true : false);
+    }
 
-  if (updates.length === 0) {
-    res.status(400).json({ error: 'No fields to update' });
-    return;
-  }
+    if (updates.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
 
-  updates.push("updated_at = datetime('now')");
+    updates.push('updated_at = NOW()');
 
-  db.prepare(`UPDATE onboarding_state SET ${updates.join(', ')} WHERE id = 1`).run(...params);
+    await execute(`UPDATE onboarding_state SET ${updates.join(', ')} WHERE id = 1`, params);
 
-  const row = db.prepare('SELECT * FROM onboarding_state WHERE id = 1').get() as OnboardingRow;
-  res.json({
-    currentStep: row.current_step,
-    workspaceId: row.workspace_id,
-    directionDone: !!row.direction_done,
-    completed: !!row.completed,
-  });
+    const row = await queryOne<OnboardingRow>('SELECT * FROM onboarding_state WHERE id = 1');
+    res.json({
+      currentStep: row!.current_step,
+      workspaceId: row!.workspace_id,
+      directionDone: !!row!.direction_done,
+      completed: !!row!.completed,
+    });
+  } catch (err) { next(err); }
 });
 
 export default router;
