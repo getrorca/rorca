@@ -106,7 +106,8 @@
       "suggestedSkills": [
         "logging-fundamentals"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }

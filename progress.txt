@@ -1,11 +1,12 @@
 # Run State Summary
 
 Spec: rorca-live-spec-terminal
-Run ID: 13
-Started: 2026-03-10T01:19:16.575Z
-Last Updated: 2026-03-10T01:50:43.517Z
+Run ID: 15
+Started: 2026-03-10T02:11:50.722Z
+Last Updated: 2026-03-10T02:18:36.882Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - LST-001: Context Injection Summary — Show What's Being Sent to the LLM — DONE (claude, 672s)
 - LST-002: Real Progress Bar — Replace Simulated Stages with Actual Elapsed Time — DONE (claude, 13s)
 - LST-003: Actionable Error Detail — Show Why Generation Failed — DONE (claude, 1164s)
+- LST-004: Generation Log Persistence — Store Context + Outcome per Spec — DONE (claude, 399s)
