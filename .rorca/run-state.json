@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T12:55:46.397Z",
+  "lastUpdatedAt": "2026-03-10T13:03:18.454Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -201,6 +201,15 @@
       "finishedAt": "2026-03-10T12:55:46.396Z",
       "agentType": "claude",
       "elapsedMs": 502171
+    },
+    {
+      "storyId": "PG-021",
+      "title": "Auto-Memory — Run-Level Synthesis After Pipeline Completion",
+      "status": "passed",
+      "startedAt": "2026-03-10T12:55:55.067Z",
+      "finishedAt": "2026-03-10T13:03:18.454Z",
+      "agentType": "claude",
+      "elapsedMs": 443387
     }
   ],
   "failedStories": [],
