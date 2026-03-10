@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -18,7 +18,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
@@ -38,18 +37,14 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pipeline-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
   // Set test user to a paid plan so pipeline trigger isn't blocked by V2-111 plan enforcement
-  db.prepare("UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'").run();
+  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
 
   // Create workspace directory with run-loop.sh and spec files
   wsDir = path.join(tmpDir, 'workspace');
@@ -57,16 +52,12 @@ beforeEach(async () => {
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'pending'), { recursive: true });
 
   // Seed workspace in DB
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES ('ws-pipe', 'Pipeline WS', ?)"
-  ).run(wsDir);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-pipe', 'Pipeline WS', $1)`, [wsDir]);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 /** Seed a spec JSON file in the workspace */
@@ -91,17 +82,13 @@ function createRunLoopStub(exitCode = 0) {
 }
 
 /** Seed a pipeline run directly in the DB */
-function seedRun(overrides: Partial<{ status: string; workspace_id: string; spec_path: string; pid: number | null }> = {}) {
-  const result = db.prepare(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, pid)
-     VALUES (?, ?, ?, ?)`
-  ).run(
-    overrides.spec_path ?? 'ralph/specs/approved/test-spec.json',
+async function seedRun(overrides: Partial<{ status: string; workspace_id: string; spec_path: string; pid: number | null }> = {}) {
+  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, pid)
+     VALUES ($1, $2, $3, $4) RETURNING id`, [overrides.spec_path ?? 'ralph/specs/approved/test-spec.json',
     overrides.workspace_id ?? 'ws-pipe',
     overrides.status ?? 'running',
-    overrides.pid ?? null,
-  );
-  return result.lastInsertRowid as number;
+    overrides.pid ?? null,]);
+  return result!.id;
 }
 
 // ─── POST /api/pipeline/trigger ──────────────────────────────────────────────
@@ -157,7 +144,7 @@ describe('POST /api/pipeline/trigger', () => {
     seedSpec('approved', 'test-spec');
 
     // Seed an active run
-    seedRun({ status: 'running' });
+    await seedRun({ status: 'running' });
 
     const res = await request(app)
       .post('/api/pipeline/trigger')
@@ -184,7 +171,7 @@ describe('POST /api/pipeline/trigger', () => {
     expect(typeof res.body.runId).toBe('number');
 
     // Verify pipeline_runs row was created
-    const run = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(res.body.runId) as any;
+    const run = await queryOne(`SELECT * FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
     expect(run).toBeDefined();
     expect(run.workspace_id).toBe('ws-pipe');
     expect(run.status).toBe('running');
@@ -204,9 +191,7 @@ describe('POST /api/pipeline/trigger', () => {
     await new Promise(resolve => setTimeout(resolve, 500));
 
     // run_finished WAL event should exist (since stub exits immediately with code 0)
-    const events = db.prepare(
-      "SELECT * FROM wal_events WHERE workspace_id = 'ws-pipe' ORDER BY id ASC"
-    ).all() as any[];
+    const events = await query(`SELECT * FROM wal_events WHERE workspace_id = 'ws-pipe' ORDER BY id ASC`) as any[];
 
     // Should have at least the run_finished event
     const finishEvent = events.find((e: any) => e.event_type === 'run_finished');
@@ -235,9 +220,7 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.body.estimate).toBeDefined();
 
     // No pipeline run should be created
-    const runs = db.prepare(
-      "SELECT * FROM pipeline_runs WHERE workspace_id = 'ws-pipe'"
-    ).all();
+    const runs = await query(`SELECT * FROM pipeline_runs WHERE workspace_id = 'ws-pipe'`);
     expect(runs).toHaveLength(0);
   });
 
@@ -278,9 +261,7 @@ describe('POST /api/pipeline/trigger', () => {
     expect(res.status).toBe(201);
 
     // Excluded story should have a story_results row
-    const excluded = db.prepare(
-      "SELECT * FROM story_results WHERE run_id = ? AND story_id = 'US-002'"
-    ).get(res.body.runId) as any;
+    const excluded = await queryOne(`SELECT * FROM story_results WHERE run_id = $1 AND story_id = 'US-002'`, [res.body.runId]) as any;
     expect(excluded).toBeDefined();
     expect(excluded.status).toBe('excluded');
   });
@@ -316,8 +297,8 @@ describe('GET /api/pipeline/runs', () => {
   });
 
   test('returns runs for a given workspace, newest first', async () => {
-    const runId1 = seedRun({ status: 'done' });
-    const runId2 = seedRun({ status: 'running' });
+    const runId1 = await seedRun({ status: 'done' });
+    const runId2 = await seedRun({ status: 'running' });
 
     const res = await request(app)
       .get('/api/pipeline/runs?workspaceId=ws-pipe')
@@ -331,9 +312,9 @@ describe('GET /api/pipeline/runs', () => {
   });
 
   test('does not return runs from other workspaces', async () => {
-    db.prepare("INSERT INTO workspaces (id, label, path) VALUES ('ws-other', 'Other', ?)").run(wsDir);
-    seedRun({ workspace_id: 'ws-pipe' });
-    seedRun({ workspace_id: 'ws-other' });
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-other', 'Other', $1)`, [wsDir]);
+    await seedRun({ workspace_id: 'ws-pipe' });
+    await seedRun({ workspace_id: 'ws-other' });
 
     const res = await request(app)
       .get('/api/pipeline/runs?workspaceId=ws-pipe')
@@ -354,15 +335,11 @@ describe('GET /api/pipeline/runs', () => {
 
 describe('GET /api/pipeline/runs/:runId', () => {
   test('returns run details with story results', async () => {
-    const runId = seedRun({ status: 'done' });
+    const runId = await seedRun({ status: 'done' });
 
     // Add story results
-    db.prepare(
-      "INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, 'US-001', 'pass', datetime('now'))"
-    ).run(runId);
-    db.prepare(
-      "INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, 'US-002', 'fail', datetime('now'))"
-    ).run(runId);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, 'US-001', 'pass', NOW())`, [runId]);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, 'US-002', 'fail', NOW())`, [runId]);
 
     const res = await request(app)
       .get(`/api/pipeline/runs/${runId}`)
@@ -398,7 +375,7 @@ describe('GET /api/pipeline/runs/:runId', () => {
   });
 
   test('returns empty stories array when run has no story results', async () => {
-    const runId = seedRun();
+    const runId = await seedRun();
 
     const res = await request(app)
       .get(`/api/pipeline/runs/${runId}`)
@@ -409,7 +386,7 @@ describe('GET /api/pipeline/runs/:runId', () => {
   });
 
   test('requires authentication', async () => {
-    const runId = seedRun();
+    const runId = await seedRun();
     const res = await request(app).get(`/api/pipeline/runs/${runId}`);
     expect(res.status).toBe(401);
   });
@@ -428,7 +405,7 @@ describe('POST /api/pipeline/runs/:runId/pause', () => {
   });
 
   test('returns 409 when run is not in running state', async () => {
-    const runId = seedRun({ status: 'done' });
+    const runId = await seedRun({ status: 'done' });
 
     const res = await request(app)
       .post(`/api/pipeline/runs/${runId}/pause`)
@@ -439,7 +416,7 @@ describe('POST /api/pipeline/runs/:runId/pause', () => {
   });
 
   test('returns 409 when process is not alive (no pid)', async () => {
-    const runId = seedRun({ status: 'running', pid: null });
+    const runId = await seedRun({ status: 'running', pid: null });
 
     const res = await request(app)
       .post(`/api/pipeline/runs/${runId}/pause`)
@@ -472,7 +449,7 @@ describe('POST /api/pipeline/runs/:runId/resume', () => {
   });
 
   test('returns 409 when run is not in paused state', async () => {
-    const runId = seedRun({ status: 'running' });
+    const runId = await seedRun({ status: 'running' });
 
     const res = await request(app)
       .post(`/api/pipeline/runs/${runId}/resume`)
@@ -483,7 +460,7 @@ describe('POST /api/pipeline/runs/:runId/resume', () => {
   });
 
   test('returns 409 when process is not alive (no pid)', async () => {
-    const runId = seedRun({ status: 'paused', pid: null });
+    const runId = await seedRun({ status: 'paused', pid: null });
 
     const res = await request(app)
       .post(`/api/pipeline/runs/${runId}/resume`)
@@ -537,9 +514,7 @@ describe('POST /api/pipeline/runs', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ specPath: 'ralph/specs/approved/test.json', workspaceId: 'ws-pipe' });
 
-    const event = db.prepare(
-      "SELECT * FROM wal_events WHERE event_type = 'run_started'"
-    ).get() as any;
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'run_started'`) as any;
 
     expect(event).toBeDefined();
     expect(event.workspace_id).toBe('ws-pipe');
@@ -554,7 +529,7 @@ describe('POST /api/pipeline/runs', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ specPath: 'ralph/specs/approved/test.json', workspaceId: 'ws-pipe' });
 
-    const run = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(res.body.run.id) as any;
+    const run = await queryOne(`SELECT * FROM pipeline_runs WHERE id = $1`, [res.body.run.id]) as any;
     expect(run).toBeDefined();
     expect(run.spec_path).toBe('ralph/specs/approved/test.json');
     expect(run.workspace_id).toBe('ws-pipe');
@@ -578,9 +553,7 @@ describe('GET /api/pipeline/runs/:runId/log', () => {
   test('returns 404 when no log file exists', async () => {
     // Use a high ID to avoid collision with legacy /tmp/rorca-run-{id}.log files
     const runId = 999999;
-    db.prepare(
-      `INSERT INTO pipeline_runs (id, spec_path, workspace_id, status) VALUES (?, ?, ?, ?)`
-    ).run(runId, 'ralph/specs/approved/test-spec.json', 'ws-pipe', 'done');
+    await execute(`INSERT INTO pipeline_runs (id, spec_path, workspace_id, status) VALUES ($1, $2, $3, $4)`, [runId, 'ralph/specs/approved/test-spec.json', 'ws-pipe', 'done']);
 
     // Ensure no legacy log file exists
     const legacyPath = path.join(os.tmpdir(), `rorca-run-${runId}.log`);
@@ -595,12 +568,12 @@ describe('GET /api/pipeline/runs/:runId/log', () => {
   });
 
   test('returns log content when log file exists', async () => {
-    const runId = seedRun();
+    const runId = await seedRun();
 
     // Create a log file and reference it in the DB
     const logPath = path.join(tmpDir, `run-${runId}.log`);
     fs.writeFileSync(logPath, 'hello from run-loop\nstory US-001 passed\n');
-    db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(logPath, runId);
+    await execute(`UPDATE pipeline_runs SET log_path = $1 WHERE id = $2`, [logPath, runId]);
 
     const res = await request(app)
       .get(`/api/pipeline/runs/${runId}/log`)
@@ -618,12 +591,10 @@ describe('GET /api/pipeline/runs/:runId/log', () => {
 
 describe('POST /api/pipeline/runs/:runId/stories/:storyId/tokens', () => {
   test('records token usage for a story', async () => {
-    const runId = seedRun({ status: 'running' });
+    const runId = await seedRun({ status: 'running' });
 
     // Add a story result
-    db.prepare(
-      "INSERT INTO story_results (run_id, story_id, status) VALUES (?, 'US-001', 'pass')"
-    ).run(runId);
+    await execute(`INSERT INTO story_results (run_id, story_id, status) VALUES ($1, 'US-001', 'pass')`, [runId]);
 
     const res = await request(app)
       .post(`/api/pipeline/runs/${runId}/stories/US-001/tokens`)
@@ -634,15 +605,13 @@ describe('POST /api/pipeline/runs/:runId/stories/:storyId/tokens', () => {
     expect(res.body.ok).toBe(true);
 
     // Verify story_results was updated
-    const story = db.prepare(
-      "SELECT input_tokens, output_tokens FROM story_results WHERE run_id = ? AND story_id = 'US-001'"
-    ).get(runId) as any;
+    const story = await queryOne(`SELECT input_tokens, output_tokens FROM story_results WHERE run_id = $1 AND story_id = 'US-001'`, [runId]) as any;
     expect(story.input_tokens).toBe(5000);
     expect(story.output_tokens).toBe(1000);
   });
 
   test('returns 400 when no token fields provided', async () => {
-    const runId = seedRun();
+    const runId = await seedRun();
 
     const res = await request(app)
       .post(`/api/pipeline/runs/${runId}/stories/US-001/tokens`)
@@ -654,7 +623,7 @@ describe('POST /api/pipeline/runs/:runId/stories/:storyId/tokens', () => {
   });
 
   test('returns 404 when story result does not exist', async () => {
-    const runId = seedRun();
+    const runId = await seedRun();
 
     const res = await request(app)
       .post(`/api/pipeline/runs/${runId}/stories/US-999/tokens`)
@@ -688,7 +657,7 @@ describe('GET /api/pipeline/runs/compare', () => {
   });
 
   test('returns 404 when run does not exist', async () => {
-    const runId = seedRun();
+    const runId = await seedRun();
 
     const res = await request(app)
       .get(`/api/pipeline/runs/compare?run1=${runId}&run2=99999`)
@@ -698,17 +667,17 @@ describe('GET /api/pipeline/runs/compare', () => {
   });
 
   test('compares two runs and returns story-level diff with summary', async () => {
-    const runId1 = seedRun({ status: 'done' });
-    const runId2 = seedRun({ status: 'done' });
+    const runId1 = await seedRun({ status: 'done' });
+    const runId2 = await seedRun({ status: 'done' });
 
     // Run 1: US-001 pass, US-002 fail
-    db.prepare("INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES (?, 'US-001', 'pass', 60)").run(runId1);
-    db.prepare("INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES (?, 'US-002', 'fail', 120)").run(runId1);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES ($1, 'US-001', 'pass', 60)`, [runId1]);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES ($1, 'US-002', 'fail', 120)`, [runId1]);
 
     // Run 2: US-001 pass, US-002 pass (improved), US-003 pass (new)
-    db.prepare("INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES (?, 'US-001', 'pass', 55)").run(runId2);
-    db.prepare("INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES (?, 'US-002', 'pass', 90)").run(runId2);
-    db.prepare("INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES (?, 'US-003', 'pass', 30)").run(runId2);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES ($1, 'US-001', 'pass', 55)`, [runId2]);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES ($1, 'US-002', 'pass', 90)`, [runId2]);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, elapsed_seconds) VALUES ($1, 'US-003', 'pass', 30)`, [runId2]);
 
     const res = await request(app)
       .get(`/api/pipeline/runs/compare?run1=${runId1}&run2=${runId2}`)
@@ -742,7 +711,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body.agentType).toBe('claude');
     expect(res.body.agentModel).toBeNull();
 
-    const run = db.prepare('SELECT agent, agent_type, agent_model FROM pipeline_runs WHERE id = ?').get(res.body.runId) as any;
+    const run = await queryOne(`SELECT agent, agent_type, agent_model FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
     expect(run.agent).toBe('claude');
     expect(run.agent_type).toBe('claude');
     expect(run.agent_model).toBeNull();
@@ -750,16 +719,12 @@ describe('OC-006: Pipeline trigger agent integration', () => {
 
   test('GET /runs/:runId returns agentType and agentModel fields', async () => {
     // Seed a run with explicit agent info
-    db.prepare(
-      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model)
-       VALUES ('ralph/specs/approved/test.json', 'ws-pipe', 'done', 'opencode', 'opencode', 'openai/gpt-4o')`
-    ).run();
-    const runId = (db.prepare('SELECT last_insert_rowid() AS id').get() as any).id;
+    const insertResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model)
+       VALUES ('ralph/specs/approved/test.json', 'ws-pipe', 'done', 'opencode', 'opencode', 'openai/gpt-4o') RETURNING id`);
+    const runId = insertResult!.id;
 
     // Add a story result so the query doesn't fail
-    db.prepare(
-      "INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, 'US-001', 'pass', datetime('now'))"
-    ).run(runId);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, 'US-001', 'pass', NOW())`, [runId]);
 
     const res = await request(app)
       .get(`/api/pipeline/runs/${runId}`)
@@ -774,10 +739,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
 
   test('GET /runs/:runId defaults agentType to claude when agent column is empty', async () => {
     // Old runs may not have agent column set
-    db.prepare(
-      `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('ralph/specs/approved/old.json', 'ws-pipe', 'done')`
-    ).run();
-    const runId = (db.prepare('SELECT last_insert_rowid() AS id').get() as any).id;
+    const insertResult2 = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('ralph/specs/approved/old.json', 'ws-pipe', 'done') RETURNING id`);
+    const runId = insertResult2!.id;
 
     const res = await request(app)
       .get(`/api/pipeline/runs/${runId}`)
@@ -788,12 +751,13 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body.agentModel).toBeNull();
   });
 
-  test('pipeline_runs table has agent_type and agent_model columns', () => {
-    const cols = db.pragma('table_info(pipeline_runs)') as { name: string }[];
-    expect(cols.some(c => c.name === 'agent_type')).toBe(true);
-    expect(cols.some(c => c.name === 'agent_model')).toBe(true);
-    expect(cols.some(c => c.name === 'agent')).toBe(true);
-    expect(cols.some(c => c.name === 'opencode_server_pid')).toBe(true);
+  test('pipeline_runs table has agent_type and agent_model columns', async () => {
+    const cols = await query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'pipeline_runs'`);
+    const colNames = cols.map(c => c.column_name);
+    expect(colNames).toContain('agent_type');
+    expect(colNames).toContain('agent_model');
+    expect(colNames).toContain('agent');
+    expect(colNames).toContain('opencode_server_pid');
   });
 
   test('trigger response includes agentType and agentModel', async () => {

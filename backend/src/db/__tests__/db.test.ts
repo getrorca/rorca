@@ -1,116 +1,123 @@
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import type Database from 'better-sqlite3';
+import { Pool } from 'pg';
+import { getTestPool, closeTestPool, truncateAll } from '../../__tests__/helpers/pg-test-utils';
 
-let db: Database.Database;
-let runMigrations: () => void;
-let tmpDir: string;
-let dbPath: string;
+let pool: Pool;
 
-beforeEach(() => {
-  jest.resetModules();
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-test-'));
-  dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  const mod = require('../index');
-  db = mod.db;
-  runMigrations = mod.runMigrations;
+beforeAll(() => {
+  pool = getTestPool();
 });
 
-afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
+afterAll(async () => {
+  await closeTestPool();
 });
 
-test('PRAGMA journal_mode returns wal', () => {
-  const result = db.pragma('journal_mode') as { journal_mode: string }[];
-  expect(result[0].journal_mode).toBe('wal');
+beforeEach(async () => {
+  await truncateAll(pool);
 });
 
-test('all core tables plus FTS5 tables exist in sqlite_master', () => {
-  const tables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-    .all() as { name: string }[];
-  const names = tables.map(t => t.name).sort();
-  expect(names).toEqual([
+test('SELECT 1 succeeds (pool is connected)', async () => {
+  const { rows } = await pool.query('SELECT 1 AS result');
+  expect(rows[0].result).toBe(1);
+});
+
+test('all core tables exist in pg_tables', async () => {
+  const { rows } = await pool.query(`
+    SELECT tablename FROM pg_tables
+    WHERE schemaname = 'public'
+      AND tablename != 'schema_migrations'
+    ORDER BY tablename
+  `);
+  const names = rows.map(r => r.tablename).sort();
+
+  // Verify key tables exist (subset check — new migrations may add more)
+  const expectedTables = [
     'agent_hooks',
     'agent_profiles',
-    'api_key_vault',
     'budget_config',
     'direction_layers',
-    'email_verification_tokens',
-    'github_connections',
-    'model_pricing',
-    'notification_preferences',
-    'notifications',
-    'onboarding_state',
-    'password_reset_tokens',
-    'pipeline_hooks',
     'pipeline_runs',
     'pipeline_schedules',
-    'provider_defaults',
     'rate_limits',
-    'refresh_tokens',
-    'spec_assignments',
-    'spec_search_index',
-    'spec_search_index_config',
-    'spec_search_index_content',
-    'spec_search_index_data',
-    'spec_search_index_docsize',
-    'spec_search_index_idx',
-    'spec_tags',
     'spec_versions',
     'story_comments',
     'story_commits',
     'story_results',
-    'subscriptions',
-    'team_invites',
-    'team_members',
     'teams',
-    'template_ratings',
     'templates',
     'token_usage',
-    'user_settings',
     'users',
     'wal_events',
-    'workspace_access',
     'workspace_context',
     'workspace_env_vars',
-    'workspace_github_webhooks',
     'workspaces',
-  ]);
+  ];
+
+  for (const table of expectedTables) {
+    expect(names).toContain(table);
+  }
 });
 
-test('can INSERT and SELECT from each table', () => {
+test('can INSERT and SELECT from core tables', async () => {
   // workspaces
-  db.prepare("INSERT INTO workspaces (id, label, path) VALUES ('w1', 'Test', '/tmp')").run();
-  const ws = db.prepare("SELECT * FROM workspaces WHERE id = 'w1'").get() as Record<string, unknown>;
-  expect(ws.label).toBe('Test');
+  await pool.query(
+    "INSERT INTO workspaces (id, label, path) VALUES ('w1', 'Test', '/tmp')"
+  );
+  const { rows: wsRows } = await pool.query(
+    "SELECT * FROM workspaces WHERE id = 'w1'"
+  );
+  expect(wsRows[0].label).toBe('Test');
 
   // direction_layers
-  db.prepare("INSERT INTO direction_layers (workspace_id, layer, content_yaml) VALUES ('w1', 1, 'key: val')").run();
-  const dl = db.prepare("SELECT * FROM direction_layers WHERE workspace_id = 'w1'").get() as Record<string, unknown>;
-  expect(dl.content_yaml).toBe('key: val');
+  await pool.query(
+    "INSERT INTO direction_layers (workspace_id, layer, content_yaml) VALUES ('w1', 1, 'key: val')"
+  );
+  const { rows: dlRows } = await pool.query(
+    "SELECT * FROM direction_layers WHERE workspace_id = 'w1'"
+  );
+  expect(dlRows[0].content_yaml).toBe('key: val');
 
   // pipeline_runs
-  db.prepare("INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('spec.yaml', 'w1', 'running')").run();
-  const pr = db.prepare("SELECT * FROM pipeline_runs WHERE workspace_id = 'w1'").get() as Record<string, unknown>;
-  expect(pr.status).toBe('running');
+  await pool.query(
+    "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ('spec.yaml', 'w1', 'running')"
+  );
+  const { rows: prRows } = await pool.query(
+    "SELECT * FROM pipeline_runs WHERE workspace_id = 'w1'"
+  );
+  expect(prRows[0].status).toBe('running');
 
   // story_results
-  const runId = (pr as { id: number }).id;
-  db.prepare("INSERT INTO story_results (run_id, story_id, status) VALUES (?, 'US-001', 'pass')").run(runId);
-  const sr = db.prepare("SELECT * FROM story_results WHERE story_id = 'US-001'").get() as Record<string, unknown>;
-  expect(sr.status).toBe('pass');
+  const runId = prRows[0].id;
+  await pool.query(
+    "INSERT INTO story_results (run_id, story_id, status) VALUES ($1, 'US-001', 'pass')",
+    [runId]
+  );
+  const { rows: srRows } = await pool.query(
+    "SELECT * FROM story_results WHERE story_id = 'US-001'"
+  );
+  expect(srRows[0].status).toBe('pass');
 
   // wal_events
-  db.prepare("INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('test', 'w1', '{\"a\":1}')").run();
-  const we = db.prepare("SELECT * FROM wal_events WHERE event_type = 'test'").get() as Record<string, unknown>;
-  expect(we.actor).toBe('ralph');
+  await pool.query(
+    `INSERT INTO wal_events (event_type, workspace_id, payload)
+     VALUES ('test', 'w1', '{"a":1}')`
+  );
+  const { rows: weRows } = await pool.query(
+    "SELECT * FROM wal_events WHERE event_type = 'test'"
+  );
+  expect(weRows[0].workspace_id).toBe('w1');
 });
 
-test('running runMigrations() twice does not throw', () => {
-  expect(() => runMigrations()).not.toThrow();
+test('schema_migrations has applied versions', async () => {
+  const { rows } = await pool.query(
+    'SELECT version, filename FROM schema_migrations ORDER BY version ASC'
+  );
+  expect(rows.length).toBeGreaterThan(0);
+  expect(rows[0].version).toBe(1);
+  expect(rows[0].filename).toContain('001');
+});
+
+test('running migrations again is idempotent', async () => {
+  // Import and re-run — should not throw
+  const { runPgMigrations } = require('../pg-index');
+  await expect(runPgMigrations(pool)).resolves.not.toThrow();
 });

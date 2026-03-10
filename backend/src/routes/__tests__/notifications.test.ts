@@ -3,17 +3,15 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import app from '../../server';
-import { db } from '../../db';
 import { JWT_SECRET } from '../auth';
 import { createNotification } from '../notifications';
+import { query, queryOne, execute } from '../../db/index';
 
-function createUser(overrides: { email?: string } = {}) {
+async function createUser(overrides: { email?: string } = {}) {
   const id = crypto.randomUUID();
   const email = overrides.email || `user-${id.slice(0, 8)}@test.com`;
   const passwordHash = bcrypt.hashSync('password123', 4);
-  db.prepare(
-    'INSERT INTO users (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)'
-  ).run(id, email, 'Test User', passwordHash);
+  await execute(`INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`, [id, email, 'Test User', passwordHash]);
   return { id, email };
 }
 
@@ -21,16 +19,16 @@ function tokenFor(user: { id: string; email: string }): string {
   return jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: '15m' });
 }
 
-afterEach(() => {
-  db.prepare('DELETE FROM notification_preferences').run();
-  db.prepare('DELETE FROM notifications').run();
-  db.prepare('DELETE FROM refresh_tokens').run();
-  db.prepare('DELETE FROM users').run();
+afterEach(async () => {
+  await execute(`DELETE FROM notification_preferences`);
+  await execute(`DELETE FROM notifications`);
+  await execute(`DELETE FROM refresh_tokens`);
+  await execute(`DELETE FROM users`);
 });
 
 describe('GET /api/notifications', () => {
   it('returns empty list for user with no notifications', async () => {
-    const user = createUser();
+    const user = await createUser();
     const res = await request(app)
       .get('/api/notifications')
       .set('Authorization', `Bearer ${tokenFor(user)}`);
@@ -40,7 +38,7 @@ describe('GET /api/notifications', () => {
   });
 
   it('returns notifications for the authenticated user', async () => {
-    const user = createUser();
+    const user = await createUser();
     createNotification(user.id, 'spec_approved', 'Spec approved', 'Your spec was approved', '/specs/test');
 
     const res = await request(app)
@@ -53,8 +51,8 @@ describe('GET /api/notifications', () => {
   });
 
   it('does not return notifications for other users', async () => {
-    const user1 = createUser();
-    const user2 = createUser();
+    const user1 = await createUser();
+    const user2 = await createUser();
     createNotification(user1.id, 'spec_approved', 'For user 1', 'body');
 
     const res = await request(app)
@@ -67,7 +65,7 @@ describe('GET /api/notifications', () => {
 
 describe('GET /api/notifications/unread-count', () => {
   it('returns correct unread count', async () => {
-    const user = createUser();
+    const user = await createUser();
     createNotification(user.id, 'spec_approved', 'N1', 'b1');
     createNotification(user.id, 'pipeline_completed', 'N2', 'b2');
 
@@ -81,7 +79,7 @@ describe('GET /api/notifications/unread-count', () => {
 
 describe('POST /api/notifications/:id/read', () => {
   it('marks a notification as read', async () => {
-    const user = createUser();
+    const user = await createUser();
     const nId = createNotification(user.id, 'mention', 'Mentioned', 'You were mentioned');
 
     const res = await request(app)
@@ -98,7 +96,7 @@ describe('POST /api/notifications/:id/read', () => {
 
 describe('POST /api/notifications/read-all', () => {
   it('marks all notifications as read', async () => {
-    const user = createUser();
+    const user = await createUser();
     createNotification(user.id, 'spec_approved', 'N1', 'b1');
     createNotification(user.id, 'spec_rejected', 'N2', 'b2');
     createNotification(user.id, 'pipeline_completed', 'N3', 'b3');
@@ -118,7 +116,7 @@ describe('POST /api/notifications/read-all', () => {
 
 describe('DELETE /api/notifications/:id', () => {
   it('deletes a notification', async () => {
-    const user = createUser();
+    const user = await createUser();
     const nId = createNotification(user.id, 'mention', 'Mentioned', 'body');
 
     const res = await request(app)
@@ -135,7 +133,7 @@ describe('DELETE /api/notifications/:id', () => {
 
 describe('Notification preferences', () => {
   it('returns default preferences (all enabled)', async () => {
-    const user = createUser();
+    const user = await createUser();
     const res = await request(app)
       .get('/api/notifications/preferences')
       .set('Authorization', `Bearer ${tokenFor(user)}`);
@@ -145,7 +143,7 @@ describe('Notification preferences', () => {
   });
 
   it('saves and retrieves user preferences', async () => {
-    const user = createUser();
+    const user = await createUser();
     const putRes = await request(app)
       .put('/api/notifications/preferences')
       .set('Authorization', `Bearer ${tokenFor(user)}`)
@@ -165,7 +163,7 @@ describe('Notification preferences', () => {
   });
 
   it('respects in_app=false preference when creating notifications', async () => {
-    const user = createUser();
+    const user = await createUser();
     // Disable in-app for spec_approved
     await request(app)
       .put('/api/notifications/preferences')

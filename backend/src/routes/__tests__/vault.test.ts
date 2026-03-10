@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -20,7 +20,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -41,22 +40,16 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-vault-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── POST /api/vault/keys ──────────────────────────────────────────────────
@@ -114,7 +107,7 @@ describe('POST /api/vault/keys', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ provider: 'anthropic', key: plainKey, label: 'Check' });
 
-    const row = db.prepare('SELECT encrypted_key FROM api_key_vault LIMIT 1').get() as { encrypted_key: string };
+    const row = await queryOne(`SELECT encrypted_key FROM api_key_vault LIMIT 1`) as { encrypted_key: string };
     expect(row.encrypted_key).not.toBe(plainKey);
     expect(row.encrypted_key).toContain(':'); // iv:authTag:ciphertext format
   });
@@ -211,7 +204,7 @@ describe('getVaultKey', () => {
       .send({ provider: 'anthropic', key: plainKey, label: 'SDK' });
 
     // Get the user id from the DB
-    const user = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
+    const user = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
 
     const { getVaultKey } = require('../vault');
     const result = getVaultKey(user.id, 'anthropic');
@@ -221,7 +214,7 @@ describe('getVaultKey', () => {
   });
 
   test('returns null when no key exists for provider', async () => {
-    const user = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
+    const user = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
 
     const { getVaultKey } = require('../vault');
     const result = getVaultKey(user.id, 'openai');

@@ -3,9 +3,9 @@
 Spec: rorca-postgres-migration
 Run ID: 16
 Started: 2026-03-10T08:21:19.019Z
-Last Updated: 2026-03-10T10:29:57.877Z
+Last Updated: 2026-03-10T11:04:50.687Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - PG-001: PostgreSQL Schema — Convert All Migrations — DONE (claude, 461s)
 - PG-002: Database Connection Layer — pg Pool + Async Helpers — DONE (claude, 190s)
 - PG-003: Route Async Conversion — Wave 1 (Core Routes) — DONE (claude, 1440s)
@@ -15,3 +15,4 @@ Last Updated: 2026-03-10T10:29:57.877Z
 - PG-007: Embedding Pipeline — Generate + Store Vectors — DONE (claude, 469s)
 - PG-008: Hybrid Search — tsvector + pgvector + RRF — DONE (claude, 330s)
 - PG-009: Docker Compose — Postgres 16 + pgvector + AGE — DONE (claude, 359s)
+- PG-010: Backend Test Suite Conversion — DONE (claude, 2084s)

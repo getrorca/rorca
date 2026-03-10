@@ -9,8 +9,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type Database from 'better-sqlite3';
-
+import { query, queryOne, execute } from '../../db/index';
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
   getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
@@ -25,11 +24,10 @@ jest.mock('../../lib/github-checks', () => ({
   evaluatePrAndPostCheck: jest.fn().mockResolvedValue(undefined),
 }));
 
-let db: Database.Database;
 let tmpDir: string;
 let workspaceId: string;
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.resetModules();
 
   jest.mock('../../lib/llm-client', () => ({
@@ -48,26 +46,18 @@ beforeEach(() => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-webhook-handlers-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   // Initialize DB by requiring it
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  workspaceId = 'ws-webhook-handlers-' + Date.now();
-  db.prepare('INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)').run(
-    workspaceId,
+workspaceId = 'ws-webhook-handlers-' + Date.now();
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [workspaceId,
     'Webhook Handlers Test',
-    tmpDir,
-  );
+    tmpDir,]);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── extractStoryIds ───────────────────────────────────────────────────────
@@ -158,9 +148,7 @@ describe('handlePush', () => {
 
     await handlePush(payload, 'push', workspaceId);
 
-    const commits = db.prepare(
-      "SELECT * FROM story_commits WHERE commit_sha = 'abc123def456'"
-    ).all() as any[];
+    const commits = await query(`SELECT * FROM story_commits WHERE commit_sha = 'abc123def456'`) as any[];
     expect(commits.length).toBeGreaterThanOrEqual(1);
     expect(commits[0].story_id).toBe('US-007');
   });
@@ -181,9 +169,7 @@ describe('handlePush', () => {
 
     await handlePush(payload, 'push', workspaceId);
 
-    const commits = db.prepare(
-      "SELECT * FROM story_commits WHERE commit_sha = 'zzzyyy111222'"
-    ).all() as any[];
+    const commits = await query(`SELECT * FROM story_commits WHERE commit_sha = 'zzzyyy111222'`) as any[];
     expect(commits).toHaveLength(0);
   });
 });
