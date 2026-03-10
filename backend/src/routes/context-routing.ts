@@ -26,6 +26,7 @@ import {
 } from '../lib/rorca-config';
 import type { RorcaConfig } from '../lib/rorca-config';
 import { invalidateConfig } from '../lib/context-cache';
+import { populateConventionsFromConfig } from '../lib/knowledge-graph';
 
 const router = Router();
 
@@ -260,6 +261,11 @@ router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), async (req:
 
   writeRorcaConfig(wsPath, req.body.config);
   invalidateConfig(req.params.id as string); // PG-013
+
+  // SW-008: Sync convention graph with updated config
+  populateConventionsFromConfig(req.params.id as string, wsPath).catch(() => {
+    // Graph population is best-effort — don't block config save
+  });
 
   // Return the saved config (with defaults filled)
   const saved = loadRorcaConfig(wsPath);
