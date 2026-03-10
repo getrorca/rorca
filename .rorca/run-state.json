@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T11:04:50.687Z",
+  "lastUpdatedAt": "2026-03-10T11:36:30.010Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -93,6 +93,15 @@
       "finishedAt": "2026-03-10T11:04:50.687Z",
       "agentType": "claude",
       "elapsedMs": 2084047
+    },
+    {
+      "storyId": "PG-011",
+      "title": "Remove SQLite Dependencies Completely",
+      "status": "passed",
+      "startedAt": "2026-03-10T11:20:08.271Z",
+      "finishedAt": "2026-03-10T11:36:30.010Z",
+      "agentType": "claude",
+      "elapsedMs": 981739
     }
   ],
   "failedStories": [],

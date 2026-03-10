@@ -74,7 +74,7 @@ export function listBackups(): BackupInfo[] {
   if (!fs.existsSync(backupDir)) return [];
 
   const files = fs.readdirSync(backupDir)
-    .filter(f => f.startsWith('rorca-backup-') && (f.endsWith('.db') || f.endsWith('.sql')));
+    .filter(f => f.startsWith('rorca-backup-') && f.endsWith('.sql'));
 
   return files
     .map(filename => {
@@ -100,7 +100,7 @@ export function pruneOldBackups(): number {
   let deleted = 0;
 
   const files = fs.readdirSync(backupDir)
-    .filter(f => f.startsWith('rorca-backup-') && (f.endsWith('.db') || f.endsWith('.sql')));
+    .filter(f => f.startsWith('rorca-backup-') && f.endsWith('.sql'));
 
   for (const filename of files) {
     const filePath = path.join(backupDir, filename);

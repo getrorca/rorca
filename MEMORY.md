@@ -10,10 +10,10 @@
 > Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
 > Source: v2-platform
 
-## 2026-02-27 [Gotcha] better-sqlite3 is synchronous
-> Rule: Never use async/await for better-sqlite3 DB calls. db.prepare().get() returns T|undefined, .all() returns T[], .run() returns RunResult.
-> Context: Using async wrappers around synchronous calls adds unnecessary overhead and can cause subtle bugs.
-> Source: v2-platform
+## 2026-03-10 [Gotcha] pg is async — always await DB calls
+> Rule: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
+> Context: Missing `await` returns a Promise instead of data. PostgreSQL uses numbered placeholders, not positional `?`.
+> Source: rorca-postgres-migration PG-011
 
 ## 2026-02-27 [Convention] chatComplete returns ChatResult
 > Rule: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.

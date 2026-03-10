@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { db } from '../db';
+import { query, queryOne, execute } from '../db';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { authRequired, type AuthUser } from './auth';
 import { logger } from '../lib/logger';
@@ -31,12 +31,13 @@ function hashToken(raw: string): string {
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
-function emitWalEvent(eventType: string, payload: Record<string, unknown>): void {
-  const result = db.prepare(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, '', ?)"
-  ).run(eventType, JSON.stringify(payload));
+async function emitWalEvent(eventType: string, payload: Record<string, unknown>): Promise<void> {
+  const result = await queryOne<{ id: number }>(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ($1, '', $2) RETURNING id",
+    [eventType, JSON.stringify(payload)]
+  );
   const walEvent: WalEvent = {
-    id: result.lastInsertRowid as number,
+    id: result?.id ?? 0,
     ts: new Date().toISOString(),
     event_type: eventType,
     workspace_id: null,
@@ -82,14 +83,15 @@ function emitWalEvent(eventType: string, payload: Record<string, unknown>): void
  *       410:
  *         description: Invite already accepted or expired
  */
-router.get('/:token', (req: Request, res: Response) => {
+router.get('/:token', async (req: Request, res: Response) => {
   try {
     const rawToken = req.params.token as string;
     const tokenHash = hashToken(rawToken);
 
-    const invite = db.prepare(
-      'SELECT * FROM team_invites WHERE token_hash = ?'
-    ).get(tokenHash) as TeamInviteRow | undefined;
+    const invite = await queryOne<TeamInviteRow>(
+      'SELECT * FROM team_invites WHERE token_hash = $1',
+      [tokenHash]
+    );
 
     if (!invite) {
       res.status(404).json({ error: 'Invalid invite token' });
@@ -106,14 +108,20 @@ router.get('/:token', (req: Request, res: Response) => {
       return;
     }
 
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(invite.team_id) as TeamRow | undefined;
+    const team = await queryOne<TeamRow>(
+      'SELECT * FROM teams WHERE id = $1',
+      [invite.team_id]
+    );
     if (!team) {
       res.status(404).json({ error: 'Team no longer exists' });
       return;
     }
 
     // Look up inviter display name
-    const inviter = db.prepare('SELECT display_name FROM users WHERE id = ?').get(invite.invited_by) as { display_name: string } | undefined;
+    const inviter = await queryOne<{ display_name: string }>(
+      'SELECT display_name FROM users WHERE id = $1',
+      [invite.invited_by]
+    );
 
     res.json({
       teamId: team.id,
@@ -166,15 +174,16 @@ router.get('/:token', (req: Request, res: Response) => {
  *       410:
  *         description: Invite already accepted or expired
  */
-router.post('/:token/accept', authRequired, (req: Request, res: Response) => {
+router.post('/:token/accept', authRequired, async (req: Request, res: Response) => {
   try {
     const user = (req as Request & { user: AuthUser }).user;
     const rawToken = req.params.token as string;
     const tokenHash = hashToken(rawToken);
 
-    const invite = db.prepare(
-      'SELECT * FROM team_invites WHERE token_hash = ?'
-    ).get(tokenHash) as TeamInviteRow | undefined;
+    const invite = await queryOne<TeamInviteRow>(
+      'SELECT * FROM team_invites WHERE token_hash = $1',
+      [tokenHash]
+    );
 
     if (!invite) {
       res.status(404).json({ error: 'Invalid invite token' });
@@ -192,37 +201,47 @@ router.post('/:token/accept', authRequired, (req: Request, res: Response) => {
     }
 
     // Verify the authenticated user's email matches the invite
-    const userRow = db.prepare('SELECT email FROM users WHERE id = ?').get(user.id) as { email: string } | undefined;
+    const userRow = await queryOne<{ email: string }>(
+      'SELECT email FROM users WHERE id = $1',
+      [user.id]
+    );
     if (!userRow || userRow.email !== invite.email) {
       res.status(403).json({ error: 'This invite was sent to a different email address' });
       return;
     }
 
     // Check if already a member
-    const existingMember = db.prepare(
-      'SELECT * FROM team_members WHERE team_id = ? AND user_id = ?'
-    ).get(invite.team_id, user.id);
+    const existingMember = await queryOne(
+      'SELECT * FROM team_members WHERE team_id = $1 AND user_id = $2',
+      [invite.team_id, user.id]
+    );
     if (existingMember) {
       // Mark invite as accepted anyway
-      db.prepare(
-        "UPDATE team_invites SET accepted_at = datetime('now') WHERE id = ?"
-      ).run(invite.id);
+      await execute(
+        "UPDATE team_invites SET accepted_at = NOW() WHERE id = $1",
+        [invite.id]
+      );
       res.status(409).json({ error: 'You are already a member of this team' });
       return;
     }
 
     // Add user as member and mark invite as accepted
-    db.prepare(
-      "INSERT INTO team_members (team_id, user_id, role, accepted_at, last_active_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))"
-    ).run(invite.team_id, user.id, invite.role);
+    await execute(
+      "INSERT INTO team_members (team_id, user_id, role, accepted_at, last_active_at) VALUES ($1, $2, $3, NOW(), NOW())",
+      [invite.team_id, user.id, invite.role]
+    );
 
-    db.prepare(
-      "UPDATE team_invites SET accepted_at = datetime('now') WHERE id = ?"
-    ).run(invite.id);
+    await execute(
+      "UPDATE team_invites SET accepted_at = NOW() WHERE id = $1",
+      [invite.id]
+    );
 
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(invite.team_id) as TeamRow;
+    const team = await queryOne<TeamRow>(
+      'SELECT * FROM teams WHERE id = $1',
+      [invite.team_id]
+    );
 
-    emitWalEvent('team_invite_accepted', {
+    await emitWalEvent('team_invite_accepted', {
       teamId: invite.team_id,
       userId: user.id,
       email: invite.email,
@@ -230,9 +249,9 @@ router.post('/:token/accept', authRequired, (req: Request, res: Response) => {
     });
 
     res.json({
-      teamId: team.id,
-      teamName: team.name,
-      teamSlug: team.slug,
+      teamId: team!.id,
+      teamName: team!.name,
+      teamSlug: team!.slug,
       role: invite.role,
       message: 'Successfully joined the team',
     });

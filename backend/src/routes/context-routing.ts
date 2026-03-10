@@ -13,7 +13,7 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
-import { db } from '../db/index';
+import { queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import {
   loadRorcaConfig,
@@ -30,10 +30,9 @@ const router = Router();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function resolveWorkspacePath(workspaceId: string): string | null {
+async function resolveWorkspacePath(workspaceId: string): Promise<string | null> {
   try {
-    const row = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as
-      { path: string } | undefined;
+    const row = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
     return row?.path ?? null;
   } catch {
     return null;
@@ -79,8 +78,8 @@ const IGNORED_DIRS = new Set([
  *       200:
  *         description: Directory entries
  */
-router.get('/:id/directory-tree', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/directory-tree', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -142,8 +141,8 @@ router.get('/:id/directory-tree', (req: Request, res: Response) => {
  *       200:
  *         description: List of skill files
  */
-router.get('/:id/skills', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/skills', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -205,8 +204,8 @@ router.get('/:id/skills', (req: Request, res: Response) => {
  *       200:
  *         description: Full rorca config with defaults applied
  */
-router.get('/:id/rorca-config', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/rorca-config', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -251,8 +250,8 @@ const RorcaConfigBodySchema = z.object({
   config: RorcaConfigSchema,
 });
 
-router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -276,8 +275,8 @@ router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), (req: Reque
  *     description: Returns the raw JSON text of .rorca/config.json for use in a code editor, or pretty-printed defaults if the file does not exist.
  *     tags: [Context Routing]
  */
-router.get('/:id/rorca-config/raw', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/rorca-config/raw', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -307,8 +306,8 @@ router.get('/:id/rorca-config/raw', (req: Request, res: Response) => {
  *     description: Parses and validates raw JSON text, then writes it to .rorca/config.json preserving the user's formatting.
  *     tags: [Context Routing]
  */
-router.put('/:id/rorca-config/raw', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.put('/:id/rorca-config/raw', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -361,8 +360,8 @@ router.put('/:id/rorca-config/raw', (req: Request, res: Response) => {
  *     description: Creates a default .rorca/config.json in the workspace directory, enabling advanced configuration for the first time.
  *     tags: [Context Routing]
  */
-router.post('/:id/rorca-config/eject', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.post('/:id/rorca-config/eject', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -395,8 +394,8 @@ router.post('/:id/rorca-config/eject', (req: Request, res: Response) => {
  *     description: Returns the .rorca/config.json as a downloadable file attachment with Content-Disposition header.
  *     tags: [Context Routing]
  */
-router.get('/:id/rorca-config/export', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/rorca-config/export', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;

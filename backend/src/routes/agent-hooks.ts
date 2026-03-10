@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import type { AgentHookRow } from '../lib/agent-hook-runner';
 
 const router = Router({ mergeParams: true });
@@ -43,11 +43,12 @@ const VALID_EVENT_TYPES = [
  *                       enabled: { type: integer }
  *                       timeout_seconds: { type: integer }
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const workspaceId = req.params.id;
-  const hooks = db.prepare(
-    'SELECT * FROM agent_hooks WHERE workspace_id = ? ORDER BY event_type, id ASC'
-  ).all(workspaceId) as AgentHookRow[];
+  const hooks = await query<AgentHookRow>(
+    'SELECT * FROM agent_hooks WHERE workspace_id = $1 ORDER BY event_type, id ASC',
+    [workspaceId]
+  );
   res.json({ hooks });
 });
 
@@ -84,7 +85,7 @@ router.get('/', (req: Request, res: Response) => {
  *       404:
  *         description: Workspace not found
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   const { event_type, command, enabled, timeout_seconds } = req.body;
 
@@ -99,7 +100,7 @@ router.post('/', (req: Request, res: Response) => {
   }
 
   // Verify workspace exists
-  const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspaceId);
+  const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
   if (!workspace) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -108,13 +109,10 @@ router.post('/', (req: Request, res: Response) => {
   const isEnabled = enabled !== undefined ? (enabled ? 1 : 0) : 1;
   const timeout = timeout_seconds !== undefined ? Math.max(1, Math.min(300, Number(timeout_seconds))) : 30;
 
-  const result = db.prepare(
-    `INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES (?, ?, ?, ?, ?)`
-  ).run(workspaceId, event_type, command, isEnabled, timeout);
-
-  const hook = db.prepare('SELECT * FROM agent_hooks WHERE id = ?').get(
-    result.lastInsertRowid
-  ) as AgentHookRow;
+  const hook = await queryOne<AgentHookRow>(
+    `INSERT INTO agent_hooks (workspace_id, event_type, command, enabled, timeout_seconds) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [workspaceId, event_type, command, isEnabled, timeout]
+  );
 
   res.status(201).json({ hook });
 });
@@ -155,16 +153,17 @@ router.post('/', (req: Request, res: Response) => {
  *       404:
  *         description: Hook not found
  */
-router.put('/:hookId', (req: Request, res: Response) => {
+router.put('/:hookId', async (req: Request, res: Response) => {
   const hookId = parseInt(String(req.params.hookId), 10);
   if (isNaN(hookId)) {
     res.status(400).json({ error: 'Invalid hook ID' });
     return;
   }
 
-  const existing = db.prepare(
-    'SELECT * FROM agent_hooks WHERE id = ? AND workspace_id = ?'
-  ).get(hookId, req.params.id) as AgentHookRow | undefined;
+  const existing = await queryOne<AgentHookRow>(
+    'SELECT * FROM agent_hooks WHERE id = $1 AND workspace_id = $2',
+    [hookId, req.params.id]
+  );
 
   if (!existing) {
     res.status(404).json({ error: 'Hook not found' });
@@ -185,11 +184,11 @@ router.put('/:hookId', (req: Request, res: Response) => {
     ? Math.max(1, Math.min(300, Number(timeout_seconds)))
     : existing.timeout_seconds;
 
-  db.prepare(
-    `UPDATE agent_hooks SET event_type = ?, command = ?, enabled = ?, timeout_seconds = ? WHERE id = ?`
-  ).run(newEventType, newCommand, newEnabled, newTimeout, hookId);
+  const updated = await queryOne<AgentHookRow>(
+    `UPDATE agent_hooks SET event_type = $1, command = $2, enabled = $3, timeout_seconds = $4 WHERE id = $5 RETURNING *`,
+    [newEventType, newCommand, newEnabled, newTimeout, hookId]
+  );
 
-  const updated = db.prepare('SELECT * FROM agent_hooks WHERE id = ?').get(hookId) as AgentHookRow;
   res.json({ hook: updated });
 });
 
@@ -218,23 +217,24 @@ router.put('/:hookId', (req: Request, res: Response) => {
  *       404:
  *         description: Hook not found
  */
-router.delete('/:hookId', (req: Request, res: Response) => {
+router.delete('/:hookId', async (req: Request, res: Response) => {
   const hookId = parseInt(String(req.params.hookId), 10);
   if (isNaN(hookId)) {
     res.status(400).json({ error: 'Invalid hook ID' });
     return;
   }
 
-  const existing = db.prepare(
-    'SELECT * FROM agent_hooks WHERE id = ? AND workspace_id = ?'
-  ).get(hookId, req.params.id) as AgentHookRow | undefined;
+  const existing = await queryOne<AgentHookRow>(
+    'SELECT * FROM agent_hooks WHERE id = $1 AND workspace_id = $2',
+    [hookId, req.params.id]
+  );
 
   if (!existing) {
     res.status(404).json({ error: 'Hook not found' });
     return;
   }
 
-  db.prepare('DELETE FROM agent_hooks WHERE id = ?').run(hookId);
+  await execute('DELETE FROM agent_hooks WHERE id = $1', [hookId]);
   res.status(204).send();
 });
 

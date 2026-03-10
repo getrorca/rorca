@@ -13,7 +13,7 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { db } from '../db/index';
+import { queryOne, query } from '../db/index';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { markWriting } from '../lib/file-watcher';
 
@@ -21,10 +21,9 @@ const router = Router();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function resolveWorkspacePath(workspaceId: string): string | null {
+async function resolveWorkspacePath(workspaceId: string): Promise<string | null> {
   try {
-    const row = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as
-      { path: string } | undefined;
+    const row = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
     return row?.path ?? null;
   } catch {
     return null;
@@ -77,8 +76,8 @@ function countWords(text: string): number {
  *       200:
  *         description: Array of context file entries
  */
-router.get('/:id/context-files', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/context-files', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -210,8 +209,8 @@ router.get('/:id/context-files', (req: Request, res: Response) => {
  *       200:
  *         description: File content + metadata
  */
-router.get('/:id/context-files/read', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/context-files/read', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -277,8 +276,8 @@ router.get('/:id/context-files/read', (req: Request, res: Response) => {
  *       200:
  *         description: File saved successfully
  */
-router.put('/:id/context-files/write', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.put('/:id/context-files/write', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -342,8 +341,8 @@ router.put('/:id/context-files/write', (req: Request, res: Response) => {
  *       200:
  *         description: Git diff output + committed content
  */
-router.get('/:id/context-files/diff', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/context-files/diff', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -770,8 +769,8 @@ function requireRole(...roles: string[]) {
 `,
 };
 
-router.post('/:id/context-files/create-skill', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.post('/:id/context-files/create-skill', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -872,8 +871,8 @@ router.get('/:id/context-files/skill-templates', (_req: Request, res: Response) 
  *       404:
  *         description: File not found
  */
-router.delete('/:id/context-files/delete-skill', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.delete('/:id/context-files/delete-skill', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -957,8 +956,8 @@ router.delete('/:id/context-files/delete-skill', (req: Request, res: Response) =
  *       200:
  *         description: Usage counts per skill file
  */
-router.get('/:id/context-files/skill-usage', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/context-files/skill-usage', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -968,13 +967,14 @@ router.get('/:id/context-files/skill-usage', (req: Request, res: Response) => {
 
   // Query WAL events for story_started events that contain context_files
   try {
-    const rows = db.prepare(`
-      SELECT payload FROM wal_events
+    const rows = await query<{ payload: string }>(
+      `SELECT payload FROM wal_events
       WHERE event_type = 'story_started'
-        AND workspace_id = ?
+        AND workspace_id = $1
       ORDER BY created_at DESC
-      LIMIT ?
-    `).all(req.params.id, runLimit * 50) as { payload: string }[];
+      LIMIT $2`,
+      [req.params.id, runLimit * 50]
+    );
 
     const counts = new Map<string, number>();
     for (const row of rows) {
@@ -1031,7 +1031,7 @@ router.get('/:id/context-files/skill-usage', (req: Request, res: Response) => {
  *         description: Skill imported
  */
 router.post('/:id/context-files/import-skill', async (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -1138,8 +1138,8 @@ router.post('/:id/context-files/import-skill', async (req: Request, res: Respons
  *       200:
  *         description: Markdown file download
  */
-router.get('/:id/context-files/export-skill', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/context-files/export-skill', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
@@ -1191,8 +1191,8 @@ router.get('/:id/context-files/export-skill', (req: Request, res: Response) => {
  *       200:
  *         description: Map of skill file path to assigned scopes/tags
  */
-router.get('/:id/context-files/skill-assignments', (req: Request, res: Response) => {
-  const wsPath = resolveWorkspacePath(req.params.id as string);
+router.get('/:id/context-files/skill-assignments', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
