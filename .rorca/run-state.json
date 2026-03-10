@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T13:13:58.564Z",
+  "lastUpdatedAt": "2026-03-10T13:18:16.002Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -219,6 +219,15 @@
       "finishedAt": "2026-03-10T13:13:58.564Z",
       "agentType": "claude",
       "elapsedMs": 631398
+    },
+    {
+      "storyId": "PG-023",
+      "title": "Auto-Memory — Spec Generation Memory Capture",
+      "status": "passed",
+      "startedAt": "2026-03-10T13:14:07.279Z",
+      "finishedAt": "2026-03-10T13:18:16.002Z",
+      "agentType": "claude",
+      "elapsedMs": 248723
     }
   ],
   "failedStories": [],

@@ -21,6 +21,7 @@ import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
 import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
+import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -1828,6 +1829,15 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         ...((parsed as Record<string, unknown>).verificationReport ? { verificationReport: (parsed as Record<string, unknown>).verificationReport } : {}),
       } : {}),
     });
+
+    // 17. Fire-and-forget spec memory capture (PG-023)
+    autoSynthesizeSpecMemory(
+      slug,
+      workspaceId,
+      brief,
+      { stories: parsed.stories as unknown[] },
+      (contextSummary ?? {}) as Record<string, unknown>,
+    ).catch(() => { /* non-blocking — errors logged internally */ });
   } catch (error: any) {
     logger.error('[Specs] Generate error:', error);
     const category = categorizeSpecError(error);
