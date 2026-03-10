@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-wiring",
   "runId": 28,
   "startedAt": "2026-03-10T22:49:18.582Z",
-  "lastUpdatedAt": "2026-03-10T23:21:21.088Z",
+  "lastUpdatedAt": "2026-03-10T23:42:28.028Z",
   "completedStories": [
     {
       "storyId": "SW-001",
@@ -66,6 +66,15 @@
       "finishedAt": "2026-03-10T23:21:21.087Z",
       "agentType": "claude",
       "elapsedMs": 130309
+    },
+    {
+      "storyId": "SW-008",
+      "title": "Populate Convention Graph Edges from .rorca/config.json Scopes",
+      "status": "passed",
+      "startedAt": "2026-03-10T23:21:44.146Z",
+      "finishedAt": "2026-03-10T23:42:28.028Z",
+      "agentType": "claude",
+      "elapsedMs": 1243882
     }
   ],
   "failedStories": [],
