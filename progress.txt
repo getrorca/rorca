@@ -3,9 +3,9 @@
 Spec: rorca-postgres-migration
 Run ID: 16
 Started: 2026-03-10T08:21:19.019Z
-Last Updated: 2026-03-10T13:13:58.564Z
+Last Updated: 2026-03-10T13:18:16.002Z
 
-## Completed Stories (24)
+## Completed Stories (25)
 - PG-001: PostgreSQL Schema — Convert All Migrations — DONE (claude, 461s)
 - PG-002: Database Connection Layer — pg Pool + Async Helpers — DONE (claude, 190s)
 - PG-003: Route Async Conversion — Wave 1 (Core Routes) — DONE (claude, 1440s)
@@ -30,3 +30,4 @@ Last Updated: 2026-03-10T13:13:58.564Z
 - PG-020: Auto-Memory — Write Memories Automatically After Each Story — DONE (claude, 502s)
 - PG-021: Auto-Memory — Run-Level Synthesis After Pipeline Completion — DONE (claude, 443s)
 - PG-022: Memory Curation UI — Delete, Edit, Pin (Post-Write Review) — DONE (claude, 631s)
+- PG-023: Auto-Memory — Spec Generation Memory Capture — DONE (claude, 249s)
