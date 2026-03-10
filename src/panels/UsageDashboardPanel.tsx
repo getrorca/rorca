@@ -3,12 +3,30 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend,
 } from 'recharts';
-import { Coins, Cpu, ArrowDownUp, RefreshCw, Calendar, Loader2 } from 'lucide-react';
+import { Coins, Cpu, ArrowDownUp, RefreshCw, Calendar, Loader2, Wrench, ChevronDown, ChevronRight } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import ErrorBanner from '../components/ErrorBanner';
+import { SkeletonLine } from '../components/Skeleton';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
+
+interface SkillEffectivenessItem {
+  name: string;
+  totalUses: number;
+  passCount: number;
+  failCount: number;
+  passRate: number;
+  avgElapsedSeconds: number | null;
+  runsUsedIn: number;
+}
+
+interface SkillEffectivenessResponse {
+  skills: SkillEffectivenessItem[];
+  period: { since: string; until: string };
+  totalRuns: number;
+  totalStories: number;
+}
 
 interface UsageGroupRow {
   group_key: string;
@@ -382,6 +400,9 @@ export default function UsageDashboardPanel() {
               </table>
               </div>
             </div>
+
+            {/* Skill Effectiveness */}
+            <SkillEffectivenessCard />
           </>
         )}
       </div>
@@ -397,6 +418,152 @@ function SummaryCard({ label, value, sub }: { label: string; value: string; sub:
       <span className="text-xs text-muted">{label}</span>
       <span className="text-2xl font-bold" aria-hidden="true">{value}</span>
       <span className="text-xs text-muted">{sub}</span>
+    </div>
+  );
+}
+
+function formatElapsed(seconds: number | null): string {
+  if (seconds == null) return '—';
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function passRateColor(rate: number): string {
+  if (rate >= 80) return 'text-emerald-500';
+  if (rate >= 50) return 'text-amber-500';
+  return 'text-red-500';
+}
+
+function SkillEffectivenessCard() {
+  const { workspaceId } = useWorkspace();
+  const [data, setData] = useState<SkillEffectivenessResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(true);
+  const [showAll, setShowAll] = useState(false);
+
+  const fetchData = useCallback(async () => {
+    if (!workspaceId) return;
+    setError(null);
+    try {
+      const result = await apiFetch<SkillEffectivenessResponse>(
+        `/api/analytics/skills/effectiveness?workspaceId=${workspaceId}`
+      );
+      setData(result);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load skill effectiveness data';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    setLoading(true);
+    fetchData();
+  }, [fetchData]);
+
+  const skills = data?.skills ?? [];
+  const visibleSkills = showAll ? skills : skills.slice(0, 10);
+
+  return (
+    <div className="bg-panel-alt rounded-lg p-4">
+      {/* Header — always visible */}
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="flex items-center gap-2 w-full text-left group"
+        aria-expanded={expanded}
+      >
+        {expanded ? (
+          <ChevronDown size={14} className="text-muted shrink-0" aria-hidden="true" />
+        ) : (
+          <ChevronRight size={14} className="text-muted shrink-0" aria-hidden="true" />
+        )}
+        <Wrench size={16} className="text-muted shrink-0" aria-hidden="true" />
+        <h3 className="text-sm font-medium text-muted">
+          Skill Effectiveness
+          {!expanded && skills.length > 0 && (
+            <span className="ml-1">({skills.length} skill{skills.length !== 1 ? 's' : ''})</span>
+          )}
+        </h3>
+        <span className="text-xs text-muted">(Last 30 Days)</span>
+      </button>
+
+      {/* Collapsible body */}
+      {expanded && (
+        <div className="mt-3">
+          {loading ? (
+            <div className="space-y-2.5">
+              {[0, 1, 2].map(i => (
+                <div key={i} className="flex items-center gap-4">
+                  <SkeletonLine className="w-28" />
+                  <SkeletonLine className="w-10 ml-auto" />
+                  <SkeletonLine className="w-12" />
+                  <SkeletonLine className="w-12" />
+                  <SkeletonLine className="w-8" />
+                </div>
+              ))}
+            </div>
+          ) : error ? (
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-red-400">{error}</span>
+              <button
+                onClick={() => { setLoading(true); fetchData(); }}
+                className="text-accent text-xs hover:underline"
+              >
+                Retry
+              </button>
+            </div>
+          ) : skills.length === 0 ? (
+            <div className="flex flex-col items-center py-6 text-center">
+              <p className="text-sm text-muted">No skill usage data yet</p>
+              <p className="text-xs text-muted mt-1">
+                Skills will appear here after running specs with matched skills.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm" role="table" aria-label="Skill effectiveness data">
+                  <thead>
+                    <tr className="text-left text-muted border-b border-border">
+                      <th className="pb-2 font-medium">Skill Name</th>
+                      <th className="pb-2 font-medium text-right">Uses</th>
+                      <th className="pb-2 font-medium text-right">Pass Rate</th>
+                      <th className="pb-2 font-medium text-right">Avg Time</th>
+                      <th className="pb-2 font-medium text-right">Runs</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleSkills.map(skill => (
+                      <tr key={skill.name} className="border-b border-border/50 last:border-0">
+                        <td className="py-2 font-mono text-sm truncate max-w-[200px]" title={skill.name}>
+                          {skill.name}
+                        </td>
+                        <td className="py-2 text-right text-muted">{skill.totalUses}</td>
+                        <td className={`py-2 text-right font-medium ${passRateColor(skill.passRate)}`}>
+                          {Math.round(skill.passRate)}%
+                        </td>
+                        <td className="py-2 text-right text-muted">{formatElapsed(skill.avgElapsedSeconds)}</td>
+                        <td className="py-2 text-right text-muted">{skill.runsUsedIn}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {skills.length > 10 && (
+                <button
+                  onClick={() => setShowAll(s => !s)}
+                  className="mt-2 text-xs text-accent hover:underline"
+                >
+                  {showAll ? 'Show less' : `Show all (${skills.length})`}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
