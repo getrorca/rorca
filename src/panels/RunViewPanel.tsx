@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X } from 'lucide-react';
+import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -17,6 +17,7 @@ import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
 import WorktreesPanel from './WorktreesPanel';
 import FinOpsTab from '../components/FinOpsTab';
+import SkillsTab from '../components/SkillsTab';
 import type { PanelId } from '../components/Sidebar';
 import { RunViewSkeleton } from '../components/skeletons';
 import AppHeader from '../components/AppHeader';
@@ -69,12 +70,13 @@ interface CommitEntry {
   author: string;
 }
 
-type RunViewTab = 'terminal' | 'stories' | 'graph' | 'finops' | 'compare' | 'worktrees' | 'commits';
+type RunViewTab = 'terminal' | 'stories' | 'graph' | 'skills' | 'finops' | 'compare' | 'worktrees' | 'commits';
 
 const TABS: { id: RunViewTab; label: string; icon: typeof TerminalIcon }[] = [
   { id: 'terminal', label: 'Terminal', icon: TerminalIcon },
   { id: 'stories', label: 'Stories', icon: List },
   { id: 'graph', label: 'Graph', icon: GitBranch },
+  { id: 'skills', label: 'Skills', icon: Wrench },
   { id: 'finops', label: 'FinOps', icon: DollarSign },
   { id: 'compare', label: 'Compare', icon: ArrowLeftRight },
   { id: 'worktrees', label: 'Worktrees', icon: FolderGit2 },
@@ -672,6 +674,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanel
             liveStatuses={liveStatuses}
           />
         );
+      case 'skills':
+        return <SkillsTab runId={run.id} />;
       case 'finops':
         return <FinOpsTab runId={run.id} />;
       case 'compare':

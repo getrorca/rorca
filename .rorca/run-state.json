@@ -2,7 +2,7 @@
   "specId": "rorca-curated-skills-library",
   "runId": 14,
   "startedAt": "2026-03-10T02:18:43.908Z",
-  "lastUpdatedAt": "2026-03-10T02:48:22.438Z",
+  "lastUpdatedAt": "2026-03-10T04:27:59.726Z",
   "completedStories": [
     {
       "storyId": "SL-002",
@@ -66,6 +66,15 @@
       "finishedAt": "2026-03-10T02:48:22.438Z",
       "agentType": "claude",
       "elapsedMs": 15595
+    },
+    {
+      "storyId": "SL-010",
+      "title": "Skills Tab in Run View",
+      "status": "passed",
+      "startedAt": "2026-03-10T03:56:47.449Z",
+      "finishedAt": "2026-03-10T04:27:59.726Z",
+      "agentType": "claude",
+      "elapsedMs": 1872277
     }
   ],
   "failedStories": [],
