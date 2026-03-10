@@ -41,6 +41,7 @@ import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
+import { startEmbeddingPipeline } from './lib/embedding-pipeline';
 import { subscribe, type WalEvent } from './lib/sse-hub';
 import { rotateMemory } from './lib/memory-ledger';
 import swaggerUi from 'swagger-ui-express';
@@ -262,6 +263,9 @@ startQueueConsumer();
 
 // CIE-005: Subscribe memory synthesis to generate ledger entries after successful runs
 startMemorySynthesis();
+
+// PG-007: Subscribe embedding pipeline to WAL events for automatic vector generation
+startEmbeddingPipeline();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
 subscribe((event: WalEvent) => {
