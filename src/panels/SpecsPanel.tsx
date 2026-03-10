@@ -2031,6 +2031,23 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Advanced options
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
+  // Auto-match & auto-suggest toggles (persisted in localStorage)
+  const [autoMatchSkills, setAutoMatchSkills] = useState(() => {
+    try { const v = localStorage.getItem('rorca:forge:autoMatchSkills'); return v !== 'false'; } catch { return true; }
+  });
+  const [autoSuggestModels, setAutoSuggestModels] = useState(() => {
+    try { const v = localStorage.getItem('rorca:forge:autoSuggestModels'); return v !== 'false'; } catch { return true; }
+  });
+  useEffect(() => { try { localStorage.setItem('rorca:forge:autoMatchSkills', String(autoMatchSkills)); } catch {} }, [autoMatchSkills]);
+  useEffect(() => { try { localStorage.setItem('rorca:forge:autoSuggestModels', String(autoSuggestModels)); } catch {} }, [autoSuggestModels]);
+
+  // Skills count
+  const [skillsCount, setSkillsCount] = useState<number | null>(null);
+
+  // Auto-match/suggest loading state
+  const [autoMatchStatus, setAutoMatchStatus] = useState<'idle' | 'matching' | 'suggesting' | 'done'>('idle');
+  const [modelSuggestions, setModelSuggestions] = useState<Array<{ storyId: string; suggestedModel: string; reason: string; confidence: number }> | null>(null);
+
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedSpec, setGeneratedSpec] = useState<GeneratedSpec | null>(null);
@@ -2104,6 +2121,14 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       .catch(() => setDirectionLayers(null));
   }, [workspaceId]);
 
+  // Fetch skills count
+  useEffect(() => {
+    if (!workspaceId) { setSkillsCount(null); return; }
+    apiFetch<{ skills: unknown[] }>(`/api/skills?workspaceId=${workspaceId}`)
+      .then(res => setSkillsCount(Array.isArray(res.skills) ? res.skills.length : (Array.isArray(res) ? (res as unknown[]).length : 0)))
+      .catch(() => setSkillsCount(0));
+  }, [workspaceId]);
+
   const validateSpecName = useCallback((value: string) => {
     if (!value) { setSpecNameError(''); return; }
     if (!KEBAB_RE.test(value)) setSpecNameError('Must be kebab-case (e.g. user-auth-oauth)');
@@ -2143,7 +2168,46 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       });
       setApiDone(true);
       setGeneratedSpec(result);
+      setModelSuggestions(null);
       setTimeout(() => setIsGenerating(false), 800);
+
+      // Fire-and-forget auto-match and auto-suggest
+      const specId = result.specName;
+      (async () => {
+        // Auto-match skills
+        if (autoMatchSkills && skillsCount && skillsCount > 0 && workspaceId) {
+          setAutoMatchStatus('matching');
+          try {
+            await apiFetch(`/api/specs/${encodeURIComponent(specId)}/match-skills`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ workspaceId }),
+            });
+          } catch {
+            showToast('Skill matching failed — you can retry from the spec review', 'warning');
+          }
+        } else if (autoMatchSkills && (!skillsCount || skillsCount === 0)) {
+          // No skills to match — show briefly then continue
+          setAutoMatchStatus('matching');
+          await new Promise(r => setTimeout(r, 800));
+        }
+
+        // Auto-suggest models
+        if (autoSuggestModels && workspaceId) {
+          setAutoMatchStatus('suggesting');
+          try {
+            const suggestRes = await apiFetch<{ suggestions: Array<{ storyId: string; suggestedModel: string; reason: string; confidence: number }> }>(
+              `/api/specs/${encodeURIComponent(specId)}/suggest-models`,
+              { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) },
+            );
+            setModelSuggestions(suggestRes.suggestions ?? null);
+          } catch {
+            showToast('Model suggestion failed — you can retry from the spec review', 'warning');
+          }
+        }
+
+        setAutoMatchStatus('done');
+        setTimeout(() => setAutoMatchStatus('idle'), 1500);
+      })();
     } catch (err: unknown) {
       if (controller.signal.aborted) return;
       setApiDone(true);
@@ -2250,13 +2314,28 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
       {/* Brief textarea */}
       {(!generatedSpec || isGenerating) && (
-        <textarea
-          ref={briefRef} rows={6} value={specBrief}
-          onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
-          placeholder="What do you want to build?"
-          aria-label="Spec brief — describe what you want to build"
-          className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors resize-none leading-relaxed"
-        />
+        <div>
+          <textarea
+            ref={briefRef} rows={6} value={specBrief}
+            onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
+            placeholder="What do you want to build?"
+            aria-label="Spec brief — describe what you want to build"
+            className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors resize-none leading-relaxed"
+          />
+          {/* Skills count indicator */}
+          {skillsCount !== null && (
+            <div className="mt-1.5 px-1">
+              {skillsCount > 0 ? (
+                <span className="text-[11px] text-muted">{skillsCount} skill{skillsCount !== 1 ? 's' : ''} available</span>
+              ) : (
+                <button onClick={() => { onNavigate?.('marketplace' as PanelId); onClose(); }}
+                  className="text-[11px] text-muted hover:text-accent transition-colors">
+                  No skills installed — add skills from the Marketplace
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Context health dots */}
@@ -2339,6 +2418,22 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
         </div>
       )}
 
+      {/* Auto-match / auto-suggest loading indicators */}
+      {autoMatchStatus === 'matching' && (
+        <div className="flex items-center gap-1.5 px-1">
+          <Loader2 size={10} className="animate-spin text-muted" />
+          <span className="text-[11px] text-muted">
+            {skillsCount && skillsCount > 0 ? 'Matching skills...' : 'No skills to match'}
+          </span>
+        </div>
+      )}
+      {autoMatchStatus === 'suggesting' && (
+        <div className="flex items-center gap-1.5 px-1">
+          <Loader2 size={10} className="animate-spin text-muted" />
+          <span className="text-[11px] text-muted">Suggesting models...</span>
+        </div>
+      )}
+
       {/* Advanced Options */}
       {!generatedSpec && (
         <section>
@@ -2401,6 +2496,29 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                   )}
                 </div>
               </div>
+
+              {/* Skills & Models */}
+              <div className="border-t border-border mt-4 pt-4 space-y-3">
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted">Skills &amp; Models</span>
+
+                {/* Toggle: Auto-match skills */}
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <button type="button" role="switch" aria-checked={autoMatchSkills} onClick={() => setAutoMatchSkills(v => !v)}
+                    className={`relative w-8 h-[18px] rounded-full transition-colors ${autoMatchSkills ? 'bg-accent' : 'bg-border group-hover:bg-muted/40'}`}>
+                    <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-switch-knob transition-transform ${autoMatchSkills ? 'translate-x-[14px]' : ''}`} />
+                  </button>
+                  <span className="text-xs font-medium text-text">Auto-match skills after generation</span>
+                </label>
+
+                {/* Toggle: Auto-suggest models */}
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <button type="button" role="switch" aria-checked={autoSuggestModels} onClick={() => setAutoSuggestModels(v => !v)}
+                    className={`relative w-8 h-[18px] rounded-full transition-colors ${autoSuggestModels ? 'bg-accent' : 'bg-border group-hover:bg-muted/40'}`}>
+                    <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-switch-knob transition-transform ${autoSuggestModels ? 'translate-x-[14px]' : ''}`} />
+                  </button>
+                  <span className="text-xs font-medium text-text">Auto-suggest models per story</span>
+                </label>
+              </div>
             </div>
           )}
         </section>
@@ -2419,6 +2537,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
           isRegenerating={isGenerating} onNavigate={onNavigate}
           onNavigateToRun={(runId) => { onClose(); onNavigateToRun?.(runId); }}
           onReset={() => { setGeneratedSpec(null); setGenerateError(null); setApiDone(false); setSpecBrief(''); setTimeout(() => briefRef.current?.focus(), 50); }}
+          modelSuggestions={modelSuggestions}
         />
       )}
 
