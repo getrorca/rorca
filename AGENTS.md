@@ -30,6 +30,7 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
   - Throw `AppError` subclasses — never raw `Error` or manual `res.status().json()` for errors
   - Use `paginate()` for list endpoints
   - Validate input at route boundary, trust internal code after
+  - Kanban API (`GET /api/specs/kanban`) returns `activeRunStatus` and `queuePosition` per spec — frontend derives running vs queued visual state from these fields
 
 ### Backend Libs (`backend/src/lib/`)
 - **Owner**: Architect

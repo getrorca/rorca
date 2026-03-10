@@ -6,7 +6,12 @@
   "generatedAt": "2026-03-09T00:00:00.000Z",
   "_notes": "Builds on existing SkillRegistry (SK-001), suggestedSkills in spec JSON (SK-002), loadMatchedSkills in execution-engine (SK-003), and active_skills column in story_results. The skills infrastructure is ~70% built — this spec fills the remaining UX gaps: three-source skills library (skills.sh / GitHub repos / custom upload), explicit Match & Inject action, model suggestion per story, Skills tab in Run View, and effectiveness analytics. Source repo for skills: https://github.com/wojons/skills.\n\nVERIFIED FILE LOCATIONS & INTERFACES (deep-read audit 2026-03-09):\n- Forge panel: src/panels/SpecsPanel.tsx (2387 lines). Advanced Options at line ~2301 (advancedOpen toggle). handleGenerate at line 2112. SpecForgePreview rendered at line ~2370 after generation.\n- SpecForgePreview: src/components/SpecForgePreview.tsx (623 lines). Imports Story from StoryCard.tsx. Action bar at line 451: 'Approve & Run' (flex-1 primary) | 'Approve' (secondary) | 'Reject' (tertiary red). Story cards at lines 262-351.\n- Spec review: src/panels/SpecReviewPanel.tsx. Action bar at lines 1023-1114: LEFT = Edit, Delete; RIGHT (ml-auto) = Run Pipeline, Approve, Reject. StoryReviewCard function at line 265.\n- StoryCard.tsx Story interface (line 8): { id, title, description?, acceptanceCriteria, dependencies?, dependsOn?, complexity?, timeoutMinutes?, passes?, excluded?, mergedVia? } — NO suggestedSkills, NO model. MUST be extended by SL-008 and SL-017.\n- SpecReviewPanel.tsx local Story interface (line 29): { id, title, description?, acceptanceCriteria, dependencies?, dependsOn?, complexity?, passes?, excluded?, model? } — NO suggestedSkills. MUST be extended by SL-008.\n- GeneratedSpec type: src/panels/SpecForgeOutput.tsx line 22. GeneratedSpecPreview: src/components/SpecForgePreview.tsx line 10. Both use stories: Story[] from StoryCard.\n- RunViewPanel.tsx: RunViewTab type at line 72. TABS array at lines 74-82 (7 entries). Wrench NOT imported — must be added by SL-010.\n- AnimatedModal: src/components/AnimatedModal.tsx — uses framer-motion with scaleIn. Props: { isOpen, onClose?, children, className? }. SL-009 should use this.\n- SpecReviewPanel.tsx lucide imports (line 1-18): ArrowLeft, ChevronDown, ChevronRight, CheckCircle2, XCircle, ListChecks, Search, X, SlidersHorizontal, AlertTriangle, GitBranch, Loader2, Play, Pencil, Trash2. NO Wrench, NO Layers — must be added by SL-008/SL-009.\n- MarketplaceView.tsx: MarketplaceTab = 'skills' | 'templates' | 'packs'. Wrench already imported. SKILL_CATEGORIES defined. SkillRegistryCard component exists.\n- Backend specs.ts: UserStory interface at line 149 has suggestedSkills. buildCatalogContext() at line 175. validateSuggestedSkills() at line 202.\n- Backend execution-engine.ts: loadMatchedSkills() at line 386. story.suggestedSkills consumed at line 1994-2004. active_skills recorded in story_results.\n- Analytics panel: actual file is src/panels/UsageDashboardPanel.tsx (NOT UsagePanel.tsx).\n- STORY_MODEL_OPTIONS in SpecReviewPanel.tsx at line 258: Default, Haiku 4.5, Sonnet 4.6, Opus 4.6.",
   "_relatesTo": "rorca-convention-agents (SK-001–SK-006), rorca-context-intent-engine (CIE .rorca/ infrastructure)",
-  "_suggestedSkills": ["exhaustive-specification", "gap-analysis", "react-review", "testing-unit"],
+  "_suggestedSkills": [
+    "exhaustive-specification",
+    "gap-analysis",
+    "react-review",
+    "testing-unit"
+  ],
   "userStories": [
     {
       "id": "SL-001",
@@ -41,7 +46,9 @@
       ],
       "dependsOn": [],
       "complexity": 3,
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-002",
@@ -69,7 +76,9 @@
       ],
       "dependsOn": [],
       "complexity": 4,
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-003",
@@ -92,7 +101,9 @@
       ],
       "dependsOn": [],
       "complexity": 3,
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-004",
@@ -116,7 +127,9 @@
       ],
       "dependsOn": [],
       "complexity": 3,
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-005",
@@ -141,7 +154,9 @@
       ],
       "dependsOn": [],
       "complexity": 2,
-      "priority": 3
+      "priority": 3,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-006",
@@ -159,7 +174,9 @@
       ],
       "dependsOn": [],
       "complexity": 2,
-      "priority": 3
+      "priority": 3,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-007",
@@ -179,9 +196,15 @@
         "Error states: inline error message in text-red-400 text-xs below the relevant action area. Errors clear on retry.",
         "Toast notifications via useGlobalToast(): success on install ('Skill \"{name}\" installed'), success on bulk install ('{count} skills installed'), success on remove ('Skill \"{name}\" removed'), warning on no-frontmatter ('Skill installed without frontmatter — name derived from filename')"
       ],
-      "dependsOn": ["SL-001", "SL-005", "SL-006"],
+      "dependsOn": [
+        "SL-001",
+        "SL-005",
+        "SL-006"
+      ],
       "complexity": 5,
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-008",
@@ -206,9 +229,13 @@
         "A small 'x' button on each skill badge allows removing that specific skill from the story. On click, removes the skill from the story's suggestedSkills array in the spec JSON (via re-reading and re-writing the file, or via a dedicated PATCH endpoint). Shows toast: 'Removed {name} from {storyId}'.",
         "If the spec already has suggestedSkills (from a previous match or from spec generation), re-running Match Skills REPLACES the existing suggestedSkills (not appends). A confirmation dialog warns: 'This will replace existing skill assignments for {count} stories. Continue?' with Cancel and 'Replace' buttons."
       ],
-      "dependsOn": ["SL-002"],
+      "dependsOn": [
+        "SL-002"
+      ],
       "complexity": 3,
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-009",
@@ -231,9 +258,13 @@
         "After any accept action, the spec review view refreshes to show updated model fields on stories (if the spec review shows model per story). A small badge showing the model name in text-[10px] font-mono on each story row where model is set.",
         "On error: toast { type: 'error', message: 'Model suggestion failed: {error}' }"
       ],
-      "dependsOn": ["SL-003"],
+      "dependsOn": [
+        "SL-003"
+      ],
       "complexity": 4,
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-010",
@@ -259,9 +290,13 @@
         "In renderTabContent() switch statement in RunViewPanel.tsx, add: case 'skills': return <SkillsTab runId={run.id} />. Import SkillsTab at top of file.",
         "Mobile: stat cards stack vertically (flex-col), bar chart hidden on mobile (show list format instead: 'react: 8 uses, 88% pass'), skill badges wrap"
       ],
-      "dependsOn": ["SL-004"],
+      "dependsOn": [
+        "SL-004"
+      ],
       "complexity": 4,
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-011",
@@ -279,9 +314,13 @@
         "A currently running story (story_started received, no story_passed/story_failed yet) shows a blue pulsing left border: border-l-2 border-l-blue-500 + css animation (same animation class used by RunStoryList for running stories: animate-pulse)",
         "If walEvents prop is undefined or empty array, behaves identically to SL-010 (static fetch only — no errors, no degradation)"
       ],
-      "dependsOn": ["SL-010"],
+      "dependsOn": [
+        "SL-010"
+      ],
       "complexity": 3,
-      "priority": 2
+      "priority": 2,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-012",
@@ -300,9 +339,13 @@
         "Word count: content.split(/\\s+/).length. Estimated tokens: Math.ceil(content.length / 4) — same heuristic used by execution-engine.ts",
         "Expand/collapse uses CSS transition (max-height transition or similar) for smooth animation — 150ms ease-in-out"
       ],
-      "dependsOn": ["SL-010"],
+      "dependsOn": [
+        "SL-010"
+      ],
       "complexity": 2,
-      "priority": 3
+      "priority": 3,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-013",
@@ -321,9 +364,13 @@
         "All payloads include workspace_id when available (from request query/body or resolved from first registered workspace). If no workspace available, workspace_id is null.",
         "WAL event_type values 'skill_installed', 'skill_removed', 'skill_matched' are documented in the CLAUDE.md WAL event types list"
       ],
-      "dependsOn": ["SL-002"],
+      "dependsOn": [
+        "SL-002"
+      ],
       "complexity": 2,
-      "priority": 3
+      "priority": 3,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-014",
@@ -342,9 +389,13 @@
         "Has @swagger JSDoc annotation with full response schema",
         "Note: better-sqlite3 bundles SQLite 3.40+ which supports json_each(). If json_each is unavailable (edge case), fall back to JavaScript-side JSON parsing of active_skills column."
       ],
-      "dependsOn": ["SL-004"],
+      "dependsOn": [
+        "SL-004"
+      ],
       "complexity": 3,
-      "priority": 3
+      "priority": 3,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-015",
@@ -362,9 +413,13 @@
         "Error state: inline error message with Retry button (same pattern as other analytics fetches in the panel)",
         "The section is collapsible (chevron toggle) — default expanded. Collapsed state shows just the header with skill count: 'Skill Effectiveness ({count} skills)'"
       ],
-      "dependsOn": ["SL-014"],
+      "dependsOn": [
+        "SL-014"
+      ],
       "complexity": 2,
-      "priority": 4
+      "priority": 4,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-016",
@@ -385,9 +440,14 @@
         "If auto-suggest is ON, the suggest-models response is passed to SpecForgePreview (SL-017) for inline display.",
         "Both toggles are independent — user can enable auto-match but disable auto-suggest, or vice versa."
       ],
-      "dependsOn": ["SL-002", "SL-003"],
+      "dependsOn": [
+        "SL-002",
+        "SL-003"
+      ],
       "complexity": 4,
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "SL-017",
@@ -408,9 +468,13 @@
         "Read the spec file path from the spec prop to re-read suggestedSkills (since auto-match wrote them to disk). Alternatively, re-fetch from GET /api/specs/{specId} to get the latest version after match-skills ran. Use a useEffect that triggers after the auto-match loading indicator finishes.",
         "The model accept handler (onModelAccepted) in SpecsPanel.tsx: reads the spec JSON, finds the story by storyId, sets story.model = acceptedModel, writes the JSON back to disk via a new lightweight PATCH endpoint or by re-reading the spec via GET /api/specs/{id} and POSTing the update."
       ],
-      "dependsOn": ["SL-016"],
+      "dependsOn": [
+        "SL-016"
+      ],
       "complexity": 4,
-      "priority": 1
+      "priority": 1,
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }

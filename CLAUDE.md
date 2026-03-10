@@ -274,6 +274,7 @@ Key routes (see `backend/src/server.ts` for full mount list):
 | `POST /api/specs/:id/reject` | Delete + preserve in wal_events |
 | `POST /api/specs/:id/add-stories` | Generate additional stories |
 | `GET /api/specs/:id/versions` + `.../diff` | Version history + structured diff |
+| `GET /api/specs/kanban` | Board view data — draft/inProgress/done columns with `activeRunStatus` + `queuePosition` |
 | `GET/PUT /api/direction` | Get/upsert direction layers |
 | `GET /api/direction/models` | List supported LLM models |
 
@@ -682,7 +683,7 @@ Escalation cascade on failure:
 
 ## Spec Pipeline — Run Order
 
-**Completed (289+ stories passed):**
+**Completed (293+ stories passed):**
 - `prd-rorca-phase1b` through `prd-rorca-phase5` (30 stories, archived, 100%)
 - `rorca-feature-enhancements` (17 stories, 7 passed — early spec, superseded by v2-platform)
 - `rorca-v2-platform` (117 stories, 113 passed — V2-082 failed, V2-089–092 excluded)
@@ -693,11 +694,12 @@ Escalation cascade on failure:
 - `rorca-forge-brief-first` (6 stories, 100% — brief-first Forge flow, FG-001–006)
 - `rorca-wave-execution-fix` (4 stories, 100% — WE-001–004: sub-worktree persistence, auto-mode, failure root cause, stdout streaming)
 - `rorca-ultimate-ux` (22 stories, 100% — ULT-001–022: consolidated ~30 panels to 5, kanban board, React Router, lazy loading, 800px slide-over)
+- `rorca-live-spec-terminal` (4 stories, 100% — LST-001–004: context injection summary, real progress bar, actionable error detail, generation log persistence)
+- `rorca-convention-agents` — Convention packs + agent personas + multi-pass spec gen
 
 **In Progress:**
+- `rorca-curated-skills-library` (17 stories, SL-001–SL-017 — 3-tab skills library, match & inject, model suggestion, skills tab in run view, effectiveness analytics)
 - `rorca-context-intent-engine` (18 stories, 15 passed — CIE-001–014, CIE-016; CIE-015 excluded; CIE-017–018 pending)
-  - CIE-017: Monorepo cross-app path detection (`detectCrossAppPaths()` in context-router.ts, `discoverMonorepo()` in workspace-echolocation.ts)
-  - CIE-018: TBD
 
 **Stale / Duplicate (can be deleted):**
 - `rorca-nav-drawer` (4 stories) — already completed as NAV-001–004 in rorca-opencode-integration
@@ -707,11 +709,13 @@ Escalation cascade on failure:
 - `rorca-frontend-routing` (5 stories) — frontend routing fixes
 
 **Pending (not yet executed):**
-1. `rorca-convention-agents` (22 stories) — Convention packs + agent personas + multi-pass spec gen (6-pass pipeline), adversarial review, convention drift detection, MCP HTTP transport, OpenAPI audit, Opus 4-6
-2. `rorca-integrations` (52 stories) — GitHub first (launch blocker), Linear/Vercel/Slack post-launch, Opus 4-6
-3. `rorca-e2e-testing` (58 stories) — Playwright E2E, finds AND fixes bugs, Sonnet 4-6
+1. `rorca-codebase-audit` (27 stories, CA-001–CA-027) — Type deduplication, AppError adoption (908 raw errors), hardcoded color elimination (152), accessibility (3/10→8/10), db/index.ts decomposition, bundle optimization. Skills: security-scan, database-optimization, accessibility-audit. Sonnet 4-6
+2. `rorca-postgres-migration` (19 stories, PG-001–PG-019) — SQLite→PostgreSQL, pgvector, Apache AGE, Docker Compose. Prerequisite for distribution (replaces native better-sqlite3 with pure JS pg driver). Sonnet 4-6
+3. `rorca-distribution` (10 stories, DIST-001–DIST-010) — Standalone binary via `bun build --compile`, Postgres downloaded on first run (Prisma pattern), install script (`curl | sh`), GitHub Actions release workflow, BSL-1.1 license. No source visible, no npm publish. Sonnet 4-6
+4. `rorca-integrations` (48 stories, audited+rewritten 2026-03-09) — GitHub first (launch blocker, ~70% already built), Linear/Vercel/Slack post-launch. Removed 5 redundant stories (INT-006/024/025/049/052), fixed migration numbers (047+), added INT-053 (story_linear_map). Opus 4-6
+5. `rorca-e2e-testing` (58 stories) — Playwright E2E, finds AND fixes bugs, Sonnet 4-6
 
-**Why this order**: CIE creates `.rorca/` directory infrastructure that convention-agents builds on top of. Convention-agents before integrations so personas can review integration code (security, red-team). Integrations before E2E because E2E tests integration flows (GitHub, Linear, Vercel, Slack). E2E testing runs last to test the complete system.
+**Why this order**: Codebase audit cleans tech debt. Postgres migration enables distribution (kills native addon) AND full features (vectors, graph). Distribution produces the installable binary. Integrations add GitHub/Linear/Vercel/Slack. E2E tests the complete system last.
 
 **Why V2-089–092 excluded**: Superseded by `rorca-ui-redesign` which covers all panel redesigns plus the navigation shell.
 **Why CIE-015 excluded**: Superseded by `rorca-convention-agents` CA-001–004, CA-019 which cover the same template/scaffold ground more completely (adds L0 direction layers, personas, per-library conventions, actual project boilerplate).
@@ -729,7 +733,7 @@ Direction        → Direction Stack (L1-L5), Memory ledger, Team Direction
 Settings         → 17 sub-tabs: general, env-vars, hooks, agents, context, providers, etc.
 ```
 
-**Kanban board** (`SpecsPanel.tsx` BoardView): Fizzy-style columns — Draft, In Progress, [custom], Done. Cards show model badge, time-ago, story progress bar, tags. Drag-and-drop: cross-column (approve/reject), within-column reorder (client-side). Collapsible columns, compact mode, keyboard nav (j/k/h/l/Enter/a/x).
+**Kanban board** (`SpecsPanel.tsx` BoardView): Fizzy-style columns — Draft, In Progress, [custom], Done. Cards show model badge, time-ago, story progress bar, tags. Drag-and-drop: cross-column (approve/reject), within-column reorder (client-side). Collapsible columns, compact mode, keyboard nav (j/k/h/l/Enter/a/x). Cards distinguish running vs queued runs: running shows green Play icon + pulsing "Running" badge; queued shows amber Clock icon + static "Queued #N" badge (position from `pipeline_runs.queue_position`). `KanbanSpec` interface includes `activeRunStatus?: 'running' | 'queued'` and `queuePosition?: number`.
 
 Key components:
 - **Command palette**: `cmdk` library, Cmd+K trigger, context-aware
