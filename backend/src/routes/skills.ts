@@ -16,6 +16,7 @@ import * as yaml from 'js-yaml';
 import { db } from '../db/index';
 import { SkillRegistry, inferCategory } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
+import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -32,6 +33,36 @@ function resolveWorkspacePath(req: Request): string | null {
   // Default: first registered workspace
   const first = db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined;
   return first?.path ?? null;
+}
+
+/**
+ * Resolve workspace ID from query/body param or first registered workspace.
+ */
+function resolveWorkspaceId(req: Request): string | null {
+  const workspaceId = (req.query.workspaceId || req.body?.workspaceId) as string | undefined;
+  if (workspaceId) return workspaceId;
+  const first = db.prepare('SELECT id FROM workspaces ORDER BY rowid LIMIT 1').get() as { id: string } | undefined;
+  return first?.id ?? null;
+}
+
+/**
+ * Emit a WAL event for skill operations and broadcast via SSE hub.
+ */
+function emitSkillWalEvent(eventType: string, workspaceId: string | null, payload: Record<string, unknown>): void {
+  const result = db.prepare(
+    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, ?, ?)'
+  ).run(eventType, workspaceId, JSON.stringify(payload));
+  const walEvent: WalEvent = {
+    id: result.lastInsertRowid as number,
+    ts: new Date().toISOString(),
+    event_type: eventType,
+    workspace_id: workspaceId,
+    spec_id: null,
+    story_id: null,
+    actor: '',
+    payload: JSON.stringify(payload),
+  };
+  broadcastAll(walEvent);
 }
 
 /**
@@ -185,6 +216,13 @@ router.post('/install', (req: Request, res: Response) => {
 
     const registry = new SkillRegistry();
     const skill = registry.install(name.trim(), content, source || 'user');
+
+    const wsId = resolveWorkspaceId(req);
+    emitSkillWalEvent('skill_installed', wsId, {
+      name: skill.metadata.name,
+      source: skill.source,
+      workspace_id: wsId,
+    });
 
     res.status(201).json({
       name: skill.metadata.name,
@@ -404,6 +442,12 @@ router.delete('/:name', (req: Request, res: Response) => {
       return;
     }
 
+    const wsId = resolveWorkspaceId(req);
+    emitSkillWalEvent('skill_removed', wsId, {
+      name,
+      workspace_id: wsId,
+    });
+
     res.json({ removed: true, name });
   } catch (error: any) {
     logger.error('[Skills] Remove error:', error);
@@ -595,6 +639,14 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
     // Register in DB
     const registry = new SkillRegistry();
     registry.install(skillName, result.content, result.source);
+
+    const wsId = resolveWorkspaceId(req);
+    emitSkillWalEvent('skill_installed', wsId, {
+      name: skillName,
+      source: result.source,
+      skillId: result.skillId,
+      workspace_id: wsId,
+    });
 
     res.status(201).json({
       name: result.name,
@@ -1228,6 +1280,14 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
     const registry = new SkillRegistry();
     registry.install(skillName, content, source);
 
+    const wsId = resolveWorkspaceId(req);
+    emitSkillWalEvent('skill_installed', wsId, {
+      name: skillName,
+      source: `github:${owner}/${repo}`,
+      repoUrl: `https://github.com/${owner}/${repo}`,
+      workspace_id: wsId,
+    });
+
     res.status(201).json({
       name: skillName,
       description,
@@ -1334,6 +1394,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
     fs.mkdirSync(claudeSkillsDir, { recursive: true });
 
     const registry = new SkillRegistry();
+    const wsId = resolveWorkspaceId(req);
     let installed = 0;
     const failed: Array<{ name: string; error: string }> = [];
 
@@ -1359,6 +1420,9 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
           fs.writeFileSync(path.join(claudeSkillsDir, `${skillName}.md`), result.content, 'utf-8');
           registry.install(skillName, result.content, result.source);
           installed++;
+          emitSkillWalEvent('skill_installed', wsId, {
+            name: skillName, source: result.source, workspace_id: wsId,
+          });
 
         } else if (item.source === 'github') {
           // Fetch from GitHub repo
@@ -1412,6 +1476,9 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
           fs.writeFileSync(path.join(claudeSkillsDir, `${normalizedName}.md`), content, 'utf-8');
           registry.install(normalizedName, content, source);
           installed++;
+          emitSkillWalEvent('skill_installed', wsId, {
+            name: normalizedName, source, workspace_id: wsId,
+          });
 
         } else if (item.source === 'content' || item.content) {
           // Install from raw markdown content
@@ -1425,6 +1492,9 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
           fs.writeFileSync(path.join(claudeSkillsDir, `${normalizedName}.md`), rawContent, 'utf-8');
           registry.install(normalizedName, rawContent, 'user');
           installed++;
+          emitSkillWalEvent('skill_installed', wsId, {
+            name: normalizedName, source: 'user', workspace_id: wsId,
+          });
 
         } else {
           failed.push({ name: itemName, error: `Unknown source type: ${item.source}` });
@@ -1500,6 +1570,7 @@ router.post('/bulk-remove', (req: Request, res: Response) => {
       : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
 
     const registry = new SkillRegistry();
+    const wsId = resolveWorkspaceId(req);
     let removed = 0;
     const notFound: string[] = [];
 
@@ -1511,6 +1582,9 @@ router.post('/bulk-remove', (req: Request, res: Response) => {
       const wasRemoved = registry.remove(trimmed);
       if (wasRemoved) {
         removed++;
+        emitSkillWalEvent('skill_removed', wsId, {
+          name: trimmed, workspace_id: wsId,
+        });
       } else {
         notFound.push(trimmed);
       }
