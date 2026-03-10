@@ -2061,6 +2061,20 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Template picker
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
+  // Model accept handler — PUTs the accepted model to the story on disk
+  const handleModelAccepted = useCallback(async (storyId: string, model: string) => {
+    if (!generatedSpec || !workspaceId) return;
+    try {
+      await apiFetch(`/api/specs/${encodeURIComponent(generatedSpec.specName)}/stories/${encodeURIComponent(storyId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, model }),
+      });
+    } catch {
+      // Silent — local state already updated in preview
+    }
+  }, [generatedSpec, workspaceId]);
+
   // Slug preview
   const [previewSlug, setPreviewSlug] = useState('');
   useEffect(() => {
@@ -2538,6 +2552,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
           onNavigateToRun={(runId) => { onClose(); onNavigateToRun?.(runId); }}
           onReset={() => { setGeneratedSpec(null); setGenerateError(null); setApiDone(false); setSpecBrief(''); setTimeout(() => briefRef.current?.focus(), 50); }}
           modelSuggestions={modelSuggestions}
+          onModelAccepted={handleModelAccepted}
         />
       )}
 
