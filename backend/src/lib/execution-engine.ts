@@ -56,6 +56,7 @@ import { loadRorcaConfig } from './rorca-config';
 import { PersonaRegistry } from './agent-personas';
 import { loadMonorepoApps, type MonorepoPackage } from './workspace-echolocation';
 import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
+import { getGraphContext, formatGraphContext } from './graph-context';
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
 import {
@@ -464,6 +465,19 @@ function formatSkillsSection(skills: ResolvedSkill[]): string {
   return '\n' + parts.join('\n\n') + '\n';
 }
 
+/** SW-004: Extract plausible file paths from story description + acceptance criteria. */
+function extractPredictedPaths(story: UserStory): string[] {
+  const text = [
+    story.description ?? '',
+    ...(Array.isArray(story.acceptanceCriteria) ? story.acceptanceCriteria : []),
+  ].join('\n');
+
+  const pathPattern = /(?:src|backend|frontend|lib|components|routes|hooks|panels|db|migrations)\/[\w\-\/\.]+\.[a-z]+/g;
+  const matches = text.match(pathPattern) ?? [];
+  // Deduplicate
+  return [...new Set(matches)];
+}
+
 function buildPrompt(
   story: UserStory,
   mode: 'impl' | 'qa',
@@ -474,6 +488,7 @@ function buildPrompt(
   roleSection?: string,
   personaRegistry?: PersonaRegistry,
   skillsSection?: string,
+  graphSection?: string,
 ): string {
   const ac = getAcceptance(story);
   const acSection = ac ? `\nAcceptance Criteria:\n${ac}` : '';
@@ -515,6 +530,11 @@ function buildPrompt(
   const matchedSkills = skillsSection ?? '';
 
 
+  // SW-004: Graph context section (related memories, conventions, file history)
+  const graphBlock = graphSection
+    ? `\n=== RELATED HISTORY (from knowledge graph) ===\n${graphSection}\n=== END RELATED HISTORY ===\n`
+    : '';
+
   if (mode === 'qa') {
     const playbookInstruction = playbook && fs.existsSync(path.join(cwd, playbook))
       ? `IMPORTANT: Read ${playbook} first for test patterns, conventions, and section references mentioned in the description.`
@@ -526,6 +546,7 @@ function buildPrompt(
       codexAgentsInstruction,
       roleSection ?? '',
       matchedSkills,
+      graphBlock,
       '', playbookInstruction, '',
       '## Workflow',
       '1. Read the relevant AGENTS.md in each directory you\'ll modify',
@@ -546,7 +567,7 @@ function buildPrompt(
   }
 
   // Implementation mode
-  // Injection order: contextPreamble → mode → agent instructions → roleSection → matched skills → persona → story task
+  // Injection order: contextPreamble → mode → agent instructions → roleSection → matched skills → graph context → workflow → persona → story task
   const skillContent = readWorkspaceFile(cwd, '.claude', 'skills', 'rorca.md')
     || readWorkspaceFile(cwd, '.claude', 'skills', 'dimitri.md');
   return [
@@ -556,6 +577,7 @@ function buildPrompt(
     codexAgentsInstruction,
     roleSection ?? '',
     matchedSkills,
+    graphBlock,
     '', skillContent,
     personaSection,
     '', '---', '',
@@ -2027,7 +2049,26 @@ async function executeStory(
   }
   const activeSkillNames = resolvedSkills.map(s => s.name);
 
-  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry, skillsSection);
+  // SW-004: Fetch graph context (related memories, conventions, file history)
+  let graphSection = '';
+  if (workspaceId) {
+    try {
+      const predictedPaths = extractPredictedPaths(story);
+      const wsIdNum = parseInt(workspaceId, 10);
+      if (!isNaN(wsIdNum) && predictedPaths.length > 0) {
+        const graphCtx = await getGraphContext(story.id, predictedPaths, wsIdNum);
+        graphSection = formatGraphContext(graphCtx);
+        if (graphSection) {
+          logger.info(`  [graph] Injected graph context for ${story.id}: ${graphCtx.relatedMemories.length} memories, ${graphCtx.relatedConventions.length} conventions, ${graphCtx.fileHistory.length} file histories`);
+        }
+      }
+    } catch (err: any) {
+      // Non-fatal — graph context is optional enrichment
+      logger.warn(`  [graph] Graph context fetch failed for ${story.id}: ${err.message}`);
+    }
+  }
+
+  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry, skillsSection, graphSection);
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
   fs.writeFileSync(promptLogFile, prompt);
