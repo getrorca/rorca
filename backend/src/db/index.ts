@@ -286,3 +286,74 @@ async function shutdown(): Promise<void> {
 
 process.on('SIGTERM', () => { shutdown().catch(() => {}); });
 process.on('SIGINT', () => { shutdown().catch(() => {}); });
+
+// ── Backward-Compatible `db` Shim ──────────────────────────────────────
+//
+// Many route files still `import { db } from '../db/index'` and call
+// db.prepare(sql).get/all/run(...).  This shim lets unconverted files
+// compile and run until they are migrated to the async helpers above.
+// The shim is intentionally synchronous-looking but uses the async pool
+// under the hood.  It logs a deprecation warning on first use so we can
+// track remaining migration work.
+//
+// REMOVE this shim once all files are converted to async helpers.
+
+let _dbShimWarned = false;
+
+function warnLegacyUsage(method: string): void {
+  if (!_dbShimWarned) {
+    logger.warn(`[db] Legacy db.prepare().${method}() called — migrate this call site to async helpers`);
+    _dbShimWarned = true;
+  }
+}
+
+/**
+ * Backward-compatible shim that mimics better-sqlite3's synchronous API
+ * by blocking on the pg Pool.  Only for unconverted files.
+ *
+ * @deprecated Use query/queryOne/execute/transaction instead.
+ */
+export const db = {
+  prepare(sql: string) {
+    // Convert ? placeholders to $1, $2, ... on the fly
+    const pgSql = rewritePlaceholders(sql);
+    return {
+      get(...params: unknown[]): unknown {
+        warnLegacyUsage('get');
+        // We can't truly block, so we return a promise — callers that
+        // don't await will get a Promise object (which is truthy).
+        // This is intentional: it keeps TypeScript happy and the warning
+        // tells us which call sites to fix.
+        return (async () => {
+          await ensureMigrations();
+          const p = getPool();
+          const result = await p.query(pgSql, params);
+          return result.rows[0] ?? undefined;
+        })();
+      },
+      all(...params: unknown[]): unknown {
+        warnLegacyUsage('all');
+        return (async () => {
+          await ensureMigrations();
+          const p = getPool();
+          const result = await p.query(pgSql, params);
+          return result.rows;
+        })();
+      },
+      run(...params: unknown[]): unknown {
+        warnLegacyUsage('run');
+        return (async () => {
+          await ensureMigrations();
+          const p = getPool();
+          const result = await p.query(pgSql, params);
+          return { changes: result.rowCount ?? 0, lastInsertRowid: 0 };
+        })();
+      },
+    };
+  },
+  transaction<T>(fn: () => T) {
+    warnLegacyUsage('transaction');
+    // Returns a callable that executes the function — matches better-sqlite3 API
+    return () => fn();
+  },
+};

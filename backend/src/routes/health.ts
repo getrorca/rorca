@@ -1,5 +1,5 @@
-import { Router, Request, Response } from 'express';
-import { db } from '../db/index';
+import { Router, Request, Response, NextFunction } from 'express';
+import { query, queryOne, dbHealthCheck } from '../db/index';
 import { listBackups } from '../lib/backup';
 import { agentType } from '../lib/config';
 import { detectOpenCode } from '../lib/opencode-detector';
@@ -12,27 +12,11 @@ const router = Router();
 
 const startTime = Date.now();
 const VERSION = '0.0.1';
-const DB_PATH = process.env.DB_PATH || './rorca.db';
 const NO_CACHE_HEADERS = {
   'Cache-Control': 'no-cache, no-store, must-revalidate',
   'Pragma': 'no-cache',
   'Expires': '0',
 };
-
-/**
- * Check DB connectivity by running a simple query.
- * Returns true if query completes within 1 second.
- */
-function checkDbConnected(): boolean {
-  try {
-    const start = Date.now();
-    const result = db.prepare('SELECT 1 AS ok').get() as { ok: number } | undefined;
-    const elapsed = Date.now() - start;
-    return elapsed < 1000 && result?.ok === 1;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * @swagger
@@ -65,50 +49,54 @@ function checkDbConnected(): boolean {
  *       503:
  *         description: Server is degraded (database not connected)
  */
-router.get('/', (_req: Request, res: Response) => {
-  res.set(NO_CACHE_HEADERS);
-
-  const dbConnected = checkDbConnected();
-
-  let activeRuns = 0;
+router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const row = db.prepare(
-      `SELECT COUNT(*) AS cnt FROM pipeline_runs WHERE status = 'running'`
-    ).get() as { cnt: number } | undefined;
-    activeRuns = row?.cnt ?? 0;
-  } catch {
-    // DB query failed — already captured by dbConnected
-  }
+    res.set(NO_CACHE_HEADERS);
 
-  const status = dbConnected ? 'healthy' : 'degraded';
-  const statusCode = dbConnected ? 200 : 503;
+    const healthResult = await dbHealthCheck();
+    const dbConnected = healthResult.ok;
 
-  // OC-002: Include opencode status when agentType=opencode
-  const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
-  // OC-024: Include codex status when agentType=codex
-  const codex = agentType === 'codex' ? detectCodex() : undefined;
+    let activeRuns = 0;
+    try {
+      const row = await queryOne<{ cnt: string }>(
+        `SELECT COUNT(*) AS cnt FROM pipeline_runs WHERE status = 'running'`
+      );
+      activeRuns = parseInt(row?.cnt ?? '0', 10);
+    } catch {
+      // DB query failed — already captured by dbConnected
+    }
 
-  res.status(statusCode).json({
-    status,
-    version: VERSION,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    db_connected: dbConnected,
-    active_runs: activeRuns,
-    // CA-021: Report MCP transport mode
-    mcpTransport: 'http',
-    // PR-005: Report telemetry status
-    telemetryEnabled: isTelemetryEnabled(),
-    // PR-009: Report auth enforcement status
-    authRequired: process.env.AUTH_REQUIRED === 'true',
-    ...(agentType === 'opencode' && opencode ? {
-      opencodeInstalled: opencode.opencodeInstalled,
-      opencodeVersion: opencode.opencodeVersion,
-    } : {}),
-    ...(agentType === 'codex' && codex ? {
-      codexInstalled: codex.codexInstalled,
-      codexVersion: codex.codexVersion,
-    } : {}),
-  });
+    const status = dbConnected ? 'healthy' : 'degraded';
+    const statusCode = dbConnected ? 200 : 503;
+
+    // OC-002: Include opencode status when agentType=opencode
+    const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
+    // OC-024: Include codex status when agentType=codex
+    const codex = agentType === 'codex' ? detectCodex() : undefined;
+
+    res.status(statusCode).json({
+      status,
+      version: VERSION,
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      db_connected: dbConnected,
+      active_runs: activeRuns,
+      db: healthResult.poolStats,
+      // CA-021: Report MCP transport mode
+      mcpTransport: 'http',
+      // PR-005: Report telemetry status
+      telemetryEnabled: isTelemetryEnabled(),
+      // PR-009: Report auth enforcement status
+      authRequired: process.env.AUTH_REQUIRED === 'true',
+      ...(agentType === 'opencode' && opencode ? {
+        opencodeInstalled: opencode.opencodeInstalled,
+        opencodeVersion: opencode.opencodeVersion,
+      } : {}),
+      ...(agentType === 'codex' && codex ? {
+        codexInstalled: codex.codexInstalled,
+        codexVersion: codex.codexVersion,
+      } : {}),
+    });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -118,7 +106,7 @@ router.get('/', (_req: Request, res: Response) => {
  *     tags: [Health]
  *     summary: Detailed health check with extended metrics
  *     operationId: getHealthDetailed
- *     description: Returns extended health metrics including database file size, pending spec count, memory usage, last backup timestamp, and execution engine status.
+ *     description: Returns extended health metrics including pending spec count, memory usage, last backup timestamp, and execution engine status.
  *     responses:
  *       200:
  *         description: Detailed health metrics
@@ -132,7 +120,6 @@ router.get('/', (_req: Request, res: Response) => {
  *                 uptime: { type: integer }
  *                 db_connected: { type: boolean }
  *                 active_runs: { type: integer }
- *                 db_size: { type: integer, description: "Database file size in bytes" }
  *                 pending_specs_count: { type: integer }
  *                 memory_usage:
  *                   type: object
@@ -145,94 +132,86 @@ router.get('/', (_req: Request, res: Response) => {
  *       503:
  *         description: Server is degraded
  */
-router.get('/detailed', (_req: Request, res: Response) => {
-  res.set(NO_CACHE_HEADERS);
-
-  const dbConnected = checkDbConnected();
-
-  // DB file size
-  let dbSize = 0;
+router.get('/detailed', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const resolvedPath = path.resolve(path.dirname(require.resolve('../../package.json')), DB_PATH);
-    const stat = fs.statSync(resolvedPath);
-    dbSize = stat.size;
-  } catch {
-    // DB file not found or inaccessible
-  }
+    res.set(NO_CACHE_HEADERS);
 
-  // Pending specs count — count spec files across all workspaces
-  let pendingSpecsCount = 0;
-  try {
-    const workspaces = db.prepare('SELECT path FROM workspaces').all() as { path: string }[];
-    for (const ws of workspaces) {
-      const pendingDir = path.join(ws.path, 'forge', 'specs', 'pending');
-      if (fs.existsSync(pendingDir)) {
-        const files = fs.readdirSync(pendingDir).filter(f => f.endsWith('.json'));
-        pendingSpecsCount += files.length;
+    const healthResult = await dbHealthCheck();
+    const dbConnected = healthResult.ok;
+
+    // Pending specs count — count spec files across all workspaces
+    let pendingSpecsCount = 0;
+    try {
+      const workspaces = await query<{ path: string }>('SELECT path FROM workspaces');
+      for (const ws of workspaces) {
+        const pendingDir = path.join(ws.path, 'forge', 'specs', 'pending');
+        if (fs.existsSync(pendingDir)) {
+          const files = fs.readdirSync(pendingDir).filter(f => f.endsWith('.json'));
+          pendingSpecsCount += files.length;
+        }
       }
+    } catch {
+      // Workspace/spec read failed
     }
-  } catch {
-    // Workspace/spec read failed
-  }
 
-  // Memory usage
-  const mem = process.memoryUsage();
-  const memoryUsage = {
-    rss: mem.rss,
-    heapTotal: mem.heapTotal,
-    heapUsed: mem.heapUsed,
-    external: mem.external,
-  };
+    // Memory usage
+    const mem = process.memoryUsage();
+    const memoryUsage = {
+      rss: mem.rss,
+      heapTotal: mem.heapTotal,
+      heapUsed: mem.heapUsed,
+      external: mem.external,
+    };
 
-  // Last backup timestamp
-  let lastBackupAt: string | null = null;
-  try {
-    const backups = listBackups();
-    if (backups.length > 0) {
-      lastBackupAt = backups[0].createdAt;
+    // Last backup timestamp
+    let lastBackupAt: string | null = null;
+    try {
+      const backups = listBackups();
+      if (backups.length > 0) {
+        lastBackupAt = backups[0].createdAt;
+      }
+    } catch {
+      // Backup dir not found or unreadable
     }
-  } catch {
-    // Backup dir not found or unreadable
-  }
 
-  // Active runs (same as basic health)
-  let activeRuns = 0;
-  try {
-    const row = db.prepare(
-      `SELECT COUNT(*) AS cnt FROM pipeline_runs WHERE status = 'running'`
-    ).get() as { cnt: number } | undefined;
-    activeRuns = row?.cnt ?? 0;
-  } catch {
-    // DB query failed
-  }
+    // Active runs (same as basic health)
+    let activeRuns = 0;
+    try {
+      const row = await queryOne<{ cnt: string }>(
+        `SELECT COUNT(*) AS cnt FROM pipeline_runs WHERE status = 'running'`
+      );
+      activeRuns = parseInt(row?.cnt ?? '0', 10);
+    } catch {
+      // DB query failed
+    }
 
-  const status = dbConnected ? 'healthy' : 'degraded';
-  const statusCode = dbConnected ? 200 : 503;
+    const status = dbConnected ? 'healthy' : 'degraded';
+    const statusCode = dbConnected ? 200 : 503;
 
-  // OC-002: Include opencode status when agentType=opencode
-  const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
-  // OC-024: Include codex status when agentType=codex
-  const codex = agentType === 'codex' ? detectCodex() : undefined;
+    // OC-002: Include opencode status when agentType=opencode
+    const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
+    // OC-024: Include codex status when agentType=codex
+    const codex = agentType === 'codex' ? detectCodex() : undefined;
 
-  res.status(statusCode).json({
-    status,
-    version: VERSION,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    db_connected: dbConnected,
-    active_runs: activeRuns,
-    db_size: dbSize,
-    pending_specs_count: pendingSpecsCount,
-    memory_usage: memoryUsage,
-    last_backup_at: lastBackupAt,
-    ...(agentType === 'opencode' && opencode ? {
-      opencodeInstalled: opencode.opencodeInstalled,
-      opencodeVersion: opencode.opencodeVersion,
-    } : {}),
-    ...(agentType === 'codex' && codex ? {
-      codexInstalled: codex.codexInstalled,
-      codexVersion: codex.codexVersion,
-    } : {}),
-  });
+    res.status(statusCode).json({
+      status,
+      version: VERSION,
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      db_connected: dbConnected,
+      active_runs: activeRuns,
+      pending_specs_count: pendingSpecsCount,
+      memory_usage: memoryUsage,
+      last_backup_at: lastBackupAt,
+      ...(agentType === 'opencode' && opencode ? {
+        opencodeInstalled: opencode.opencodeInstalled,
+        opencodeVersion: opencode.opencodeVersion,
+      } : {}),
+      ...(agentType === 'codex' && codex ? {
+        codexInstalled: codex.codexInstalled,
+        codexVersion: codex.codexVersion,
+      } : {}),
+    });
+  } catch (err) { next(err); }
 });
 
 export default router;
