@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T12:07:41.313Z",
+  "lastUpdatedAt": "2026-03-10T12:13:53.628Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -138,6 +138,15 @@
       "finishedAt": "2026-03-10T12:07:41.313Z",
       "agentType": "claude",
       "elapsedMs": 476358
+    },
+    {
+      "storyId": "PG-016",
+      "title": "Graph-Powered Context Retrieval",
+      "status": "passed",
+      "startedAt": "2026-03-10T12:07:49.974Z",
+      "finishedAt": "2026-03-10T12:13:53.628Z",
+      "agentType": "claude",
+      "elapsedMs": 363654
     }
   ],
   "failedStories": [],
