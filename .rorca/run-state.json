@@ -2,7 +2,7 @@
   "specId": "rorca-curated-skills-library",
   "runId": 14,
   "startedAt": "2026-03-10T02:18:43.908Z",
-  "lastUpdatedAt": "2026-03-10T04:55:57.321Z",
+  "lastUpdatedAt": "2026-03-10T05:02:26.985Z",
   "completedStories": [
     {
       "storyId": "SL-002",
@@ -129,6 +129,15 @@
       "finishedAt": "2026-03-10T04:55:57.321Z",
       "agentType": "claude",
       "elapsedMs": 113471
+    },
+    {
+      "storyId": "SL-013",
+      "title": "WAL Events for Skill Lifecycle",
+      "status": "passed",
+      "startedAt": "2026-03-10T04:56:11.348Z",
+      "finishedAt": "2026-03-10T05:02:26.985Z",
+      "agentType": "claude",
+      "elapsedMs": 375637
     }
   ],
   "failedStories": [],
