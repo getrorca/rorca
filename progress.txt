@@ -3,11 +3,12 @@
 Spec: rorca-semantic-wiring
 Run ID: 28
 Started: 2026-03-10T22:49:18.582Z
-Last Updated: 2026-03-10T23:16:01.160Z
+Last Updated: 2026-03-10T23:18:48.496Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - SW-001: Populate Embeddings on Spec Approval + Run Completion — DONE (claude, 342s)
 - SW-002: Auto-Index Specs in tsvector for Keyword Search — DONE (claude, 215s)
 - SW-003: Wire retrieveContext() into Spec Generation Prompt — DONE (claude, 265s)
 - SW-004: Wire Graph Context into Execution Engine buildPrompt() — DONE (claude, 298s)
 - SW-005: Populate Knowledge Graph After Each Story Completion — DONE (claude, 380s)
+- SW-006: Update Context Injection Summary UI with Semantic Stats — DONE (claude, 145s)
