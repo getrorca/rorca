@@ -16,6 +16,8 @@ import {
   Pencil,
   Trash2,
   Wrench,
+  Layers,
+  Check,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
@@ -23,6 +25,7 @@ import { apiFetch } from '../lib/apiFetch';
 import { ReadinessRing } from '../components/ReadinessRing';
 import { SpecConfirmDialog } from '../components/SpecConfirmDialog';
 import { useHotkeys, modLabel } from '../hooks/useHotkeys';
+import { AnimatedModal } from '../components/AnimatedModal';
 import type { PanelId } from '../components/Sidebar';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -51,6 +54,16 @@ interface SpecDetail {
   generatedAt?: string;
   _status?: 'pending' | 'approved';
   [key: string]: unknown;
+}
+
+interface ModelSuggestion {
+  storyId: string;
+  suggestedModel: string;
+  confidence: number;
+  reason: string;
+  /** UI-only state */
+  accepted?: boolean;
+  denied?: boolean;
 }
 
 /* ─── Complexity badge ────────────────────────────────────────────── */
@@ -353,6 +366,13 @@ function StoryReviewCard({
           </span>
         )}
 
+        {/* Model badge */}
+        {story.model && (
+          <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded bg-panel border border-border text-muted">
+            {story.model}
+          </span>
+        )}
+
         {/* Dependency count indicator */}
         {deps.length > 0 && (
           <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-warning/15 text-warning">
@@ -632,6 +652,11 @@ export default function SpecReviewPanel({
   const [dagModalOpen, setDagModalOpen] = useState(false);
   const [matchLoading, setMatchLoading] = useState(false);
   const [matchConfirmOpen, setMatchConfirmOpen] = useState(false);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [suggestions, setSuggestions] = useState<ModelSuggestion[]>([]);
+  const [expandedReasonId, setExpandedReasonId] = useState<string | null>(null);
+  const [acceptAllConfirm, setAcceptAllConfirm] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const mod = modLabel();
 
@@ -958,6 +983,80 @@ export default function SpecReviewPanel({
     }
   }, [workspaceId, spec, specId, stories, toast]);
 
+  // ─── Model suggestion handlers ─────────────────────────────────────
+  const handleSuggestModels = useCallback(async () => {
+    if (!workspaceId || suggestLoading || !stories.length) return;
+    setSuggestLoading(true);
+    try {
+      const result = await apiFetch<{ suggestions: ModelSuggestion[] }>(
+        `/api/specs/${specId}/suggest-models`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        },
+      );
+      setSuggestions(result.suggestions.map((s) => ({ ...s, accepted: false, denied: false })));
+      setShowSuggestions(true);
+      setAcceptAllConfirm(false);
+      setExpandedReasonId(null);
+    } catch (err: any) {
+      toast.show(`Model suggestion failed: ${err?.message || 'Unknown error'}`, 'error');
+    } finally {
+      setSuggestLoading(false);
+    }
+  }, [workspaceId, suggestLoading, stories.length, specId, toast]);
+
+  const handleAcceptSuggestion = useCallback(async (suggestion: ModelSuggestion) => {
+    if (!workspaceId) return;
+    try {
+      await apiFetch(`/api/specs/${specId}/stories/${suggestion.storyId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, model: suggestion.suggestedModel }),
+      });
+      // Update local spec state
+      setSpec((prev) => {
+        if (!prev) return prev;
+        const updated = (prev.userStories ?? prev.stories ?? []).map((s: Story) =>
+          s.id === suggestion.storyId ? { ...s, model: suggestion.suggestedModel } : s,
+        );
+        return { ...prev, userStories: updated };
+      });
+      // Mark as accepted in suggestions UI
+      setSuggestions((prev) =>
+        prev.map((s) => (s.storyId === suggestion.storyId ? { ...s, accepted: true } : s)),
+      );
+    } catch (err: any) {
+      toast.show(`Failed to apply model: ${err?.message || 'Unknown error'}`, 'error');
+    }
+  }, [workspaceId, specId, toast]);
+
+  const handleDenySuggestion = useCallback((storyId: string) => {
+    setSuggestions((prev) =>
+      prev.map((s) => (s.storyId === storyId ? { ...s, denied: true } : s)),
+    );
+  }, []);
+
+  const handleAcceptAll = useCallback(async () => {
+    const pending = suggestions.filter((s) => !s.accepted && !s.denied);
+    for (const s of pending) {
+      await handleAcceptSuggestion(s);
+    }
+    setAcceptAllConfirm(false);
+  }, [suggestions, handleAcceptSuggestion]);
+
+  const highConfidenceSuggestions = useMemo(
+    () => suggestions.filter((s) => s.confidence >= 0.8 && !s.accepted && !s.denied),
+    [suggestions],
+  );
+
+  const handleAcceptHighConfidence = useCallback(async () => {
+    for (const s of highConfidenceSuggestions) {
+      await handleAcceptSuggestion(s);
+    }
+  }, [highConfidenceSuggestions, handleAcceptSuggestion]);
+
   const isPending = spec?._status === 'pending';
   const isApproved = spec?._status === 'approved';
 
@@ -1173,6 +1272,21 @@ export default function SpecReviewPanel({
               {matchLoading ? <Loader2 size={14} className="animate-spin" /> : <Wrench size={14} />}
               {matchLoading ? 'Matching...' : 'Match Skills'}
             </button>
+            <button
+              onClick={handleSuggestModels}
+              disabled={suggestLoading || !workspaceId || !stories.length}
+              title={
+                !workspaceId
+                  ? 'Select a workspace first'
+                  : !stories.length
+                    ? 'No stories to suggest models for'
+                    : 'Suggest optimal models for each story'
+              }
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-muted border border-border hover:text-text hover:border-accent/40 transition-colors disabled:opacity-50"
+            >
+              {suggestLoading ? <Loader2 size={14} className="animate-spin" /> : <Layers size={14} />}
+              {suggestLoading ? 'Suggesting...' : 'Suggest Models'}
+            </button>
           </div>
 
           {/* Right: primary actions */}
@@ -1299,6 +1413,169 @@ export default function SpecReviewPanel({
           </div>
         </div>
       )}
+
+      {/* ─── Model Suggestions modal ────────────────────────────────── */}
+      <AnimatedModal isOpen={showSuggestions} onClose={() => setShowSuggestions(false)}>
+        <div className="bg-bg border border-border rounded-lg shadow-xl w-full max-w-2xl mx-4">
+          {/* Header */}
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <div className="flex items-center gap-2">
+              <Layers size={16} className="text-accent" />
+              <h2 className="text-sm font-semibold text-text">Model Suggestions</h2>
+              <span className="text-xs text-muted">({suggestions.length} stories)</span>
+            </div>
+            <button
+              onClick={() => setShowSuggestions(false)}
+              className="text-muted hover:text-text transition-colors"
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          {/* Bulk actions */}
+          <div className="flex items-center gap-2 px-5 py-3 border-b border-border/50">
+            <button
+              onClick={() => setAcceptAllConfirm(true)}
+              disabled={suggestions.every((s) => s.accepted || s.denied)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors disabled:opacity-40"
+            >
+              <Check size={12} />
+              Accept All
+            </button>
+            <button
+              onClick={handleAcceptHighConfidence}
+              disabled={highConfidenceSuggestions.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-accent/10 text-accent border border-accent/20 hover:bg-accent/20 transition-colors disabled:opacity-40"
+            >
+              <Check size={12} />
+              Accept High Confidence ({highConfidenceSuggestions.length})
+            </button>
+          </div>
+
+          {/* Accept All confirmation */}
+          {acceptAllConfirm && (
+            <div className="px-5 py-3 bg-warning/5 border-b border-warning/20 flex items-center justify-between">
+              <span className="text-xs text-warning">
+                Apply model suggestions to all {suggestions.filter((s) => !s.accepted && !s.denied).length} stories?
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setAcceptAllConfirm(false)}
+                  className="px-2 py-1 text-xs text-muted border border-border rounded hover:text-text transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAcceptAll}
+                  className="px-2 py-1 text-xs font-medium bg-emerald-500 text-white rounded hover:bg-emerald-600 transition-colors"
+                >
+                  Accept All
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Table */}
+          <div className="max-h-[60vh] overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-bg border-b border-border">
+                <tr className="text-xs text-muted uppercase tracking-wide">
+                  <th className="text-left px-5 py-2 font-medium">Story</th>
+                  <th className="text-left px-3 py-2 font-medium">Current</th>
+                  <th className="text-left px-3 py-2 font-medium">Suggested</th>
+                  <th className="text-left px-3 py-2 font-medium w-24">Confidence</th>
+                  <th className="text-right px-5 py-2 font-medium">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {suggestions.map((s) => {
+                  const story = stories.find((st) => st.id === s.storyId);
+                  const confColor =
+                    s.confidence >= 0.8
+                      ? 'bg-emerald-500'
+                      : s.confidence >= 0.6
+                        ? 'bg-amber-500'
+                        : 'bg-red-500';
+                  const isExpanded = expandedReasonId === s.storyId;
+
+                  return (
+                    <tr
+                      key={s.storyId}
+                      className={`border-b border-border/30 ${s.denied ? 'opacity-40' : ''} ${s.accepted ? 'bg-emerald-500/5' : ''}`}
+                    >
+                      <td className="px-5 py-2.5">
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-mono text-xs text-accent">{s.storyId}</span>
+                          <span className="text-xs text-text truncate max-w-[180px]" title={story?.title}>
+                            {story?.title ?? '—'}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <span className="text-[10px] font-mono text-muted">
+                          {story?.model || '—'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <span className="text-[10px] font-mono text-accent font-medium">
+                          {s.suggestedModel}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-1.5 rounded-full bg-border overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${confColor} transition-all`}
+                              style={{ width: `${Math.round(s.confidence * 100)}%` }}
+                            />
+                          </div>
+                          <span className="text-[10px] font-mono text-muted shrink-0 w-8 text-right">
+                            {Math.round(s.confidence * 100)}%
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => setExpandedReasonId(isExpanded ? null : s.storyId)}
+                          className="text-[10px] text-muted hover:text-text transition-colors mt-0.5 truncate max-w-[120px] block"
+                          title={s.reason}
+                        >
+                          {isExpanded ? s.reason : (s.reason.length > 40 ? s.reason.slice(0, 40) + '...' : s.reason)}
+                        </button>
+                      </td>
+                      <td className="px-5 py-2.5 text-right">
+                        {s.accepted ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded bg-emerald-500/15 text-emerald-500">
+                            <CheckCircle2 size={10} />
+                            Accepted
+                          </span>
+                        ) : s.denied ? (
+                          <span className="text-[10px] text-muted">Denied</span>
+                        ) : (
+                          <div className="flex items-center gap-1 justify-end">
+                            <button
+                              onClick={() => handleAcceptSuggestion(s)}
+                              className="p-1 rounded hover:bg-emerald-500/15 text-emerald-500 transition-colors"
+                              title="Accept suggestion"
+                            >
+                              <Check size={14} />
+                            </button>
+                            <button
+                              onClick={() => handleDenySuggestion(s.storyId)}
+                              className="p-1 rounded hover:bg-error/15 text-muted hover:text-error transition-colors"
+                              title="Deny suggestion"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </AnimatedModal>
     </div>
   );
 }

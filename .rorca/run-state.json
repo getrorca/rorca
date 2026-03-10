@@ -2,7 +2,7 @@
   "specId": "rorca-curated-skills-library",
   "runId": 14,
   "startedAt": "2026-03-10T02:18:43.908Z",
-  "lastUpdatedAt": "2026-03-10T04:27:59.726Z",
+  "lastUpdatedAt": "2026-03-10T04:32:37.105Z",
   "completedStories": [
     {
       "storyId": "SL-002",
@@ -75,6 +75,15 @@
       "finishedAt": "2026-03-10T04:27:59.726Z",
       "agentType": "claude",
       "elapsedMs": 1872277
+    },
+    {
+      "storyId": "SL-009",
+      "title": "Model Suggestion UI in Spec Review",
+      "status": "passed",
+      "startedAt": "2026-03-10T04:28:13.856Z",
+      "finishedAt": "2026-03-10T04:32:37.105Z",
+      "agentType": "claude",
+      "elapsedMs": 263249
     }
   ],
   "failedStories": [],
