@@ -3,7 +3,8 @@
 Spec: rorca-distribution
 Run ID: 17
 Started: 2026-03-10T13:18:22.929Z
-Last Updated: 2026-03-10T13:21:18.622Z
+Last Updated: 2026-03-10T13:36:38.485Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - DIST-001: Postgres Binary Download Manager — DONE (claude, 173s)
+- DIST-002: Postgres Lifecycle Management (init, start, stop) — DONE (claude, 911s)

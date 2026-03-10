@@ -2,7 +2,7 @@
   "specId": "rorca-distribution",
   "runId": 17,
   "startedAt": "2026-03-10T13:18:22.929Z",
-  "lastUpdatedAt": "2026-03-10T13:21:18.622Z",
+  "lastUpdatedAt": "2026-03-10T13:36:38.485Z",
   "completedStories": [
     {
       "storyId": "DIST-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-10T13:21:18.622Z",
       "agentType": "claude",
       "elapsedMs": 173136
+    },
+    {
+      "storyId": "DIST-002",
+      "title": "Postgres Lifecycle Management (init, start, stop)",
+      "status": "passed",
+      "startedAt": "2026-03-10T13:21:27.197Z",
+      "finishedAt": "2026-03-10T13:36:38.485Z",
+      "agentType": "claude",
+      "elapsedMs": 911288
     }
   ],
   "failedStories": [],
