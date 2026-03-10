@@ -27,6 +27,7 @@ import {
   formatGraphContext,
   type GraphContext as FullGraphContext,
 } from './graph-context';
+import { query as dbQuery } from '../db/index';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -268,12 +269,31 @@ export async function retrieveContext(
   const remainingTokens = maxTokens - directionTokens;
   const budgets = calculateBudgets(remainingTokens, includeGraph);
 
-  // ── Populate memory from cache ───────────────────────────────────────────
+  // ── PG-022: Fetch pinned memories first (always included) ───────────────
 
   const memoryEntries: MemoryEntryResult[] = [];
   let memoryTokensUsed = 0;
+  const pinnedTexts = new Set<string>();
+
+  try {
+    const pinnedRows = await dbQuery<{ content: string }>(
+      `SELECT content FROM memories WHERE workspace_id = $1 AND pinned = true AND deleted_at IS NULL ORDER BY created_at DESC`,
+      [wsId],
+    );
+    for (const row of pinnedRows) {
+      const tokens = estimateTokens(row.content);
+      memoryEntries.push({ text: row.content, score: 1, source: 'cache' });
+      memoryTokensUsed += tokens;
+      pinnedTexts.add(row.content);
+    }
+  } catch {
+    // pinned column may not exist yet — graceful fallback
+  }
+
+  // ── Populate memory from cache (skip pinned duplicates) ────────────────
 
   for (const entry of cachedMemory) {
+    if (pinnedTexts.has(entry.text)) continue;
     const tokens = estimateTokens(entry.text);
     if (memoryTokensUsed + tokens <= budgets.memory) {
       memoryEntries.push({ text: entry.text, score: 0, source: 'cache' });
