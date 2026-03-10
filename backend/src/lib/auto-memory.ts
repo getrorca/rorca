@@ -209,6 +209,156 @@ export async function autoSynthesizeMemory(
   }
 }
 
+// ─── Spec-Generation Memory Capture (PG-023) ────────────────────────────────
+
+/** Timeout for spec memory synthesis — kept tight like per-story (< 5s target) */
+const SPEC_SYNTHESIS_TIMEOUT_MS = 5_000;
+
+/**
+ * After successful spec generation, synthesizes 1-2 memory entries capturing
+ * codebase observations the LLM made during generation: architecture patterns,
+ * complexity hotspots, missing conventions, technical debt.
+ *
+ * Non-fatal: all errors are caught and logged. Never throws.
+ */
+export async function autoSynthesizeSpecMemory(
+  specId: string,
+  workspaceId: string,
+  brief: string,
+  generatedSpec: { stories: unknown[] },
+  contextSummary: Record<string, unknown>,
+): Promise<void> {
+  const t0 = Date.now();
+
+  try {
+    // Build a concise summary of what context was available
+    const ctxParts: string[] = [];
+    const dl = contextSummary.directionLayers as Record<string, unknown> | undefined;
+    if (dl) {
+      if (dl.l1) ctxParts.push('L1 standards');
+      if ((dl.l2 as Record<string, unknown>)?.present) ctxParts.push(`L2 ${(dl.l2 as Record<string, unknown>).domain || 'domain'} conventions`);
+      if (dl.l3) ctxParts.push('L3 project brief');
+    }
+    if (contextSummary.schemaSnapshot) ctxParts.push(`schema snapshot`);
+    if (contextSummary.gitMemory) ctxParts.push(`git memory`);
+    const skills = contextSummary.skills as string[] | undefined;
+    if (skills?.length) ctxParts.push(`${skills.length} skills`);
+    if (contextSummary.memoryEntries) ctxParts.push(`${contextSummary.memoryEntries} memory entries`);
+
+    const storyCount = generatedSpec.stories.length;
+    const storySummary = (generatedSpec.stories as Record<string, unknown>[])
+      .slice(0, 10)
+      .map((s) => `- ${s.id}: ${s.title}`)
+      .join('\n');
+
+    const prompt = `You are a memory synthesis agent. A spec was just generated from a brief. Analyze what the spec generation reveals about this codebase and extract 1-2 observations.
+
+## Brief
+${brief.slice(0, 2000)}
+
+## Generated Spec (${storyCount} stories)
+${storySummary}${storyCount > 10 ? `\n... and ${storyCount - 10} more stories` : ''}
+
+## Context Available During Generation
+You had access to: ${ctxParts.join(', ') || 'minimal context'}
+
+## Instructions
+Extract 1-2 observations about the codebase that emerged during spec generation. Focus on:
+- Architecture patterns: what the story structure reveals about system complexity
+- Complexity hotspots: areas that needed many stories or deep dependency chains
+- Missing conventions: gaps where the codebase lacks clear patterns
+- Technical debt: structural issues the spec had to work around
+
+Category must be "Spec Observation".
+
+Respond with ONLY a JSON array (no markdown fences, no explanation):
+[
+  {
+    "category": "Spec Observation",
+    "content": "concise observation (1-2 sentences)",
+    "confidence": "high|medium|low",
+    "relatedFiles": ["path/to/file.ts"]
+  }
+]`;
+
+    const messages: ChatMessage[] = [{ role: 'user', content: prompt }];
+
+    const llmResult = await Promise.race([
+      chatComplete(messages, SYNTHESIS_MODEL),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('spec_synthesis_timeout')), SPEC_SYNTHESIS_TIMEOUT_MS),
+      ),
+    ]);
+
+    // Parse LLM response
+    let entries: MemoryEntry[];
+    try {
+      const text = llmResult.text.trim();
+      const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+      entries = JSON.parse(cleaned);
+    } catch (parseErr) {
+      logger.warn(`[auto-memory] Failed to parse spec memory for ${specId}: ${(parseErr as Error).message}`);
+      return;
+    }
+
+    if (!Array.isArray(entries) || entries.length === 0) {
+      logger.warn(`[auto-memory] No spec memory entries extracted for ${specId}`);
+      return;
+    }
+
+    // Cap at 2 entries
+    entries = entries.slice(0, 2);
+
+    // Validate entries
+    const validConfidence = new Set(['high', 'medium', 'low']);
+    entries = entries.filter(e => {
+      if (!e.content) return false;
+      e.category = 'Spec Observation';
+      if (!validConfidence.has(e.confidence)) e.confidence = 'medium';
+      if (!Array.isArray(e.relatedFiles)) e.relatedFiles = [];
+      return true;
+    });
+
+    if (entries.length === 0) return;
+
+    // Store entries with embeddings
+    for (const entry of entries) {
+      let embedding: number[] | null = null;
+      try {
+        const prepared = prepareText('memory', entry.content);
+        embedding = await embedText(prepared);
+      } catch (embErr) {
+        logger.warn(`[auto-memory] Embedding failed for spec memory ${specId}: ${(embErr as Error).message}`);
+      }
+
+      const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+
+      await execute(
+        `INSERT INTO memories (workspace_id, category, content, source_spec_id, confidence, related_files, embedding)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::vector)`,
+        [
+          workspaceId,
+          entry.category,
+          entry.content,
+          specId,
+          entry.confidence,
+          JSON.stringify(entry.relatedFiles),
+          embeddingStr,
+        ],
+      );
+    }
+
+    logger.info(`[auto-memory] Saved ${entries.length} spec memories for ${specId} (${Date.now() - t0}ms)`);
+  } catch (err: any) {
+    const elapsed = Date.now() - t0;
+    if (err.message === 'spec_synthesis_timeout') {
+      logger.warn(`[auto-memory] Spec memory synthesis timed out for ${specId} after ${elapsed}ms — skipping`);
+    } else {
+      logger.warn(`[auto-memory] Spec memory synthesis failed for ${specId}: ${err.message}`);
+    }
+  }
+}
+
 // ─── Run Memory Synthesis (PG-021) ──────────────────────────────────────────
 
 /** Cosine similarity between two embedding vectors */
