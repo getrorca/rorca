@@ -2311,4 +2311,179 @@ router.get('/finops/export', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/analytics/skills/effectiveness — Skill effectiveness across runs ─
+
+interface SkillEffectivenessRow {
+  skill_name: string;
+  status: string;
+  elapsed_seconds: number | null;
+  run_id: number;
+}
+
+interface SkillEffectivenessResult {
+  name: string;
+  totalUses: number;
+  passCount: number;
+  failCount: number;
+  passRate: number;
+  avgElapsedSeconds: number | null;
+  runsUsedIn: number;
+}
+
+/**
+ * @swagger
+ * /api/analytics/skills/effectiveness:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Skill effectiveness analytics
+ *     operationId: getSkillEffectiveness
+ *     description: Aggregates which skills correlate most with story success across pipeline runs for a workspace within a time range.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace ID to filter runs
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *         description: ISO date string, defaults to 30 days ago
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20, maximum: 50 }
+ *         description: Max skills to return (default 20, max 50)
+ *     responses:
+ *       200:
+ *         description: Skill effectiveness data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 skills:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name: { type: string }
+ *                       totalUses: { type: integer }
+ *                       passCount: { type: integer }
+ *                       failCount: { type: integer }
+ *                       passRate: { type: number }
+ *                       avgElapsedSeconds: { type: number, nullable: true }
+ *                       runsUsedIn: { type: integer }
+ *                 period:
+ *                   type: object
+ *                   properties:
+ *                     since: { type: string }
+ *                     until: { type: string }
+ *                 totalRuns: { type: integer }
+ *                 totalStories: { type: integer }
+ *       400:
+ *         description: Missing workspaceId parameter
+ */
+router.get('/skills/effectiveness', (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspaceId as string | undefined;
+    if (!workspaceId) {
+      return res.status(400).json({ error: 'workspaceId query parameter is required' });
+    }
+
+    const now = new Date();
+    const since = (req.query.since as string) || new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const until = now.toISOString();
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 20, 1), 50);
+
+    // Total runs in window
+    const totalRunsRow = db.prepare(
+      `SELECT COUNT(DISTINCT id) AS cnt FROM pipeline_runs WHERE workspace_id = ? AND started_at >= ?`
+    ).get(workspaceId, since) as { cnt: number } | undefined;
+    const totalRuns = totalRunsRow?.cnt ?? 0;
+
+    // Total stories in window
+    const totalStoriesRow = db.prepare(
+      `SELECT COUNT(*) AS cnt FROM story_results sr
+       JOIN pipeline_runs pr ON sr.run_id = pr.id
+       WHERE pr.workspace_id = ? AND sr.started_at >= ?`
+    ).get(workspaceId, since) as { cnt: number } | undefined;
+    const totalStories = totalStoriesRow?.cnt ?? 0;
+
+    // Try json_each() approach first (SQLite 3.38+, bundled with better-sqlite3)
+    let rows: SkillEffectivenessRow[];
+    try {
+      rows = db.prepare(
+        `SELECT je.value AS skill_name, sr.status, sr.elapsed_seconds, sr.run_id
+         FROM story_results sr, json_each(sr.active_skills) je
+         JOIN pipeline_runs pr ON sr.run_id = pr.id
+         WHERE pr.workspace_id = ? AND sr.started_at >= ? AND sr.active_skills IS NOT NULL`
+      ).all(workspaceId, since) as SkillEffectivenessRow[];
+    } catch {
+      // Fallback: JS-side JSON parsing
+      const rawRows = db.prepare(
+        `SELECT sr.story_id, sr.status, sr.active_skills, sr.elapsed_seconds, sr.run_id
+         FROM story_results sr
+         JOIN pipeline_runs pr ON sr.run_id = pr.id
+         WHERE pr.workspace_id = ? AND sr.started_at >= ? AND sr.active_skills IS NOT NULL`
+      ).all(workspaceId, since) as Array<{ story_id: string; status: string; active_skills: string; elapsed_seconds: number | null; run_id: number }>;
+
+      rows = [];
+      for (const row of rawRows) {
+        try {
+          const skills: string[] = JSON.parse(row.active_skills);
+          for (const skill_name of skills) {
+            rows.push({ skill_name, status: row.status, elapsed_seconds: row.elapsed_seconds, run_id: row.run_id });
+          }
+        } catch {
+          // skip malformed JSON
+        }
+      }
+    }
+
+    // Aggregate per skill
+    const skillMap = new Map<string, { totalUses: number; passCount: number; failCount: number; passElapsedSum: number; passElapsedCount: number; runs: Set<number> }>();
+
+    for (const row of rows) {
+      let entry = skillMap.get(row.skill_name);
+      if (!entry) {
+        entry = { totalUses: 0, passCount: 0, failCount: 0, passElapsedSum: 0, passElapsedCount: 0, runs: new Set() };
+        skillMap.set(row.skill_name, entry);
+      }
+      entry.totalUses++;
+      entry.runs.add(row.run_id);
+      if (row.status === 'pass') {
+        entry.passCount++;
+        if (row.elapsed_seconds != null) {
+          entry.passElapsedSum += row.elapsed_seconds;
+          entry.passElapsedCount++;
+        }
+      } else if (row.status === 'fail') {
+        entry.failCount++;
+      }
+    }
+
+    const skills: SkillEffectivenessResult[] = Array.from(skillMap.entries())
+      .map(([name, e]) => ({
+        name,
+        totalUses: e.totalUses,
+        passCount: e.passCount,
+        failCount: e.failCount,
+        passRate: e.totalUses > 0 ? Math.round((e.passCount / e.totalUses) * 10000) / 10000 : 0,
+        avgElapsedSeconds: e.passElapsedCount > 0 ? Math.round(e.passElapsedSum / e.passElapsedCount) : null,
+        runsUsedIn: e.runs.size,
+      }))
+      .sort((a, b) => b.totalUses - a.totalUses)
+      .slice(0, limit);
+
+    res.json({
+      skills,
+      period: { since, until },
+      totalRuns,
+      totalStories,
+    });
+  } catch (error: any) {
+    logger.error('[Analytics] Skill effectiveness error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
