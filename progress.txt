@@ -1,12 +1,9 @@
 # Run State Summary
 
-Spec: rorca-live-spec-terminal
-Run ID: 15
-Started: 2026-03-10T02:11:50.722Z
-Last Updated: 2026-03-10T02:18:36.882Z
+Spec: rorca-curated-skills-library
+Run ID: 14
+Started: 2026-03-10T02:18:43.908Z
+Last Updated: 2026-03-10T02:22:00.343Z
 
-## Completed Stories (4)
-- LST-001: Context Injection Summary — Show What's Being Sent to the LLM — DONE (claude, 672s)
-- LST-002: Real Progress Bar — Replace Simulated Stages with Actual Elapsed Time — DONE (claude, 13s)
-- LST-003: Actionable Error Detail — Show Why Generation Failed — DONE (claude, 1164s)
-- LST-004: Generation Log Persistence — Store Context + Outcome per Spec — DONE (claude, 399s)
+## Completed Stories (1)
+- SL-002: Explicit Match & Inject Skills API — DONE (claude, 194s)
