@@ -99,7 +99,7 @@ export async function runHooks(
   env: Record<string, string>,
 ): Promise<HookResult[]> {
   const hooks = await query<PipelineHookRow>(
-    `SELECT * FROM pipeline_hooks WHERE workspace_id = $1 AND hook_type = $2 AND enabled = 1 ORDER BY id ASC`,
+    `SELECT * FROM pipeline_hooks WHERE workspace_id = $1 AND hook_type = $2 AND enabled = true ORDER BY id ASC`,
     [workspaceId, hookType],
   );
 

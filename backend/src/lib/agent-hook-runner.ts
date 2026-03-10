@@ -37,7 +37,7 @@ export async function fireAgentHooks(walEvent: WalEvent): Promise<void> {
   if (!workspaceId) return;
 
   const hooks = await query<AgentHookRow>(
-    `SELECT * FROM agent_hooks WHERE workspace_id = $1 AND event_type = $2 AND enabled = 1 ORDER BY id ASC`,
+    `SELECT * FROM agent_hooks WHERE workspace_id = $1 AND event_type = $2 AND enabled = true ORDER BY id ASC`,
     [workspaceId, hookEventType]
   );
 
