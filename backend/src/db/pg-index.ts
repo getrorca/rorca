@@ -61,6 +61,16 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     const { rows: applied } = await client.query('SELECT version FROM schema_migrations');
     const appliedVersions = new Set(applied.map(r => r.version));
 
+    // PG-019: Migrations that create extensions may fail on managed services
+    // (e.g., Supabase pre-installs pgvector, Neon doesn't support AGE).
+    // Extension migration filenames contain these keywords for detection.
+    const EXTENSION_MIGRATION_PATTERNS = ['pgvector', 'pgcrypto', 'knowledge_graph', 'age'];
+
+    function isExtensionMigration(filename: string): boolean {
+      const lower = filename.toLowerCase();
+      return EXTENSION_MIGRATION_PATTERNS.some(pat => lower.includes(pat));
+    }
+
     let appliedCount = 0;
     let skippedCount = 0;
 
@@ -93,6 +103,27 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         console.log(`[pg-migrate] Applied: ${file}`);
       } catch (err) {
         await client.query('ROLLBACK');
+
+        // PG-019: Extension migrations are non-fatal on managed services.
+        // Some managed Postgres providers pre-install extensions (CREATE EXTENSION
+        // fails with "already loaded") or don't support them at all (AGE on
+        // Supabase/Neon). Mark as applied so we don't retry, and continue.
+        if (isExtensionMigration(file)) {
+          console.warn(`[pg-migrate] Extension migration failed (non-fatal): ${file}`);
+          console.warn(`[pg-migrate] Reason: ${(err as Error).message || err}`);
+          // Record as applied to prevent retries
+          try {
+            await client.query(
+              'INSERT INTO schema_migrations (version, filename) VALUES ($1, $2)',
+              [version, `${file} [skipped: extension unavailable]`]
+            );
+          } catch {
+            // schema_migrations insert itself may fail if version already exists
+          }
+          skippedCount++;
+          continue;
+        }
+
         console.error(`[pg-migrate] FAILED: ${file}`);
         console.error(err);
         throw err;
