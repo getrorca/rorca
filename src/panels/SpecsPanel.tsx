@@ -400,7 +400,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
             onNewSpec={() => setShowNewSpec(true)}
           />
         ) : (
-          <MarketplaceView />
+          <MarketplaceView activeSpecId={detailSpecId ?? undefined} />
         )}
       </div>
 
