@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T11:36:30.010Z",
+  "lastUpdatedAt": "2026-03-10T11:42:56.554Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -102,6 +102,15 @@
       "finishedAt": "2026-03-10T11:36:30.010Z",
       "agentType": "claude",
       "elapsedMs": 981739
+    },
+    {
+      "storyId": "PG-012",
+      "title": "Selective Retrieval in synthesize()",
+      "status": "passed",
+      "startedAt": "2026-03-10T11:36:38.916Z",
+      "finishedAt": "2026-03-10T11:42:56.553Z",
+      "agentType": "claude",
+      "elapsedMs": 377637
     }
   ],
   "failedStories": [],
