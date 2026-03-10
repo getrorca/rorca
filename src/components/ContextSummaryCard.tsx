@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Check, X, AlertTriangle, FileText, Brain, Shield, Layers, Puzzle } from 'lucide-react';
+import { ChevronDown, ChevronRight, Check, X, AlertTriangle, FileText, Brain, Shield, Layers, Puzzle, Search, Share2 } from 'lucide-react';
 import type { ContextSummary } from '../panels/SpecForgeOutput';
 
 interface ContextSummaryCardProps {
@@ -74,7 +74,7 @@ function TokenBar({ estimated, contextWindow }: { estimated: number; contextWind
 export default function ContextSummaryCard({ summary, isGenerating }: ContextSummaryCardProps) {
   const [expanded, setExpanded] = useState(!!isGenerating);
 
-  const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow } = summary;
+  const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow, vectorHits, graphHits, retrievalTier, retrievalLatencyMs } = summary;
 
   return (
     <div
@@ -135,6 +135,38 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
             <span className={`inline-flex items-center gap-1 ${gitMemory ? 'text-text' : 'text-muted'}`}>
               <FileText className="w-3 h-3" />
               Git Memory {gitMemory ? '✓' : '—'}
+            </span>
+          </div>
+
+          {/* Semantic retrieval */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span
+              className={`inline-flex items-center gap-1 ${vectorHits && vectorHits > 0 ? 'text-text' : 'text-zinc-400'}`}
+              title="Vector search and knowledge graph require embeddings. Run POST /api/admin/embed-all or set OPENAI_API_KEY to enable."
+            >
+              <Search className="w-3 h-3" />
+              Vector Search{' '}
+              {vectorHits != null && vectorHits > 0
+                ? <span className="text-success">✅ {vectorHits} hit{vectorHits !== 1 ? 's' : ''}</span>
+                : <span>⬚ No embeddings</span>}
+              {retrievalTier && (
+                <span className="ml-1 px-1.5 py-0 rounded bg-muted/15 text-[10px] font-medium text-muted">
+                  {retrievalTier}
+                </span>
+              )}
+              {retrievalLatencyMs != null && (
+                <span className="text-muted text-[10px] ml-0.5">{retrievalLatencyMs}ms</span>
+              )}
+            </span>
+            <span
+              className={`inline-flex items-center gap-1 ${graphHits && graphHits > 0 ? 'text-text' : 'text-zinc-400'}`}
+              title="Vector search and knowledge graph require embeddings. Run POST /api/admin/embed-all or set OPENAI_API_KEY to enable."
+            >
+              <Share2 className="w-3 h-3" />
+              Knowledge Graph{' '}
+              {graphHits != null && graphHits > 0
+                ? <span className="text-success">✅ {graphHits} node{graphHits !== 1 ? 's' : ''}</span>
+                : <span>⬚ No graph data</span>}
             </span>
           </div>
 

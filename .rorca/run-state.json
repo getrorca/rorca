@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-wiring",
   "runId": 28,
   "startedAt": "2026-03-10T22:49:18.582Z",
-  "lastUpdatedAt": "2026-03-10T23:16:01.160Z",
+  "lastUpdatedAt": "2026-03-10T23:18:48.496Z",
   "completedStories": [
     {
       "storyId": "SW-001",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-10T23:16:01.159Z",
       "agentType": "claude",
       "elapsedMs": 379509
+    },
+    {
+      "storyId": "SW-006",
+      "title": "Update Context Injection Summary UI with Semantic Stats",
+      "status": "passed",
+      "startedAt": "2026-03-10T23:16:23.060Z",
+      "finishedAt": "2026-03-10T23:18:48.496Z",
+      "agentType": "claude",
+      "elapsedMs": 145436
     }
   ],
   "failedStories": [],
