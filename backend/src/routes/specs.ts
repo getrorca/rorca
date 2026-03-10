@@ -62,6 +62,101 @@ function resolveVaultCreds(userId: string, model: string): { apiKey?: string; ba
   if (anthropic) return { apiKey: anthropic.key };
   return {};
 }
+
+// ─── Spec Generation Error Categorization ────────────────────────────────────
+
+export type SpecErrorCategory =
+  | 'model_error'
+  | 'api_key_error'
+  | 'rate_limit'
+  | 'context_too_large'
+  | 'timeout'
+  | 'parse_error'
+  | 'network_error'
+  | 'unknown';
+
+export interface StructuredSpecError {
+  error: string;
+  category: SpecErrorCategory;
+  model: string;
+  provider: string;
+  contextSummary?: Record<string, unknown>;
+  suggestion: string;
+  rawResponse?: string; // first 500 chars of LLM output for parse errors
+}
+
+const ERROR_SUGGESTIONS: Record<SpecErrorCategory, string> = {
+  model_error: 'Check the model name in Settings > Providers. The model may not exist or may not be available for your provider.',
+  api_key_error: 'Update your API key in Settings > Providers > API Keys. The key may be invalid or expired.',
+  rate_limit: 'You\'ve been rate-limited by the provider. Wait a minute or switch to a different model.',
+  context_too_large: 'The prompt exceeds the model\'s context window. Reduce direction stack content or remove skills.',
+  timeout: 'The LLM took too long to respond. Try a faster model or reduce the story count.',
+  parse_error: 'The model produced output that couldn\'t be parsed as valid JSON. Try again or switch models.',
+  network_error: 'Check your internet connection and verify the API endpoint is reachable.',
+  unknown: 'An unexpected error occurred during spec generation.',
+};
+
+function categorizeSpecError(error: any): SpecErrorCategory {
+  const msg = (error?.message || String(error)).toLowerCase();
+  const status = error?.status || error?.statusCode || error?.response?.status;
+
+  // API key / auth errors
+  if (status === 401 || status === 403 ||
+      msg.includes('api key') || msg.includes('apikey') ||
+      msg.includes('unauthorized') || msg.includes('invalid.*key') ||
+      msg.includes('authentication') || msg.includes('forbidden') ||
+      msg.includes('permission denied') || msg.includes('invalid x-api-key')) {
+    return 'api_key_error';
+  }
+
+  // Rate limiting
+  if (status === 429 || msg.includes('rate limit') || msg.includes('rate_limit') ||
+      msg.includes('too many requests') || msg.includes('overloaded') ||
+      msg.includes('capacity') || msg.includes('throttl')) {
+    return 'rate_limit';
+  }
+
+  // Context too large
+  if (msg.includes('context') && (msg.includes('too large') || msg.includes('too long') || msg.includes('exceed')) ||
+      msg.includes('max.*token') || msg.includes('token.*limit') ||
+      msg.includes('maximum context length') || msg.includes('context_length_exceeded') ||
+      msg.includes('prompt is too long')) {
+    return 'context_too_large';
+  }
+
+  // Timeout
+  if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('deadline') ||
+      msg.includes('etimedout') || msg.includes('esockettimedout') ||
+      error?.timedOut === true) {
+    return 'timeout';
+  }
+
+  // Parse errors (LLM returned non-JSON)
+  if (msg.includes('non-json') || msg.includes('returned non-json') ||
+      msg.includes('invalid spec structure') || msg.includes('parse') ||
+      msg.includes('unexpected token') || msg.includes('json')) {
+    return 'parse_error';
+  }
+
+  // Model errors
+  if (status === 404 || msg.includes('model not found') || msg.includes('does not exist') ||
+      msg.includes('not available') || msg.includes('unknown model') ||
+      msg.includes('invalid model') || msg.includes('unsupported')) {
+    return 'model_error';
+  }
+
+  // Network errors
+  if (msg.includes('econnrefused') || msg.includes('enotfound') ||
+      msg.includes('econnreset') || msg.includes('network') ||
+      msg.includes('fetch failed') || msg.includes('failed to fetch') ||
+      msg.includes('dns') || msg.includes('socket hang up') ||
+      msg.includes('err_network')) {
+    return 'network_error';
+  }
+
+  return 'unknown';
+}
+
 import { createNotification } from './notifications';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
@@ -569,6 +664,11 @@ const GenerateSpecSchema = z.object({
 });
 
 router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, res: Response) => {
+  // Hoist error-relevant state so catch block can build structured errors
+  let resolvedModel = 'unknown';
+  let usedProvider = 'unknown';
+  let precomputedContextSummary: Record<string, unknown> | undefined;
+
   try {
     const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
     const title: string = req.body.title || req.body.specName;
@@ -591,7 +691,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 2b. Resolve model: request param > workspace L3 preferred_model > default
-    let resolvedModel: string = DEFAULT_MODEL;
+    resolvedModel = DEFAULT_MODEL;
     if (requestedModel) {
       resolvedModel = requestedModel;
     } else {
@@ -664,6 +764,55 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // 6c. Discover skill + persona catalogs and read context files
     const catalogs = buildCatalogContext(workspace.path as string);
+
+    // 6d. Pre-compute contextSummary for error responses (also used in success response)
+    const skillNamesList = catalogs.skillCatalog
+      ? catalogs.skillCatalog.split('\n').map(l => l.split(':')[0]?.trim()).filter(Boolean)
+      : [];
+    const memoryEntryCount = catalogs.memoryMd
+      ? (catalogs.memoryMd.match(/^## \d{4}-\d{2}-\d{2}/gm) || []).length
+      : 0;
+    const catalogTokens = Math.ceil(
+      (catalogs.skillCatalog.length + catalogs.personaCatalog.length +
+       catalogs.memoryMd.length + catalogs.agentsMd.length + templateContext.length) / 4
+    );
+    const estimatedTokens = synthResult.meta.totalTokens + catalogTokens;
+    const modelInfo = getModelInfo(resolvedModel);
+    const modelContextWindow = modelInfo?.contextWindow ?? 200000;
+
+    precomputedContextSummary = {
+      directionLayers: {
+        l1: synthResult.meta.standards,
+        l2: { present: synthResult.meta.conventions, domain: domain || null },
+        l3: synthResult.meta.project,
+      },
+      skills: skillNamesList,
+      memoryEntries: memoryEntryCount,
+      agentsMd: !!catalogs.agentsMd,
+      template: templateId || null,
+      schemaSnapshot: synthResult.meta.schema,
+      gitMemory: synthResult.meta.memory,
+      estimatedTokens,
+      modelContextWindow,
+    };
+
+    /** Build a structured error response for spec generation failures. */
+    function buildSpecError(error: any, rawResponse?: string): StructuredSpecError {
+      const category = categorizeSpecError(error);
+      let suggestion = ERROR_SUGGESTIONS[category];
+      if (category === 'context_too_large') {
+        suggestion = `The prompt exceeds the model's context window. Current: ~${Math.round(estimatedTokens / 1000)}K tokens, max: ~${Math.round(modelContextWindow / 1000)}K. Reduce direction stack content or remove skills.`;
+      }
+      return {
+        error: error?.message || String(error),
+        category,
+        model: resolvedModel,
+        provider: typeof usedProvider === 'string' ? usedProvider : getActiveProvider(),
+        contextSummary: precomputedContextSummary,
+        suggestion,
+        ...(rawResponse ? { rawResponse: rawResponse.slice(0, 500) } : {}),
+      };
+    }
 
     // 7. Build LLM prompt
     const storyPrefix = req.body.storyPrefix || 'US';
@@ -772,7 +921,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // 8. Route by agent type: OpenCode path vs SDK (llm-client) path
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
     let tokenUsage = { inputTokens: 0, outputTokens: 0 };
-    let usedProvider: string;
 
     // Pre-compute slug early — needed for multi-pass version snapshots
     const slug = title
@@ -850,12 +998,17 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       try {
         pass1Result = parseLLMJson(llmResult1.text) as typeof pass1Result;
       } catch {
-        res.status(500).json({ error: 'Pass 1 (PM Agent) returned non-JSON', raw: llmResult1.text });
+        res.status(500).json(buildSpecError(
+          new Error('Pass 1 (PM Agent) returned non-JSON'),
+          llmResult1.text,
+        ));
         return;
       }
 
       if (!Array.isArray(pass1Result.stories)) {
-        res.status(500).json({ error: 'Pass 1 (PM Agent) returned invalid spec structure' });
+        res.status(500).json(buildSpecError(
+          new Error('Pass 1 (PM Agent) returned invalid spec structure'),
+        ));
         return;
       }
 
@@ -953,12 +1106,17 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       try {
         parsed = parseLLMJson(llmResult2.text) as typeof parsed;
       } catch {
-        res.status(500).json({ error: 'Pass 2 (Spec Writer Agent) returned non-JSON', raw: llmResult2.text });
+        res.status(500).json(buildSpecError(
+          new Error('Pass 2 (Spec Writer Agent) returned non-JSON'),
+          llmResult2.text,
+        ));
         return;
       }
 
       if (!Array.isArray(parsed.stories)) {
-        res.status(500).json({ error: 'Pass 2 (Spec Writer Agent) returned invalid spec structure' });
+        res.status(500).json(buildSpecError(
+          new Error('Pass 2 (Spec Writer Agent) returned invalid spec structure'),
+        ));
         return;
       }
 
@@ -1533,12 +1691,17 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         try {
           parsed = parseLLMJson(rawResponse) as typeof parsed;
         } catch {
-          res.status(500).json({ error: 'LLM returned non-JSON (fallback after OpenCode failure)', raw: rawResponse });
+          res.status(500).json(buildSpecError(
+            new Error('LLM returned non-JSON (fallback after OpenCode failure)'),
+            rawResponse,
+          ));
           return;
         }
 
         if (!Array.isArray(parsed.stories)) {
-          res.status(500).json({ error: 'Invalid spec structure from LLM (fallback)' });
+          res.status(500).json(buildSpecError(
+            new Error('Invalid spec structure from LLM (fallback)'),
+          ));
           return;
         }
       } else {
@@ -1565,12 +1728,17 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       try {
         parsed = parseLLMJson(rawResponse) as typeof parsed;
       } catch {
-        res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse });
+        res.status(500).json(buildSpecError(
+          new Error('LLM returned non-JSON'),
+          rawResponse,
+        ));
         return;
       }
 
       if (!Array.isArray(parsed.stories)) {
-        res.status(500).json({ error: 'Invalid spec structure from LLM' });
+        res.status(500).json(buildSpecError(
+          new Error('Invalid spec structure from LLM'),
+        ));
         return;
       }
     }
@@ -1626,37 +1794,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       },
     };
 
-    // 14b. Build contextSummary for transparency card
-    const skillNamesList = catalogs.skillCatalog
-      ? catalogs.skillCatalog.split('\n').map(l => l.split(':')[0]?.trim()).filter(Boolean)
-      : [];
-    const memoryEntryCount = catalogs.memoryMd
-      ? (catalogs.memoryMd.match(/^## \d{4}-\d{2}-\d{2}/gm) || []).length
-      : 0;
-    // Estimate total prompt tokens: direction stack + catalog sections + prompt chrome
-    const catalogTokens = Math.ceil(
-      (catalogs.skillCatalog.length + catalogs.personaCatalog.length +
-       catalogs.memoryMd.length + catalogs.agentsMd.length + templateContext.length) / 4
-    );
-    const estimatedTokens = synthResult.meta.totalTokens + catalogTokens;
-    const modelInfo = getModelInfo(resolvedModel);
-    const modelContextWindow = modelInfo?.contextWindow ?? 200000;
-
-    const contextSummary = {
-      directionLayers: {
-        l1: synthResult.meta.standards,
-        l2: { present: synthResult.meta.conventions, domain: domain || null },
-        l3: synthResult.meta.project,
-      },
-      skills: skillNamesList,
-      memoryEntries: memoryEntryCount,
-      agentsMd: !!catalogs.agentsMd,
-      template: templateId || null,
-      schemaSnapshot: synthResult.meta.schema,
-      gitMemory: synthResult.meta.memory,
-      estimatedTokens,
-      modelContextWindow,
-    };
+    // 14b. contextSummary already precomputed in step 6d
+    const contextSummary = precomputedContextSummary;
 
     // 15. Write spec to workspace directory
     let specPath: string;
@@ -1700,7 +1839,21 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     });
   } catch (error: any) {
     logger.error('[Specs] Generate error:', error);
-    res.status(500).json({ error: error.message });
+    const category = categorizeSpecError(error);
+    let suggestion = ERROR_SUGGESTIONS[category];
+    if (category === 'context_too_large' && precomputedContextSummary) {
+      const estTokens = (precomputedContextSummary as any).estimatedTokens ?? 0;
+      const ctxWindow = (precomputedContextSummary as any).modelContextWindow ?? 200000;
+      suggestion = `The prompt exceeds the model's context window. Current: ~${Math.round(estTokens / 1000)}K tokens, max: ~${Math.round(ctxWindow / 1000)}K. Reduce direction stack content or remove skills.`;
+    }
+    res.status(500).json({
+      error: error.message,
+      category,
+      model: resolvedModel,
+      provider: usedProvider,
+      suggestion,
+      ...(precomputedContextSummary ? { contextSummary: precomputedContextSummary } : {}),
+    });
   }
 });
 

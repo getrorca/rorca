@@ -6,13 +6,18 @@ export const BASE_URL = import.meta.env.VITE_API_URL
 // ─── Typed API Error ──────────────────────────────────────────────────────────
 
 export class ApiError extends Error {
+  /** Extra structured fields from the backend error response */
+  public readonly details: Record<string, unknown>;
+
   constructor(
     public readonly status: number,
     public readonly code: string,
     message: string,
+    details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'ApiError';
+    this.details = details ?? {};
   }
 }
 
@@ -99,8 +104,9 @@ function parseErrorBody(status: number, text: string): ApiError {
     const json = JSON.parse(text);
     return new ApiError(
       status,
-      json.code || json.error || `HTTP_${status}`,
+      json.code || json.category || json.error || `HTTP_${status}`,
       json.message || json.error || text,
+      json,
     );
   } catch {
     return new ApiError(status, `HTTP_${status}`, text || `HTTP ${status}`);
