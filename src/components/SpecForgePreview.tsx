@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, CheckCircle2, Loader2, Play, X, GitBranch, MinusCircle, PlusCircle, Check, Trash2, Layers, CheckCircle, XCircle } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2, Loader2, Play, X, GitBranch, MinusCircle, PlusCircle, Check, Trash2, Layers, CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -46,13 +46,39 @@ export default function SpecForgePreview({
   onNavigate,
   onNavigateToRun,
   onReset,
-  modelSuggestions: _modelSuggestions,
-  onModelAccepted: _onModelAccepted,
+  modelSuggestions,
+  onModelAccepted,
 }: SpecForgePreviewProps) {
   const { show } = useGlobalToast();
   const { workspaces } = useWorkspace();
   const [approving, setApproving] = useState(false);
   const [expandedStories, setExpandedStories] = useState<Set<string>>(new Set());
+
+  // Model suggestion local state: track dismissed and accepted suggestions
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(new Set());
+  const [acceptedModels, setAcceptedModels] = useState<Map<string, string>>(new Map());
+  const [showAcceptAllConfirm, setShowAcceptAllConfirm] = useState(false);
+
+  const pendingSuggestions = (modelSuggestions ?? []).filter(
+    s => !dismissedSuggestions.has(s.storyId) && !acceptedModels.has(s.storyId)
+  );
+
+  const handleAcceptModel = useCallback((storyId: string, model: string) => {
+    setAcceptedModels(prev => new Map(prev).set(storyId, model));
+    onModelAccepted?.(storyId, model);
+  }, [onModelAccepted]);
+
+  const handleDismissModel = useCallback((storyId: string) => {
+    setDismissedSuggestions(prev => new Set(prev).add(storyId));
+  }, []);
+
+  const handleAcceptAll = useCallback(() => {
+    for (const s of pendingSuggestions) {
+      setAcceptedModels(prev => new Map(prev).set(s.storyId, s.suggestedModel));
+      onModelAccepted?.(s.storyId, s.suggestedModel);
+    }
+    setShowAcceptAllConfirm(false);
+  }, [pendingSuggestions, onModelAccepted]);
 
   // Editable spec name
   const [editingName, setEditingName] = useState(false);
@@ -268,11 +294,46 @@ export default function SpecForgePreview({
         </span>
       </div>
 
+      {/* Accept All Models button */}
+      {pendingSuggestions.length > 0 && (
+        <div className="flex items-center gap-2">
+          {showAcceptAllConfirm ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted">Apply model suggestions to {pendingSuggestions.length} {pendingSuggestions.length === 1 ? 'story' : 'stories'}?</span>
+              <button
+                onClick={handleAcceptAll}
+                className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 rounded transition-colors"
+              >
+                <Check size={10} />
+                Confirm
+              </button>
+              <button
+                onClick={() => setShowAcceptAllConfirm(false)}
+                className="text-[11px] text-muted hover:text-text transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowAcceptAllConfirm(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-text border border-border rounded hover:bg-accent/10 hover:border-accent/30 transition-colors"
+            >
+              <Check size={10} />
+              Accept All Models ({pendingSuggestions.length})
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Story cards */}
       <div className="space-y-2">
         {spec.stories.map((story) => {
           const isExpanded = expandedStories.has(story.id);
           const isExcluded = excludedIds.has(story.id);
+          const storySkills = story.suggestedSkills ?? [];
+          const storySuggestion = pendingSuggestions.find(s => s.storyId === story.id);
+          const storyAcceptedModel = acceptedModels.get(story.id) ?? story.model;
           return (
             <div
               key={story.id}
@@ -307,6 +368,12 @@ export default function SpecForgePreview({
                     </p>
                   )}
                 </button>
+                {/* Accepted model badge */}
+                {storyAcceptedModel && !storySuggestion && (
+                  <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded bg-accent/15 text-accent mt-0.5">
+                    {storyAcceptedModel}
+                  </span>
+                )}
                 {isExcluded && (
                   <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-muted/15 text-muted mt-0.5">
                     EXCLUDED
@@ -327,6 +394,57 @@ export default function SpecForgePreview({
                   {isExcluded ? <PlusCircle size={14} /> : <MinusCircle size={14} />}
                 </button>
               </div>
+
+              {/* Skill badges + model suggestion row */}
+              {(storySkills.length > 0 || storySuggestion) && !isExcluded && (
+                <div className="px-3 pb-2 pt-0 ml-6 space-y-1.5">
+                  {/* Skill badges */}
+                  {storySkills.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {storySkills.map((skill) => (
+                        <span
+                          key={skill.name}
+                          title={skill.reason}
+                          className={`px-1.5 py-0.5 text-[10px] font-mono rounded cursor-default ${
+                            skill.relevance >= 8
+                              ? 'bg-emerald-500/10 text-emerald-400'
+                              : skill.relevance >= 5
+                                ? 'bg-blue-500/10 text-blue-400'
+                                : 'bg-gray-500/10 text-gray-400'
+                          }`}
+                        >
+                          {skill.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {/* Model suggestion */}
+                  {storySuggestion && (
+                    <div className="flex items-center gap-1.5">
+                      {storySuggestion.confidence < 0.6 && (
+                        <AlertTriangle size={10} className="text-amber-500 shrink-0" />
+                      )}
+                      <span className="text-[11px] text-muted/80">
+                        Suggested: {storySuggestion.suggestedModel}
+                      </span>
+                      <button
+                        onClick={() => handleAcceptModel(storySuggestion.storyId, storySuggestion.suggestedModel)}
+                        title="Accept model suggestion"
+                        className="text-emerald-500 hover:bg-emerald-500/10 rounded px-1 transition-colors"
+                      >
+                        <Check size={10} />
+                      </button>
+                      <button
+                        onClick={() => handleDismissModel(storySuggestion.storyId)}
+                        title="Dismiss suggestion"
+                        className="text-muted hover:bg-red-500/10 rounded px-1 transition-colors"
+                      >
+                        <X size={10} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {isExpanded && (
                 <div className="px-3 pb-3 pt-0 ml-6 border-t border-border/50">
