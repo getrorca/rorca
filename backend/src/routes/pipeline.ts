@@ -871,6 +871,7 @@ const PipelineTriggerSchema = z.object({
   modelOverride: z.string().optional(),
   storyId: z.string().optional(),
   queuedRunId: z.number().optional(),
+  queue: z.boolean().optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
@@ -1150,19 +1151,27 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     ).get(workspaceId) as PipelineRunRow | undefined;
 
     if (activeRun && !autoWorktree) {
-      // Queue the run instead of blocking — insert with status='queued'
-      const queueCount = (db.prepare(
-        `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = ? AND status = 'queued'`
-      ).get(workspaceId) as { count: number }).count;
-      const position = queueCount + 1;
+      // Check if user explicitly requested queueing
+      const { queue } = req.body;
+      if (queue) {
+        // Explicit queue request — insert with status='queued'
+        const queueCount = (db.prepare(
+          `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = ? AND status = 'queued'`
+        ).get(workspaceId) as { count: number }).count;
+        const position = queueCount + 1;
 
-      const queueResult = db.prepare(
-        `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position)
-         VALUES (?, ?, 'queued', ?, datetime('now'), ?)`
-      ).run(specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position);
-      const queuedId = queueResult.lastInsertRowid as number;
+        const queueResult = db.prepare(
+          `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position)
+           VALUES (?, ?, 'queued', ?, datetime('now'), ?)`
+        ).run(specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position);
+        const queuedId = queueResult.lastInsertRowid as number;
 
-      res.status(202).json({ queued: true, runId: queuedId, position });
+        res.status(202).json({ queued: true, runId: queuedId, position });
+        return;
+      }
+
+      // No explicit queue — return conflict so user can choose
+      res.json({ conflict: true, activeRunId: activeRun.id });
       return;
     }
 

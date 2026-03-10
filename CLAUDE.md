@@ -197,21 +197,32 @@ rorca/
 ```
 
 ### Sidebar Navigation (defined in `src/components/Sidebar.tsx`)
-`PanelId` and `NAV_SECTIONS` are the canonical source of truth. `spec-review` is a valid PanelId but not in NAV_SECTIONS (opened via slide-over).
+`PanelId` and `SIDEBAR_ITEMS` are the canonical source of truth. After the ULT (Ultimate UX) overhaul, the sidebar was consolidated from ~30 panels down to 5 primary panels + 2 contextual panels.
 
-| Section | Panels (PanelId) |
-|---------|-----------------|
-| Specs | `forge`, `queue`, `archive`, `marketplace` |
-| Pipeline | `pipeline`, `worktrees`, `compare` |
-| Direction | `stack`, `team-direction` |
-| Analytics | `usage`, `costs`, `models`, `velocity`, `completion`, `roi`, `health` |
-| System | `audit-log`, `activity`, `github`, `workspace-settings`, `settings` |
+| PanelId | Route | Description |
+|---------|-------|-------------|
+| `specs` | `/specs` | Kanban board (Board), archive table (List), skills.sh marketplace (Marketplace) |
+| `runs` | `/runs` | Run history, active runs; `/runs/:runId` for Run View |
+| `analytics` | `/analytics` | Token usage, costs, velocity, ROI, health |
+| `direction` | `/direction` | Direction Stack (L1-L5), Memory, Team Direction |
+| `settings` | `/settings/:tab` | 17 sub-tabs grouped: Workspace, Execution, Integrations, Account, System |
+| `run-view` | `/runs/:runId` | (contextual) Full-screen terminal + story list |
+| `spec-review` | `/specs/:id/review` | (contextual) Spec review slide-over |
 
-**Context-aware sidebars**: When `activePanel` is in `['settings', 'workspace-settings', 'github', 'stack']`, `App.tsx` renders `SettingsSidebar` instead of the main `Sidebar`. `SettingsSidebar` has 6 tabs: `direction | providers | github | shortcuts | account | billing` (typed as `SettingsTab`). A "Back to Rorca" button exits settings context.
+**Settings sub-tabs** (typed as `SettingsTab`): `general | env-vars | hooks | agents | context | providers | direction | pipeline | github | slack | linear | vercel | account | billing | shortcuts | notifications | system | api-keys | developer`
+
+**React Router**: All navigation is URL-based via `react-router-dom`. Legacy panel IDs (`forge`, `queue`, `archive`, `pipeline`, `worktrees`, etc.) are `<Navigate>` redirects to the new routes in `App.tsx`.
+
+**Specs Panel architecture** (`src/panels/SpecsPanel.tsx`): Three view modes toggled in the header bar:
+- **Board** (default): Fizzy-style kanban with Draft -> In Progress -> [Custom columns] -> Done. Drag-and-drop between columns (approve/reject) and within-column reorder. Collapsible columns, compact/detailed toggle, keyboard nav (j/k/h/l).
+- **List**: Searchable archive table with status filters, pagination, tags.
+- **Marketplace**: Skills (skills.sh browser), Templates, Convention Packs -- tabbed view.
+
+**Spec Detail**: `SpecDetailSlideOver` (800px right panel) with tabs: Stories, History, Graph, Diagram, JSON. Actions: Approve, Reject, Run, Fork, Export, Delete.
 
 ## Database Tables
 
-36 migrations (`backend/src/db/migrations/001–036`). Key tables:
+46 migrations (`backend/src/db/migrations/001-045`). Key tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -671,7 +682,7 @@ Escalation cascade on failure:
 
 ## Spec Pipeline — Run Order
 
-**Completed (259 stories passed):**
+**Completed (289+ stories passed):**
 - `prd-rorca-phase1b` through `prd-rorca-phase5` (30 stories, archived, 100%)
 - `rorca-feature-enhancements` (17 stories, 7 passed — early spec, superseded by v2-platform)
 - `rorca-v2-platform` (117 stories, 113 passed — V2-082 failed, V2-089–092 excluded)
@@ -681,6 +692,7 @@ Escalation cascade on failure:
 - `rorca-ui-redesign-p2` (22 stories, 100% — polish, animations, accessibility, performance)
 - `rorca-forge-brief-first` (6 stories, 100% — brief-first Forge flow, FG-001–006)
 - `rorca-wave-execution-fix` (4 stories, 100% — WE-001–004: sub-worktree persistence, auto-mode, failure root cause, stdout streaming)
+- `rorca-ultimate-ux` (22 stories, 100% — ULT-001–022: consolidated ~30 panels to 5, kanban board, React Router, lazy loading, 800px slide-over)
 
 **In Progress:**
 - `rorca-context-intent-engine` (18 stories, 15 passed — CIE-001–014, CIE-016; CIE-015 excluded; CIE-017–018 pending)
@@ -704,21 +716,27 @@ Escalation cascade on failure:
 **Why V2-089–092 excluded**: Superseded by `rorca-ui-redesign` which covers all panel redesigns plus the navigation shell.
 **Why CIE-015 excluded**: Superseded by `rorca-convention-agents` CA-001–004, CA-019 which cover the same template/scaffold ground more completely (adds L0 direction layers, personas, per-library conventions, actual project boilerplate).
 
-## UI Redesign Architecture (rorca-ui-redesign)
-The redesign replaces the 10-icon sidebar with a 4-screen architecture:
+## UI Architecture (post-ULT overhaul, 2026-03-09)
+Consolidated from ~30 panels to 5 primary panels + URL-based routing (`react-router-dom`).
 
 ```
-4 nav icons: + (New), Hub (grid), Forge (hammer), Settings (gear)
+5 nav icons: Specs (layers), Runs (play), Analytics (chart), Direction (compass), Settings (gear)
 
-Hub (default)    → Active run card + Pending reviews + Recent runs
-Run View         → Full-screen: terminal (60%) + story list (40%) + Graph tab
-Forge            → Brief input + direction stack sidebar + inline approve
-Settings         → Direction Stack / Model / GitHub / Account / Billing tabs
+Specs (default)  → Kanban board (Board | List | Marketplace views)
+Runs             → Run history table; /runs/:runId → full-screen terminal + story list
+Analytics        → Token usage, costs, velocity, ROI, health dashboards
+Direction        → Direction Stack (L1-L5), Memory ledger, Team Direction
+Settings         → 17 sub-tabs: general, env-vars, hooks, agents, context, providers, etc.
 ```
+
+**Kanban board** (`SpecsPanel.tsx` BoardView): Fizzy-style columns — Draft, In Progress, [custom], Done. Cards show model badge, time-ago, story progress bar, tags. Drag-and-drop: cross-column (approve/reject), within-column reorder (client-side). Collapsible columns, compact mode, keyboard nav (j/k/h/l/Enter/a/x).
 
 Key components:
-- **Command palette**: `cmdk` library, ⌘K trigger, context-aware
-- **Graph view**: D3.js or React Flow DAG from `dependsOn` fields — NO graph DB needed. Nodes = stories, edges = dependsOn. Colors: grey/blue-pulse/green/red by status from `story_results` + SSE
+- **Command palette**: `cmdk` library, Cmd+K trigger, context-aware
+- **Spec detail slide-over**: 800px right panel, tabs: Stories, History, Graph, Diagram, JSON
+- **All panels lazy-loaded**: `React.lazy` + `Suspense` with skeleton fallbacks
+- **`@refresh reset`** directive on `SpecsPanel.tsx` to prevent Vite HMR hook state corruption (10+ components in single file)
+- **Graph view**: D3.js or React Flow DAG from `dependsOn` fields. Nodes = stories, edges = dependsOn. Colors by status from `story_results` + SSE
 - **HITL blocked state**: Amber banner when run-loop is stuck, textarea to inject context, resume without kill
 - **Semantic logging**: Parse xterm output for `[Read]`, `[Write]`, `[Planning]`, `[Executing]`, `[Commit]` prefixes — toggle raw/semantic
 
