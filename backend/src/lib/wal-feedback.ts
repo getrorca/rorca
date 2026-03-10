@@ -6,7 +6,7 @@
  * and retry detection. Entries go through deduplication before being written.
  */
 
-import { db } from '../db/index';
+import { query, queryOne } from '../db/index';
 import {
   readMemory,
   type MemoryEntry,
@@ -57,24 +57,26 @@ export interface CandidateMemoryEntry {
  * memory entries. Does NOT write to MEMORY.md — returns candidates
  * for deduplication and persistence.
  */
-export function analyzeRunEvents(runId: number): CandidateMemoryEntry[] {
-  const run = db.prepare(
-    'SELECT id, workspace_id, spec_path, status, started_at, finished_at FROM pipeline_runs WHERE id = ?'
-  ).get(runId) as PipelineRunRow | undefined;
+export async function analyzeRunEvents(runId: number): Promise<CandidateMemoryEntry[]> {
+  const run = await queryOne<PipelineRunRow>(
+    'SELECT id, workspace_id, spec_path, status, started_at, finished_at FROM pipeline_runs WHERE id = $1',
+    [runId]
+  );
 
   if (!run) {
     logger.warn(`[wal-feedback] Run ${runId} not found`);
     return [];
   }
 
-  const storyResults = db.prepare(
-    'SELECT story_id, status, retries, started_at, finished_at FROM story_results WHERE run_id = ?'
-  ).all(runId) as StoryResultRow[];
+  const storyResults = await query<StoryResultRow>(
+    'SELECT story_id, status, retries, started_at, finished_at FROM story_results WHERE run_id = $1',
+    [runId]
+  );
 
   if (storyResults.length === 0) return [];
 
   // Collect WAL events for this run's timeframe
-  const walEvents = collectWalEventsForRun(run);
+  const walEvents = await collectWalEventsForRun(run);
 
   const candidates: CandidateMemoryEntry[] = [];
 
@@ -91,7 +93,7 @@ export function analyzeRunEvents(runId: number): CandidateMemoryEntry[] {
   candidates.push(...analyzeEscalations(runId, walEvents));
 
   // Deduplicate against existing memory entries
-  const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(run.workspace_id) as { path: string } | undefined;
+  const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]);
   if (ws) {
     const existing = readMemory(ws.path);
     return deduplicateCandidates(candidates, existing);
@@ -281,26 +283,28 @@ function analyzeEscalations(
 
 // ─── WAL Event Collection ───────────────────────────────────────────────────
 
-function collectWalEventsForRun(run: PipelineRunRow): WalEventRow[] {
+async function collectWalEventsForRun(run: PipelineRunRow): Promise<WalEventRow[]> {
   // Get events that reference this run_id in payload
-  const events = db.prepare(
+  const events = await query<WalEventRow>(
     `SELECT id, event_type, story_id, payload, ts FROM wal_events
-     WHERE workspace_id = ? AND payload LIKE ?
-     ORDER BY id ASC LIMIT 200`
-  ).all(run.workspace_id, `%"run_id":${run.id}%`) as WalEventRow[];
+     WHERE workspace_id = $1 AND payload LIKE $2
+     ORDER BY id ASC LIMIT 200`,
+    [run.workspace_id, `%"run_id":${run.id}%`]
+  );
 
   // Also get story-level events in the run timeframe
-  const storyEvents = db.prepare(
+  const storyEvents = await query<WalEventRow>(
     `SELECT id, event_type, story_id, payload, ts FROM wal_events
-     WHERE workspace_id = ? AND event_type IN ('story_started', 'story_passed', 'story_failed', 'story_skipped', 'story_escalated')
-     AND id >= (SELECT COALESCE(MIN(id), 0) FROM wal_events WHERE workspace_id = ? AND event_type = 'run_started' AND payload LIKE ?)
-     AND id <= (SELECT COALESCE(MAX(id), 999999999) FROM wal_events WHERE workspace_id = ? AND event_type = 'run_finished' AND payload LIKE ?)
-     ORDER BY id ASC LIMIT 200`
-  ).all(
-    run.workspace_id,
-    run.workspace_id, `%"run_id":${run.id}%`,
-    run.workspace_id, `%"run_id":${run.id}%`,
-  ) as WalEventRow[];
+     WHERE workspace_id = $1 AND event_type IN ('story_started', 'story_passed', 'story_failed', 'story_skipped', 'story_escalated')
+     AND id >= (SELECT COALESCE(MIN(id), 0) FROM wal_events WHERE workspace_id = $2 AND event_type = 'run_started' AND payload LIKE $3)
+     AND id <= (SELECT COALESCE(MAX(id), 999999999) FROM wal_events WHERE workspace_id = $4 AND event_type = 'run_finished' AND payload LIKE $5)
+     ORDER BY id ASC LIMIT 200`,
+    [
+      run.workspace_id,
+      run.workspace_id, `%"run_id":${run.id}%`,
+      run.workspace_id, `%"run_id":${run.id}%`,
+    ]
+  );
 
   // Deduplicate
   const seen = new Set<number>();
@@ -340,10 +344,11 @@ function deduplicateCandidates(
  * Check if AUTO_MEMORY_SYNTHESIS is enabled for a workspace.
  * Reads from workspace_env_vars table.
  */
-export function isAutoSynthesisEnabled(workspaceId: string): boolean {
-  const row = db.prepare(
-    `SELECT value FROM workspace_env_vars WHERE workspace_id = ? AND key = 'AUTO_MEMORY_SYNTHESIS'`
-  ).get(workspaceId) as { value: string } | undefined;
+export async function isAutoSynthesisEnabled(workspaceId: string): Promise<boolean> {
+  const row = await queryOne<{ value: string }>(
+    `SELECT value FROM workspace_env_vars WHERE workspace_id = $1 AND key = 'AUTO_MEMORY_SYNTHESIS'`,
+    [workspaceId]
+  );
 
   return row?.value === 'true';
 }

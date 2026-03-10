@@ -267,14 +267,14 @@ function safeReadFile(filePath: string): string {
  * Build skill + persona catalog context for spec generation prompts.
  * Discovers installed skills and personas from the workspace, reads MEMORY.md and AGENTS.md.
  */
-function buildCatalogContext(workspacePath: string): {
+async function buildCatalogContext(workspacePath: string): Promise<{
   skillCatalog: string;
   personaCatalog: string;
   memoryMd: string;
   agentsMd: string;
   skillNames: Set<string>;
-} {
-  const skillRegistry = new SkillRegistry().discover(workspacePath);
+}> {
+  const skillRegistry = await new SkillRegistry().discover(workspacePath);
   const rorcaDir = path.join(workspacePath, '.rorca');
   const personaRegistry = new PersonaRegistry().discover(rorcaDir);
 
@@ -747,7 +747,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 6c. Discover skill + persona catalogs and read context files
-    const catalogs = buildCatalogContext(workspace.path as string);
+    const catalogs = await buildCatalogContext(workspace.path as string);
 
     // 6d. Pre-compute contextSummary for error responses (also used in success response)
     const skillNamesList = catalogs.skillCatalog
@@ -924,7 +924,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         return;
       }
 
-      const user = getEffectiveUser(req);
+      const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
       const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
 
@@ -1662,7 +1662,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         // Fallback to SDK path on OpenCode failure
         logger.warn(`[Specs] OpenCode spec gen failed (${ocResult.error}), falling back to SDK path`);
 
-        const user = getEffectiveUser(req);
+        const user = await getEffectiveUser(req);
         if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
         const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
         const llmResult = await chatComplete(
@@ -1699,7 +1699,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       }
     } else {
       // ── SDK path: direct LLM call via chatComplete ──
-      const user = getEffectiveUser(req);
+      const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
       const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
       const llmResult = await chatComplete(
@@ -1936,7 +1936,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const storyPrefix = 'US';
 
   // Discover skill + persona catalogs for batch brief
-  const batchCatalogs = buildCatalogContext(workspace.path);
+  const batchCatalogs = await buildCatalogContext(workspace.path);
   const batchCatalogSections: string[] = [];
   if (batchCatalogs.memoryMd) {
     batchCatalogSections.push('=== PROJECT MEMORY ===', batchCatalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
@@ -2172,7 +2172,7 @@ router.post('/generate/batch', async (req: Request, res: Response) => {
     }
 
     const batchId = crypto.randomUUID();
-    const batchUser = getEffectiveUser(req);
+    const batchUser = await getEffectiveUser(req);
     if (!batchUser) { res.status(500).json({ error: 'No user configured' }); return; }
     const batch: BatchState = {
       id: batchId,
@@ -3528,7 +3528,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     ].filter(Boolean).join('\n');
 
     const { chatComplete: chatCompleteFn } = await import('../lib/llm-client');
-    const addStoriesUser = getEffectiveUser(req);
+    const addStoriesUser = await getEffectiveUser(req);
     if (!addStoriesUser) { res.status(500).json({ error: 'No user configured' }); return; }
     const addStoriesVaultCreds = resolveVaultCreds(addStoriesUser.id, DEFAULT_MODEL);
     const rawResponse = await chatCompleteFn(
@@ -4397,7 +4397,7 @@ User instructions: ${instructions || 'Improve clarity and completeness.'}
 Rewrite the story following the user instructions. Keep the same scope unless told otherwise. Return ONLY the JSON object.`;
 
     const resolvedModel = model || undefined;
-    const rewriteUser = getEffectiveUser(req);
+    const rewriteUser = await getEffectiveUser(req);
     if (!rewriteUser) { res.status(500).json({ error: 'No user configured' }); return; }
     const rewriteVaultCreds = resolveVaultCreds(rewriteUser.id, resolvedModel ?? DEFAULT_MODEL);
     const llmResult = await chatComplete(
@@ -5742,7 +5742,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
       '- Return empty array if no missing dependencies found',
     ].join('\n');
 
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
     const depVaultCreds = resolveVaultCreds(user.id, DEFAULT_MODEL);
     const llmResult = await chatComplete(
@@ -7210,7 +7210,7 @@ router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Resp
   try {
     const { specId, storyId } = req.params;
     const { body } = req.body;
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!body || typeof body !== 'string' || body.trim().length === 0) {
@@ -7315,7 +7315,7 @@ router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Resp
 router.post('/:specId/stories/:storyId/comments/:commentId/resolve', async (req: Request, res: Response) => {
   try {
     const { specId, storyId, commentId } = req.params;
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     const existing = await queryOne('SELECT id, resolved_at FROM story_comments WHERE id = $1 AND spec_id = $2 AND story_id = $3', [commentId, specId, storyId]) as { id: string; resolved_at: string | null } | undefined;
@@ -7463,7 +7463,7 @@ router.put('/:specId/assign', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
     const { workspaceId, assigneeId } = req.body;
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!workspaceId) {
@@ -7602,7 +7602,7 @@ router.put('/:specId/stories/:storyId/assign', async (req: Request, res: Respons
     const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
     const { workspaceId, assigneeId } = req.body;
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!workspaceId) {
@@ -7921,7 +7921,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
       'Each suggestion has the criterion text and a brief rationale explaining why it was added.',
     ].filter(Boolean).join('\n');
 
-    const enhanceUser = getEffectiveUser(req);
+    const enhanceUser = await getEffectiveUser(req);
     if (!enhanceUser) { res.status(500).json({ error: 'No user configured' }); return; }
     const enhanceVaultCreds = resolveVaultCreds(enhanceUser.id, DEFAULT_MODEL);
     const rawResponse = await chatComplete(
@@ -8161,7 +8161,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     }
 
     // Build skill catalog context
-    const catalogs = buildCatalogContext(workspace.path as string);
+    const catalogs = await buildCatalogContext(workspace.path as string);
     if (catalogs.skillNames.size === 0) {
       res.status(422).json({ error: 'No skills installed. Install skills from the Marketplace before matching.' });
       return;

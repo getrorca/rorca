@@ -1,5 +1,5 @@
 import { CronExpressionParser } from 'cron-parser';
-import { db } from '../db/index';
+import { query, execute } from '../db/index';
 import { INTERNAL_SERVICE_TOKEN } from '../routes/auth';
 import { createBackup, pruneOldBackups } from './backup';
 import { logger } from './logger';
@@ -69,18 +69,20 @@ function isDue(schedule: ScheduleRow): boolean {
   }
 }
 
-function checkSchedules(): void {
+async function checkSchedules(): Promise<void> {
   try {
-    const schedules = db.prepare(
-      'SELECT * FROM pipeline_schedules WHERE enabled = 1'
-    ).all() as ScheduleRow[];
+    const schedules = await query<ScheduleRow>(
+      'SELECT * FROM pipeline_schedules WHERE enabled = 1',
+      []
+    );
 
     for (const schedule of schedules) {
       if (isDue(schedule)) {
         // Update last_triggered_at immediately to prevent double-firing
-        db.prepare(
-          `UPDATE pipeline_schedules SET last_triggered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-        ).run(schedule.id);
+        await execute(
+          `UPDATE pipeline_schedules SET last_triggered_at = NOW(), updated_at = NOW() WHERE id = $1`,
+          [schedule.id]
+        );
 
         triggerScheduledRun(schedule).catch(err => {
           logger.error({ err }, `[Scheduler] Unhandled error for schedule ${schedule.id}`);
@@ -122,11 +124,11 @@ export function startScheduler(): void {
   if (intervalHandle) return;
   logger.info('[Scheduler] Starting — checking every 60s');
   intervalHandle = setInterval(() => {
-    checkSchedules();
+    checkSchedules().catch(err => logger.error({ err }, '[Scheduler] Check error'));
     checkDailyBackup().catch(err => logger.error({ err }, '[Scheduler] Backup check error'));
   }, 60_000);
   // Run immediately on startup to catch any missed triggers
-  checkSchedules();
+  checkSchedules().catch(err => logger.error({ err }, '[Scheduler] Initial check error'));
   checkDailyBackup().catch(err => logger.error({ err }, '[Scheduler] Initial backup check error'));
 }
 

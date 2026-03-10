@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { queryOne } from '../db/index';
 import { decryptToken } from '../routes/auth';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
@@ -44,10 +44,10 @@ export const CHECK_NAME = 'rorca/spec-compliance';
  * Resolve a GitHub access token for API calls.
  * Looks up the first github_connection in the DB (user OAuth token).
  */
-function getGithubToken(): string | null {
-  const row = db.prepare(
+async function getGithubToken(): Promise<string | null> {
+  const row = await queryOne<GitHubConnectionRow>(
     'SELECT encrypted_token FROM github_connections LIMIT 1'
-  ).get() as GitHubConnectionRow | undefined;
+  );
   if (!row) return null;
   return decryptToken(row.encrypted_token);
 }
@@ -66,7 +66,7 @@ export async function postCommitStatus(
   description: string,
   targetUrl?: string,
 ): Promise<boolean> {
-  const token = getGithubToken();
+  const token = await getGithubToken();
   if (!token) {
     logger.error('[Checks] No GitHub token available to post commit status');
     return false;
@@ -120,7 +120,7 @@ async function fetchPrChangedFiles(
   repo: string,
   prNumber: number,
 ): Promise<PrFile[]> {
-  const token = getGithubToken();
+  const token = await getGithubToken();
   if (!token) return [];
 
   const files: PrFile[] = [];
@@ -246,9 +246,10 @@ export async function evaluatePrAndPostCheck(
   }
 
   // Look up workspace to find spec files
-  const workspace = db.prepare(
-    'SELECT * FROM workspaces WHERE id = ?'
-  ).get(workspaceId) as WorkspaceRow | undefined;
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT * FROM workspaces WHERE id = $1',
+    [workspaceId],
+  );
   if (!workspace) {
     logger.error(`[Checks] Workspace ${workspaceId} not found`);
     return null;
@@ -295,7 +296,7 @@ export async function evaluatePrAndPostCheck(
       specId,
     };
     await postCommitStatus(owner, repo, headSha, 'success', result.description, buildTargetUrl(workspaceId, specId, storyIds[0]));
-    emitCheckWalEvent(workspaceId, headSha, result);
+    await emitCheckWalEvent(workspaceId, headSha, result);
     return result;
   }
 
@@ -332,7 +333,7 @@ export async function evaluatePrAndPostCheck(
     specId,
   };
 
-  emitCheckWalEvent(workspaceId, headSha, result);
+  await emitCheckWalEvent(workspaceId, headSha, result);
 
   return result;
 }
@@ -354,10 +355,8 @@ function buildTargetUrl(
   return `${baseUrl}/?workspace=${workspaceId}`;
 }
 
-function emitCheckWalEvent(workspaceId: string, sha: string, result: CheckResult): void {
-  const walResult = db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_check_posted', ?, 'github', ?)`
-  ).run(workspaceId, JSON.stringify({
+async function emitCheckWalEvent(workspaceId: string, sha: string, result: CheckResult): Promise<void> {
+  const payload = JSON.stringify({
     sha,
     state: result.state,
     description: result.description,
@@ -365,11 +364,14 @@ function emitCheckWalEvent(workspaceId: string, sha: string, result: CheckResult
     spec_id: result.specId,
     criteria_total: result.criteria.length,
     criteria_covered: result.criteria.filter(c => c.covered).length,
-  }));
+  });
 
-  const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-    walResult.lastInsertRowid
-  ) as WalEvent;
+  const walEvent = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_check_posted', $1, 'github', $2) RETURNING *`,
+    [workspaceId, payload],
+  );
 
-  broadcastAll(walEvent);
+  if (walEvent) {
+    broadcastAll(walEvent);
+  }
 }

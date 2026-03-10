@@ -830,7 +830,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // ── Plan enforcement: Free tier cannot execute pipelines ─────
-    const effectiveUser = getEffectiveUser(req);
+    const effectiveUser = await getEffectiveUser(req);
     if (effectiveUser?.id) {
       const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
       const plan = userRow?.plan || 'free';
@@ -1212,7 +1212,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 7c. Inject vault API keys for all configured providers
-    const pipelineUser = getEffectiveUser(req);
+    const pipelineUser = await getEffectiveUser(req);
     const anthropicVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'anthropic') : null;
     if (anthropicVaultKey) {
       env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
@@ -1256,7 +1256,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     // 8. Run pre-run hooks — abort if any exit non-zero
     const logPath = workspaceLogPath(workspace.path, runId);
     await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [logPath, runId]);
-    const preRunResults = runHooks(workspaceId, 'pre_run', cwd, env);
+    const preRunResults = await runHooks(workspaceId, 'pre_run', cwd, env);
     if (preRunResults.length > 0) {
       // Write hook output to the log file so it appears in the terminal
       const hookOutput = preRunResults.map(r =>
@@ -1631,7 +1631,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
       // Run post-run hooks with RUN_STATUS and RUN_ID env vars
       const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
-      const postRunResults = runHooks(workspaceId, 'post_run', cwd, postRunEnv);
+      const postRunResults = await runHooks(workspaceId, 'post_run', cwd, postRunEnv);
       if (postRunResults.length > 0) {
         const hookOutput = postRunResults.map(r =>
           `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +
@@ -2003,7 +2003,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 2. Plan enforcement
-    const effectiveUser = getEffectiveUser(req);
+    const effectiveUser = await getEffectiveUser(req);
     if (effectiveUser?.id) {
       const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
       const plan = userRow?.plan || 'free';
@@ -2044,7 +2044,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 6. Resolve vault creds for LLM call
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     let vaultCreds: { apiKey?: string; baseUrl?: string } = {};
     if (user?.id) {
       const vaultProvider = resolveVaultProvider(resolvedModel);
@@ -2287,7 +2287,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       if (status === 'done') markSpecCompleted(relativeSpecPath);
 
       const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
-      const postRunResults = runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
+      const postRunResults = await runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
       if (postRunResults.length > 0) {
         const hookOutput = postRunResults.map(r =>
           `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +

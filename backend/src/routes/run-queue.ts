@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { db } from '../db/index';
+import { query, queryOne, execute, transaction } from '../db/index';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -42,7 +42,7 @@ const router = Router();
  *       400: { description: "Missing workspaceId query parameter" }
  *       500: { description: "Internal server error" }
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId;
     if (!workspaceId) {
@@ -50,9 +50,10 @@ router.get('/', (req: Request, res: Response) => {
       return;
     }
 
-    const entries = db.prepare(
-      `SELECT * FROM run_queue WHERE workspace_id = ? AND status = 'pending' ORDER BY position ASC`
-    ).all(Number(workspaceId));
+    const entries = await query(
+      `SELECT * FROM run_queue WHERE workspace_id = $1 AND status = 'pending' ORDER BY position ASC`,
+      [Number(workspaceId)]
+    );
 
     res.json({ items: entries });
   } catch (error: any) {
@@ -89,7 +90,7 @@ router.get('/', (req: Request, res: Response) => {
  *                 runningRunId: { type: integer, nullable: true, description: "ID of currently running pipeline run" }
  *       500: { description: "Internal server error" }
  */
-router.get('/status', (req: Request, res: Response) => {
+router.get('/status', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId;
 
@@ -97,27 +98,31 @@ router.get('/status', (req: Request, res: Response) => {
     let nextSpec: any = null;
 
     if (workspaceId) {
-      queueLength = (db.prepare(
-        `SELECT COUNT(*) as count FROM run_queue WHERE workspace_id = ? AND status = 'pending'`
-      ).get(Number(workspaceId)) as { count: number }).count;
+      const countRow = await queryOne<{ count: number }>(
+        `SELECT COUNT(*) as count FROM run_queue WHERE workspace_id = $1 AND status = 'pending'`,
+        [Number(workspaceId)]
+      );
+      queueLength = countRow?.count ?? 0;
 
-      nextSpec = db.prepare(
-        `SELECT * FROM run_queue WHERE workspace_id = ? AND status = 'pending' ORDER BY position ASC LIMIT 1`
-      ).get(Number(workspaceId)) || null;
+      nextSpec = (await queryOne(
+        `SELECT * FROM run_queue WHERE workspace_id = $1 AND status = 'pending' ORDER BY position ASC LIMIT 1`,
+        [Number(workspaceId)]
+      )) || null;
     } else {
-      queueLength = (db.prepare(
+      const countRow = await queryOne<{ count: number }>(
         `SELECT COUNT(*) as count FROM run_queue WHERE status = 'pending'`
-      ).get() as { count: number }).count;
+      );
+      queueLength = countRow?.count ?? 0;
 
-      nextSpec = db.prepare(
+      nextSpec = (await queryOne(
         `SELECT * FROM run_queue WHERE status = 'pending' ORDER BY position ASC LIMIT 1`
-      ).get() || null;
+      )) || null;
     }
 
     // Find any currently running pipeline run
-    const runningRun = db.prepare(
+    const runningRun = await queryOne<{ id: number }>(
       `SELECT id FROM pipeline_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`
-    ).get() as { id: number } | undefined;
+    );
 
     res.json({
       queueLength,
@@ -171,7 +176,7 @@ router.get('/status', (req: Request, res: Response) => {
  *       404: { description: "Workspace not found" }
  *       500: { description: "Internal server error" }
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const { workspaceId, specId, specPath, parallelism, autoWorktree } = req.body;
 
@@ -180,31 +185,26 @@ router.post('/', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspaceId);
+    const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
     }
 
     // Get max position for this workspace
-    const maxRow = db.prepare(
-      `SELECT MAX(position) as maxPos FROM run_queue WHERE workspace_id = ?`
-    ).get(workspaceId) as { maxPos: number | null };
-    const nextPosition = (maxRow.maxPos ?? 0) + 1;
+    const maxRow = await queryOne<{ maxpos: number | null }>(
+      `SELECT MAX(position) as maxPos FROM run_queue WHERE workspace_id = $1`,
+      [workspaceId]
+    );
+    const nextPosition = (maxRow?.maxpos ?? 0) + 1;
 
-    const result = db.prepare(`
-      INSERT INTO run_queue (workspace_id, spec_id, spec_path, parallelism, auto_worktree, position)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      workspaceId,
-      specId,
-      specPath,
-      parallelism ?? 1,
-      autoWorktree ? 1 : 0,
-      nextPosition
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO run_queue (workspace_id, spec_id, spec_path, parallelism, auto_worktree, position)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [workspaceId, specId, specPath, parallelism ?? 1, autoWorktree ? 1 : 0, nextPosition]
     );
 
-    const entry = db.prepare('SELECT * FROM run_queue WHERE id = ?').get(result.lastInsertRowid);
+    const entry = await queryOne('SELECT * FROM run_queue WHERE id = $1', [inserted?.id]);
     res.status(201).json(entry);
   } catch (error: any) {
     logger.error('[RunQueue] POST error:', error);
@@ -241,7 +241,7 @@ router.post('/', (req: Request, res: Response) => {
  *       404: { description: "Queue entry not found" }
  *       500: { description: "Internal server error" }
  */
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const idParam = req.params.id;
     const idStr = Array.isArray(idParam) ? idParam[0] : idParam;
@@ -251,13 +251,13 @@ router.delete('/:id', (req: Request, res: Response) => {
       return;
     }
 
-    const existing = db.prepare('SELECT id FROM run_queue WHERE id = ?').get(id);
+    const existing = await queryOne('SELECT id FROM run_queue WHERE id = $1', [id]);
     if (!existing) {
       res.status(404).json({ error: 'Queue entry not found' });
       return;
     }
 
-    db.prepare('DELETE FROM run_queue WHERE id = ?').run(id);
+    await execute('DELETE FROM run_queue WHERE id = $1', [id]);
     res.json({ success: true });
   } catch (error: any) {
     logger.error('[RunQueue] DELETE error:', error);
@@ -299,7 +299,7 @@ router.delete('/:id', (req: Request, res: Response) => {
  *       400: { description: "orderedIds must be a non-empty array" }
  *       500: { description: "Internal server error" }
  */
-router.put('/reorder', (req: Request, res: Response) => {
+router.put('/reorder', async (req: Request, res: Response) => {
   try {
     const { orderedIds } = req.body;
     if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
@@ -307,13 +307,11 @@ router.put('/reorder', (req: Request, res: Response) => {
       return;
     }
 
-    const updateStmt = db.prepare('UPDATE run_queue SET position = ? WHERE id = ?');
-    const reorder = db.transaction((ids: number[]) => {
-      for (let i = 0; i < ids.length; i++) {
-        updateStmt.run(i + 1, ids[i]);
+    await transaction(async (client) => {
+      for (let i = 0; i < orderedIds.length; i++) {
+        await client.query('UPDATE run_queue SET position = $1 WHERE id = $2', [i + 1, orderedIds[i]]);
       }
     });
-    reorder(orderedIds);
 
     res.json({ success: true });
   } catch (error: any) {

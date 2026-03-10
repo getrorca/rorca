@@ -113,13 +113,13 @@ function emitSkillWalEvent(eventType: string, workspaceId: string | null, payloa
  *                   type: string
  *                   description: Compact name:description list for LLM prompt injection
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const registry = new SkillRegistry();
     const workspacePath = resolveWorkspacePath(req);
 
     if (workspacePath) {
-      registry.discover(workspacePath);
+      await registry.discover(workspacePath);
     } else {
       // No workspace — only return DB-persisted skills
       const dbSkills = db.prepare('SELECT name, description, source, content, category, tags FROM installed_skills').all() as {
@@ -201,7 +201,7 @@ router.get('/', (req: Request, res: Response) => {
  *       400:
  *         description: Missing required fields
  */
-router.post('/install', (req: Request, res: Response) => {
+router.post('/install', async (req: Request, res: Response) => {
   try {
     const { name, content, source } = req.body;
 
@@ -215,7 +215,7 @@ router.post('/install', (req: Request, res: Response) => {
     }
 
     const registry = new SkillRegistry();
-    const skill = registry.install(name.trim(), content, source || 'user');
+    const skill = await registry.install(name.trim(), content, source || 'user');
 
     const wsId = resolveWorkspaceId(req);
     emitSkillWalEvent('skill_installed', wsId, {
@@ -356,7 +356,7 @@ router.get('/preview', async (req: Request, res: Response) => {
  *       404:
  *         description: Skill not found
  */
-router.get('/:name/content', (req: Request, res: Response) => {
+router.get('/:name/content', async (req: Request, res: Response) => {
   try {
     const name = req.params.name as string;
     const registry = new SkillRegistry();
@@ -364,7 +364,7 @@ router.get('/:name/content', (req: Request, res: Response) => {
 
     // 1) Try filesystem via SkillRegistry
     if (wsPath) {
-      registry.discover(wsPath);
+      await registry.discover(wsPath);
     }
     const skill = registry.getSkill(name);
 
@@ -431,11 +431,11 @@ router.get('/:name/content', (req: Request, res: Response) => {
  *       404:
  *         description: Skill not found in installed_skills table
  */
-router.delete('/:name', (req: Request, res: Response) => {
+router.delete('/:name', async (req: Request, res: Response) => {
   try {
     const name = req.params.name as string;
     const registry = new SkillRegistry();
-    const removed = registry.remove(name);
+    const removed = await registry.remove(name);
 
     if (!removed) {
       res.status(404).json({ error: `Skill "${name}" not found in installed skills` });
@@ -638,7 +638,7 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
 
     // Register in DB
     const registry = new SkillRegistry();
-    registry.install(skillName, result.content, result.source);
+    await registry.install(skillName, result.content, result.source);
 
     const wsId = resolveWorkspaceId(req);
     emitSkillWalEvent('skill_installed', wsId, {
@@ -729,7 +729,7 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
  *       400:
  *         description: No workspace found
  */
-router.get('/suggestions', (req: Request, res: Response) => {
+router.get('/suggestions', async (req: Request, res: Response) => {
   try {
     const wsPath = resolveWorkspacePath(req);
     if (!wsPath) {
@@ -759,7 +759,7 @@ router.get('/suggestions', (req: Request, res: Response) => {
 
     // Check which skills are already installed (filesystem + DB)
     const registry = new SkillRegistry();
-    registry.discover(wsPath);
+    await registry.discover(wsPath);
     const installedNames = new Set(registry.getAll().map(s => s.metadata.name.toLowerCase()));
 
     // Build suggestions
@@ -1048,7 +1048,7 @@ router.post('/browse-github', async (req: Request, res: Response) => {
     const installedNames = new Set<string>();
     if (wsPath) {
       const registry = new SkillRegistry();
-      registry.discover(wsPath);
+      await registry.discover(wsPath);
       for (const s of registry.getAll()) {
         installedNames.add(s.metadata.name.toLowerCase());
       }
@@ -1278,7 +1278,7 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
 
     // Register in DB
     const registry = new SkillRegistry();
-    registry.install(skillName, content, source);
+    await registry.install(skillName, content, source);
 
     const wsId = resolveWorkspaceId(req);
     emitSkillWalEvent('skill_installed', wsId, {
@@ -1418,7 +1418,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
           const skillName = query.replace(/[^a-z0-9-]/g, '-');
           fs.writeFileSync(path.join(rorcaSkillsDir, `${skillName}.md`), result.content, 'utf-8');
           fs.writeFileSync(path.join(claudeSkillsDir, `${skillName}.md`), result.content, 'utf-8');
-          registry.install(skillName, result.content, result.source);
+          await registry.install(skillName, result.content, result.source);
           installed++;
           emitSkillWalEvent('skill_installed', wsId, {
             name: skillName, source: result.source, workspace_id: wsId,
@@ -1474,7 +1474,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
 
           fs.writeFileSync(path.join(rorcaSkillsDir, `${normalizedName}.md`), content, 'utf-8');
           fs.writeFileSync(path.join(claudeSkillsDir, `${normalizedName}.md`), content, 'utf-8');
-          registry.install(normalizedName, content, source);
+          await registry.install(normalizedName, content, source);
           installed++;
           emitSkillWalEvent('skill_installed', wsId, {
             name: normalizedName, source, workspace_id: wsId,
@@ -1490,7 +1490,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
           const normalizedName = itemName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
           fs.writeFileSync(path.join(rorcaSkillsDir, `${normalizedName}.md`), rawContent, 'utf-8');
           fs.writeFileSync(path.join(claudeSkillsDir, `${normalizedName}.md`), rawContent, 'utf-8');
-          registry.install(normalizedName, rawContent, 'user');
+          await registry.install(normalizedName, rawContent, 'user');
           installed++;
           emitSkillWalEvent('skill_installed', wsId, {
             name: normalizedName, source: 'user', workspace_id: wsId,
@@ -1555,7 +1555,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
  *       400:
  *         description: Missing or invalid request body
  */
-router.post('/bulk-remove', (req: Request, res: Response) => {
+router.post('/bulk-remove', async (req: Request, res: Response) => {
   try {
     const { names, workspaceId } = req.body;
 
@@ -1579,7 +1579,7 @@ router.post('/bulk-remove', (req: Request, res: Response) => {
       const trimmed = name.trim();
       if (!trimmed) continue;
 
-      const wasRemoved = registry.remove(trimmed);
+      const wasRemoved = await registry.remove(trimmed);
       if (wasRemoved) {
         removed++;
         emitSkillWalEvent('skill_removed', wsId, {
@@ -1651,13 +1651,13 @@ router.post('/bulk-remove', (req: Request, res: Response) => {
  *                   type: string
  *                   nullable: true
  */
-router.get('/export', (req: Request, res: Response) => {
+router.get('/export', async (req: Request, res: Response) => {
   try {
     const wsPath = resolveWorkspacePath(req);
 
     const registry = new SkillRegistry();
     if (wsPath) {
-      registry.discover(wsPath);
+      await registry.discover(wsPath);
     }
 
     const allSkills = registry.getAll();
