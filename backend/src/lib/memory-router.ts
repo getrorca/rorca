@@ -21,6 +21,7 @@ import {
 } from './context-cache';
 import { hybridSearch, type SearchResult } from './search';
 import { logger } from './logger';
+import { queryRelated, queryImpact, graphStats } from './knowledge-graph';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -113,6 +114,33 @@ function extractKeyPhrases(text: string): string[] {
 }
 
 /**
+ * Extract file paths mentioned in story text.
+ * Matches patterns like src/foo/bar.ts, backend/routes/auth.ts, etc.
+ */
+function extractFilePaths(text: string): string[] {
+  const pathPattern = /(?:^|\s)((?:[\w.-]+\/)+[\w.-]+\.\w+)/g;
+  const paths: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = pathPattern.exec(text)) !== null) {
+    paths.push(match[1]);
+  }
+  return [...new Set(paths)];
+}
+
+/**
+ * Extract story IDs from text (e.g. US-001, CIE-005, PG-015).
+ */
+function extractStoryIds(text: string): string[] {
+  const idPattern = /\b([A-Z]{1,5}-\d{2,4})\b/g;
+  const ids: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = idPattern.exec(text)) !== null) {
+    ids.push(match[1]);
+  }
+  return [...new Set(ids)];
+}
+
+/**
  * Check what fraction of key phrases appear in the cached memory entries.
  * Returns a coverage ratio 0..1.
  */
@@ -192,7 +220,7 @@ export async function retrieveContext(
 
   let cagHits = 0;
   let ragHits = 0;
-  const graphHits = 0;
+  let graphHits = 0;
 
   // ── Step 1: CAG — Cache-first retrieval ──────────────────────────────────
 
@@ -290,19 +318,62 @@ export async function retrieveContext(
     }
   }
 
-  // ── Step 3: Graph — Knowledge graph context (PG-015 placeholder) ─────────
+  // ── Step 3: Graph — Knowledge graph context via Apache AGE ───────────────
 
   let graphContext: GraphContext | undefined;
-
   if (includeGraph) {
-    // PG-015: Will query Apache AGE graph for related stories, file touches,
-    // and convention links. For now, return empty structure.
-    graphContext = {
-      relatedStories: [],
-      fileTouches: [],
-      conventionLinks: [],
-    };
-    logger.debug({ workspaceId: wsId }, '[memory-router] Graph context requested — PG-015 placeholder');
+    try {
+      const stats = await graphStats();
+      if (stats.available && stats.vertexCount > 0) {
+        // Extract file paths and story IDs from the story text for graph lookup
+        const filePaths = extractFilePaths(storyText);
+        const storyIds = extractStoryIds(storyText);
+
+        const relatedStories: GraphContext['relatedStories'] = [];
+        const fileTouches: GraphContext['fileTouches'] = [];
+        const conventionLinks: GraphContext['conventionLinks'] = [];
+
+        // Query impact for each mentioned file path
+        for (const fp of filePaths.slice(0, 5)) { // limit to 5 paths
+          const impact = await queryImpact(fp);
+          for (const s of impact.stories) {
+            if (!relatedStories.some(rs => rs.id === s.id)) {
+              relatedStories.push({ id: s.id, title: s.title, relevance: 0.8 });
+            }
+          }
+          if (impact.stories.length > 0) {
+            fileTouches.push({ path: fp, storyIds: impact.stories.map(s => s.id) });
+          }
+          for (const c of impact.conventions) {
+            conventionLinks.push({ from: c.name, to: fp, type: 'APPLIES_TO' });
+          }
+        }
+
+        // Query related nodes for each mentioned story ID
+        for (const sid of storyIds.slice(0, 5)) {
+          const related = await queryRelated('Story', sid, 2, ['DEPENDS_ON', 'TOUCHES']);
+          for (const r of related) {
+            const props = r.properties as Record<string, string>;
+            if (r.label === 'Story' && props.id && !relatedStories.some(rs => rs.id === props.id)) {
+              relatedStories.push({ id: props.id, title: props.title || props.id, relevance: 0.6 });
+            }
+          }
+        }
+
+        graphHits = relatedStories.length + fileTouches.length + conventionLinks.length;
+
+        graphContext = { relatedStories, fileTouches, conventionLinks };
+        logger.debug(
+          { workspaceId: wsId, graphHits: graphHits },
+          '[memory-router] Graph context retrieved',
+        );
+      } else {
+        graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
+      }
+    } catch (err) {
+      logger.warn({ err, workspaceId: wsId }, '[memory-router] Graph context retrieval failed — using empty');
+      graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
+    }
   }
 
   // ── Redistribute unused budget ───────────────────────────────────────────
