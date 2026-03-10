@@ -72,6 +72,8 @@ import telemetryRouter from './routes/telemetry';
 import { logger } from './lib/logger';
 import pinoHttp from 'pino-http';
 import { startGraphPopulator } from './lib/graph-populator';
+import workspaceDriftRouter from './routes/workspace-drift';
+import { startDriftSubscriber } from './lib/drift-subscriber';
 
 dotenv.config();
 
@@ -216,6 +218,7 @@ app.use('/api/workspaces/:id/budget', budgetRouter);
 app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces/:id/github', workspaceGithubRouter);
+app.use('/api/workspaces', workspaceDriftRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/teams', teamsRouter);
 app.use('/api/activity', activityRouter);
@@ -272,6 +275,9 @@ startEmbeddingPipeline();
 
 // PG-015: Subscribe graph populator to WAL events for knowledge graph edges
 startGraphPopulator();
+
+// PG-017: Subscribe drift detector to WAL events for post-run convention drift analysis
+startDriftSubscriber();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
 subscribe((event: WalEvent) => {
