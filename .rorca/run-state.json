@@ -1,161 +1,17 @@
 {
-  "specId": "rorca-curated-skills-library",
-  "runId": 14,
-  "startedAt": "2026-03-10T02:18:43.908Z",
-  "lastUpdatedAt": "2026-03-10T05:08:59.395Z",
+  "specId": "rorca-distribution",
+  "runId": 17,
+  "startedAt": "2026-03-10T13:18:22.929Z",
+  "lastUpdatedAt": "2026-03-10T13:21:18.622Z",
   "completedStories": [
     {
-      "storyId": "SL-002",
-      "title": "Explicit Match & Inject Skills API",
+      "storyId": "DIST-001",
+      "title": "Postgres Binary Download Manager",
       "status": "passed",
-      "startedAt": "2026-03-10T02:18:46.410Z",
-      "finishedAt": "2026-03-10T02:22:00.342Z",
+      "startedAt": "2026-03-10T13:18:25.486Z",
+      "finishedAt": "2026-03-10T13:21:18.622Z",
       "agentType": "claude",
-      "elapsedMs": 193932
-    },
-    {
-      "storyId": "SL-008",
-      "title": "Match & Inject Button in Spec Review",
-      "status": "passed",
-      "startedAt": "2026-03-10T02:22:13.860Z",
-      "finishedAt": "2026-03-10T02:27:43.762Z",
-      "agentType": "claude",
-      "elapsedMs": 329902
-    },
-    {
-      "storyId": "SL-001",
-      "title": "GitHub Repository Skill Browser API",
-      "status": "passed",
-      "startedAt": "2026-03-10T02:27:57.542Z",
-      "finishedAt": "2026-03-10T02:32:41.791Z",
-      "agentType": "claude",
-      "elapsedMs": 284249
-    },
-    {
-      "storyId": "SL-003",
-      "title": "Model Suggestion API",
-      "status": "passed",
-      "startedAt": "2026-03-10T02:32:55.892Z",
-      "finishedAt": "2026-03-10T02:33:09.268Z",
-      "agentType": "claude",
-      "elapsedMs": 13376
-    },
-    {
-      "storyId": "SL-016",
-      "title": "Auto-Match Skills & Auto-Suggest Models in Forge Panel",
-      "status": "passed",
-      "startedAt": "2026-03-10T02:33:22.889Z",
-      "finishedAt": "2026-03-10T02:43:29.169Z",
-      "agentType": "claude",
-      "elapsedMs": 606280
-    },
-    {
-      "storyId": "SL-017",
-      "title": "SpecForgePreview Skills & Model Integration",
-      "status": "passed",
-      "startedAt": "2026-03-10T02:43:43.070Z",
-      "finishedAt": "2026-03-10T02:47:53.248Z",
-      "agentType": "claude",
-      "elapsedMs": 250178
-    },
-    {
-      "storyId": "SL-004",
-      "title": "Skills Usage Per-Run API Endpoint",
-      "status": "passed",
-      "startedAt": "2026-03-10T02:48:06.843Z",
-      "finishedAt": "2026-03-10T02:48:22.438Z",
-      "agentType": "claude",
-      "elapsedMs": 15595
-    },
-    {
-      "storyId": "SL-010",
-      "title": "Skills Tab in Run View",
-      "status": "passed",
-      "startedAt": "2026-03-10T03:56:47.449Z",
-      "finishedAt": "2026-03-10T04:27:59.726Z",
-      "agentType": "claude",
-      "elapsedMs": 1872277
-    },
-    {
-      "storyId": "SL-009",
-      "title": "Model Suggestion UI in Spec Review",
-      "status": "passed",
-      "startedAt": "2026-03-10T04:28:13.856Z",
-      "finishedAt": "2026-03-10T04:32:37.105Z",
-      "agentType": "claude",
-      "elapsedMs": 263249
-    },
-    {
-      "storyId": "SL-011",
-      "title": "Real-Time Skill Display via WAL Events",
-      "status": "passed",
-      "startedAt": "2026-03-10T04:32:50.965Z",
-      "finishedAt": "2026-03-10T04:33:01.294Z",
-      "agentType": "claude",
-      "elapsedMs": 10329
-    },
-    {
-      "storyId": "SL-005",
-      "title": "Skill Curation Bulk Operations",
-      "status": "passed",
-      "startedAt": "2026-03-10T04:33:14.831Z",
-      "finishedAt": "2026-03-10T04:38:12.718Z",
-      "agentType": "claude",
-      "elapsedMs": 297887
-    },
-    {
-      "storyId": "SL-006",
-      "title": "Skill Category Tags",
-      "status": "passed",
-      "startedAt": "2026-03-10T04:38:26.636Z",
-      "finishedAt": "2026-03-10T04:45:14.216Z",
-      "agentType": "claude",
-      "elapsedMs": 407580
-    },
-    {
-      "storyId": "SL-007",
-      "title": "Three-Tab Skills Library UI",
-      "status": "passed",
-      "startedAt": "2026-03-10T04:45:27.863Z",
-      "finishedAt": "2026-03-10T04:53:50.174Z",
-      "agentType": "claude",
-      "elapsedMs": 502311
-    },
-    {
-      "storyId": "SL-012",
-      "title": "Skill Content Preview in Run View Skills Tab",
-      "status": "passed",
-      "startedAt": "2026-03-10T04:54:03.850Z",
-      "finishedAt": "2026-03-10T04:55:57.321Z",
-      "agentType": "claude",
-      "elapsedMs": 113471
-    },
-    {
-      "storyId": "SL-013",
-      "title": "WAL Events for Skill Lifecycle",
-      "status": "passed",
-      "startedAt": "2026-03-10T04:56:11.348Z",
-      "finishedAt": "2026-03-10T05:02:26.985Z",
-      "agentType": "claude",
-      "elapsedMs": 375637
-    },
-    {
-      "storyId": "SL-014",
-      "title": "Skill Effectiveness Analytics API",
-      "status": "passed",
-      "startedAt": "2026-03-10T05:02:40.740Z",
-      "finishedAt": "2026-03-10T05:05:51.231Z",
-      "agentType": "claude",
-      "elapsedMs": 190491
-    },
-    {
-      "storyId": "SL-015",
-      "title": "Skill Effectiveness Widget in Analytics Panel",
-      "status": "passed",
-      "startedAt": "2026-03-10T05:06:05.234Z",
-      "finishedAt": "2026-03-10T05:08:59.395Z",
-      "agentType": "claude",
-      "elapsedMs": 174161
+      "elapsedMs": 173136
     }
   ],
   "failedStories": [],
