@@ -169,7 +169,8 @@
         "DIST-005",
         "DIST-006"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "DIST-008",

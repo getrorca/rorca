@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Quality gates (must pass before any binary build) ──
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      # Step 2: Install dependencies
+      - name: Install dependencies
+        run: npm ci && cd backend && npm ci
+
+      # Step 3: Typecheck both frontend and backend
+      - name: Typecheck frontend
+        run: npx tsc --noEmit
+
+      - name: Typecheck backend
+        run: cd backend && npx tsc --noEmit
+
+      # Step 4: Run backend tests
+      - name: Run tests
+        run: cd backend && npm test
+
+      # Step 5: Build frontend
+      - name: Build frontend
+        run: npm run build
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+          retention-days: 1
+
+  # ── Step 6: Matrix build — 4 parallel jobs producing platform binaries ──
+  build:
+    name: Build ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: bun-darwin-arm64
+            binary: rorca-darwin-arm64
+            name: macOS ARM64
+          - os: macos-13
+            target: bun-darwin-x64
+            binary: rorca-darwin-x64
+            name: macOS x64
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            binary: rorca-linux-x64
+            name: Linux x64
+          - os: ubuntu-latest
+            target: bun-windows-x64
+            binary: rorca-windows-x64.exe
+            name: Windows x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci && cd backend && npm ci
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+
+      - name: Build binary
+        run: bash scripts/build-binaries.sh --target ${{ matrix.target }} --output build/${{ matrix.binary }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.binary }}
+          path: build/${{ matrix.binary }}
+          retention-days: 1
+
+  # ── Steps 7-8: Create release and upload assets ──
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -la artifacts/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Step 7: Create GitHub Release with auto-generated notes
+      # Step 8: Upload all 4 binaries + LICENSE as release assets
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Rorca v${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            artifacts/rorca-darwin-arm64 \
+            artifacts/rorca-darwin-x64 \
+            artifacts/rorca-linux-x64 \
+            artifacts/rorca-windows-x64.exe \
+            LICENSE
