@@ -3,9 +3,9 @@
 Spec: rorca-postgres-migration
 Run ID: 16
 Started: 2026-03-10T08:21:19.019Z
-Last Updated: 2026-03-10T11:42:56.554Z
+Last Updated: 2026-03-10T11:53:02.693Z
 
-## Completed Stories (12)
+## Completed Stories (13)
 - PG-001: PostgreSQL Schema — Convert All Migrations — DONE (claude, 461s)
 - PG-002: Database Connection Layer — pg Pool + Async Helpers — DONE (claude, 190s)
 - PG-003: Route Async Conversion — Wave 1 (Core Routes) — DONE (claude, 1440s)
@@ -18,3 +18,4 @@ Last Updated: 2026-03-10T11:42:56.554Z
 - PG-010: Backend Test Suite Conversion — DONE (claude, 2084s)
 - PG-011: Remove SQLite Dependencies Completely — DONE (claude, 982s)
 - PG-012: Selective Retrieval in synthesize() — DONE (claude, 378s)
+- PG-013: CAG — In-Memory Context Cache (Hot Layer) — DONE (claude, 598s)

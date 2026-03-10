@@ -1197,6 +1197,14 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       runId = runResult!.id;
     }
 
+    // PG-013: Pre-populate context cache for all stories in this run
+    try {
+      const { warmup: cacheWarmup } = await import('../lib/context-cache');
+      await cacheWarmup(workspaceId);
+    } catch (warmupErr: any) {
+      logger.warn('[pipeline/trigger] Cache warmup failed (non-fatal):', warmupErr.message);
+    }
+
     // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {

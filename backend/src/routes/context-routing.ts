@@ -25,6 +25,7 @@ import {
   invalidateConfigCache,
 } from '../lib/rorca-config';
 import type { RorcaConfig } from '../lib/rorca-config';
+import { invalidateConfig } from '../lib/context-cache';
 
 const router = Router();
 
@@ -258,6 +259,7 @@ router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), async (req:
   }
 
   writeRorcaConfig(wsPath, req.body.config);
+  invalidateConfig(req.params.id as string); // PG-013
 
   // Return the saved config (with defaults filled)
   const saved = loadRorcaConfig(wsPath);
@@ -345,6 +347,7 @@ router.put('/:id/rorca-config/raw', async (req: Request, res: Response) => {
   const cfgPath = path.join(wsPath, '.rorca', 'config.json');
   fs.writeFileSync(cfgPath, raw, 'utf-8');
   invalidateConfigCache();
+  invalidateConfig(req.params.id as string); // PG-013
 
   res.json({ config: result.data, configExists: true });
 });
