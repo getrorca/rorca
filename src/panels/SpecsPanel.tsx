@@ -2414,7 +2414,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       {(!generatedSpec || isGenerating) && (
         <div className="space-y-2">
           {isGenerating || (generateError && !generatedSpec) ? (
-            <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} onRetry={handleRetry} onRetryWithModel={handleRetryWithModel} />
+            <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} onRetry={handleRetry} onRetryWithModel={handleRetryWithModel} model={selectedModel || defaultModelId || 'claude-sonnet-4-5-20250929'} provider={activeProvider} />
           ) : !generatedSpec ? (
             <>
               <button onClick={handleGenerate} disabled={!canGenerate || isGenerating}
