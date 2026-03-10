@@ -17,6 +17,13 @@ export interface GeneratedSpecPreview {
   contextUsed?: ContextUsed;
 }
 
+export interface ModelSuggestion {
+  storyId: string;
+  suggestedModel: string;
+  reason: string;
+  confidence: number;
+}
+
 interface SpecForgePreviewProps {
   spec: GeneratedSpecPreview;
   workspaceId: string;
@@ -26,6 +33,8 @@ interface SpecForgePreviewProps {
   onNavigate?: (panel: PanelId) => void;
   onNavigateToRun?: (runId: number) => void;
   onReset?: () => void;
+  modelSuggestions?: ModelSuggestion[] | null;
+  onModelAccepted?: (storyId: string, model: string) => void;
 }
 
 export default function SpecForgePreview({
@@ -37,6 +46,8 @@ export default function SpecForgePreview({
   onNavigate,
   onNavigateToRun,
   onReset,
+  modelSuggestions: _modelSuggestions,
+  onModelAccepted: _onModelAccepted,
 }: SpecForgePreviewProps) {
   const { show } = useGlobalToast();
   const { workspaces } = useWorkspace();
