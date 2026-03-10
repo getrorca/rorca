@@ -5,7 +5,7 @@
  * Tabs: Stories (default), History, Dependencies, Raw JSON.
  * Actions: Approve, Reject, Run, Fork, Export, Delete.
  */
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
@@ -32,7 +32,7 @@ import type { PanelId } from './Sidebar';
 /* ─── Types ───────────────────────────────────────────────────────── */
 
 type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
-type PreviewTab = 'stories' | 'history' | 'context' | 'graph' | 'diagram' | 'json';
+type PreviewTab = 'stories' | 'history' | 'context' | 'skills' | 'graph' | 'diagram' | 'json';
 
 export interface SpecSlideOverSummary {
   id: string;
@@ -115,6 +115,149 @@ export interface SpecDetailSlideOverProps {
   onApproved?: (specId: string) => void;
   /** Called when spec is rejected so parent can update */
   onRejected?: (specId: string) => void;
+}
+
+/* ─── Spec Skills Tab ─────────────────────────────────────────────── */
+
+interface SuggestedSkill { name: string; relevance?: number; reason?: string; }
+
+function SpecSkillsTab({ stories, workspaceId }: { stories: Story[]; workspaceId: string }) {
+  const [installedNames, setInstalledNames] = useState<Set<string>>(new Set());
+  const [loadingInstalled, setLoadingInstalled] = useState(true);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<{ items: { name: string }[] }>(`/api/skills?workspaceId=${workspaceId}`)
+      .then(d => setInstalledNames(new Set((d.items ?? []).map((s: any) => s.name))))
+      .catch(() => {})
+      .finally(() => setLoadingInstalled(false));
+  }, [workspaceId]);
+
+  // Normalize a skill entry — may be a plain string or an object
+  const toSkill = (raw: unknown): SuggestedSkill =>
+    typeof raw === 'string' ? { name: raw } : (raw as SuggestedSkill);
+
+  // Collect all suggested skills across stories, deduplicate by name
+  const byStory: { storyId: string; storyTitle: string; skills: SuggestedSkill[] }[] = useMemo(() =>
+    stories
+      .map(s => ({
+        storyId: s.id,
+        storyTitle: s.title,
+        skills: ((s as any).suggestedSkills ?? []).map(toSkill) as SuggestedSkill[],
+      }))
+      .filter(s => s.skills.length > 0),
+    [stories],
+  );
+
+  const allSkills = useMemo(() => {
+    const map = new Map<string, SuggestedSkill & { storyCount: number }>();
+    for (const story of byStory) {
+      for (const sk of story.skills) {
+        const existing = map.get(sk.name);
+        if (existing) { existing.storyCount++; }
+        else { map.set(sk.name, { ...sk, storyCount: 1 }); }
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => b.storyCount - a.storyCount);
+  }, [byStory]);
+
+  if (loadingInstalled) {
+    return <div className="flex-1 flex items-center justify-center text-muted text-sm gap-2"><Loader2 size={14} className="animate-spin" />Loading…</div>;
+  }
+
+  if (allSkills.length === 0) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center text-muted">
+        <Sparkles size={28} className="opacity-30" />
+        <p className="text-sm font-medium">No skills matched to this spec yet</p>
+        <p className="text-xs">Generate the spec with skill matching enabled, or use Match Skills from the Marketplace tab.</p>
+      </div>
+    );
+  }
+
+  const installed = allSkills.filter(s => installedNames.has(s.name));
+  const notInstalled = allSkills.filter(s => !installedNames.has(s.name));
+
+  return (
+    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      {/* Summary badges */}
+      <div className="flex items-center gap-2 text-xs text-muted flex-wrap">
+        <span>{allSkills.length} skills suggested</span>
+        <span className="text-emerald-500">{installed.length} installed</span>
+        {notInstalled.length > 0 && <span className="text-amber-500">{notInstalled.length} not installed</span>}
+      </div>
+
+      {/* Installed */}
+      {installed.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted mb-2">Installed — ready to inject</div>
+          <div className="space-y-1.5">
+            {installed.map(sk => (
+              <div key={sk.name} className="flex items-start gap-2 p-2 rounded bg-emerald-500/5 border border-emerald-500/15">
+                <CheckCircle2 size={13} className="text-emerald-500 mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono font-medium">{sk.name}</span>
+                    {sk.relevance != null && <span className="text-[10px] text-emerald-500">{sk.relevance}/10</span>}
+                    <span className="text-[10px] text-muted ml-auto">{sk.storyCount} {sk.storyCount === 1 ? 'story' : 'stories'}</span>
+                  </div>
+                  {sk.reason && <p className="text-[11px] text-muted mt-0.5 leading-relaxed">{sk.reason}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Not installed */}
+      {notInstalled.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted mb-2">Not installed — install from Marketplace</div>
+          <div className="space-y-1.5">
+            {notInstalled.map(sk => (
+              <div key={sk.name} className="flex items-start gap-2 p-2 rounded bg-panel border border-border/50">
+                <AlertCircle size={13} className="text-amber-500 mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono font-medium text-muted">{sk.name}</span>
+                    {sk.relevance != null && <span className="text-[10px] text-muted">{sk.relevance}/10</span>}
+                    <span className="text-[10px] text-muted ml-auto">{sk.storyCount} {sk.storyCount === 1 ? 'story' : 'stories'}</span>
+                  </div>
+                  {sk.reason && <p className="text-[11px] text-muted/70 mt-0.5 leading-relaxed">{sk.reason}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Per-story breakdown */}
+      {byStory.length > 0 && (
+        <details className="group">
+          <summary className="text-[10px] font-semibold uppercase tracking-wide text-muted cursor-pointer select-none hover:text-[var(--text)] transition-colors">
+            Per-story breakdown
+          </summary>
+          <div className="mt-2 space-y-2">
+            {byStory.map(story => (
+              <div key={story.storyId} className="p-2 rounded bg-panel border border-border/40">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className="font-mono text-[10px] text-muted">{story.storyId}</span>
+                  <span className="text-xs truncate">{story.storyTitle}</span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {story.skills.map(sk => (
+                    <span key={sk.name} className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${installedNames.has(sk.name) ? 'bg-emerald-500/10 text-emerald-500' : 'bg-gray-500/10 text-gray-400'}`}>
+                      {sk.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
 }
 
 /* ─── Main Component ──────────────────────────────────────────────── */
@@ -392,10 +535,19 @@ function SpecDetailContent({
   const isDraft = summary?.status === 'pending';
   const canRun = summary?.status === 'approved' || summary?.status === 'completed';
 
+  const specSkillCount = useMemo(() => {
+    const seen = new Set<string>();
+    for (const s of stories) {
+      for (const sk of (s as any).suggestedSkills ?? []) seen.add(sk.name ?? sk);
+    }
+    return seen.size;
+  }, [stories]);
+
   const tabs: { id: PreviewTab; label: string; badge?: string; icon?: typeof History }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
     { id: 'history', label: 'History', icon: History },
     { id: 'context', label: 'Context', icon: FileSearch },
+    { id: 'skills', label: 'Skills', badge: specSkillCount > 0 ? `${specSkillCount}` : undefined },
     { id: 'graph', label: 'Graph' },
     { id: 'diagram', label: 'Dependencies' },
     { id: 'json', label: 'Raw JSON' },
@@ -498,6 +650,7 @@ function SpecDetailContent({
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'context' && <GenerationLogTab specId={specId} />}
+            {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
             {activeTab === 'json' && <JsonTab spec={detail} specId={specId} />}
@@ -771,6 +924,7 @@ function GenerationLogTab({ specId }: { specId: string }) {
     return (
       <div className="flex items-center justify-center py-12">
         <p className="text-sm text-muted">No generation data available</p>
+          <p className="text-xs text-muted/60 mt-1 text-center max-w-[280px]">Context logging was introduced in a recent update. Specs generated after that point will show direction layers, token usage, and model details here.</p>
       </div>
     );
   }

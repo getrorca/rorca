@@ -24,7 +24,7 @@
     "llm",
     "development"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "BSL-1.1",
   "engines": {
     "node": ">=20.0.0"
   },

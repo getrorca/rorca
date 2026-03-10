@@ -1,33 +1,9 @@
 # Run State Summary
 
-Spec: rorca-postgres-migration
-Run ID: 16
-Started: 2026-03-10T08:21:19.019Z
-Last Updated: 2026-03-10T13:18:16.002Z
+Spec: rorca-distribution
+Run ID: 26
+Started: 2026-03-10T22:02:11.346Z
+Last Updated: 2026-03-10T22:03:21.252Z
 
-## Completed Stories (25)
-- PG-001: PostgreSQL Schema — Convert All Migrations — DONE (claude, 461s)
-- PG-002: Database Connection Layer — pg Pool + Async Helpers — DONE (claude, 190s)
-- PG-003: Route Async Conversion — Wave 1 (Core Routes) — DONE (claude, 1440s)
-- PG-004: Route Async Conversion — Wave 2 (Remaining Routes) — DONE (claude, 19s)
-- PG-005: Library Module Async Conversion — DONE (claude, 417s)
-- PG-006: pgvector Extension + Embedding Store — DONE (claude, 13s)
-- PG-007: Embedding Pipeline — Generate + Store Vectors — DONE (claude, 469s)
-- PG-008: Hybrid Search — tsvector + pgvector + RRF — DONE (claude, 330s)
-- PG-009: Docker Compose — Postgres 16 + pgvector + AGE — DONE (claude, 359s)
-- PG-010: Backend Test Suite Conversion — DONE (claude, 2084s)
-- PG-011: Remove SQLite Dependencies Completely — DONE (claude, 982s)
-- PG-012: Selective Retrieval in synthesize() — DONE (claude, 378s)
-- PG-013: CAG — In-Memory Context Cache (Hot Layer) — DONE (claude, 598s)
-- PG-014: Memory Tiering Router — CAG/RAG Fallback Chain — DONE (claude, 385s)
-- PG-015: Apache AGE Extension + Knowledge Graph Schema — DONE (claude, 476s)
-- PG-016: Graph-Powered Context Retrieval — DONE (claude, 364s)
-- PG-017: Graph-Based Convention Drift + Impact Analysis — DONE (claude, 448s)
-- PG-018: SQLite → Postgres Data Migration Tool — DONE (claude, 331s)
-- PG-019: Cloud Database Compatibility Layer — DONE (claude, 490s)
-- PR-018: Memory Semantic Deduplication — DONE (claude, 354s)
-- PR-021: Cross-Workspace Memory Synthesis — DONE (claude, 336s)
-- PG-020: Auto-Memory — Write Memories Automatically After Each Story — DONE (claude, 502s)
-- PG-021: Auto-Memory — Run-Level Synthesis After Pipeline Completion — DONE (claude, 443s)
-- PG-022: Memory Curation UI — Delete, Edit, Pin (Post-Write Review) — DONE (claude, 631s)
-- PG-023: Auto-Memory — Spec Generation Memory Capture — DONE (claude, 249s)
+## Completed Stories (1)
+- DIST-006: LICENSE & Legal Files — DONE (claude, 61s)
