@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T12:13:53.628Z",
+  "lastUpdatedAt": "2026-03-10T12:21:29.904Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -147,6 +147,15 @@
       "finishedAt": "2026-03-10T12:13:53.628Z",
       "agentType": "claude",
       "elapsedMs": 363654
+    },
+    {
+      "storyId": "PG-017",
+      "title": "Graph-Based Convention Drift + Impact Analysis",
+      "status": "passed",
+      "startedAt": "2026-03-10T12:14:02.313Z",
+      "finishedAt": "2026-03-10T12:21:29.904Z",
+      "agentType": "claude",
+      "elapsedMs": 447591
     }
   ],
   "failedStories": [],
