@@ -1,7 +1,6 @@
-import { query, queryOne } from '../db/index';
-import { hybridSearch, type SearchResult } from './search';
 import { logger } from './logger';
-import { getDirectionLayers as getCachedDirectionLayers, type DirectionLayers } from './context-cache';
+import { getDirectionLayers as getCachedDirectionLayers } from './context-cache';
+import { retrieveContext } from './memory-router';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -120,124 +119,20 @@ export function synthesizeLayersWithMeta(params: SynthesizeParams): SynthesizeRe
 export const synthesize = synthesizeLayers;
 export const synthesizeWithMeta = synthesizeLayersWithMeta;
 
-// ─── PG-012: Semantic-Aware Synthesis ────────────────────────────────────────
+// ─── PG-012 + PG-014: Semantic-Aware Synthesis via Memory Router ────────────
 
 const DEFAULT_MAX_TOKENS = 32000;
-const SEMANTIC_RELEVANCE_THRESHOLD = 0.3;
-const RECENCY_LIMIT = 20;
-const SEMANTIC_MEMORY_LIMIT = 15;
 
 /**
- * Fetch direction layers from DB for a workspace.
- * PG-013: Now delegates to context-cache for cache-first lookups.
- * Returns the raw layer content ready for assembly.
- */
-async function fetchDirectionLayers(workspaceId: string): Promise<DirectionLayers> {
-  return getCachedDirectionLayers(workspaceId);
-}
-
-/**
- * Fetch memory entries using semantic search when storyText is provided,
- * or recency-based fallback otherwise.
- */
-async function fetchMemoryEntries(
-  workspaceId: string,
-  storyText?: string,
-): Promise<{
-  entries: Array<{ text: string; score: number }>;
-  total: number;
-  searchMode: 'semantic' | 'keyword' | 'full-dump';
-}> {
-  // Check if embeddings exist for fallback detection
-  const countRow = await queryOne<{ cnt: string }>('SELECT COUNT(*)::text AS cnt FROM embeddings');
-  const embeddingCount = parseInt(countRow?.cnt || '0', 10);
-
-  // Get total memory entry count from wal_events
-  const totalRow = await queryOne<{ cnt: string }>(
-    `SELECT COUNT(*)::text AS cnt FROM wal_events WHERE event_type IN ('memory_created', 'memory_updated') AND workspace_id = $1`,
-    [workspaceId],
-  );
-  const total = parseInt(totalRow?.cnt || '0', 10);
-
-  if (total === 0) {
-    return { entries: [], total: 0, searchMode: 'full-dump' };
-  }
-
-  // No embeddings → full-dump mode with recency limit
-  if (embeddingCount === 0) {
-    logger.warn('[direction-stack] No embeddings configured — using full memory dump with token budget cap');
-
-    const rows = await query<{ payload: string }>(
-      `SELECT payload FROM wal_events
-       WHERE event_type IN ('memory_created', 'memory_updated') AND workspace_id = $1
-       ORDER BY ts DESC LIMIT $2`,
-      [workspaceId, RECENCY_LIMIT],
-    );
-
-    const entries = rows.map(r => {
-      try {
-        const p = JSON.parse(r.payload || '{}');
-        return { text: p.text || p.content || p.rule || '', score: 0 };
-      } catch {
-        return { text: '', score: 0 };
-      }
-    }).filter(e => e.text.length > 0);
-
-    return { entries, total, searchMode: 'full-dump' };
-  }
-
-  // With storyText: use hybrid search for semantic relevance
-  if (storyText) {
-    const results: SearchResult[] = await hybridSearch(storyText, {
-      sourceTypes: ['memory'],
-      workspaceId,
-      limit: SEMANTIC_MEMORY_LIMIT,
-    });
-
-    // Filter by relevance threshold
-    const filtered = results.filter(r => r.score > SEMANTIC_RELEVANCE_THRESHOLD);
-
-    const entries = filtered.map(r => ({
-      text: r.snippet || r.title,
-      score: r.score,
-    }));
-
-    return {
-      entries,
-      total,
-      searchMode: results.some(r => r.matchType === 'semantic' || r.matchType === 'hybrid') ? 'semantic' : 'keyword',
-    };
-  }
-
-  // No storyText: recency-based selection
-  const rows = await query<{ payload: string }>(
-    `SELECT payload FROM wal_events
-     WHERE event_type IN ('memory_created', 'memory_updated') AND workspace_id = $1
-     ORDER BY ts DESC LIMIT $2`,
-    [workspaceId, RECENCY_LIMIT],
-  );
-
-  const entries = rows.map(r => {
-    try {
-      const p = JSON.parse(r.payload || '{}');
-      return { text: p.text || p.content || p.rule || '', score: 0 };
-    } catch {
-      return { text: '', score: 0 };
-    }
-  }).filter(e => e.text.length > 0);
-
-  return { entries, total, searchMode: 'full-dump' };
-}
-
-/**
- * PG-012: Semantic-aware direction stack synthesis.
+ * PG-014: Semantic-aware direction stack synthesis.
  *
- * Fetches direction layers from DB, uses hybrid search for relevant memory entries,
- * and enforces a token budget on the assembled context.
+ * Thin wrapper around retrieveContext() (memory-router.ts) that formats
+ * the unified retrieval result into the existing SynthesizedContext contract.
  *
- * Priority order: (1) Direction layers — NEVER dropped.
- * (2) Memory entries — sorted by relevance, included until budget exhausted.
- * (3) Schema/Git context — included if budget allows.
+ * The memory router handles the tiered retrieval chain:
+ *   1. CAG — cache-first direction layers + recent memory + skills
+ *   2. RAG — hybrid search for unfamiliar concepts
+ *   3. Graph — knowledge graph (PG-015, future)
  */
 export async function synthesizeDirectionStack(
   workspaceId: string,
@@ -245,119 +140,115 @@ export async function synthesizeDirectionStack(
 ): Promise<SynthesizedContext> {
   const maxTokens = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
   const storyText = options?.storyText;
+
+  // Delegate to unified memory router
+  const retrieved = await retrieveContext(
+    parseInt(workspaceId, 10) || 0,
+    storyText || '',
+    { maxTokens },
+  );
+
+  // Also fetch raw direction layers for schema/git context (not in memory-router scope)
+  const layers = await getCachedDirectionLayers(workspaceId);
   const droppedItems: Array<{ type: string; reason: string }> = [];
 
-  // 1. Fetch direction layers (always included)
-  const layers = await fetchDirectionLayers(workspaceId);
+  // Build direction sections from retrieved context
+  const sections: string[] = [];
 
-  // 2. Build direction layer sections (NEVER dropped)
-  const directionSections: string[] = [];
-  const effectiveL1 = layers.teamL1?.trim() || layers.l1?.trim();
-  const effectiveL2 = layers.teamL2?.trim() || layers.l2?.trim();
-
-  if (effectiveL1) directionSections.push(`=== GLOBAL STANDARDS (L1) ===\n${effectiveL1}`);
-  if (effectiveL2) directionSections.push(`=== DOMAIN PROFILE (L2) ===\n${effectiveL2}`);
-  if (layers.l3?.trim()) directionSections.push(`=== PROJECT CONTEXT (L3) ===\n${layers.l3.trim()}`);
-
-  const directionText = directionSections.join('\n\n');
-  let usedTokens = estimateTokens(directionText);
-
-  // 3. Fetch memory entries (semantic or recency-based)
-  const memoryResult = await fetchMemoryEntries(workspaceId, storyText);
-  const includedMemory: Array<{ text: string; score: number }> = [];
-
-  for (const entry of memoryResult.entries) {
-    const entryTokens = estimateTokens(entry.text);
-    if (usedTokens + entryTokens <= maxTokens) {
-      includedMemory.push(entry);
-      usedTokens += entryTokens;
-    } else {
-      droppedItems.push({ type: 'memory_entry', reason: 'token_budget_exceeded' });
-    }
+  if (retrieved.direction.standards) {
+    sections.push(`=== GLOBAL STANDARDS (L1) ===\n${retrieved.direction.standards}`);
+  }
+  if (retrieved.direction.conventions) {
+    sections.push(`=== DOMAIN PROFILE (L2) ===\n${retrieved.direction.conventions}`);
+  }
+  if (retrieved.direction.project) {
+    sections.push(`=== PROJECT CONTEXT (L3) ===\n${retrieved.direction.project}`);
   }
 
-  // Track entries dropped by relevance threshold (only for semantic mode)
-  if (storyText && memoryResult.searchMode !== 'full-dump') {
-    const droppedByRelevance = memoryResult.total - memoryResult.entries.length;
-    if (droppedByRelevance > 0) {
-      droppedItems.push({
-        type: `memory_entries(${droppedByRelevance})`,
-        reason: 'below_relevance_threshold',
-      });
-    }
-  }
+  let usedTokens = estimateTokens(sections.join('\n\n'));
 
-  // 4. Include schema snapshot if budget allows
-  let schemaIncluded = false;
+  // Include schema snapshot if budget allows
   if (layers.schemaSnapshot?.trim()) {
     const schemaTokens = estimateTokens(layers.schemaSnapshot);
     if (usedTokens + schemaTokens <= maxTokens) {
-      schemaIncluded = true;
+      sections.push(`=== DATABASE SCHEMA (Auto-Hydrated) ===\n${layers.schemaSnapshot.trim()}`);
       usedTokens += schemaTokens;
     } else {
       droppedItems.push({ type: 'schema_snapshot', reason: 'token_budget_exceeded' });
     }
   }
 
-  // 5. Include git memory if budget allows
-  let gitMemoryIncluded = false;
+  // Include git memory if budget allows
   if (layers.gitMemory?.trim()) {
     const gitTokens = estimateTokens(layers.gitMemory);
     if (usedTokens + gitTokens <= maxTokens) {
-      gitMemoryIncluded = true;
+      sections.push(`=== PROJECT MEMORY (Git History) ===\n${layers.gitMemory.trim()}`);
       usedTokens += gitTokens;
     } else {
       droppedItems.push({ type: 'git_memory', reason: 'token_budget_exceeded' });
     }
   }
 
-  // 6. Assemble final text
-  const sections: string[] = [];
-
-  // Direction layers (always first)
-  if (directionText) sections.push(directionText);
-
-  // Schema snapshot
-  if (schemaIncluded && layers.schemaSnapshot?.trim()) {
-    sections.push(`=== DATABASE SCHEMA (Auto-Hydrated) ===\n${layers.schemaSnapshot.trim()}`);
+  // Include memory entries from retrieval
+  if (retrieved.memory.length > 0) {
+    const searchMode = retrieved.meta.tier === 'cache' ? 'full-dump'
+      : retrieved.meta.ragHits > 0 ? 'semantic'
+      : 'full-dump';
+    const memoryLines = retrieved.memory.map(m => `- ${m.text}`).join('\n');
+    sections.push(`=== RELEVANT MEMORY (${searchMode}) ===\n${memoryLines}`);
   }
 
-  // Git memory (hydrated)
-  if (gitMemoryIncluded && layers.gitMemory?.trim()) {
-    sections.push(`=== PROJECT MEMORY (Git History) ===\n${layers.gitMemory.trim()}`);
-  }
-
-  // Semantic memory entries
-  if (includedMemory.length > 0) {
-    const memoryLines = includedMemory.map(m => `- ${m.text}`).join('\n');
-    sections.push(`=== RELEVANT MEMORY (${memoryResult.searchMode}) ===\n${memoryLines}`);
+  // Include skills context
+  if (retrieved.skills.length > 0) {
+    const skillLines = retrieved.skills.map(s => `### ${s.name}\n${s.content}`).join('\n\n');
+    sections.push(`=== SKILLS ===\n${skillLines}`);
   }
 
   const text = sections.join('\n\n');
   const finalTokens = estimateTokens(text);
 
-  // Compute relevance range
-  const scores = includedMemory.map(m => m.score).filter(s => s > 0);
+  // Compute relevance range from memory scores
+  const scores = retrieved.memory.map(m => m.score).filter(s => s > 0);
   const relevanceRange: [number, number] = scores.length > 0
     ? [Math.min(...scores), Math.max(...scores)]
     : [0, 0];
+
+  // Map tier to searchMode for backward compatibility
+  const searchMode: 'semantic' | 'keyword' | 'full-dump' =
+    retrieved.meta.tier === 'search' || retrieved.meta.tier === 'hybrid'
+      ? 'semantic'
+      : 'full-dump';
+
+  logger.debug(
+    {
+      workspaceId,
+      tier: retrieved.meta.tier,
+      cagHits: retrieved.meta.cagHits,
+      ragHits: retrieved.meta.ragHits,
+      memoryEntries: retrieved.memory.length,
+      skills: retrieved.skills.length,
+      totalTokens: finalTokens,
+      latencyMs: retrieved.meta.latencyMs,
+    },
+    '[direction-stack] synthesizeDirectionStack via memory-router',
+  );
 
   return {
     text,
     metadata: {
       totalTokens: finalTokens,
       layers: {
-        standards: !!effectiveL1,
-        conventions: !!effectiveL2,
-        project: !!layers.l3?.trim(),
+        standards: !!retrieved.direction.standards,
+        conventions: !!retrieved.direction.conventions,
+        project: !!retrieved.direction.project,
       },
       memoryEntries: {
-        included: includedMemory.length,
-        total: memoryResult.total,
+        included: retrieved.memory.length,
+        total: retrieved.memory.length, // Total from router scope
         relevanceRange,
       },
       droppedItems,
-      searchMode: memoryResult.searchMode,
+      searchMode,
     },
   };
 }
