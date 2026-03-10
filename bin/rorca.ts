@@ -198,6 +198,7 @@ function runStart(startArgs: string[]): void {
   });
 
   child.on('exit', (code: number | null) => {
+    stopManagedPostgres();
     if (code !== 0 && code !== null) {
       console.error(`Server exited with code ${code}`);
     }
@@ -212,10 +213,11 @@ function runStart(startArgs: string[]): void {
     }, 1500);
   }
 
-  // Forward signals for clean shutdown
+  // Forward signals for clean shutdown — stop Postgres before exiting
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.on(sig, () => {
       child.kill(sig);
+      stopManagedPostgres();
     });
   }
 }
@@ -233,6 +235,30 @@ function findBinary(name: string): string | null {
     return result.split('\n')[0].trim() || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Stop the managed Postgres server on shutdown.
+ * Uses pg_ctl from the cached binary location. Best-effort — if it fails,
+ * the PID file will trigger a reuse on next start.
+ */
+function stopManagedPostgres(): void {
+  const rorcaHome = join(homedir(), '.rorca');
+  const pgCtl = join(rorcaHome, 'postgres', 'bin', process.platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl');
+  const dataDir = join(rorcaHome, 'data');
+
+  if (!existsSync(pgCtl) || !existsSync(dataDir)) return;
+
+  try {
+    execSync(`"${pgCtl}" stop -D "${dataDir}" -m fast -w`, {
+      encoding: 'utf-8',
+      timeout: 15_000,
+      stdio: 'pipe',
+    });
+    console.log('PostgreSQL stopped.');
+  } catch {
+    // best-effort — process may already be gone
   }
 }
 
