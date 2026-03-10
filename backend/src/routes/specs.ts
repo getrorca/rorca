@@ -9,7 +9,7 @@ import { db } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
-import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo } from '../lib/llm-client';
+import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo, ALL_MODELS } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
@@ -8353,7 +8353,7 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
  */
 router.post('/:specId/match-skills', async (req: Request, res: Response) => {
   try {
-    const specId = req.params.specId;
+    const specId = req.params.specId as string;
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
@@ -8443,7 +8443,7 @@ ${storyList}`;
       const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
       parsed = JSON.parse(cleaned);
     } catch {
-      logger.error('[Specs] match-skills: LLM returned invalid JSON:', llmResult.text.slice(0, 500));
+      logger.error(`[Specs] match-skills: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
       res.status(500).json({ error: 'LLM returned invalid JSON for skill matching' });
       return;
     }
@@ -8513,6 +8513,175 @@ ${storyList}`;
     });
   } catch (error: any) {
     logger.error('[Specs] match-skills error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /:specId/suggest-models — LLM-driven model suggestion ────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/suggest-models:
+ *   post:
+ *     tags: [Specs]
+ *     summary: LLM-driven model suggestion for each story in a spec
+ *     operationId: suggestModels
+ *     description: >
+ *       Sends story metadata and available models to the LLM to suggest the optimal
+ *       execution model for each story based on complexity, description, dependsOn depth,
+ *       and acceptance criteria count. Returns SUGGESTIONS only — does not auto-apply.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               availableModels: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Model suggestions per story
+ *       400:
+ *         description: Missing workspaceId
+ *       404:
+ *         description: Spec or workspace not found
+ *       422:
+ *         description: Spec has no stories
+ */
+router.post('/:specId/suggest-models', async (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId;
+    const { workspaceId, availableModels } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId is required' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Resolve spec file: approved first, then pending
+    const { pendingDir, approvedDir } = specsDirs(workspace.path as string);
+    let specFilePath = path.join(approvedDir, `${specId}.json`);
+    if (!fs.existsSync(specFilePath)) {
+      specFilePath = path.join(pendingDir, `${specId}.json`);
+      if (!fs.existsSync(specFilePath)) {
+        res.status(404).json({ error: 'Spec not found in approved or pending directories' });
+        return;
+      }
+    }
+
+    // Read spec
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    const stories: UserStory[] = specContent.userStories ?? [];
+    if (stories.length === 0) {
+      res.status(422).json({ error: 'Spec has no user stories' });
+      return;
+    }
+
+    // Build model catalog from ALL_MODELS or caller-provided list
+    const modelCatalog = (availableModels && Array.isArray(availableModels) && availableModels.length > 0)
+      ? ALL_MODELS.filter(m => availableModels.includes(m.id))
+      : ALL_MODELS;
+
+    const modelDescriptions = modelCatalog.map(m => {
+      const tier = m.speedTier || (m.id.includes('haiku') ? 'fast' : m.id.includes('sonnet') ? 'balanced' : 'powerful');
+      const cost = m.costPer1kInput !== undefined ? `$${m.costPer1kInput}/1k input` : 'subscription';
+      return `- ${m.id}: ${m.label || m.id} (${tier}, ${cost}, context: ${Math.round(m.contextWindow / 1000)}K)`;
+    }).join('\n');
+
+    // Build story context
+    const storyList = stories.map((s, i) => {
+      const acCount = s.acceptanceCriteria?.length ?? 0;
+      const depsDepth = s.dependsOn?.length ?? 0;
+      const complexity = s.complexity ?? 'unset';
+      return `${i + 1}. [${s.id}] ${s.title}
+   Description: ${(s.description ?? '').slice(0, 300)}
+   Acceptance Criteria: ${acCount} items
+   Dependencies: ${depsDepth} (dependsOn: ${s.dependsOn?.join(', ') || 'none'})
+   Complexity: ${complexity}`;
+    }).join('\n');
+
+    // Resolve model for this LLM call
+    let resolvedModel: string = DEFAULT_MODEL;
+    const l3Pref = db.prepare(
+      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+    ).get(workspaceId) as { preferred_model: string | null } | undefined;
+    if (l3Pref?.preferred_model) {
+      resolvedModel = l3Pref.preferred_model;
+    }
+
+    const prompt = `You are a model-routing advisor. For each story, suggest the most cost-effective model that can reliably complete the task. Consider:
+- Stories with many acceptance criteria or complex dependencies need stronger models.
+- Simple UI tweaks, copy changes, and config updates can use the cheapest model.
+- Security-sensitive, architecture, and payment stories should always use the strongest available model.
+- Stories with high complexity scores (4-5) need powerful models.
+- Stories with 0-1 dependencies and few acceptance criteria can use faster/cheaper models.
+
+Respond with valid JSON only, no markdown fences. Format:
+{ "suggestions": [{ "storyId": "US-001", "suggestedModel": "claude-sonnet-4-5-20250929", "confidence": 0.85, "reason": "Standard feature with moderate complexity — Sonnet is sufficient" }] }
+
+confidence is 0.0-1.0 where 1.0 = highly confident this is the right model.
+
+## Available Models
+${modelDescriptions}
+
+## Stories
+${storyList}`;
+
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: prompt }],
+      { model: resolvedModel as any },
+    );
+
+    // Parse LLM response
+    let parsed: { suggestions: Array<{ storyId: string; suggestedModel: string; confidence: number; reason: string }> };
+    try {
+      const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      logger.error(`[Specs] suggest-models: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
+      res.status(500).json({ error: 'LLM returned invalid JSON for model suggestion' });
+      return;
+    }
+
+    if (!Array.isArray(parsed.suggestions)) {
+      res.status(500).json({ error: 'LLM response missing suggestions array' });
+      return;
+    }
+
+    // Validate model IDs against catalog
+    const validModelIds = new Set(modelCatalog.map(m => m.id));
+    const suggestions = parsed.suggestions
+      .filter(s => s.storyId && s.suggestedModel && validModelIds.has(s.suggestedModel))
+      .map(s => ({
+        storyId: s.storyId,
+        suggestedModel: s.suggestedModel,
+        confidence: Math.max(0, Math.min(1, s.confidence ?? 0.5)),
+        reason: s.reason ?? '',
+      }));
+
+    // Emit WAL event
+    db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
+    ).run('model_suggested', specId, workspaceId, JSON.stringify({
+      suggestion_count: suggestions.length,
+    }));
+
+    res.json({ suggestions });
+  } catch (error: any) {
+    logger.error('[Specs] suggest-models error:', error);
     res.status(500).json({ error: error.message });
   }
 });
