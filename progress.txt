@@ -3,11 +3,12 @@
 Spec: rorca-curated-skills-library
 Run ID: 14
 Started: 2026-03-10T02:18:43.908Z
-Last Updated: 2026-03-10T02:43:29.170Z
+Last Updated: 2026-03-10T02:47:53.248Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - SL-002: Explicit Match & Inject Skills API — DONE (claude, 194s)
 - SL-008: Match & Inject Button in Spec Review — DONE (claude, 330s)
 - SL-001: GitHub Repository Skill Browser API — DONE (claude, 284s)
 - SL-003: Model Suggestion API — DONE (claude, 13s)
 - SL-016: Auto-Match Skills & Auto-Suggest Models in Forge Panel — DONE (claude, 606s)
+- SL-017: SpecForgePreview Skills & Model Integration — DONE (claude, 250s)
