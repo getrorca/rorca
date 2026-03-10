@@ -3,12 +3,11 @@ import * as os from 'os';
 import * as path from 'path';
 import { createHmac } from 'crypto';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -33,40 +32,31 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-webhook-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
   // Clear WAL events from user registration
-  db.prepare('DELETE FROM wal_events').run();
+  await execute(`DELETE FROM wal_events`);
 
   // Create a workspace
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)"
-  ).run(WORKSPACE_ID, 'Webhook Test', tmpDir);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'Webhook Test', tmpDir]);
 
   // Store encrypted webhook secret — use encryptToken from auth module
   const authMod = require('../auth');
   const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
-  db.prepare(
-    `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret);
+  await execute(`INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
+     VALUES ($1, $2, $3, $4, $5)`, [WORKSPACE_ID, 'acme', 'my-repo', 12345, encryptedSecret]);
 });
 
 afterEach(async () => {
   // Allow any pending setImmediate callbacks to flush before closing the DB
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 50));
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── Signature verification ─────────────────────────────────────────────────
@@ -105,9 +95,7 @@ test('invalid signature returns 401 with no WAL event logged', async () => {
   expect(res.body.error).toMatch(/invalid webhook signature/i);
 
   // No WAL event should be created for invalid signatures
-  const events = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'github_webhook'"
-  ).all();
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_webhook'`);
   expect(events).toHaveLength(0);
 });
 
@@ -211,9 +199,7 @@ test('valid webhook logs a wal_event with github_webhook type', async () => {
   // Give async processing time to complete
   await new Promise((r) => setTimeout(r, 100));
 
-  const events = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'github_webhook'"
-  ).all() as any[];
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'github_webhook'`) as any[];
 
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe(WORKSPACE_ID);
@@ -268,9 +254,7 @@ test('valid webhook updates last_webhook_at timestamp', async () => {
   const body = JSON.stringify(payload);
   const sig = sign(body, WEBHOOK_SECRET);
 
-  const before = db.prepare(
-    'SELECT last_webhook_at FROM workspace_github_webhooks WHERE workspace_id = ?'
-  ).get(WORKSPACE_ID) as any;
+  const before = await queryOne(`SELECT last_webhook_at FROM workspace_github_webhooks WHERE workspace_id = $1`, [WORKSPACE_ID]) as any;
   expect(before.last_webhook_at).toBeNull();
 
   await request(app)
@@ -282,8 +266,6 @@ test('valid webhook updates last_webhook_at timestamp', async () => {
 
   await new Promise((r) => setTimeout(r, 100));
 
-  const after = db.prepare(
-    'SELECT last_webhook_at FROM workspace_github_webhooks WHERE workspace_id = ?'
-  ).get(WORKSPACE_ID) as any;
+  const after = await queryOne(`SELECT last_webhook_at FROM workspace_github_webhooks WHERE workspace_id = $1`, [WORKSPACE_ID]) as any;
   expect(after.last_webhook_at).not.toBeNull();
 });

@@ -2,8 +2,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { query, queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -16,7 +16,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 
 beforeEach(() => {
@@ -34,18 +33,14 @@ beforeEach(() => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
 });
 
 afterEach(() => {
-  if (db) db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe('GET /api/health', () => {
@@ -77,16 +72,10 @@ describe('GET /api/health', () => {
 
   it('reports active runs count', async () => {
     // Seed a workspace and a running pipeline
-    db.prepare("INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)").run('ws-1', 'TestWS', tmpDir);
-    db.prepare(
-      "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES (?, ?, ?)"
-    ).run('test-spec.json', 'ws-1', 'running');
-    db.prepare(
-      "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES (?, ?, ?)"
-    ).run('test-spec-2.json', 'ws-1', 'running');
-    db.prepare(
-      "INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES (?, ?, ?)"
-    ).run('test-spec-3.json', 'ws-1', 'done');
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, ['ws-1', 'TestWS', tmpDir]);
+    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec.json', 'ws-1', 'running']);
+    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec-2.json', 'ws-1', 'running']);
+    await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec-3.json', 'ws-1', 'done']);
 
     const res = await request(app).get('/api/health');
     expect(res.body.active_runs).toBe(2);
@@ -135,7 +124,7 @@ describe('GET /api/health/detailed', () => {
     fs.writeFileSync(path.join(pendingDir, 'spec-a.json'), '{}');
     fs.writeFileSync(path.join(pendingDir, 'spec-b.json'), '{}');
 
-    db.prepare("INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)").run('ws-1', 'TestWS', wsDir);
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, ['ws-1', 'TestWS', wsDir]);
 
     const res = await request(app).get('/api/health/detailed');
     expect(res.body.pending_specs_count).toBe(2);
@@ -168,7 +157,6 @@ describe('GET /api/health (agentType=claude)', () => {
 
 describe('GET /api/health (agentType=opencode)', () => {
   let ocApp: Express;
-  let ocDb: Database.Database;
   let ocTmpDir: string;
 
   beforeEach(() => {
@@ -211,18 +199,14 @@ describe('GET /api/health (agentType=opencode)', () => {
 
     ocTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-oc-test-'));
     const dbPath = path.join(ocTmpDir, 'test.db');
-    process.env.DB_PATH = dbPath;
-    process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
     const serverMod = require('../../server');
     ocApp = serverMod.default;
-    const dbMod = require('../../db/index');
-    ocDb = dbMod.db;
-  });
+});
 
   afterEach(() => {
-    if (ocDb) ocDb.close();
-    fs.rmSync(ocTmpDir, { recursive: true, force: true });
+fs.rmSync(ocTmpDir, { recursive: true, force: true });
   });
 
   it('includes opencodeInstalled and opencodeVersion when agentType=opencode', async () => {

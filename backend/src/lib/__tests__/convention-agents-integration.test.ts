@@ -20,27 +20,23 @@ import * as os from 'os';
 
 const mockRows: Record<string, unknown[]> = {};
 const mockSingleRows: Record<string, unknown> = {};
-let lastInsertRowid = 1;
 let lastChanges = 1;
 
-const mockDbPrepare = jest.fn().mockImplementation((sql: string) => ({
-  all: jest.fn((..._args: unknown[]) => mockRows[sql] ?? []),
-  get: jest.fn((..._args: unknown[]) => mockSingleRows[sql] ?? undefined),
-  run: jest.fn((..._args: unknown[]) => ({
-    lastInsertRowid: lastInsertRowid++,
-    changes: lastChanges,
-  })),
-}));
-
-const mockDbExec = jest.fn();
-const mockDbPragma = jest.fn();
+/** Normalize whitespace in SQL for lookup-key matching. */
+function normSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim();
+}
 
 jest.mock('../../db/index', () => ({
-  db: {
-    prepare: (...args: unknown[]) => mockDbPrepare(...args),
-    exec: (...args: unknown[]) => mockDbExec(...args),
-    pragma: (...args: unknown[]) => mockDbPragma(...args),
-  },
+  query: jest.fn(async (sql: string, ..._args: unknown[]) => {
+    const key = Object.keys(mockRows).find(k => normSql(k) === normSql(sql));
+    return key ? mockRows[key] : [];
+  }),
+  queryOne: jest.fn(async (sql: string, ..._args: unknown[]) => {
+    const key = Object.keys(mockSingleRows).find(k => normSql(k) === normSql(sql));
+    return key !== undefined ? mockSingleRows[key] : undefined;
+  }),
+  execute: jest.fn(async (_sql: string, ..._args: unknown[]) => ({ rowCount: lastChanges })),
 }));
 
 jest.mock('../llm-client', () => ({
@@ -258,7 +254,6 @@ function copyDirSync(src: string, dest: string): void {
 
 function clearMockState(): void {
   jest.clearAllMocks();
-  lastInsertRowid = 1;
   lastChanges = 1;
   for (const key of Object.keys(mockRows)) delete mockRows[key];
   for (const key of Object.keys(mockSingleRows)) delete mockSingleRows[key];
@@ -291,14 +286,14 @@ describe('Pack Lifecycle — install, fork, uninstall', () => {
   });
 
   describe('installPack', () => {
-    it('creates files in .rorca/ and injects direction layers into DB', () => {
+    it('creates files in .rorca/ and injects direction layers into DB', async () => {
       // Mock: no existing registration
-      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
       mockSingleRows[existsSql] = undefined;
 
       // Mock: after register, return the new row
-      const getByIdSql = 'SELECT * FROM convention_packs WHERE id = ?';
-      mockSingleRows[getByIdSql] = {
+      const insertSql = 'INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path) VALUES ($1, $2, $3, $4) RETURNING *';
+      mockSingleRows[insertSql] = {
         id: 1,
         workspace_id: 'ws-1',
         pack_name: 'test-pack',
@@ -307,7 +302,7 @@ describe('Pack Lifecycle — install, fork, uninstall', () => {
         pack_path: packDir,
       };
 
-      const result = installPack('ws-1', wsDir, packDir);
+      const result = await installPack('ws-1', wsDir, packDir);
 
       // Scaffold files copied to workspace root
       expect(result.scaffoldCopied).toContain('README.md');
@@ -341,19 +336,19 @@ describe('Pack Lifecycle — install, fork, uninstall', () => {
       expect(result.dbRow.pack_version).toBe('1.0.0');
     });
 
-    it('reports scaffold conflicts when files already exist', () => {
+    it('reports scaffold conflicts when files already exist', async () => {
       // Pre-create a conflicting file
       writeFile(wsDir, 'README.md', '# Existing README');
 
-      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
       mockSingleRows[existsSql] = undefined;
-      const getByIdSql = 'SELECT * FROM convention_packs WHERE id = ?';
-      mockSingleRows[getByIdSql] = {
+      const insertSql = 'INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path) VALUES ($1, $2, $3, $4) RETURNING *';
+      mockSingleRows[insertSql] = {
         id: 1, workspace_id: 'ws-1', pack_name: 'test-pack',
         pack_version: '1.0.0', installed_at: '2026-02-28T00:00:00', pack_path: packDir,
       };
 
-      const result = installPack('ws-1', wsDir, packDir);
+      const result = await installPack('ws-1', wsDir, packDir);
 
       // README.md should be in conflicts, not copied
       expect(result.scaffoldConflicts.some(c => c.relativePath === 'README.md')).toBe(true);
@@ -363,18 +358,18 @@ describe('Pack Lifecycle — install, fork, uninstall', () => {
       expect(readFile(wsDir, 'README.md')).toBe('# Existing README');
     });
 
-    it('appends to existing AGENTS.md with markers', () => {
+    it('appends to existing AGENTS.md with markers', async () => {
       writeFile(wsDir, 'AGENTS.md', '# Existing Governance\n\nOriginal rules here.');
 
-      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
       mockSingleRows[existsSql] = undefined;
-      const getByIdSql = 'SELECT * FROM convention_packs WHERE id = ?';
-      mockSingleRows[getByIdSql] = {
+      const insertSql = 'INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path) VALUES ($1, $2, $3, $4) RETURNING *';
+      mockSingleRows[insertSql] = {
         id: 1, workspace_id: 'ws-1', pack_name: 'test-pack',
         pack_version: '1.0.0', installed_at: '2026-02-28T00:00:00', pack_path: packDir,
       };
 
-      const result = installPack('ws-1', wsDir, packDir);
+      const result = await installPack('ws-1', wsDir, packDir);
 
       expect(result.agentsMdAction).toBe('appended');
       const agentsMd = readFile(wsDir, 'AGENTS.md');
@@ -386,48 +381,48 @@ describe('Pack Lifecycle — install, fork, uninstall', () => {
   });
 
   describe('uninstallPack (via PackRegistry.unregister)', () => {
-    it('removes pack registration from DB', () => {
+    it('removes pack registration from DB', async () => {
       const registry = new PackRegistry(wsDir, 'ws-1');
       lastChanges = 1; // Simulate successful deletion
 
       // Should not throw
-      expect(() => registry.unregister('test-pack')).not.toThrow();
+      await expect(registry.unregister('test-pack')).resolves.not.toThrow();
     });
 
-    it('throws NotFoundError when pack not registered', () => {
+    it('throws NotFoundError when pack not registered', async () => {
       const registry = new PackRegistry(wsDir, 'ws-1');
       lastChanges = 0; // Simulate no rows affected
 
-      expect(() => registry.unregister('ghost-pack')).toThrow(/not found/i);
+      await expect(registry.unregister('ghost-pack')).rejects.toThrow(/not found/i);
     });
   });
 
   describe('forkPack', () => {
-    it('creates copy with updated pack.json, original pack unchanged', () => {
+    it('creates copy with updated pack.json, original pack unchanged', async () => {
       // First install original pack
       const origPackDir = path.join(wsDir, '.rorca', 'packs', 'test-pack');
       createFullPack(origPackDir, { name: 'test-pack', version: '1.0.0' });
 
       // Mock: pack is registered (getPackPath lookup)
-      const pathSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+      const pathSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
       mockSingleRows[pathSql] = { pack_path: '.rorca/packs/test-pack' };
 
       // Mock: unregister succeeds
       lastChanges = 1;
 
       // Mock: no existing registration for new name
-      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
       // Return undefined for registration check (will be called for both old and new)
 
       // Mock: register returns row
-      const getByIdSql = 'SELECT * FROM convention_packs WHERE id = ?';
-      mockSingleRows[getByIdSql] = {
+      const insertSql = 'INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path) VALUES ($1, $2, $3, $4) RETURNING *';
+      mockSingleRows[insertSql] = {
         id: 2, workspace_id: 'ws-1', pack_name: 'my-fork',
         pack_version: '1.0.0', installed_at: '2026-02-28T00:00:00',
         pack_path: '.rorca/packs/my-fork',
       };
 
-      const result = forkPack('ws-1', wsDir, 'test-pack', 'my-fork');
+      const result = await forkPack('ws-1', wsDir, 'test-pack', 'my-fork');
 
       // Forked pack exists on disk
       expect(fileExists(wsDir, '.rorca/packs/my-fork/pack.json')).toBe(true);
@@ -1107,7 +1102,7 @@ describe('SkillRegistry', () => {
   });
 
   describe('discover', () => {
-    it('discovers skills from .rorca/skills/ and .claude/skills/', () => {
+    it('discovers skills from .rorca/skills/ and .claude/skills/', async () => {
       writeFile(wsDir, '.rorca/skills/react.md', [
         '---',
         'name: react',
@@ -1125,9 +1120,9 @@ describe('SkillRegistry', () => {
       ].join('\n'));
 
       // Mock DB returns empty (no DB-persisted skills)
-      mockRows['SELECT name, description, source, content FROM installed_skills'] = [];
+      mockRows['SELECT name, description, source, content, category, tags FROM installed_skills'] = [];
 
-      const registry = new SkillRegistry().discover(wsDir);
+      const registry = await new SkillRegistry().discover(wsDir);
 
       expect(registry.getAll()).toHaveLength(2);
       expect(registry.getSkill('react')).toBeDefined();
@@ -1136,7 +1131,7 @@ describe('SkillRegistry', () => {
       expect(registry.getSkill('testing')!.source).toBe('claude-skills');
     });
 
-    it('merges DB-persisted skills without overwriting filesystem ones', () => {
+    it('merges DB-persisted skills without overwriting filesystem ones', async () => {
       writeFile(wsDir, '.rorca/skills/react.md', [
         '---',
         'name: react',
@@ -1146,12 +1141,12 @@ describe('SkillRegistry', () => {
       ].join('\n'));
 
       // DB has react (should be skipped) + tailwind (should be included)
-      mockRows['SELECT name, description, source, content FROM installed_skills'] = [
+      mockRows['SELECT name, description, source, content, category, tags FROM installed_skills'] = [
         { name: 'react', description: 'DB version', source: 'db', content: 'DB React skill.' },
         { name: 'tailwind', description: 'Tailwind CSS', source: 'db', content: 'Use utilities.' },
       ];
 
-      const registry = new SkillRegistry().discover(wsDir);
+      const registry = await new SkillRegistry().discover(wsDir);
 
       expect(registry.getAll()).toHaveLength(2);
       // FS version wins for react
@@ -1161,22 +1156,22 @@ describe('SkillRegistry', () => {
       expect(registry.getSkill('tailwind')!.source).toBe('db');
     });
 
-    it('warns on invalid YAML but does not crash', () => {
+    it('warns on invalid YAML but does not crash', async () => {
       writeFile(wsDir, '.rorca/skills/bad.md', '---\n  invalid: [yaml: {\n---\nBody.');
-      mockRows['SELECT name, description, source, content FROM installed_skills'] = [];
+      mockRows['SELECT name, description, source, content, category, tags FROM installed_skills'] = [];
 
-      const registry = new SkillRegistry().discover(wsDir);
+      const registry = await new SkillRegistry().discover(wsDir);
 
       expect(registry.getAll()).toHaveLength(0);
       expect(registry.getWarnings()).toHaveLength(1);
       expect(registry.getWarnings()[0].reason).toContain('Invalid YAML');
     });
 
-    it('handles skill files without frontmatter (uses filename as name)', () => {
+    it('handles skill files without frontmatter (uses filename as name)', async () => {
       writeFile(wsDir, '.rorca/skills/plain-skill.md', 'Just plain markdown content.');
-      mockRows['SELECT name, description, source, content FROM installed_skills'] = [];
+      mockRows['SELECT name, description, source, content, category, tags FROM installed_skills'] = [];
 
-      const registry = new SkillRegistry().discover(wsDir);
+      const registry = await new SkillRegistry().discover(wsDir);
 
       expect(registry.getAll()).toHaveLength(1);
       expect(registry.getSkill('plain-skill')).toBeDefined();
@@ -1184,12 +1179,12 @@ describe('SkillRegistry', () => {
       expect(registry.getSkill('plain-skill')!.metadata.description).toBe('');
     });
 
-    it('warns on duplicate skill names', () => {
+    it('warns on duplicate skill names', async () => {
       writeFile(wsDir, '.rorca/skills/react.md', '---\nname: react\ndescription: v1\n---\nFirst.');
       writeFile(wsDir, '.claude/skills/react.md', '---\nname: react\ndescription: v2\n---\nSecond.');
-      mockRows['SELECT name, description, source, content FROM installed_skills'] = [];
+      mockRows['SELECT name, description, source, content, category, tags FROM installed_skills'] = [];
 
-      const registry = new SkillRegistry().discover(wsDir);
+      const registry = await new SkillRegistry().discover(wsDir);
 
       expect(registry.getAll()).toHaveLength(1);
       expect(registry.getWarnings()).toHaveLength(1);
@@ -1198,11 +1193,11 @@ describe('SkillRegistry', () => {
   });
 
   describe('install (CRUD)', () => {
-    it('installs a skill to DB and updates in-memory registry', () => {
+    it('installs a skill to DB and updates in-memory registry', async () => {
       const registry = new SkillRegistry();
       const content = '---\nname: express\ndescription: Express conventions\n---\nUse middleware.';
 
-      const skill = registry.install('express', content, 'user');
+      const skill = await registry.install('express', content, 'user');
 
       expect(skill.metadata.name).toBe('express');
       expect(skill.metadata.description).toBe('Express conventions');
@@ -1214,44 +1209,44 @@ describe('SkillRegistry', () => {
       expect(registry.getSkill('EXPRESS')).toBeDefined(); // case-insensitive
     });
 
-    it('updates existing skill on re-install', () => {
+    it('updates existing skill on re-install', async () => {
       const registry = new SkillRegistry();
 
-      registry.install('react', '---\nname: react\ndescription: v1\n---\nVersion 1.');
+      await registry.install('react', '---\nname: react\ndescription: v1\n---\nVersion 1.');
       expect(registry.getSkill('react')!.promptText).toBe('Version 1.');
 
-      registry.install('react', '---\nname: react\ndescription: v2\n---\nVersion 2.');
+      await registry.install('react', '---\nname: react\ndescription: v2\n---\nVersion 2.');
       expect(registry.getSkill('react')!.promptText).toBe('Version 2.');
       expect(registry.getAll()).toHaveLength(1);
     });
   });
 
   describe('remove', () => {
-    it('removes a skill from DB and in-memory registry', () => {
+    it('removes a skill from DB and in-memory registry', async () => {
       const registry = new SkillRegistry();
-      registry.install('test-skill', '---\nname: test-skill\ndescription: Test\n---\nBody.');
+      await registry.install('test-skill', '---\nname: test-skill\ndescription: Test\n---\nBody.');
 
       lastChanges = 1; // Simulate DB deletion succeeds
-      const removed = registry.remove('test-skill');
+      const removed = await registry.remove('test-skill');
 
       expect(removed).toBe(true);
       expect(registry.getSkill('test-skill')).toBeUndefined();
     });
 
-    it('returns false when skill does not exist', () => {
+    it('returns false when skill does not exist', async () => {
       const registry = new SkillRegistry();
       lastChanges = 0; // No rows affected
 
-      const removed = registry.remove('nonexistent');
+      const removed = await registry.remove('nonexistent');
       expect(removed).toBe(false);
     });
   });
 
   describe('getCatalogForPrompt', () => {
-    it('returns compact "name: description" format', () => {
+    it('returns compact "name: description" format', async () => {
       const registry = new SkillRegistry();
-      registry.install('react', '---\nname: react\ndescription: React patterns\n---\nBody.');
-      registry.install('express', '---\nname: express\ndescription: Express conventions\n---\nBody.');
+      await registry.install('react', '---\nname: react\ndescription: React patterns\n---\nBody.');
+      await registry.install('express', '---\nname: express\ndescription: Express conventions\n---\nBody.');
 
       const catalog = registry.getCatalogForPrompt();
       expect(catalog).toContain('react: React patterns');
@@ -1321,23 +1316,23 @@ describe('SkillRegistry', () => {
 // ==========================================================================
 
 describe('End-to-End: Pack → Persona → Prompt', () => {
-  it('full lifecycle: install pack, discover personas, inject in buildPrompt', () => {
+  it('full lifecycle: install pack, discover personas, inject in buildPrompt', async () => {
     const wsDir = path.join(tmpDir, 'e2e-workspace');
     const packDir = path.join(tmpDir, 'e2e-pack');
     fs.mkdirSync(wsDir, { recursive: true });
     createFullPack(packDir);
 
     // Mock DB for install
-    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?';
+    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
     mockSingleRows[existsSql] = undefined;
-    const getByIdSql = 'SELECT * FROM convention_packs WHERE id = ?';
-    mockSingleRows[getByIdSql] = {
+    const insertSql = 'INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path) VALUES ($1, $2, $3, $4) RETURNING *';
+    mockSingleRows[insertSql] = {
       id: 1, workspace_id: 'e2e-ws', pack_name: 'test-pack',
       pack_version: '1.0.0', installed_at: '2026-02-28T00:00:00', pack_path: packDir,
     };
 
     // 1. Install pack
-    const installResult = installPack('e2e-ws', wsDir, packDir);
+    const installResult = await installPack('e2e-ws', wsDir, packDir);
     expect(installResult.personasCopied.length).toBeGreaterThan(0);
 
     // 2. Discover personas from installed pack
@@ -1359,8 +1354,8 @@ describe('End-to-End: Pack → Persona → Prompt', () => {
     expect(personaSection).toContain('## Agent Persona: architect');
 
     // 5. Discover skills from installed pack
-    mockRows['SELECT name, description, source, content FROM installed_skills'] = [];
-    const skillRegistry = new SkillRegistry().discover(wsDir);
+    mockRows['SELECT name, description, source, content, category, tags FROM installed_skills'] = [];
+    const skillRegistry = await new SkillRegistry().discover(wsDir);
     expect(skillRegistry.getAll().length).toBeGreaterThan(0);
     expect(skillRegistry.getSkill('tailwind')).toBeDefined();
   });

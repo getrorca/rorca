@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -20,7 +20,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let authToken: string;
@@ -54,21 +53,15 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-batch-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  const llmClient = require('../../lib/llm-client');
+const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
 
   // Seed a workspace
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', ?)"
-  ).run(os.tmpdir());
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1)`, [os.tmpdir()]);
 
   authToken = await getAuthToken(app);
 });
@@ -78,11 +71,8 @@ afterEach(() => {
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
-
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── POST /api/specs/generate/batch ───────────────────────────────────────────
@@ -169,9 +159,7 @@ test('POST /api/specs/generate/batch emits batch_started WAL event', async () =>
 
   expect(res.status).toBe(201);
 
-  const walEvent = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'batch_started'"
-  ).get() as { payload: string } | undefined;
+  const walEvent = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'batch_started'`) as { payload: string } | undefined;
 
   expect(walEvent).toBeDefined();
   const payload = JSON.parse(walEvent!.payload);
@@ -262,9 +250,7 @@ test('batch emits batch_progress WAL events for each brief', async () => {
 
   await new Promise(resolve => setTimeout(resolve, 500));
 
-  const progressEvents = db.prepare(
-    "SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC"
-  ).all() as { payload: string }[];
+  const progressEvents = await query(`SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC`) as { payload: string }[];
 
   // 2 briefs × 2 events each (generating + completed) = 4 events
   expect(progressEvents.length).toBe(4);
@@ -332,9 +318,7 @@ test('batch writes spec and emits generate WAL event', async () => {
   expect(statusRes.body.items[0].slug).toBe('batch-auth');
 
   // Verify WAL event for generate was emitted
-  const walEvent = db.prepare(
-    "SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'batch-auth'"
-  ).get() as { payload: string } | undefined;
+  const walEvent = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'batch-auth'`) as { payload: string } | undefined;
   expect(walEvent).toBeDefined();
   const payload = JSON.parse(walEvent!.payload);
   expect(payload.title).toBe('Batch Auth');

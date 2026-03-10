@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -17,7 +17,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
@@ -39,29 +38,21 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-analytics-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 
   // Create workspace directory and DB record
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
-  db.prepare(
-    `INSERT INTO workspaces (id, label, path) VALUES (?, 'Analytics WS', ?)`
-  ).run(WS_ID, wsDir);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2)`, [WS_ID, wsDir]);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 function get(urlPath: string) {
@@ -77,28 +68,22 @@ function del(urlPath: string) {
 }
 
 /** Seed a pipeline run + token_usage + story_results for analytics */
-function seedAnalyticsData() {
-  const result = db.prepare(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
-     VALUES ('ralph/specs/approved/test-analytics.json', ?, 'done', datetime('now', '-2 days'), datetime('now', '-1 day'))`
-  ).run(WS_ID);
-  const runId = result.lastInsertRowid as number;
+async function seedAnalyticsData() {
+  const result = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
+     VALUES ('ralph/specs/approved/test-analytics.json', $1, 'done', NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day') RETURNING id`, [WS_ID]);
+  const runId = result!.id;
 
   // Insert token_usage rows
   for (let i = 1; i <= 3; i++) {
-    db.prepare(
-      `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
-       VALUES (?, ?, ?, 'claude-sonnet-4-5-20250929', ?, ?, ?, datetime('now', '-' || ? || ' hours'))`
-    ).run(runId, `US-${String(i).padStart(3, '0')}`, WS_ID, 10000 * i, 2000 * i, 0.05 * i, i);
+    await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+       VALUES ($1, $2, $3, 'claude-sonnet-4-5-20250929', $4, $5, $6, NOW() - ($7 || ' hours')::INTERVAL)`, [runId, `US-${String(i).padStart(3, '0')}`, WS_ID, 10000 * i, 2000 * i, 0.05 * i, i]);
   }
 
   // Insert story_results rows
   const statuses = ['pass', 'pass', 'fail'];
   for (let i = 1; i <= 3; i++) {
-    db.prepare(
-      `INSERT INTO story_results (run_id, story_id, status, finished_at, elapsed_seconds, input_tokens, output_tokens)
-       VALUES (?, ?, ?, datetime('now', '-' || ? || ' hours'), ?, ?, ?)`
-    ).run(runId, `US-${String(i).padStart(3, '0')}`, statuses[i - 1], i, 60 * i, 10000 * i, 2000 * i);
+    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, elapsed_seconds, input_tokens, output_tokens)
+       VALUES ($1, $2, $3, NOW() - ($4 || ' hours')::INTERVAL, $5, $6, $7)`, [runId, `US-${String(i).padStart(3, '0')}`, statuses[i - 1], i, 60 * i, 10000 * i, 2000 * i]);
   }
 
   return runId;
@@ -120,7 +105,7 @@ describe('GET /api/analytics/usage', () => {
   });
 
   test('returns usage data grouped by model (default)', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/usage?workspace_id=${WS_ID}`);
 
@@ -142,7 +127,7 @@ describe('GET /api/analytics/usage', () => {
   });
 
   test('groups by story when requested', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/usage?workspace_id=${WS_ID}&group_by=story`);
 
@@ -177,7 +162,7 @@ describe('GET /api/analytics/costs', () => {
   });
 
   test('returns costs grouped by model', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/costs?workspace_id=${WS_ID}&group_by=model`);
 
@@ -190,7 +175,7 @@ describe('GET /api/analytics/costs', () => {
   });
 
   test('returns costs grouped by period (weekly)', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/costs?workspace_id=${WS_ID}&group_by=period`);
 
@@ -288,7 +273,7 @@ describe('PUT /api/analytics/pricing/:modelId', () => {
       output_cost_per_1m_tokens: 10.0,
     });
 
-    const row = db.prepare('SELECT * FROM model_pricing WHERE model_id = ?').get('db-check-model') as any;
+    const row = await queryOne(`SELECT * FROM model_pricing WHERE model_id = $1`, ['db-check-model']) as any;
     expect(row).toBeDefined();
     expect(row.input_cost_per_1m).toBe(2.5);
     expect(row.output_cost_per_1m).toBe(10.0);
@@ -310,7 +295,7 @@ describe('DELETE /api/analytics/pricing/:modelId', () => {
     expect(res.body.deleted).toBe('delete-me');
 
     // Verify gone from DB
-    const row = db.prepare('SELECT * FROM model_pricing WHERE model_id = ?').get('delete-me');
+    const row = await queryOne(`SELECT * FROM model_pricing WHERE model_id = $1`, ['delete-me']);
     expect(row).toBeUndefined();
   });
 
@@ -334,7 +319,7 @@ describe('GET /api/analytics/models', () => {
   });
 
   test('returns model comparison metrics with data', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/models?workspace_id=${WS_ID}`);
 
@@ -371,7 +356,7 @@ describe('GET /api/analytics/velocity', () => {
   });
 
   test('returns weekly velocity data', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/velocity?workspace_id=${WS_ID}`);
 
@@ -387,7 +372,7 @@ describe('GET /api/analytics/velocity', () => {
   });
 
   test('includes available specs for filtering', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/velocity?workspace_id=${WS_ID}`);
 
@@ -416,7 +401,7 @@ describe('GET /api/analytics/completion-rates', () => {
   });
 
   test('returns summary pass/fail/skip counts with data', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/completion-rates?workspace_id=${WS_ID}`);
 
@@ -465,7 +450,7 @@ describe('GET /api/analytics/roi', () => {
   });
 
   test('calculates ROI with passed stories and token usage', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     const res = await get(`/api/analytics/roi?workspace_id=${WS_ID}`);
 
@@ -552,13 +537,13 @@ describe('PUT /api/analytics/roi/config', () => {
       hourly_rate: 100,
     });
 
-    const ws = db.prepare('SELECT roi_hours_per_story, roi_hourly_rate FROM workspaces WHERE id = ?').get(WS_ID) as any;
+    const ws = await queryOne(`SELECT roi_hours_per_story, roi_hourly_rate FROM workspaces WHERE id = $1`, [WS_ID]) as any;
     expect(ws.roi_hours_per_story).toBe(8);
     expect(ws.roi_hourly_rate).toBe(100);
   });
 
   test('updated config affects ROI calculation', async () => {
-    seedAnalyticsData();
+    await seedAnalyticsData();
 
     // Set custom config
     await put('/api/analytics/roi/config', {

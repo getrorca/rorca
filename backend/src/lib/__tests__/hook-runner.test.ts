@@ -31,8 +31,7 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hookrunner-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const dbMod = require('../../db/index');
   await dbMod.initDb();
@@ -50,8 +49,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+delete process.env.NODE_ENV;
 });
 
 test('returns empty array when no hooks exist', async () => {
