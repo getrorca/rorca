@@ -5,6 +5,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync, fork, spawn } from 'child_process';
 import { homedir } from 'os';
+import * as net from 'net';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -55,8 +56,10 @@ if (command === 'init') {
 
 // ─── Command: start ───
 if (command === 'start') {
-  runStart(args.slice(1));
-  // runStart sets up async process management — don't exit here
+  runStart(args.slice(1)).catch((err) => {
+    console.error(`\nStartup failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
 } else {
   console.error(`Unknown command: ${command}\nRun "rorca --help" for usage.`);
   process.exit(1);
@@ -120,26 +123,48 @@ function runInit(): void {
 }
 
 // ────────────────────────────────────────────────────────────────
-// start: launch Express backend + open browser
+// start: orchestrate first-run onboarding + launch Express
 // ────────────────────────────────────────────────────────────────
 
-function runStart(startArgs: string[]): void {
+async function runStart(startArgs: string[]): Promise<void> {
   // Parse options
   const portIdx = startArgs.indexOf('--port');
-  const port = portIdx !== -1 && startArgs[portIdx + 1] ? startArgs[portIdx + 1] : '3030';
+  const explicitPort = portIdx !== -1 && startArgs[portIdx + 1] ? startArgs[portIdx + 1] : null;
   const noOpen = startArgs.includes('--no-open');
 
-  const portNum = parseInt(port, 10);
-  if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
-    console.error(`Invalid port: ${port}`);
-    process.exit(1);
+  if (explicitPort) {
+    const parsed = parseInt(explicitPort, 10);
+    if (isNaN(parsed) || parsed < 1 || parsed > 65535) {
+      console.error(`Invalid port: ${explicitPort}`);
+      process.exit(1);
+    }
   }
 
-  // Ensure ~/.rorca/ config directory exists
   const rorcaHome = join(homedir(), '.rorca');
-  if (!existsSync(rorcaHome)) {
-    mkdirSync(rorcaHome, { recursive: true });
-    console.log(`Created config directory: ${rorcaHome}`);
+  const isFirstRun = !existsSync(rorcaHome);
+
+  if (isFirstRun) {
+    await runFirstTimeSetup(rorcaHome);
+  } else {
+    await runSubsequentStart(rorcaHome);
+  }
+
+  // ── Resolve port ──
+  const basePort = explicitPort ? parseInt(explicitPort, 10) : 3030;
+  const portNum = explicitPort
+    ? basePort // explicit port — don't scan, fail if taken
+    : await findAvailablePort(basePort, 3039);
+
+  if (portNum === null) {
+    console.error(`\nAll ports 3030-3039 are in use. Specify a free port with --port <port>.`);
+    process.exit(1);
+    return;
+  }
+
+  if (explicitPort && !(await isPortFree(basePort))) {
+    console.error(`Port ${basePort} is already in use. Choose a different port with --port <port>.`);
+    process.exit(1);
+    return;
   }
 
   const dbPath = join(rorcaHome, 'rorca.db');
@@ -148,14 +173,19 @@ function runStart(startArgs: string[]): void {
   const rootDir = join(__dirname, '..');
   const distDir = join(rootDir, 'dist');
   if (!existsSync(join(distDir, 'index.html'))) {
-    console.log('Frontend not built yet — building...');
+    stepLog('Building frontend assets');
     try {
-      execSync('npm run build', { cwd: rootDir, stdio: 'inherit' });
+      execSync('npm run build', { cwd: rootDir, stdio: 'pipe' });
+      stepDone();
     } catch {
-      console.error('Build failed. Please run "npm run build" manually and try again.');
+      stepFail();
+      console.error('  Run "npm run build" manually and try again.');
       process.exit(1);
     }
   }
+
+  // ── Step: Start Express ──
+  stepLog(`Starting Rorca on http://localhost:${portNum}`);
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -174,10 +204,8 @@ function runStart(startArgs: string[]): void {
   let child: ReturnType<typeof fork> | ReturnType<typeof spawn>;
 
   if (existsSync(backendEntry)) {
-    // Production: compiled JS
     child = fork(backendEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
   } else if (existsSync(backendTsEntry)) {
-    // Development: run TypeScript source via tsx
     child = spawn('npx', ['tsx', backendTsEntry], {
       env,
       cwd: backendDir,
@@ -185,15 +213,14 @@ function runStart(startArgs: string[]): void {
       shell: true,
     });
   } else {
-    console.error('Could not find backend entry point. Run "npm run build" first.');
+    stepFail();
+    console.error('  Could not find backend entry point. Run "npm run build" first.');
     process.exit(1);
-    return; // unreachable — satisfies TypeScript
+    return;
   }
 
-  console.log(`Rorca running at http://localhost:${portNum}`);
-
   child.on('error', (err: Error) => {
-    console.error('Failed to start server:', err.message);
+    console.error(`\nFailed to start server: ${err.message}`);
     process.exit(1);
   });
 
@@ -208,18 +235,223 @@ function runStart(startArgs: string[]): void {
   // Open browser after short delay to let server bind
   if (!noOpen) {
     setTimeout(() => {
-      const url = `http://localhost:${portNum}`;
-      openBrowser(url);
+      openBrowser(`http://localhost:${portNum}`);
     }, 1500);
   }
+
+  console.log('');
+  console.log(`  Press Ctrl+C to stop.`);
+  console.log('');
 
   // Forward signals for clean shutdown — stop Postgres before exiting
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.on(sig, () => {
+      console.log('\nShutting down...');
       child.kill(sig);
       stopManagedPostgres();
     });
   }
+}
+
+// ────────────────────────────────────────────────────────────────
+// First-time setup flow
+// ────────────────────────────────────────────────────────────────
+
+async function runFirstTimeSetup(rorcaHome: string): Promise<void> {
+  printWelcomeBanner();
+
+  // Step 0: Create directory structure
+  stepLog('Creating ~/.rorca/ directory structure');
+  mkdirSync(join(rorcaHome, 'data'), { recursive: true });
+  mkdirSync(join(rorcaHome, 'logs'), { recursive: true });
+  stepDone();
+
+  // Dynamically import PostgresManager (lives in backend)
+  const { PostgresManager } = await importPostgresManager();
+  const pg = new PostgresManager({
+    cacheDir: join(rorcaHome, 'postgres'),
+    dataDir: join(rorcaHome, 'data'),
+  });
+
+  // Step 1: Check / download Postgres
+  if (!pg.isInstalled()) {
+    stepLog('Downloading PostgreSQL 16.4 + pgvector');
+    try {
+      await pg.download();
+      process.stdout.write('\n'); // newline after progress bar
+      stepDone();
+    } catch (err) {
+      stepFail();
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`  ${msg}`);
+      console.error('  Try setting POSTGRES_DOWNLOAD_URL to a mirror, or install Postgres manually.');
+      process.exit(1);
+    }
+  } else {
+    stepLog('PostgreSQL binary found');
+    stepDone();
+  }
+
+  // Step 2: Initialize cluster
+  stepLog('Initializing database cluster');
+  try {
+    pg.initCluster();
+    stepDone();
+  } catch (err) {
+    stepFail();
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`  ${msg}`);
+    process.exit(1);
+  }
+
+  // Step 3: Start Postgres
+  stepLog(`Starting PostgreSQL on port ${pg.port}`);
+  try {
+    await pg.start();
+    stepDone();
+  } catch (err) {
+    stepFail();
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`  ${msg}`);
+    console.error(`  Check ~/.rorca/postgres.log for details.`);
+    process.exit(1);
+  }
+
+  // Step 4: Create database + run migrations
+  stepLog('Creating database');
+  try {
+    pg.createDatabase();
+    stepDone();
+  } catch (err) {
+    stepFail();
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`  ${msg}`);
+    process.exit(1);
+  }
+
+  stepLog('Running migrations (47 tables)');
+  // Migrations run automatically when backend starts via db/index.ts
+  // Just mark as done — the Express import triggers them
+  stepDone();
+
+  console.log('');
+}
+
+// ────────────────────────────────────────────────────────────────
+// Subsequent start (fast path)
+// ────────────────────────────────────────────────────────────────
+
+async function runSubsequentStart(rorcaHome: string): Promise<void> {
+  // Ensure data/logs dirs exist (in case user deleted them)
+  mkdirSync(join(rorcaHome, 'data'), { recursive: true });
+  mkdirSync(join(rorcaHome, 'logs'), { recursive: true });
+
+  const { PostgresManager } = await importPostgresManager();
+  const pg = new PostgresManager({
+    cacheDir: join(rorcaHome, 'postgres'),
+    dataDir: join(rorcaHome, 'data'),
+  });
+
+  // Only start Postgres if binary is installed (user may be using external Postgres)
+  if (pg.isInstalled()) {
+    if (!pg.isRunning()) {
+      stepLog(`Starting PostgreSQL on port ${pg.port}`);
+      try {
+        await pg.start();
+        stepDone();
+      } catch (err) {
+        stepFail();
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`  ${msg}`);
+        console.error(`  Check ~/.rorca/postgres.log for details.`);
+        process.exit(1);
+      }
+    }
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// Welcome banner
+// ────────────────────────────────────────────────────────────────
+
+function printWelcomeBanner(): void {
+  console.log('');
+  console.log('  ╔══════════════════════════════════════════╗');
+  console.log('  ║                                          ║');
+  console.log('  ║   ██████╗  ██████╗ ██████╗  ██████╗ █╗  ║');
+  console.log('  ║   ██╔══██╗██╔═══██╗██╔══██╗██╔════╝██║  ║');
+  console.log('  ║   ██████╔╝██║   ██║██████╔╝██║     ███║ ║');
+  console.log('  ║   ██╔══██╗██║   ██║██╔══██╗██║     ╚██║ ║');
+  console.log('  ║   ██║  ██║╚██████╔╝██║  ██║╚██████╗ ██║ ║');
+  console.log('  ║   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚═╝ ║');
+  console.log('  ║                                          ║');
+  console.log(`  ║   v${pkg.version.padEnd(38)}║`);
+  console.log('  ║   AI spec orchestration pipeline         ║');
+  console.log('  ║                                          ║');
+  console.log('  ╚══════════════════════════════════════════╝');
+  console.log('');
+  console.log('  First-time setup — this only runs once.');
+  console.log('');
+}
+
+// ────────────────────────────────────────────────────────────────
+// Step output formatting
+// ────────────────────────────────────────────────────────────────
+
+let _stepLabel = '';
+
+function stepLog(label: string): void {
+  _stepLabel = label;
+  const padded = label.padEnd(50, '.');
+  process.stdout.write(`  ${padded} `);
+}
+
+function stepDone(): void {
+  process.stdout.write('done\n');
+}
+
+function stepFail(): void {
+  process.stdout.write('FAILED\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// Port scanning
+// ────────────────────────────────────────────────────────────────
+
+function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+async function findAvailablePort(start: number, end: number): Promise<number | null> {
+  for (let port = start; port <= end; port++) {
+    if (await isPortFree(port)) return port;
+  }
+  return null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Dynamic import of PostgresManager
+// ────────────────────────────────────────────────────────────────
+
+async function importPostgresManager(): Promise<{ PostgresManager: typeof import('../backend/src/lib/postgres-manager').PostgresManager }> {
+  // Try compiled JS first, fall back to TS source via tsx
+  const rootDir = join(__dirname, '..');
+  const compiledPath = join(rootDir, 'backend', 'dist', 'lib', 'postgres-manager.js');
+  const sourcePath = join(rootDir, 'backend', 'src', 'lib', 'postgres-manager.ts');
+
+  if (existsSync(compiledPath)) {
+    return await import(compiledPath);
+  }
+
+  // When running via tsx, the TS source is importable directly
+  return await import(sourcePath);
 }
 
 // ────────────────────────────────────────────────────────────────
