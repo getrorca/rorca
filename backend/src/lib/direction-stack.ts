@@ -1,6 +1,7 @@
 import { query, queryOne } from '../db/index';
 import { hybridSearch, type SearchResult } from './search';
 import { logger } from './logger';
+import { getDirectionLayers as getCachedDirectionLayers, type DirectionLayers } from './context-cache';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -128,79 +129,11 @@ const SEMANTIC_MEMORY_LIMIT = 15;
 
 /**
  * Fetch direction layers from DB for a workspace.
+ * PG-013: Now delegates to context-cache for cache-first lookups.
  * Returns the raw layer content ready for assembly.
  */
-async function fetchDirectionLayers(workspaceId: string): Promise<{
-  l1?: string;
-  l2?: string;
-  l3?: string;
-  teamL1?: string;
-  teamL2?: string;
-  schemaSnapshot?: string;
-  gitMemory?: string;
-}> {
-  // L1: global standards
-  const l1Row = await queryOne<{ content_yaml: string }>(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-  );
-
-  // Get workspace domain
-  const wsRow = await queryOne<{ domain: string | null }>(
-    'SELECT domain FROM workspaces WHERE id = $1',
-    [workspaceId]
-  );
-  const domain = wsRow?.domain;
-
-  // L2: domain conventions
-  const l2Row = domain
-    ? await queryOne<{ content_yaml: string }>(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`,
-        [domain]
-      )
-    : undefined;
-
-  // L3: project context
-  const l3Row = await queryOne<{ content_yaml: string }>(
-    `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
-    [workspaceId]
-  );
-
-  // Auto-hydrated context
-  const ctx = await queryOne<{ schema_snapshot: string | null; git_memory: string | null }>(
-    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`,
-    [workspaceId]
-  );
-
-  // Team layers
-  const access = await queryOne<{ team_id: string }>(
-    'SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1',
-    [workspaceId]
-  );
-
-  let teamL1: string | undefined;
-  let teamL2: string | undefined;
-  if (access) {
-    const tl1 = await queryOne<{ content_yaml: string }>(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`,
-      [access.team_id]
-    );
-    const tl2 = await queryOne<{ content_yaml: string }>(
-      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`,
-      [access.team_id]
-    );
-    teamL1 = tl1?.content_yaml;
-    teamL2 = tl2?.content_yaml;
-  }
-
-  return {
-    l1: l1Row?.content_yaml,
-    l2: l2Row?.content_yaml,
-    l3: l3Row?.content_yaml,
-    teamL1,
-    teamL2,
-    schemaSnapshot: ctx?.schema_snapshot || undefined,
-    gitMemory: ctx?.git_memory || undefined,
-  };
+async function fetchDirectionLayers(workspaceId: string): Promise<DirectionLayers> {
+  return getCachedDirectionLayers(workspaceId);
 }
 
 /**

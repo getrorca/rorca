@@ -9,6 +9,7 @@ import type { ProviderType, ModelInfo } from '../lib/llm-client';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 import { getVaultKey } from './vault';
 import { logger } from '../lib/logger';
+import { invalidateDirection } from '../lib/context-cache';
 
 const router = Router();
 
@@ -175,6 +176,13 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
       ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
       DO UPDATE SET content_yaml = EXCLUDED.content_yaml, preferred_model = EXCLUDED.preferred_model, updated_at = NOW()
     `, [layer, workspaceId || null, domain || null, contentYaml, (layer === 3 ? preferredModel ?? null : null)]);
+
+    // PG-013: Invalidate direction cache — global layers affect all workspaces
+    if (layer === 1 && !workspaceId) {
+      invalidateDirection(); // Global L1 changed — invalidate all
+    } else {
+      invalidateDirection(workspaceId ? String(workspaceId) : undefined);
+    }
 
     // WAL event
     await execute(
