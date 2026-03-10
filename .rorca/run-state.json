@@ -2,7 +2,7 @@
   "specId": "rorca-distribution",
   "runId": 17,
   "startedAt": "2026-03-10T13:18:22.929Z",
-  "lastUpdatedAt": "2026-03-10T14:06:05.042Z",
+  "lastUpdatedAt": "2026-03-10T14:10:27.255Z",
   "completedStories": [
     {
       "storyId": "DIST-001",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-10T14:06:05.041Z",
       "agentType": "claude",
       "elapsedMs": 1733189
+    },
+    {
+      "storyId": "DIST-005",
+      "title": "Cross-Platform Build Matrix",
+      "status": "passed",
+      "startedAt": "2026-03-10T14:06:20.614Z",
+      "finishedAt": "2026-03-10T14:10:27.255Z",
+      "agentType": "claude",
+      "elapsedMs": 246641
     }
   ],
   "failedStories": [],
