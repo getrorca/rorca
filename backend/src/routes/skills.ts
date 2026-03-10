@@ -13,7 +13,7 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { SkillRegistry, inferCategory } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
@@ -24,37 +24,38 @@ const router = Router();
 /**
  * Resolve the workspace path from optional query param or first registered workspace.
  */
-function resolveWorkspacePath(req: Request): string | null {
+async function resolveWorkspacePath(req: Request): Promise<string | null> {
   const workspaceId = req.query.workspaceId as string | undefined;
   if (workspaceId) {
-    const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined;
+    const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
     return ws?.path ?? null;
   }
   // Default: first registered workspace
-  const first = db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined;
+  const first = await queryOne<{ path: string }>('SELECT path FROM workspaces ORDER BY id LIMIT 1');
   return first?.path ?? null;
 }
 
 /**
  * Resolve workspace ID from query/body param or first registered workspace.
  */
-function resolveWorkspaceId(req: Request): string | null {
+async function resolveWorkspaceId(req: Request): Promise<string | null> {
   const workspaceId = (req.query.workspaceId || req.body?.workspaceId) as string | undefined;
   if (workspaceId) return workspaceId;
-  const first = db.prepare('SELECT id FROM workspaces ORDER BY rowid LIMIT 1').get() as { id: string } | undefined;
+  const first = await queryOne<{ id: string }>('SELECT id FROM workspaces ORDER BY id LIMIT 1');
   return first?.id ?? null;
 }
 
 /**
  * Emit a WAL event for skill operations and broadcast via SSE hub.
  */
-function emitSkillWalEvent(eventType: string, workspaceId: string | null, payload: Record<string, unknown>): void {
-  const result = db.prepare(
-    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES (?, ?, ?)'
-  ).run(eventType, workspaceId, JSON.stringify(payload));
+async function emitSkillWalEvent(eventType: string, workspaceId: string | null, payload: Record<string, unknown>): Promise<void> {
+  const row = await queryOne<{ id: number; ts: string }>(
+    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ($1, $2, $3) RETURNING id, ts',
+    [eventType, workspaceId, JSON.stringify(payload)]
+  );
   const walEvent: WalEvent = {
-    id: result.lastInsertRowid as number,
-    ts: new Date().toISOString(),
+    id: row!.id,
+    ts: row!.ts,
     event_type: eventType,
     workspace_id: workspaceId,
     spec_id: null,
@@ -116,20 +117,20 @@ function emitSkillWalEvent(eventType: string, workspaceId: string | null, payloa
 router.get('/', async (req: Request, res: Response) => {
   try {
     const registry = new SkillRegistry();
-    const workspacePath = resolveWorkspacePath(req);
+    const workspacePath = await resolveWorkspacePath(req);
 
     if (workspacePath) {
       await registry.discover(workspacePath);
     } else {
       // No workspace — only return DB-persisted skills
-      const dbSkills = db.prepare('SELECT name, description, source, content, category, tags FROM installed_skills').all() as {
+      const dbSkills = await query<{
         name: string;
         description: string;
         source: string;
         content: string;
         category: string | null;
         tags: string | null;
-      }[];
+      }>('SELECT name, description, source, content, category, tags FROM installed_skills');
       // Manual load into registry is not needed — discover() handles DB merge.
       // But with no workspace path we just return DB skills directly.
       res.json({
@@ -217,8 +218,8 @@ router.post('/install', async (req: Request, res: Response) => {
     const registry = new SkillRegistry();
     const skill = await registry.install(name.trim(), content, source || 'user');
 
-    const wsId = resolveWorkspaceId(req);
-    emitSkillWalEvent('skill_installed', wsId, {
+    const wsId = await resolveWorkspaceId(req);
+    await emitSkillWalEvent('skill_installed', wsId, {
       name: skill.metadata.name,
       source: skill.source,
       workspace_id: wsId,
@@ -360,7 +361,7 @@ router.get('/:name/content', async (req: Request, res: Response) => {
   try {
     const name = req.params.name as string;
     const registry = new SkillRegistry();
-    const wsPath = resolveWorkspacePath(req);
+    const wsPath = await resolveWorkspacePath(req);
 
     // 1) Try filesystem via SkillRegistry
     if (wsPath) {
@@ -386,9 +387,10 @@ router.get('/:name/content', async (req: Request, res: Response) => {
     }
 
     // 2) Fallback: DB lookup
-    const dbSkill = db.prepare(
-      'SELECT name, description, content FROM installed_skills WHERE LOWER(name) = LOWER(?)'
-    ).get(name) as { name: string; description: string; content: string } | undefined;
+    const dbSkill = await queryOne<{ name: string; description: string; content: string }>(
+      'SELECT name, description, content FROM installed_skills WHERE LOWER(name) = LOWER($1)',
+      [name]
+    );
 
     if (dbSkill) {
       const wordCount = dbSkill.content.split(/\s+/).filter(Boolean).length;
@@ -442,8 +444,8 @@ router.delete('/:name', async (req: Request, res: Response) => {
       return;
     }
 
-    const wsId = resolveWorkspaceId(req);
-    emitSkillWalEvent('skill_removed', wsId, {
+    const wsId = await resolveWorkspaceId(req);
+    await emitSkillWalEvent('skill_removed', wsId, {
       name,
       workspace_id: wsId,
     });
@@ -604,12 +606,17 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
     }
 
     // Strip .md extension if present (suggestions pass "react.md")
-    const query = name.trim().replace(/\.md$/i, '').toLowerCase();
+    const queryStr = name.trim().replace(/\.md$/i, '').toLowerCase();
 
     // Resolve workspace path
-    const wsPath = workspaceId
-      ? (db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined)?.path
-      : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
+    let wsPath: string | undefined;
+    if (workspaceId) {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+      wsPath = ws?.path;
+    } else {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces ORDER BY id LIMIT 1');
+      wsPath = ws?.path;
+    }
 
     if (!wsPath) {
       res.status(400).json({ error: 'No workspace found' });
@@ -617,13 +624,13 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
     }
 
     // Search skills.sh and fetch content from GitHub
-    const result = await fetchSkillFromRegistry(query);
+    const result = await fetchSkillFromRegistry(queryStr);
     if (!result) {
-      res.status(404).json({ error: `No skill found for "${query}" in skills.sh registry` });
+      res.status(404).json({ error: `No skill found for "${queryStr}" in skills.sh registry` });
       return;
     }
 
-    const skillName = query.replace(/[^a-z0-9-]/g, '-');
+    const skillName = queryStr.replace(/[^a-z0-9-]/g, '-');
 
     // Save to both .rorca/skills/ and .claude/skills/
     const rorcaSkillsDir = path.join(wsPath, '.rorca', 'skills');
@@ -640,8 +647,8 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
     const registry = new SkillRegistry();
     await registry.install(skillName, result.content, result.source);
 
-    const wsId = resolveWorkspaceId(req);
-    emitSkillWalEvent('skill_installed', wsId, {
+    const wsId = await resolveWorkspaceId(req);
+    await emitSkillWalEvent('skill_installed', wsId, {
       name: skillName,
       source: result.source,
       skillId: result.skillId,
@@ -731,7 +738,7 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
  */
 router.get('/suggestions', async (req: Request, res: Response) => {
   try {
-    const wsPath = resolveWorkspacePath(req);
+    const wsPath = await resolveWorkspacePath(req);
     if (!wsPath) {
       res.status(400).json({ error: 'No workspace found' });
       return;
@@ -845,9 +852,9 @@ router.get('/suggestions', async (req: Request, res: Response) => {
  */
 router.post('/search', async (req: Request, res: Response) => {
   try {
-    const { query, limit } = req.body;
+    const { query: searchQuery, limit } = req.body;
 
-    if (!query || typeof query !== 'string' || !query.trim()) {
+    if (!searchQuery || typeof searchQuery !== 'string' || !searchQuery.trim()) {
       res.status(400).json({ error: 'query is required' });
       return;
     }
@@ -856,7 +863,7 @@ router.post('/search', async (req: Request, res: Response) => {
 
     // Proxy to skills.sh search API
     const searchUrl = new URL('https://skills.sh/api/search');
-    searchUrl.searchParams.set('q', query.trim());
+    searchUrl.searchParams.set('q', searchQuery.trim());
     searchUrl.searchParams.set('limit', String(searchLimit));
 
     let response: globalThis.Response;
@@ -900,7 +907,7 @@ router.post('/search', async (req: Request, res: Response) => {
         author: r.author || r.owner || '',
         url: r.url || r.homepage || '',
       })),
-      query: query.trim(),
+      query: searchQuery.trim(),
       total: data?.total ?? results.length,
     });
   } catch (error: any) {
@@ -1044,7 +1051,7 @@ router.post('/browse-github', async (req: Request, res: Response) => {
       .map((f: any) => f.path);
 
     // Build installed set for checking
-    const wsPath = resolveWorkspacePath(req);
+    const wsPath = await resolveWorkspacePath(req);
     const installedNames = new Set<string>();
     if (wsPath) {
       const registry = new SkillRegistry();
@@ -1206,9 +1213,14 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
     const { owner, repo } = parsed;
 
     // Resolve workspace
-    const wsPath = workspaceId
-      ? (db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined)?.path
-      : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
+    let wsPath: string | undefined;
+    if (workspaceId) {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+      wsPath = ws?.path;
+    } else {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces ORDER BY id LIMIT 1');
+      wsPath = ws?.path;
+    }
 
     if (!wsPath) {
       res.status(400).json({ error: 'No workspace found' });
@@ -1280,8 +1292,8 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
     const registry = new SkillRegistry();
     await registry.install(skillName, content, source);
 
-    const wsId = resolveWorkspaceId(req);
-    emitSkillWalEvent('skill_installed', wsId, {
+    const wsId = await resolveWorkspaceId(req);
+    await emitSkillWalEvent('skill_installed', wsId, {
       name: skillName,
       source: `github:${owner}/${repo}`,
       repoUrl: `https://github.com/${owner}/${repo}`,
@@ -1378,9 +1390,14 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
     }
 
     // Resolve workspace path
-    const wsPath = workspaceId
-      ? (db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined)?.path
-      : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
+    let wsPath: string | undefined;
+    if (workspaceId) {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+      wsPath = ws?.path;
+    } else {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces ORDER BY id LIMIT 1');
+      wsPath = ws?.path;
+    }
 
     if (!wsPath) {
       res.status(400).json({ error: 'No workspace found' });
@@ -1394,7 +1411,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
     fs.mkdirSync(claudeSkillsDir, { recursive: true });
 
     const registry = new SkillRegistry();
-    const wsId = resolveWorkspaceId(req);
+    const wsId = await resolveWorkspaceId(req);
     let installed = 0;
     const failed: Array<{ name: string; error: string }> = [];
 
@@ -1409,18 +1426,18 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
       try {
         if (item.source === 'sh') {
           // Fetch from skills.sh registry
-          const query = itemName.replace(/\.md$/i, '').toLowerCase();
-          const result = await fetchSkillFromRegistry(query);
+          const queryStr = itemName.replace(/\.md$/i, '').toLowerCase();
+          const result = await fetchSkillFromRegistry(queryStr);
           if (!result) {
             failed.push({ name: itemName, error: `Not found in skills.sh registry` });
             continue;
           }
-          const skillName = query.replace(/[^a-z0-9-]/g, '-');
+          const skillName = queryStr.replace(/[^a-z0-9-]/g, '-');
           fs.writeFileSync(path.join(rorcaSkillsDir, `${skillName}.md`), result.content, 'utf-8');
           fs.writeFileSync(path.join(claudeSkillsDir, `${skillName}.md`), result.content, 'utf-8');
           await registry.install(skillName, result.content, result.source);
           installed++;
-          emitSkillWalEvent('skill_installed', wsId, {
+          await emitSkillWalEvent('skill_installed', wsId, {
             name: skillName, source: result.source, workspace_id: wsId,
           });
 
@@ -1476,7 +1493,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
           fs.writeFileSync(path.join(claudeSkillsDir, `${normalizedName}.md`), content, 'utf-8');
           await registry.install(normalizedName, content, source);
           installed++;
-          emitSkillWalEvent('skill_installed', wsId, {
+          await emitSkillWalEvent('skill_installed', wsId, {
             name: normalizedName, source, workspace_id: wsId,
           });
 
@@ -1492,7 +1509,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
           fs.writeFileSync(path.join(claudeSkillsDir, `${normalizedName}.md`), rawContent, 'utf-8');
           await registry.install(normalizedName, rawContent, 'user');
           installed++;
-          emitSkillWalEvent('skill_installed', wsId, {
+          await emitSkillWalEvent('skill_installed', wsId, {
             name: normalizedName, source: 'user', workspace_id: wsId,
           });
 
@@ -1565,12 +1582,17 @@ router.post('/bulk-remove', async (req: Request, res: Response) => {
     }
 
     // Resolve workspace path for filesystem cleanup
-    const wsPath = workspaceId
-      ? (db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as { path: string } | undefined)?.path
-      : (db.prepare('SELECT path FROM workspaces ORDER BY rowid LIMIT 1').get() as { path: string } | undefined)?.path;
+    let wsPath: string | undefined;
+    if (workspaceId) {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+      wsPath = ws?.path;
+    } else {
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces ORDER BY id LIMIT 1');
+      wsPath = ws?.path;
+    }
 
     const registry = new SkillRegistry();
-    const wsId = resolveWorkspaceId(req);
+    const wsId = await resolveWorkspaceId(req);
     let removed = 0;
     const notFound: string[] = [];
 
@@ -1582,7 +1604,7 @@ router.post('/bulk-remove', async (req: Request, res: Response) => {
       const wasRemoved = await registry.remove(trimmed);
       if (wasRemoved) {
         removed++;
-        emitSkillWalEvent('skill_removed', wsId, {
+        await emitSkillWalEvent('skill_removed', wsId, {
           name: trimmed, workspace_id: wsId,
         });
       } else {
@@ -1653,7 +1675,7 @@ router.post('/bulk-remove', async (req: Request, res: Response) => {
  */
 router.get('/export', async (req: Request, res: Response) => {
   try {
-    const wsPath = resolveWorkspacePath(req);
+    const wsPath = await resolveWorkspacePath(req);
 
     const registry = new SkillRegistry();
     if (wsPath) {
@@ -1663,27 +1685,31 @@ router.get('/export', async (req: Request, res: Response) => {
     const allSkills = registry.getAll();
 
     // If no skills from registry, also check DB directly
-    const exportSkills = allSkills.length > 0
-      ? allSkills.map(s => ({
-          name: s.metadata.name,
-          description: s.metadata.description,
+    let exportSkills;
+    if (allSkills.length > 0) {
+      exportSkills = allSkills.map(s => ({
+        name: s.metadata.name,
+        description: s.metadata.description,
+        source: s.source,
+        category: s.metadata.category || inferCategory(s.metadata.name, s.metadata.description),
+        tags: s.metadata.tags || [],
+      }));
+    } else {
+      const dbSkills = await query<{
+        name: string; description: string; source: string; category: string | null; tags: string | null;
+      }>('SELECT name, description, source, category, tags FROM installed_skills');
+      exportSkills = dbSkills.map(s => {
+        let parsedTags: string[] = [];
+        if (s.tags) { try { parsedTags = JSON.parse(s.tags); } catch { /* ignore */ } }
+        return {
+          name: s.name,
+          description: s.description,
           source: s.source,
-          category: s.metadata.category || inferCategory(s.metadata.name, s.metadata.description),
-          tags: s.metadata.tags || [],
-        }))
-      : (db.prepare('SELECT name, description, source, category, tags FROM installed_skills').all() as {
-          name: string; description: string; source: string; category: string | null; tags: string | null;
-        }[]).map(s => {
-          let parsedTags: string[] = [];
-          if (s.tags) { try { parsedTags = JSON.parse(s.tags); } catch { /* ignore */ } }
-          return {
-            name: s.name,
-            description: s.description,
-            source: s.source,
-            category: s.category || inferCategory(s.name, s.description),
-            tags: parsedTags,
-          };
-        });
+          category: s.category || inferCategory(s.name, s.description),
+          tags: parsedTags,
+        };
+      });
+    }
 
     res.json({
       skills: exportSkills,

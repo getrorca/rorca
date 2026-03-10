@@ -128,6 +128,6 @@ Planned canonical execution engine — replaces bash `run-loop.sh` entirely. Bui
 
 - **`chatComplete` returns `ChatResult`** — never `const text = await chatComplete(...)` directly. Always `.text`.
 - **Model resolution**: check `direction_layers` L3 `preferred_model` first; fall back to default. Already handled in `llm-client.ts` model resolution chain.
-- **Schema hydrator is sync-ish** — it's async (uses `fs.readFile`) but never opens a DB. No `better-sqlite3` calls inside.
+- **Schema hydrator is file-based** — it's async (uses `fs.readFile`) but never opens a DB connection.
 - **Git hydrator is expensive** — each chunk is an LLM call. Don't call on every request.
 - **SSE hub subscribers leak** — `attachSSE()` handles cleanup on disconnect. Don't manually manage subscriber sets outside `sse-hub.ts`.

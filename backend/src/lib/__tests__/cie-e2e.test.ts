@@ -917,8 +917,8 @@ describe('CIE E2E: Bi-directional Sync — CLAUDE.md Diff on L3 Update', () => {
 
   it('generates a diffable string showing L3 changes that affect CLAUDE.md', () => {
     // Simulate the diff generation between old and new L3 content
-    const oldL3 = 'Stack: React + Express + SQLite\nPorts: 5210, 3030\nDB: better-sqlite3';
-    const newL3 = 'Stack: React + Express + PostgreSQL\nPorts: 5210, 3030\nDB: pg + Prisma';
+    const oldL3 = 'Stack: React + Express + PostgreSQL\nPorts: 5210, 3030\nDB: pg Pool';
+    const newL3 = 'Stack: React + Express + PostgreSQL\nPorts: 5210, 3030\nDB: pg Pool + Prisma';
 
     const oldLines = oldL3.split('\n');
     const newLines = newL3.split('\n');
@@ -931,11 +931,9 @@ describe('CIE E2E: Bi-directional Sync — CLAUDE.md Diff on L3 Update', () => {
       }
     }
 
-    expect(changes).toHaveLength(2); // Line 1 (Stack) and Line 3 (DB) changed
-    expect(changes[0].old).toContain('SQLite');
-    expect(changes[0].new).toContain('PostgreSQL');
-    expect(changes[1].old).toContain('better-sqlite3');
-    expect(changes[1].new).toContain('Prisma');
+    expect(changes).toHaveLength(1); // Line 3 (DB) changed
+    expect(changes[0].old).toContain('pg Pool');
+    expect(changes[0].new).toContain('Prisma');
   });
 
   it('preserves L1/L2/L4/L5 sections when only L3 changes', () => {

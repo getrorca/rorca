@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { db } from '../db';
+import { query, queryOne, execute } from '../db/index';
 import { JWT_SECRET } from './auth';
 import type { AuthUser } from './auth';
 import { chatComplete } from '../lib/llm-client';
@@ -12,10 +12,10 @@ const router = Router();
 const VAULT_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
 
 // Auth is intentionally bypassed globally — fall back to the first registered user
-function getEffectiveUser(req: Request): AuthUser | null {
+async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
   const user = (req as Request & { user: AuthUser }).user;
   if (user) return user;
-  return db.prepare('SELECT id, email FROM users LIMIT 1').get() as AuthUser | null;
+  return await queryOne<AuthUser>('SELECT id, email FROM users LIMIT 1');
 }
 
 // ─── Crypto helpers ─────────────────────────────────────────────────────────
@@ -104,8 +104,8 @@ export interface VaultKeyResult {
  *       400: { description: "Missing or invalid provider/key" }
  *       401: { description: "No user found" }
  */
-router.post('/', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.post('/', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(401).json({ error: 'No user found' }); return; }
 
   const { provider, key, label, base_url } = req.body;
@@ -130,9 +130,10 @@ router.post('/', (req: Request, res: Response) => {
   const safeLabel = typeof label === 'string' ? label.trim() : '';
   const safeBaseUrl = typeof base_url === 'string' && base_url.trim() ? base_url.trim() : null;
 
-  db.prepare(
-    'INSERT INTO api_key_vault (id, user_id, provider, encrypted_key, label, base_url) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(id, user.id, provider, encryptedKey, safeLabel, safeBaseUrl);
+  await execute(
+    'INSERT INTO api_key_vault (id, user_id, provider, encrypted_key, label, base_url) VALUES ($1, $2, $3, $4, $5, $6)',
+    [id, user.id, provider, encryptedKey, safeLabel, safeBaseUrl]
+  );
 
   res.status(201).json({
     id,
@@ -174,13 +175,14 @@ router.post('/', (req: Request, res: Response) => {
  *                       last_used_at: { type: string, format: date-time, nullable: true }
  *                       created_at: { type: string, format: date-time }
  */
-router.get('/', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.get('/', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.json({ keys: [] }); return; }
 
-  const rows = db.prepare(
-    'SELECT id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE user_id = ? ORDER BY created_at DESC'
-  ).all(user.id) as VaultRow[];
+  const rows = await query<VaultRow>(
+    'SELECT id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE user_id = $1 ORDER BY created_at DESC',
+    [user.id]
+  );
 
   const keys = rows.map(row => ({
     id: row.id,
@@ -223,22 +225,23 @@ router.get('/', (req: Request, res: Response) => {
  *       401: { description: "No user found" }
  *       404: { description: "Key not found" }
  */
-router.delete('/:id', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.delete('/:id', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(401).json({ error: 'No user found' }); return; }
   const keyId = req.params.id;
 
   // Verify ownership before deleting
-  const existing = db.prepare(
-    'SELECT id, spend_total_usd FROM api_key_vault WHERE id = ? AND user_id = ?'
-  ).get(keyId, user.id) as VaultRow | undefined;
+  const existing = await queryOne<VaultRow>(
+    'SELECT id, spend_total_usd FROM api_key_vault WHERE id = $1 AND user_id = $2',
+    [keyId, user.id]
+  );
 
   if (!existing) {
     res.status(404).json({ error: 'Key not found' });
     return;
   }
 
-  db.prepare('DELETE FROM api_key_vault WHERE id = ? AND user_id = ?').run(keyId, user.id);
+  await execute('DELETE FROM api_key_vault WHERE id = $1 AND user_id = $2', [keyId, user.id]);
 
   res.json({ deleted: true, spend_total_usd: existing.spend_total_usd });
 });
@@ -278,7 +281,7 @@ router.delete('/:id', (req: Request, res: Response) => {
  *       502: { description: "Connection test failed" }
  */
 router.post('/test', async (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(401).json({ error: 'No user found' }); return; }
   const { provider } = req.body as { provider?: string };
 
@@ -300,9 +303,10 @@ router.post('/test', async (req: Request, res: Response) => {
 
     if (provider !== 'claude-cli') {
       // Look up vault key for this user + provider
-      const row = db.prepare(
-        'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = ? AND provider = ? ORDER BY created_at DESC LIMIT 1'
-      ).get(user.id, provider) as Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'> | undefined;
+      const row = await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
+        'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = $1 AND provider = $2 ORDER BY created_at DESC LIMIT 1',
+        [user.id, provider]
+      );
 
       if (!row) {
         res.status(400).json({ error: `No API key stored for provider "${provider}". Add a key first.` });
@@ -369,8 +373,8 @@ router.post('/test', async (req: Request, res: Response) => {
  *                 provider: { type: string }
  *       400: { description: "workspaceId query param is required" }
  */
-router.get('/default-provider', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.get('/default-provider', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   const { workspaceId } = req.query;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
@@ -380,9 +384,10 @@ router.get('/default-provider', (req: Request, res: Response) => {
 
   if (!user) { res.json({ provider: 'claude-cli' }); return; }
 
-  const row = db.prepare(
-    'SELECT provider FROM provider_defaults WHERE user_id = ? AND workspace_id = ?'
-  ).get(user.id, workspaceId) as { provider: string } | undefined;
+  const row = await queryOne<{ provider: string }>(
+    'SELECT provider FROM provider_defaults WHERE user_id = $1 AND workspace_id = $2',
+    [user.id, workspaceId]
+  );
 
   res.json({ provider: row?.provider ?? 'claude-cli' });
 });
@@ -418,8 +423,8 @@ router.get('/default-provider', (req: Request, res: Response) => {
  *       400: { description: "Missing workspaceId or invalid provider" }
  *       401: { description: "No user found" }
  */
-router.put('/default-provider', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.put('/default-provider', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(401).json({ error: 'No user found' }); return; }
   const { workspaceId, provider } = req.body;
 
@@ -439,17 +444,18 @@ router.put('/default-provider', (req: Request, res: Response) => {
   }
 
   const id = crypto.randomUUID();
-  db.prepare(`
+  await execute(`
     INSERT INTO provider_defaults (id, user_id, workspace_id, provider)
-    VALUES (?, ?, ?, ?)
+    VALUES ($1, $2, $3, $4)
     ON CONFLICT (user_id, workspace_id)
-    DO UPDATE SET provider = excluded.provider, updated_at = datetime('now')
-  `).run(id, user.id, workspaceId, provider);
+    DO UPDATE SET provider = excluded.provider, updated_at = NOW()
+  `, [id, user.id, workspaceId, provider]);
 
   // WAL event
-  db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('provider_default_changed', ?, ?)`
-  ).run(workspaceId, JSON.stringify({ provider, userId: user.id }));
+  await execute(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('provider_default_changed', $1, $2)`,
+    [workspaceId, JSON.stringify({ provider, userId: user.id })]
+  );
 
   res.json({ ok: true, provider });
 });
@@ -481,8 +487,8 @@ router.put('/default-provider', (req: Request, res: Response) => {
  *                       hasKey: { type: boolean }
  *                       baseUrl: { type: string, nullable: true }
  */
-router.get('/providers', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.get('/providers', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
 
   const providers: Array<{
     id: string;
@@ -498,9 +504,10 @@ router.get('/providers', (req: Request, res: Response) => {
   ];
 
   // Check vault for user's keys
-  const vaultRows = user ? db.prepare(
-    'SELECT provider, base_url FROM api_key_vault WHERE user_id = ? ORDER BY created_at DESC'
-  ).all(user.id) as Array<{ provider: string; base_url: string | null }> : [];
+  const vaultRows = user ? await query<{ provider: string; base_url: string | null }>(
+    'SELECT provider, base_url FROM api_key_vault WHERE user_id = $1 ORDER BY created_at DESC',
+    [user.id]
+  ) : [];
 
   for (const row of vaultRows) {
     const p = providers.find(p => p.id === row.provider);
@@ -530,15 +537,16 @@ router.get('/providers', (req: Request, res: Response) => {
 
 // ─── Exported helper: resolve a user's vault key for a provider ─────────────
 
-export function getVaultKey(userId: string, provider: string): VaultKeyResult | null {
-  const row = db.prepare(
-    'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = ? AND provider = ? ORDER BY created_at DESC LIMIT 1'
-  ).get(userId, provider) as Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'> | undefined;
+export async function getVaultKey(userId: string, provider: string): Promise<VaultKeyResult | null> {
+  const row = await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
+    'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = $1 AND provider = $2 ORDER BY created_at DESC LIMIT 1',
+    [userId, provider]
+  );
 
   if (!row) return null;
 
   // Update last_used_at
-  db.prepare('UPDATE api_key_vault SET last_used_at = datetime(\'now\') WHERE id = ?').run(row.id);
+  await execute('UPDATE api_key_vault SET last_used_at = NOW() WHERE id = $1', [row.id]);
 
   try {
     return { key: decrypt(row.encrypted_key), baseUrl: row.base_url };

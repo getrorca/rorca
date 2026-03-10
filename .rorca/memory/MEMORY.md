@@ -10,10 +10,10 @@
 > Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
 > Source: v2-platform
 
-## 2026-02-27 [Gotcha] better-sqlite3 is synchronous
-> Rule: Never use async/await for better-sqlite3 DB calls. db.prepare().get() returns T|undefined, .all() returns T[], .run() returns RunResult.
-> Context: Using async wrappers around synchronous calls adds unnecessary overhead and can cause subtle bugs.
-> Source: v2-platform
+## 2026-03-10 [Gotcha] pg is async — always await DB calls
+> Rule: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
+> Context: Missing `await` returns a Promise instead of data. PostgreSQL uses numbered placeholders, not positional `?`.
+> Source: rorca-postgres-migration PG-011
 
 ## 2026-02-27 [Convention] chatComplete returns ChatResult
 > Rule: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
@@ -80,10 +80,10 @@
 > Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
 > Source: PR-QUEUE-1
 
-## 2026-03-08 [Gotcha] Migration Files Must Not Use Conditional DDL
-> Rule: SQLite lacks IF NOT EXISTS for ALTER TABLE ADD COLUMN — use pragma table_info checks in db/index.ts instead of migration files for conditional schema changes
-> Context: This is already documented in CLAUDE.md SQLite Migration Pattern section, but worth reinforcing given 044 new migration files in this run. Prevents migration failures on re-runs.
-> Source: PR-002 through PR-044
+## 2026-03-10 [Convention] PostgreSQL Migration Pattern
+> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
+> Context: Supersedes the old SQLite pragma table_info workaround. PostgreSQL supports `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, etc.
+> Source: rorca-postgres-migration PG-011
 
 ## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
 > Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
