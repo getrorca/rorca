@@ -32,9 +32,10 @@ const CATEGORY_COLORS: Record<string, string> = {
   Decision: 'bg-amber-500/10 text-amber-500',
   Pattern: 'bg-emerald-500/10 text-emerald-500',
   Gotcha: 'bg-orange-500/10 text-orange-500',
+  'Run Synthesis': 'bg-cyan-500/10 text-cyan-500',
 };
 
-const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha'];
+const CATEGORIES = ['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha', 'Run Synthesis'];
 
 // ─── Inline Edit Form ───────────────────────────────────────────────────────
 

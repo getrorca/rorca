@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import Stripe from 'stripe';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import type { AuthUser } from './auth';
 import { logger } from '../lib/logger';
 
@@ -54,30 +54,34 @@ interface SubscriptionRow {
   current_period_end: string | null;
 }
 
-function getUserPlan(userId: string): PlanId {
-  const row = db.prepare(
-    `SELECT plan FROM users WHERE id = ?`
-  ).get(userId) as { plan: string } | undefined;
+async function getUserPlan(userId: string): Promise<PlanId> {
+  const row = await queryOne<{ plan: string }>(
+    `SELECT plan FROM users WHERE id = $1`,
+    [userId]
+  );
   return (row?.plan as PlanId) || 'free';
 }
 
-function getOrCreateCustomer(userId: string): SubscriptionRow | null {
-  return db.prepare(
-    `SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`
-  ).get(userId) as SubscriptionRow | undefined || null;
+async function getOrCreateCustomer(userId: string): Promise<SubscriptionRow | null> {
+  const row = await queryOne<SubscriptionRow>(
+    `SELECT * FROM subscriptions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+  return row || null;
 }
 
 // ─── Seat counting ──────────────────────────────────────────────────────────
-function getSeatsUsed(userId: string): { used: number; limit: number | null } {
+async function getSeatsUsed(userId: string): Promise<{ used: number; limit: number | null }> {
   // Count team members where user is team owner
-  const row = db.prepare(
+  const row = await queryOne<{ cnt: number }>(
     `SELECT COUNT(DISTINCT tm.user_id) as cnt
      FROM teams t
      JOIN team_members tm ON tm.team_id = t.id
-     WHERE t.owner_id = ?`
-  ).get(userId) as { cnt: number } | undefined;
+     WHERE t.owner_id = $1`,
+    [userId]
+  );
   const used = (row?.cnt ?? 0) + 1; // +1 for owner
-  const plan = getUserPlan(userId);
+  const plan = await getUserPlan(userId);
   const limits: Record<string, number | null> = { free: 1, solo: 1, pro: 5, team: null };
   return { used, limit: limits[plan] ?? 1 };
 }
@@ -104,11 +108,11 @@ function getSeatsUsed(userId: string): { used: number; limit: number | null } {
  *                 plans: { type: object }
  *                 stripeConfigured: { type: boolean }
  */
-router.get('/status', (req: Request, res: Response) => {
+router.get('/status', async (req: Request, res: Response) => {
   const authReq = req as Request & { user: AuthUser };
-  const plan = getUserPlan(authReq.user.id);
-  const sub = getOrCreateCustomer(authReq.user.id);
-  const seats = getSeatsUsed(authReq.user.id);
+  const plan = await getUserPlan(authReq.user.id);
+  const sub = await getOrCreateCustomer(authReq.user.id);
+  const seats = await getSeatsUsed(authReq.user.id);
 
   res.json({
     plan,
@@ -170,7 +174,7 @@ router.get('/invoices', async (req: Request, res: Response) => {
   }
 
   const authReq = req as Request & { user: AuthUser };
-  const sub = getOrCreateCustomer(authReq.user.id);
+  const sub = await getOrCreateCustomer(authReq.user.id);
 
   if (!sub?.stripe_customer_id) {
     res.json({ invoices: [] });
@@ -259,7 +263,7 @@ router.post('/checkout', async (req: Request, res: Response) => {
 
   try {
     // Get or create Stripe customer
-    let sub = getOrCreateCustomer(authReq.user.id);
+    let sub = await getOrCreateCustomer(authReq.user.id);
     let customerId: string;
 
     if (sub?.stripe_customer_id) {
@@ -273,9 +277,10 @@ router.post('/checkout', async (req: Request, res: Response) => {
 
       // Upsert subscription record with just the customer ID
       const id = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      db.prepare(
-        `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status) VALUES (?, ?, ?, 'free', 'active')`
-      ).run(id, authReq.user.id, customerId);
+      await execute(
+        `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status) VALUES ($1, $2, $3, 'free', 'active')`,
+        [id, authReq.user.id, customerId]
+      );
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -325,7 +330,7 @@ router.post('/portal', async (req: Request, res: Response) => {
   }
 
   const authReq = req as Request & { user: AuthUser };
-  const sub = getOrCreateCustomer(authReq.user.id);
+  const sub = await getOrCreateCustomer(authReq.user.id);
 
   if (!sub?.stripe_customer_id) {
     res.status(404).json({ error: 'No billing account found. Subscribe to a plan first.' });
@@ -352,26 +357,27 @@ interface QuotaRow {
   quota_limit: number;
 }
 
-function getFeatureUsage(userId: string, feature: string): number {
+async function getFeatureUsage(userId: string, feature: string): Promise<number> {
   switch (feature) {
     case 'workspaces': {
-      const row = db.prepare('SELECT COUNT(*) as cnt FROM workspaces').get() as { cnt: number };
-      return row.cnt;
+      const row = await queryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM workspaces');
+      return row?.cnt ?? 0;
     }
     case 'specs_per_month': {
-      const row = db.prepare(
+      const row = await queryOne<{ cnt: number }>(
         `SELECT COUNT(*) as cnt FROM wal_events
-         WHERE event_type = 'generate' AND ts >= datetime('now', '-30 days')`
-      ).get() as { cnt: number };
-      return row.cnt;
+         WHERE event_type = 'generate' AND ts >= NOW() - INTERVAL '30 days'`
+      );
+      return row?.cnt ?? 0;
     }
     case 'team_members': {
-      const row = db.prepare(
+      const row = await queryOne<{ cnt: number }>(
         `SELECT COUNT(DISTINCT tm.user_id) as cnt
          FROM teams t
          JOIN team_members tm ON tm.team_id = t.id
-         WHERE t.owner_id = ?`
-      ).get(userId) as { cnt: number };
+         WHERE t.owner_id = $1`,
+        [userId]
+      );
       return (row?.cnt ?? 0) + 1;
     }
     case 'marketplace_publish':
@@ -411,24 +417,25 @@ function getFeatureUsage(userId: string, feature: string): number {
  *                       used: { type: integer }
  *                       remaining: { type: integer, nullable: true, description: "null if unlimited" }
  */
-router.get('/quotas', (req: Request, res: Response) => {
+router.get('/quotas', async (req: Request, res: Response) => {
   const authReq = req as Request & { user: AuthUser };
   const userId = authReq.user?.id;
-  const plan = getUserPlan(userId || 'local-admin');
+  const plan = await getUserPlan(userId || 'local-admin');
 
-  const rows = db.prepare(
-    'SELECT feature, quota_limit FROM plan_quotas WHERE plan_name = ?'
-  ).all(plan) as QuotaRow[];
+  const rows = await query<QuotaRow>(
+    'SELECT feature, quota_limit FROM plan_quotas WHERE plan_name = $1',
+    [plan]
+  );
 
-  const quotas = rows.map(row => {
-    const used = getFeatureUsage(userId || 'local-admin', row.feature);
+  const quotas = await Promise.all(rows.map(async row => {
+    const used = await getFeatureUsage(userId || 'local-admin', row.feature);
     return {
       feature: row.feature,
       limit: row.quota_limit,
       used,
       remaining: row.quota_limit === -1 ? null : Math.max(0, row.quota_limit - used),
     };
-  });
+  }));
 
   res.json({ plan, quotas });
 });
@@ -526,27 +533,31 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
           : null;
 
         // Upsert subscription row
-        const existing = db.prepare(
-          `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = ?`
-        ).get(customerId) as { id: string; user_id: string } | undefined;
+        const existing = await queryOne<{ id: string; user_id: string }>(
+          `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = $1`,
+          [customerId]
+        );
 
         if (existing) {
-          db.prepare(
-            `UPDATE subscriptions SET stripe_subscription_id = ?, plan = ?, status = ?,
-             current_period_start = ?, current_period_end = ?, updated_at = datetime('now')
-             WHERE id = ?`
-          ).run(
-            subscription.id,
-            plan,
-            status,
-            periodStart,
-            periodEnd,
-            existing.id,
+          await execute(
+            `UPDATE subscriptions SET stripe_subscription_id = $1, plan = $2, status = $3,
+             current_period_start = $4, current_period_end = $5, updated_at = NOW()
+             WHERE id = $6`,
+            [
+              subscription.id,
+              plan,
+              status,
+              periodStart,
+              periodEnd,
+              existing.id,
+            ]
           );
 
           // Update user plan
-          db.prepare('UPDATE users SET plan = ?, updated_at = datetime(\'now\') WHERE id = ?')
-            .run(plan, existing.user_id);
+          await execute(
+            'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
+            [plan, existing.user_id]
+          );
         }
         break;
       }
@@ -555,16 +566,20 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
         const subscription = event.data.object as Stripe.Subscription;
         const customerId = subscription.customer as string;
 
-        const existing = db.prepare(
-          `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = ?`
-        ).get(customerId) as { id: string; user_id: string } | undefined;
+        const existing = await queryOne<{ id: string; user_id: string }>(
+          `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = $1`,
+          [customerId]
+        );
 
         if (existing) {
-          db.prepare(
-            `UPDATE subscriptions SET plan = 'free', status = 'canceled', updated_at = datetime('now') WHERE id = ?`
-          ).run(existing.id);
-          db.prepare('UPDATE users SET plan = \'free\', updated_at = datetime(\'now\') WHERE id = ?')
-            .run(existing.user_id);
+          await execute(
+            `UPDATE subscriptions SET plan = 'free', status = 'canceled', updated_at = NOW() WHERE id = $1`,
+            [existing.id]
+          );
+          await execute(
+            'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
+            ['free', existing.user_id]
+          );
         }
         break;
       }

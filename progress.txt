@@ -1,25 +1,33 @@
 # Run State Summary
 
-Spec: rorca-curated-skills-library
-Run ID: 14
-Started: 2026-03-10T02:18:43.908Z
-Last Updated: 2026-03-10T05:08:59.395Z
+Spec: rorca-postgres-migration
+Run ID: 16
+Started: 2026-03-10T08:21:19.019Z
+Last Updated: 2026-03-10T13:18:16.002Z
 
-## Completed Stories (17)
-- SL-002: Explicit Match & Inject Skills API — DONE (claude, 194s)
-- SL-008: Match & Inject Button in Spec Review — DONE (claude, 330s)
-- SL-001: GitHub Repository Skill Browser API — DONE (claude, 284s)
-- SL-003: Model Suggestion API — DONE (claude, 13s)
-- SL-016: Auto-Match Skills & Auto-Suggest Models in Forge Panel — DONE (claude, 606s)
-- SL-017: SpecForgePreview Skills & Model Integration — DONE (claude, 250s)
-- SL-004: Skills Usage Per-Run API Endpoint — DONE (claude, 16s)
-- SL-010: Skills Tab in Run View — DONE (claude, 1872s)
-- SL-009: Model Suggestion UI in Spec Review — DONE (claude, 263s)
-- SL-011: Real-Time Skill Display via WAL Events — DONE (claude, 10s)
-- SL-005: Skill Curation Bulk Operations — DONE (claude, 298s)
-- SL-006: Skill Category Tags — DONE (claude, 408s)
-- SL-007: Three-Tab Skills Library UI — DONE (claude, 502s)
-- SL-012: Skill Content Preview in Run View Skills Tab — DONE (claude, 113s)
-- SL-013: WAL Events for Skill Lifecycle — DONE (claude, 376s)
-- SL-014: Skill Effectiveness Analytics API — DONE (claude, 190s)
-- SL-015: Skill Effectiveness Widget in Analytics Panel — DONE (claude, 174s)
+## Completed Stories (25)
+- PG-001: PostgreSQL Schema — Convert All Migrations — DONE (claude, 461s)
+- PG-002: Database Connection Layer — pg Pool + Async Helpers — DONE (claude, 190s)
+- PG-003: Route Async Conversion — Wave 1 (Core Routes) — DONE (claude, 1440s)
+- PG-004: Route Async Conversion — Wave 2 (Remaining Routes) — DONE (claude, 19s)
+- PG-005: Library Module Async Conversion — DONE (claude, 417s)
+- PG-006: pgvector Extension + Embedding Store — DONE (claude, 13s)
+- PG-007: Embedding Pipeline — Generate + Store Vectors — DONE (claude, 469s)
+- PG-008: Hybrid Search — tsvector + pgvector + RRF — DONE (claude, 330s)
+- PG-009: Docker Compose — Postgres 16 + pgvector + AGE — DONE (claude, 359s)
+- PG-010: Backend Test Suite Conversion — DONE (claude, 2084s)
+- PG-011: Remove SQLite Dependencies Completely — DONE (claude, 982s)
+- PG-012: Selective Retrieval in synthesize() — DONE (claude, 378s)
+- PG-013: CAG — In-Memory Context Cache (Hot Layer) — DONE (claude, 598s)
+- PG-014: Memory Tiering Router — CAG/RAG Fallback Chain — DONE (claude, 385s)
+- PG-015: Apache AGE Extension + Knowledge Graph Schema — DONE (claude, 476s)
+- PG-016: Graph-Powered Context Retrieval — DONE (claude, 364s)
+- PG-017: Graph-Based Convention Drift + Impact Analysis — DONE (claude, 448s)
+- PG-018: SQLite → Postgres Data Migration Tool — DONE (claude, 331s)
+- PG-019: Cloud Database Compatibility Layer — DONE (claude, 490s)
+- PR-018: Memory Semantic Deduplication — DONE (claude, 354s)
+- PR-021: Cross-Workspace Memory Synthesis — DONE (claude, 336s)
+- PG-020: Auto-Memory — Write Memories Automatically After Each Story — DONE (claude, 502s)
+- PG-021: Auto-Memory — Run-Level Synthesis After Pipeline Completion — DONE (claude, 443s)
+- PG-022: Memory Curation UI — Delete, Edit, Pin (Post-Write Review) — DONE (claude, 631s)
+- PG-023: Auto-Memory — Spec Generation Memory Capture — DONE (claude, 249s)

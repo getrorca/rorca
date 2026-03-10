@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { db } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { postCommitStatus, CHECK_NAME, type CheckState } from '../lib/github-checks';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
@@ -78,9 +78,10 @@ router.post('/:sha', async (req: Request, res: Response) => {
     }
 
     // Look up the GitHub repo for this workspace
-    const webhookRow = db.prepare(
-      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = ?'
-    ).get(workspaceId) as GithubWebhookRow | undefined;
+    const webhookRow = await queryOne<GithubWebhookRow>(
+      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId]
+    );
 
     if (!webhookRow) {
       res.status(404).json({ error: 'No GitHub connection found for this workspace' });
@@ -103,20 +104,19 @@ router.post('/:sha', async (req: Request, res: Response) => {
     }
 
     // Emit WAL event
-    const walResult = db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_check_manual', ?, 'user', ?)`
-    ).run(workspaceId, JSON.stringify({
-      sha,
-      state,
-      description: desc,
-      context: CHECK_NAME,
-    }));
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, actor, payload) VALUES ('github_check_manual', $1, 'user', $2) RETURNING *`,
+      [workspaceId, JSON.stringify({
+        sha,
+        state,
+        description: desc,
+        context: CHECK_NAME,
+      })]
+    );
 
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      walResult.lastInsertRowid
-    ) as WalEvent;
-
-    broadcastAll(walEvent);
+    if (walEvent) {
+      broadcastAll(walEvent);
+    }
 
     res.json({
       ok: true,

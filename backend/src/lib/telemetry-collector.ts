@@ -2,7 +2,7 @@
 // PR-005: Collect anonymous usage metrics (event type, agent type, story count, duration)
 // NEVER collects: spec content, file paths, workspace names, API keys
 
-import { db } from '../db/index';
+import { queryOne } from '../db/index';
 import { isTelemetryEnabled } from './telemetry-config';
 import { agentType } from './config';
 import { logger } from './logger';
@@ -19,23 +19,25 @@ export interface TelemetryMetrics {
  * Collect anonymous usage metrics from a completed pipeline run.
  * Returns null if telemetry is disabled.
  */
-export function collectRunMetrics(runId: number): TelemetryMetrics | null {
+export async function collectRunMetrics(runId: number): Promise<TelemetryMetrics | null> {
   if (!isTelemetryEnabled()) {
     return null;
   }
 
   try {
-    const run = db.prepare(
-      `SELECT id, started_at, finished_at, agent_type FROM pipeline_runs WHERE id = ?`
-    ).get(runId) as any;
+    const run = await queryOne<{ id: number; started_at: string; finished_at: string; agent_type: string }>(
+      `SELECT id, started_at, finished_at, agent_type FROM pipeline_runs WHERE id = $1`,
+      [runId]
+    );
 
     if (!run) {
       return null;
     }
 
-    const storyResults = db.prepare(
-      `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ?`
-    ).get(runId) as any;
+    const storyResults = await queryOne<{ cnt: number }>(
+      `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1`,
+      [runId]
+    );
 
     const startedAt = new Date(run.started_at).getTime();
     const finishedAt = new Date(run.finished_at).getTime();

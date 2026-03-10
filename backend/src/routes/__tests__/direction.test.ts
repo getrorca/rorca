@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -15,20 +14,15 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-direction-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 const validWorkspace = {
@@ -87,10 +81,8 @@ test('GET /api/direction/preview with hydrated workspace includes schema section
     .send({ layer: 3, workspaceId: 'ws-dir-test', contentYaml: validL3Yaml });
 
   // Seed workspace_context with schema + git
-  db.prepare(
-    `INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_memory, git_commit_count)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run('ws-dir-test', 'CREATE TABLE users (id TEXT);', 1, 'conventions:\n  - use snake_case', 42);
+  await execute(`INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_memory, git_commit_count)
+     VALUES ($1, $2, $3, $4, $5)`, ['ws-dir-test', 'CREATE TABLE users (id TEXT);', 1, 'conventions:\n  - use snake_case', 42]);
 
   const res = await request(app)
     .get('/api/direction/preview?brief=build+auth&workspaceId=ws-dir-test')
@@ -214,9 +206,7 @@ test('WAL event logged for direction_update on PUT', async () => {
     .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 1, contentYaml: 'quality: high' });
 
-  const events = db
-    .prepare("SELECT event_type FROM wal_events WHERE event_type = 'direction_update'")
-    .all() as { event_type: string }[];
+  const events = await query("SELECT event_type FROM wal_events WHERE event_type = 'direction_update'") as { event_type: string }[];
 
   expect(events).toHaveLength(1);
   expect(events[0].event_type).toBe('direction_update');

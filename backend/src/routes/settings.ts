@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { db } from '../db';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
@@ -50,13 +50,14 @@ interface UserSettingsRow {
  *       500:
  *         description: No user configured
  */
-router.get('/profile', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.get('/profile', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
-  const row = db.prepare(
-    'SELECT id, email, display_name, avatar_url FROM users WHERE id = ?'
-  ).get(user.id) as Omit<UserRow, 'password_hash'> | undefined;
+  const row = await queryOne<Omit<UserRow, 'password_hash'>>(
+    'SELECT id, email, display_name, avatar_url FROM users WHERE id = $1',
+    [user.id],
+  );
 
   if (!row) {
     res.status(404).json({ error: 'User not found' });
@@ -107,20 +108,23 @@ const ProfileUpdateSchema = z.object({
   avatarUrl: z.string().nullable().optional(),
 });
 
-router.put('/profile', validateBody(ProfileUpdateSchema), (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.put('/profile', validateBody(ProfileUpdateSchema), async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { displayName, avatarUrl } = req.body;
 
   const updates: string[] = [];
   const params: (string | null)[] = [];
+  let paramIdx = 0;
 
   if (displayName !== undefined) {
-    updates.push('display_name = ?');
+    paramIdx++;
+    updates.push(`display_name = $${paramIdx}`);
     params.push(displayName.trim());
   }
   if (avatarUrl !== undefined) {
-    updates.push('avatar_url = ?');
+    paramIdx++;
+    updates.push(`avatar_url = $${paramIdx}`);
     params.push(avatarUrl === '' ? null : avatarUrl);
   }
 
@@ -129,10 +133,11 @@ router.put('/profile', validateBody(ProfileUpdateSchema), (req: Request, res: Re
     return;
   }
 
-  updates.push("updated_at = datetime('now')");
+  updates.push('updated_at = NOW()');
+  paramIdx++;
   params.push(user.id);
 
-  db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  await execute(`UPDATE users SET ${updates.join(', ')} WHERE id = $${paramIdx}`, params);
 
   res.json({ ok: true });
 });
@@ -173,8 +178,8 @@ router.put('/profile', validateBody(ProfileUpdateSchema), (req: Request, res: Re
  *       500:
  *         description: No user configured
  */
-router.put('/password', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.put('/password', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { currentPassword, newPassword } = req.body;
 
@@ -187,7 +192,10 @@ router.put('/password', (req: Request, res: Response) => {
     return;
   }
 
-  const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(user.id) as Pick<UserRow, 'password_hash'> | undefined;
+  const row = await queryOne<Pick<UserRow, 'password_hash'>>(
+    'SELECT password_hash FROM users WHERE id = $1',
+    [user.id],
+  );
   if (!row) {
     res.status(404).json({ error: 'User not found' });
     return;
@@ -199,7 +207,10 @@ router.put('/password', (req: Request, res: Response) => {
   }
 
   const hash = bcrypt.hashSync(newPassword, BCRYPT_COST);
-  db.prepare("UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?").run(hash, user.id);
+  await execute(
+    'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+    [hash, user.id],
+  );
 
   res.json({ ok: true });
 });
@@ -225,13 +236,14 @@ router.put('/password', (req: Request, res: Response) => {
  *       500:
  *         description: No user configured
  */
-router.get('/display', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.get('/display', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
-  const row = db.prepare(
-    'SELECT * FROM user_settings WHERE user_id = ?'
-  ).get(user.id) as UserSettingsRow | undefined;
+  const row = await queryOne<UserSettingsRow>(
+    'SELECT * FROM user_settings WHERE user_id = $1',
+    [user.id],
+  );
 
   res.json({
     defaultModel: row?.default_model ?? 'claude-sonnet-4-5-20250929',
@@ -270,8 +282,8 @@ router.get('/display', (req: Request, res: Response) => {
  *       500:
  *         description: No user configured
  */
-router.put('/display', (req: Request, res: Response) => {
-  const user = getEffectiveUser(req);
+router.put('/display', async (req: Request, res: Response) => {
+  const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
   const { defaultModel, itemsPerPage } = req.body;
 
@@ -280,14 +292,15 @@ router.put('/display', (req: Request, res: Response) => {
     ? Math.round(itemsPerPage)
     : 20;
 
-  db.prepare(`
-    INSERT INTO user_settings (user_id, default_model, items_per_page, updated_at)
-    VALUES (?, ?, ?, datetime('now'))
-    ON CONFLICT(user_id) DO UPDATE SET
-      default_model = excluded.default_model,
-      items_per_page = excluded.items_per_page,
-      updated_at = excluded.updated_at
-  `).run(user.id, model, perPage);
+  await execute(
+    `INSERT INTO user_settings (user_id, default_model, items_per_page, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT(user_id) DO UPDATE SET
+       default_model = excluded.default_model,
+       items_per_page = excluded.items_per_page,
+       updated_at = excluded.updated_at`,
+    [user.id, model, perPage],
+  );
 
   res.json({ ok: true, defaultModel: model, itemsPerPage: perPage });
 });

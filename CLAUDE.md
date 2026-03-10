@@ -42,7 +42,7 @@ npm run self-register
 **Rorca** is a spec-driven development platform. It turns a plain-English brief into a structured spec (N user stories), then executes each story as an isolated subprocess with the full tool set — no context limits, resumable, runs to completion autonomously.
 
 ```
-Browser (React :5210)  ←→  Express API (:3030)  ←→  SQLite (WAL)
+Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
                                     ↓
                             Execution Engine (per-story subprocess)
                             ├── claude --print      (Claude subscription)
@@ -54,7 +54,7 @@ Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 
 **Stack**:
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + xterm.js
-- Backend: Express.js + TypeScript + SQLite (`better-sqlite3`, WAL mode, FK on)
+- Backend: Express.js + TypeScript + PostgreSQL 16 (`pg` Pool, async, connection pooling, pgvector, Apache AGE)
 - Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex --approval-mode auto-edit` (ChatGPT sub)
 - Spec generation: OpenCode (autonomous codebase exploration) OR SDK fallback (`SPEC_PROVIDER` env var)
 - MCP: API-first (OpenAPI spec → auto-generated MCP tools via HTTP transport on :3030)
@@ -185,15 +185,16 @@ rorca/
 │       │                     # errors, scheduler, agent-hook-runner, etc.)
 │       ├── mcp/              # MCP stdio server (5 tools)
 │       └── db/
-│           ├── index.ts      # DB connection + schema bootstrapper
-│           └── migrations/   # SQL migration files (001–036)
+│           ├── index.ts      # PostgreSQL Pool + async query helpers
+│           ├── pg-index.ts   # Migration runner (schema_migrations tracking)
+│           └── pg-migrations/ # PostgreSQL migration files (001–049)
 ├── forge/
 │   ├── run-loop.sh           # Ralph Loop execution engine
 │   ├── self-register.ts      # Self-hosting bootstrap
 │   └── specs/                # Spec JSON files + logs
 │       ├── pending/          # Generated, awaiting approval
 │       └── approved/         # Approved, ready to run
-└── backend/rorca.db         # SQLite database (auto-created)
+└── docker-compose.yml       # PostgreSQL 16 + pgvector + AGE
 ```
 
 ### Sidebar Navigation (defined in `src/components/Sidebar.tsx`)
@@ -222,7 +223,7 @@ rorca/
 
 ## Database Tables
 
-46 migrations (`backend/src/db/migrations/001-045`). Key tables:
+49 migrations (`backend/src/db/pg-migrations/001-049`). Key tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -258,7 +259,7 @@ rorca/
 
 **WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching)
 
-WAL mode + FK constraints are enabled on every DB connection in `backend/src/db/index.ts`.
+PostgreSQL enforces FK constraints natively. Connection pooling (max 20, 30s idle timeout) is configured in `backend/src/db/index.ts`.
 
 ## API Routes
 
@@ -373,7 +374,7 @@ When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the buil
 
 ### Top 5
 1. **`chatComplete` returns `ChatResult { text, usage }`** — always use `.text` accessor. Never treat result as a string.
-2. **better-sqlite3 is synchronous** — never use async in DB calls. `db.prepare(sql).get()` returns T|undefined, `.all()` returns T[], `.run()` returns RunResult.
+2. **pg is async — always `await` DB calls**. `await queryOne<T>(sql, params)` returns T|undefined, `await query<T>(sql, params)` returns T[], `await execute(sql, params)` returns `{ rowCount }`. Use `$1, $2, ...` numbered placeholders (not `?`).
 3. **spec `id` ≠ spec `specName`** — `id` is the filename slug (`rorca-feature-enhancements`), `specName` is the human title. Use `spec.id` to construct file paths.
 4. **run-loop.sh is a bash fallback only** — lives at `workspace.path/forge/run-loop.sh`. Only used if `execution-engine.ts` is missing. Claude-only, no multi-agent support. Do not rely on it.
 5. **Backend requires restart** — `tsx` has no hot-reload. Always `lsof -ti:3030 | xargs kill -9 && npm run dev` after any backend changes.
@@ -412,14 +413,14 @@ Runs marked `status='running'` survive backend restarts but their processes are 
 -- Check via DB
 SELECT id, pid, status FROM pipeline_runs WHERE status='running';
 -- Fix
-UPDATE pipeline_runs SET status='failed', finished_at=datetime('now') WHERE status='running' AND id=<id>;
+UPDATE pipeline_runs SET status='failed', finished_at=NOW() WHERE status='running' AND id=<id>;
 ```
 
 ### WAL Events Drive UI
 The Pipeline Monitor (`/api/pipeline/stream` SSE) polls `wal_events` every 3s. Story progress only appears after `execution-engine.ts` writes `story_started`/`story_passed` events to the WAL via `fetch` to `/api/wal`. The Terminal tab shows raw output independently of WAL events.
 
 ### WAL Events Table — Column Is `ts`, Not `created_at`
-The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Queries against this table must use `ORDER BY ts DESC` and `SELECT ts`. The route handler can alias it (`ts AS created_at`) for API consumers, but the SQL itself must use `ts`. Using `created_at` produces `SqliteError: no such column: created_at`.
+The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Queries against this table must use `ORDER BY ts DESC` and `SELECT ts`. The route handler can alias it (`ts AS created_at`) for API consumers, but the SQL itself must use `ts`. Using `created_at` produces an error: no such column.
 
 ### Direction Stack Synthesis
 `synthesize()` in `backend/src/lib/direction-stack.ts` merges L1→L5 into a single context string. L4/L5 come from the spec brief and story annotations — not stored in `direction_layers`.
@@ -431,8 +432,8 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### SQLite Migration Pattern
-Migrations are SQL files in `backend/src/db/migrations/`. They run in numeric order on first startup. For column additions (SQLite lacks `ADD COLUMN IF NOT EXISTS`), use `pragma table_info` check in `db/index.ts` instead of a migration file.
+### PostgreSQL Migration Pattern
+Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -499,7 +500,7 @@ Multiple workspaces can run simultaneously. Same-workspace parallel runs require
 ```bash
 # Core
 PORT=3030                     # Optional override
-DB_PATH=./rorca.db           # Optional override
+DATABASE_URL=postgres://rorca:rorca@localhost:5432/rorca  # PostgreSQL connection string
 
 # Execution engine
 RORCA_AGENT=claude           # Options: claude (default), opencode, codex

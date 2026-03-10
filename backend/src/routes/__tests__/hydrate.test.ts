@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 // Mock git-hydrator
 const mockGitMapStep = jest.fn();
@@ -23,7 +23,6 @@ jest.mock('../../lib/schema-hydrator', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let dbPath: string;
 let authToken: string;
@@ -33,20 +32,15 @@ beforeEach(async () => {
   jest.clearAllMocks();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hydrate-test-'));
   dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 const validWorkspace = {
@@ -220,9 +214,7 @@ test('UPSERT: calling hydrate twice does not duplicate workspace_context rows', 
   expect(res.body.schema.tableCount).toBe(2);
 
   // Only one row in workspace_context
-  const rows = db
-    .prepare('SELECT * FROM workspace_context WHERE workspace_id = ?')
-    .all('ws-hydrate');
+  const rows = await query('SELECT * FROM workspace_context WHERE workspace_id = $1', ['ws-hydrate']);
   expect(rows).toHaveLength(1);
 });
 
@@ -230,10 +222,8 @@ test('delta sync: uses last_ingested_commit_hash from workspace_context', async 
   await createWorkspace();
 
   // Pre-seed workspace_context with a previous hash
-  db.prepare(
-    `INSERT INTO workspace_context (workspace_id, last_ingested_commit_hash, git_commit_count, git_memory)
-     VALUES (?, ?, ?, ?)`
-  ).run('ws-hydrate', 'prev_hash_abc', 20, 'existing:\n  - old memory');
+  await execute(`INSERT INTO workspace_context (workspace_id, last_ingested_commit_hash, git_commit_count, git_memory)
+     VALUES ($1, $2, $3, $4)`, ['ws-hydrate', 'prev_hash_abc', 20, 'existing:\n  - old memory']);
 
   mockGitMapStep.mockResolvedValue([
     { fromHash: 'n1', toHash: 'n2', commitCount: 3, summary: '- New feature' },
@@ -256,9 +246,7 @@ test('delta sync: uses last_ingested_commit_hash from workspace_context', async 
   expect(res.body.git.newCommits).toBe(3);
 
   // Git memory should be appended (delta mode)
-  const ctx = db
-    .prepare('SELECT git_memory FROM workspace_context WHERE workspace_id = ?')
-    .get('ws-hydrate') as { git_memory: string };
+  const ctx = await queryOne('SELECT git_memory FROM workspace_context WHERE workspace_id = $1', ['ws-hydrate']) as { git_memory: string };
   expect(ctx.git_memory).toContain('existing:');
   expect(ctx.git_memory).toContain('new rule');
 });
@@ -285,11 +273,9 @@ test('WAL events inserted for both hydrate_schema and hydrate_git', async () => 
     .set('Authorization', `Bearer ${authToken}`)
     .send({});
 
-  const events = db
-    .prepare(
-      "SELECT event_type, workspace_id, payload FROM wal_events WHERE workspace_id = 'ws-hydrate' AND event_type LIKE 'hydrate_%' ORDER BY id"
-    )
-    .all() as { event_type: string; workspace_id: string; payload: string }[];
+  const events = await query(
+    "SELECT event_type, workspace_id, payload FROM wal_events WHERE workspace_id = 'ws-hydrate' AND event_type LIKE 'hydrate_%' ORDER BY id"
+  ) as { event_type: string; workspace_id: string; payload: string }[];
 
   expect(events).toHaveLength(2);
   expect(events[0].event_type).toBe('hydrate_schema');

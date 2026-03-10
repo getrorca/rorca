@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let workspacePath: string;
 let authToken: string;
@@ -16,27 +15,21 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-graph-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  // Create a workspace with spec directories
+// Create a workspace with spec directories
   workspacePath = path.join(tmpDir, 'test-project');
   fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending'), { recursive: true });
-  db.prepare('INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)').run('ws-1', 'Test', workspacePath);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, ['ws-1', 'Test', workspacePath]);
   authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 function writeSpec(slug: string, spec: object, status: 'pending' | 'approved' = 'approved') {
@@ -115,16 +108,10 @@ test('includes story status from pipeline run when runId is provided', async () 
   });
 
   // Create a pipeline run and story results
-  db.prepare(
-    `INSERT INTO pipeline_runs (id, workspace_id, spec_path, status, started_at) VALUES (?, ?, ?, ?, datetime('now'))`
-  ).run(1, 'ws-1', 'ralph/specs/approved/status-spec.json', 'running');
+  await execute(`INSERT INTO pipeline_runs (id, workspace_id, spec_path, status, started_at) VALUES ($1, $2, $3, $4, NOW())`, [1, 'ws-1', 'ralph/specs/approved/status-spec.json', 'running']);
 
-  db.prepare(
-    `INSERT INTO story_results (run_id, story_id, status, started_at) VALUES (?, ?, ?, datetime('now'))`
-  ).run(1, 'US-001', 'pass');
-  db.prepare(
-    `INSERT INTO story_results (run_id, story_id, status, started_at) VALUES (?, ?, ?, datetime('now'))`
-  ).run(1, 'US-002', 'fail');
+  await execute(`INSERT INTO story_results (run_id, story_id, status, started_at) VALUES ($1, $2, $3, NOW())`, [1, 'US-001', 'pass']);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, started_at) VALUES ($1, $2, $3, NOW())`, [1, 'US-002', 'fail']);
 
   const res = await request(app).get('/api/specs/status-spec/graph?workspaceId=ws-1&runId=1').set('Authorization', `Bearer ${authToken}`);
 

@@ -2,15 +2,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
+import { query, queryOne, execute } from '../../db/index';
 
 // Mock global fetch for GitHub OAuth tests
 const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 
 beforeEach(() => {
@@ -18,21 +17,16 @@ beforeEach(() => {
   mockFetch.mockReset();
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-auth-test-'));
-  process.env.DB_PATH = path.join(tmpDir, 'test.db');
-
-  // Create workspace dir structure for specs (required by some route mounts)
+// Create workspace dir structure for specs (required by some route mounts)
   const wsDir = path.join(tmpDir, 'ws');
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'pending'), { recursive: true });
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
 
-  db = require('../../db').db;
   app = require('../../server').default;
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
+fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 const validPayload = {
@@ -67,7 +61,7 @@ describe('POST /api/auth/register', () => {
   test('stores hashed password (not plaintext) in the database', async () => {
     await request(app).post('/api/auth/register').send(validPayload);
 
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get('test@example.com') as Record<string, unknown>;
+    const user = await queryOne(`SELECT * FROM users WHERE email = $1`, ['test@example.com']) as Record<string, unknown>;
     expect(user).toBeDefined();
     expect(user.password_hash).toBeDefined();
     expect(user.password_hash).not.toBe('securepass123');
@@ -125,7 +119,7 @@ describe('POST /api/auth/register', () => {
 
   test('stores refresh token hash in database', async () => {
     await request(app).post('/api/auth/register').send(validPayload);
-    const tokens = db.prepare('SELECT * FROM refresh_tokens').all() as Record<string, unknown>[];
+    const tokens = await query(`SELECT * FROM refresh_tokens`) as Record<string, unknown>[];
     expect(tokens).toHaveLength(1);
     expect(tokens[0].token_hash).toBeDefined();
     expect(tokens[0].expires_at).toBeDefined();
@@ -133,7 +127,7 @@ describe('POST /api/auth/register', () => {
 
   test('emits user_registered WAL event', async () => {
     await request(app).post('/api/auth/register').send(validPayload);
-    const event = db.prepare("SELECT * FROM wal_events WHERE event_type = 'user_registered'").get() as Record<string, unknown>;
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'user_registered'`) as Record<string, unknown>;
     expect(event).toBeDefined();
     const payload = JSON.parse(event.payload as string);
     expect(payload.email).toBe('test@example.com');
@@ -201,7 +195,7 @@ describe('POST /api/auth/login', () => {
     });
 
     // Should have 2 refresh tokens now (1 from register, 1 from login)
-    const tokens = db.prepare('SELECT * FROM refresh_tokens ORDER BY created_at DESC').all() as Record<string, unknown>[];
+    const tokens = await query(`SELECT * FROM refresh_tokens ORDER BY created_at DESC`) as Record<string, unknown>[];
     expect(tokens.length).toBeGreaterThanOrEqual(2);
 
     const latestToken = tokens[0];
@@ -267,7 +261,7 @@ describe('POST /api/auth/login', () => {
       password: 'securepass123',
     });
 
-    const event = db.prepare("SELECT * FROM wal_events WHERE event_type = 'user_login'").get() as Record<string, unknown>;
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'user_login'`) as Record<string, unknown>;
     expect(event).toBeDefined();
     const payload = JSON.parse(event.payload as string);
     expect(payload.email).toBe('test@example.com');
@@ -326,7 +320,7 @@ describe('POST /api/auth/refresh', () => {
     // Manually expire the token in DB
     const crypto = require('crypto');
     const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-    db.prepare("UPDATE refresh_tokens SET expires_at = datetime('now', '-1 day') WHERE token_hash = ?").run(tokenHash);
+    await execute(`UPDATE refresh_tokens SET expires_at = NOW() - INTERVAL '1 day' WHERE token_hash = $1`, [tokenHash]);
 
     const res = await request(app).post('/api/auth/refresh').send({ refreshToken });
     expect(res.status).toBe(401);
@@ -369,7 +363,7 @@ describe('POST /api/auth/logout', () => {
 
     const crypto = require('crypto');
     const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-    const token = db.prepare('SELECT * FROM refresh_tokens WHERE token_hash = ?').get(tokenHash) as Record<string, unknown>;
+    const token = await queryOne(`SELECT * FROM refresh_tokens WHERE token_hash = $1`, [tokenHash]) as Record<string, unknown>;
     expect(token.revoked_at).toBeDefined();
     expect(token.revoked_at).not.toBeNull();
   });
@@ -470,7 +464,7 @@ describe('authRequired middleware', () => {
     const { accessToken } = await registerUser();
 
     // Delete the user from DB
-    db.prepare('DELETE FROM users').run();
+    await execute(`DELETE FROM users`);
 
     const { authRequired } = require('../auth');
     const express = require('express');
@@ -565,7 +559,7 @@ describe('POST /api/auth/forgot-password', () => {
 
     await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
 
-    const tokens = db.prepare('SELECT * FROM password_reset_tokens').all() as Record<string, unknown>[];
+    const tokens = await query(`SELECT * FROM password_reset_tokens`) as Record<string, unknown>[];
     expect(tokens).toHaveLength(1);
     expect(tokens[0].token_hash).toBeDefined();
     expect(tokens[0].expires_at).toBeDefined();
@@ -577,8 +571,8 @@ describe('POST /api/auth/forgot-password', () => {
 
     await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
 
-    const token = db.prepare('SELECT * FROM password_reset_tokens').get() as Record<string, unknown>;
-    // SQLite datetime('now') stores UTC without timezone suffix — append 'Z' for correct JS parsing
+    const token = await queryOne(`SELECT * FROM password_reset_tokens`) as Record<string, unknown>;
+    // SQLite NOW() stores UTC without timezone suffix — append 'Z' for correct JS parsing
     const expiresAt = new Date((token.expires_at as string) + 'Z').getTime();
     const createdAt = new Date((token.created_at as string) + 'Z').getTime();
     const hoursUntilExpiry = (expiresAt - createdAt) / (1000 * 60 * 60);
@@ -626,7 +620,7 @@ describe('POST /api/auth/forgot-password', () => {
 
     await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
 
-    const event = db.prepare("SELECT * FROM wal_events WHERE event_type = 'password_reset_requested'").get() as Record<string, unknown>;
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'password_reset_requested'`) as Record<string, unknown>;
     expect(event).toBeDefined();
     const payload = JSON.parse(event.payload as string);
     expect(payload.email).toBe('test@example.com');
@@ -691,7 +685,7 @@ describe('POST /api/auth/reset-password', () => {
       newPassword: 'newpassword123',
     });
 
-    const resetToken = db.prepare('SELECT * FROM password_reset_tokens').get() as Record<string, unknown>;
+    const resetToken = await queryOne(`SELECT * FROM password_reset_tokens`) as Record<string, unknown>;
     expect(resetToken.used_at).not.toBeNull();
   });
 
@@ -721,7 +715,7 @@ describe('POST /api/auth/reset-password', () => {
     // Manually expire the token
     const crypto = require('crypto');
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    db.prepare("UPDATE password_reset_tokens SET expires_at = datetime('now', '-1 hour') WHERE token_hash = ?").run(tokenHash);
+    await execute(`UPDATE password_reset_tokens SET expires_at = NOW() - INTERVAL '1 hour' WHERE token_hash = $1`, [tokenHash]);
 
     const res = await request(app).post('/api/auth/reset-password').send({
       token,
@@ -787,7 +781,7 @@ describe('POST /api/auth/reset-password', () => {
       newPassword: 'newpassword123',
     });
 
-    const event = db.prepare("SELECT * FROM wal_events WHERE event_type = 'password_reset'").get() as Record<string, unknown>;
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'password_reset'`) as Record<string, unknown>;
     expect(event).toBeDefined();
     const payload = JSON.parse(event.payload as string);
     expect(payload.email).toBe('test@example.com');
@@ -802,7 +796,7 @@ describe('POST /api/auth/reset-password', () => {
       newPassword: 'newpassword123',
     });
 
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get('test@example.com') as Record<string, unknown>;
+    const user = await queryOne(`SELECT * FROM users WHERE email = $1`, ['test@example.com']) as Record<string, unknown>;
     expect(user.password_hash).toBeDefined();
     expect(user.password_hash).not.toBe('newpassword123');
     expect((user.password_hash as string).startsWith('$2a$12$') || (user.password_hash as string).startsWith('$2b$12$')).toBe(true);
@@ -845,7 +839,6 @@ describe('GET /api/auth/github', () => {
     jest.resetModules();
     process.env.GITHUB_CLIENT_ID = 'test-client-id';
     process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
-    db = require('../../db').db;
     app = require('../../server').default;
 
     const res = await request(app).get('/api/auth/github');
@@ -868,7 +861,6 @@ describe('GET /api/auth/github/callback', () => {
     process.env.GITHUB_CLIENT_ID = 'test-client-id';
     process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
     mockFetch.mockReset();
-    db = require('../../db').db;
     app = require('../../server').default;
   }
 
@@ -944,12 +936,12 @@ describe('GET /api/auth/github/callback', () => {
     expect(tokens.refreshToken).toBeDefined();
 
     // Verify user was created in DB
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get('octocat@github.com') as Record<string, unknown>;
+    const user = await queryOne(`SELECT * FROM users WHERE email = $1`, ['octocat@github.com']) as Record<string, unknown>;
     expect(user).toBeDefined();
     expect(user.github_id).toBe('12345');
 
     // Verify github_connection was created
-    const conn = db.prepare('SELECT * FROM github_connections WHERE user_id = ?').get(user.id as string) as Record<string, unknown>;
+    const conn = await queryOne(`SELECT * FROM github_connections WHERE user_id = $1`, [user.id as string]) as Record<string, unknown>;
     expect(conn).toBeDefined();
     expect(conn.github_user_id).toBe('12345');
     expect(conn.github_username).toBe('octocat');
@@ -979,12 +971,12 @@ describe('GET /api/auth/github/callback', () => {
     expect(tokens.accessToken).toBeDefined();
 
     // Verify only 1 user exists (no duplicate)
-    const users = db.prepare('SELECT * FROM users WHERE email = ?').all('octocat@github.com') as Record<string, unknown>[];
+    const users = await query(`SELECT * FROM users WHERE email = $1`, ['octocat@github.com']) as Record<string, unknown>[];
     expect(users).toHaveLength(1);
     expect(users[0].github_id).toBe('12345');
 
     // Verify github_connection was created
-    const conn = db.prepare('SELECT * FROM github_connections WHERE user_id = ?').get(users[0].id as string) as Record<string, unknown>;
+    const conn = await queryOne(`SELECT * FROM github_connections WHERE user_id = $1`, [users[0].id as string]) as Record<string, unknown>;
     expect(conn).toBeDefined();
   });
 
@@ -996,7 +988,7 @@ describe('GET /api/auth/github/callback', () => {
     await request(app).get('/api/auth/github/callback?code=first-code');
 
     // Get user ID from DB
-    const user1 = db.prepare('SELECT id FROM users WHERE email = ?').get('octocat@github.com') as Record<string, unknown>;
+    const user1 = await queryOne(`SELECT id FROM users WHERE email = $1`, ['octocat@github.com']) as Record<string, unknown>;
     const userId = user1.id as string;
 
     // Second login (returning user) with new token
@@ -1004,7 +996,7 @@ describe('GET /api/auth/github/callback', () => {
     await request(app).get('/api/auth/github/callback?code=second-code');
 
     // Token should be updated
-    const conn = db.prepare('SELECT * FROM github_connections WHERE user_id = ?').get(userId) as Record<string, unknown>;
+    const conn = await queryOne(`SELECT * FROM github_connections WHERE user_id = $1`, [userId]) as Record<string, unknown>;
     const { decryptToken } = require('../auth');
     expect(decryptToken(conn.encrypted_token as string)).toBe('gho_new_token_456');
   });
@@ -1052,7 +1044,7 @@ describe('GET /api/auth/github/callback', () => {
     expect(res.status).toBe(302);
 
     // Verify user email was normalized in DB
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get('direct@example.com') as Record<string, unknown>;
+    const user = await queryOne(`SELECT * FROM users WHERE email = $1`, ['direct@example.com']) as Record<string, unknown>;
     expect(user).toBeDefined();
   });
 
@@ -1062,7 +1054,7 @@ describe('GET /api/auth/github/callback', () => {
 
     await request(app).get('/api/auth/github/callback?code=test-code');
 
-    const event = db.prepare("SELECT * FROM wal_events WHERE event_type = 'github_login'").get() as Record<string, unknown>;
+    const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'github_login'`) as Record<string, unknown>;
     expect(event).toBeDefined();
     const payload = JSON.parse(event.payload as string);
     expect(payload.githubUserId).toBe('12345');

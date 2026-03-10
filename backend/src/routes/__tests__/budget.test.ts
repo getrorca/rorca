@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -17,26 +16,18 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-budget-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, 'Test Workspace', ?)"
-  ).run(WORKSPACE_ID, tmpDir);
+await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2)`, [WORKSPACE_ID, tmpDir]);
 
   authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 describe('GET /api/workspaces/:id/budget', () => {
@@ -54,9 +45,7 @@ describe('GET /api/workspaces/:id/budget', () => {
   });
 
   it('returns budget config and spending status', async () => {
-    db.prepare(
-      "INSERT INTO budget_config (workspace_id, alert_threshold_usd, hard_cap_usd, period, notify_emails) VALUES (?, 10, 50, 'monthly', '[]')"
-    ).run(WORKSPACE_ID);
+    await execute(`INSERT INTO budget_config (workspace_id, alert_threshold_usd, hard_cap_usd, period, notify_emails) VALUES ($1, 10, 50, 'monthly', '[]')`, [WORKSPACE_ID]);
 
     const res = await request(app)
       .get(`/api/workspaces/${WORKSPACE_ID}/budget`)
@@ -102,9 +91,7 @@ describe('POST /api/workspaces/:id/budget', () => {
   });
 
   it('upserts existing budget config', async () => {
-    db.prepare(
-      "INSERT INTO budget_config (workspace_id, alert_threshold_usd, hard_cap_usd, period, notify_emails) VALUES (?, 5, 20, 'daily', '[]')"
-    ).run(WORKSPACE_ID);
+    await execute(`INSERT INTO budget_config (workspace_id, alert_threshold_usd, hard_cap_usd, period, notify_emails) VALUES ($1, 5, 20, 'daily', '[]')`, [WORKSPACE_ID]);
 
     const res = await request(app)
       .post(`/api/workspaces/${WORKSPACE_ID}/budget`)
@@ -116,7 +103,7 @@ describe('POST /api/workspaces/:id/budget', () => {
     expect(res.body.config.hard_cap_usd).toBe(100);
     expect(res.body.config.period).toBe('weekly');
 
-    const count = (db.prepare('SELECT COUNT(*) as c FROM budget_config WHERE workspace_id = ?').get(WORKSPACE_ID) as { c: number }).c;
+    const count = (await queryOne(`SELECT COUNT(*) as c FROM budget_config WHERE workspace_id = $1`, [WORKSPACE_ID]) as { c: number }).c;
     expect(count).toBe(1);
   });
 
@@ -162,9 +149,7 @@ describe('POST /api/workspaces/:id/budget', () => {
 
 describe('DELETE /api/workspaces/:id/budget', () => {
   it('deletes an existing budget config', async () => {
-    db.prepare(
-      "INSERT INTO budget_config (workspace_id, period, notify_emails) VALUES (?, 'monthly', '[]')"
-    ).run(WORKSPACE_ID);
+    await execute(`INSERT INTO budget_config (workspace_id, period, notify_emails) VALUES ($1, 'monthly', '[]')`, [WORKSPACE_ID]);
 
     const res = await request(app)
       .delete(`/api/workspaces/${WORKSPACE_ID}/budget`)
@@ -173,7 +158,7 @@ describe('DELETE /api/workspaces/:id/budget', () => {
     expect(res.status).toBe(200);
     expect(res.body.deleted).toBe(true);
 
-    const gone = db.prepare('SELECT * FROM budget_config WHERE workspace_id = ?').get(WORKSPACE_ID);
+    const gone = await queryOne(`SELECT * FROM budget_config WHERE workspace_id = $1`, [WORKSPACE_ID]);
     expect(gone).toBeUndefined();
   });
 

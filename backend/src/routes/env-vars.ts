@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
 
@@ -53,19 +53,20 @@ const SECRET_MASK = '••••••';
  *       404:
  *         description: Workspace not found
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
 
-    const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspaceId);
+    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
     }
 
-    const rows = db.prepare(
-      'SELECT * FROM workspace_env_vars WHERE workspace_id = ? ORDER BY key ASC'
-    ).all(workspaceId) as EnvVarRow[];
+    const rows = await query<EnvVarRow>(
+      'SELECT * FROM workspace_env_vars WHERE workspace_id = $1 ORDER BY key ASC',
+      [workspaceId]
+    );
 
     const envVars = rows.map(row => ({
       id: row.id,
@@ -117,7 +118,7 @@ router.get('/', (req: Request, res: Response) => {
  *       404:
  *         description: Workspace not found
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
     const { key, value, isSecret } = req.body;
@@ -137,7 +138,7 @@ router.post('/', (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = db.prepare('SELECT id FROM workspaces WHERE id = ?').get(workspaceId);
+    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -147,38 +148,39 @@ router.post('/', (req: Request, res: Response) => {
     const encryptedValue = encryptToken(value);
 
     // Upsert: update if key exists for this workspace, otherwise insert
-    const existing = db.prepare(
-      'SELECT id FROM workspace_env_vars WHERE workspace_id = ? AND key = ?'
-    ).get(workspaceId, key) as { id: string } | undefined;
+    const existing = await queryOne<{ id: string }>(
+      'SELECT id FROM workspace_env_vars WHERE workspace_id = $1 AND key = $2',
+      [workspaceId, key]
+    );
 
     if (existing) {
-      db.prepare(
-        `UPDATE workspace_env_vars SET encrypted_value = ?, is_secret = ?, updated_at = datetime('now') WHERE id = ?`
-      ).run(encryptedValue, secret, existing.id);
+      const row = await queryOne<EnvVarRow>(
+        `UPDATE workspace_env_vars SET encrypted_value = $1, is_secret = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
+        [encryptedValue, secret, existing.id]
+      );
 
-      const row = db.prepare('SELECT * FROM workspace_env_vars WHERE id = ?').get(existing.id) as EnvVarRow;
       res.json({
-        id: row.id,
-        key: row.key,
-        value: row.is_secret ? SECRET_MASK : value,
-        isSecret: !!row.is_secret,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
+        id: row!.id,
+        key: row!.key,
+        value: row!.is_secret ? SECRET_MASK : value,
+        isSecret: !!row!.is_secret,
+        createdAt: row!.created_at,
+        updatedAt: row!.updated_at,
       });
     } else {
       const id = randomUUID();
-      db.prepare(
-        `INSERT INTO workspace_env_vars (id, workspace_id, key, encrypted_value, is_secret) VALUES (?, ?, ?, ?, ?)`
-      ).run(id, workspaceId, key, encryptedValue, secret);
+      const row = await queryOne<EnvVarRow>(
+        `INSERT INTO workspace_env_vars (id, workspace_id, key, encrypted_value, is_secret) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [id, workspaceId, key, encryptedValue, secret]
+      );
 
-      const row = db.prepare('SELECT * FROM workspace_env_vars WHERE id = ?').get(id) as EnvVarRow;
       res.status(201).json({
-        id: row.id,
-        key: row.key,
-        value: row.is_secret ? SECRET_MASK : value,
-        isSecret: !!row.is_secret,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
+        id: row!.id,
+        key: row!.key,
+        value: row!.is_secret ? SECRET_MASK : value,
+        isSecret: !!row!.is_secret,
+        createdAt: row!.created_at,
+        updatedAt: row!.updated_at,
       });
     }
   } catch (error: any) {
@@ -210,16 +212,17 @@ router.post('/', (req: Request, res: Response) => {
  *       404:
  *         description: Environment variable not found
  */
-router.delete('/:key', (req: Request, res: Response) => {
+router.delete('/:key', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
     const key = req.params.key;
 
-    const result = db.prepare(
-      'DELETE FROM workspace_env_vars WHERE workspace_id = ? AND key = ?'
-    ).run(workspaceId, key);
+    const result = await execute(
+      'DELETE FROM workspace_env_vars WHERE workspace_id = $1 AND key = $2',
+      [workspaceId, key]
+    );
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       res.status(404).json({ error: 'Env var not found' });
       return;
     }
@@ -233,10 +236,11 @@ router.delete('/:key', (req: Request, res: Response) => {
 
 // ─── Helper: get decrypted env vars for pipeline injection ──────────────────
 
-export function getWorkspaceEnvVars(workspaceId: string): Record<string, string> {
-  const rows = db.prepare(
-    'SELECT key, encrypted_value FROM workspace_env_vars WHERE workspace_id = ?'
-  ).all(workspaceId) as Pick<EnvVarRow, 'key' | 'encrypted_value'>[];
+export async function getWorkspaceEnvVars(workspaceId: string): Promise<Record<string, string>> {
+  const rows = await query<Pick<EnvVarRow, 'key' | 'encrypted_value'>>(
+    'SELECT key, encrypted_value FROM workspace_env_vars WHERE workspace_id = $1',
+    [workspaceId]
+  );
 
   const vars: Record<string, string> = {};
   for (const row of rows) {

@@ -3,7 +3,7 @@
 # Usage: ./healthcheck.sh [--json] [--quiet]
 # Exit codes: 0 = healthy, 1 = degraded, 2 = critical
 #
-# Checks: database connectivity, disk space, backend process, nginx process
+# Checks: database connectivity (via API), disk space, backend process
 # Designed for use with monitoring systems (Nagios, Datadog, uptime checks).
 
 set -euo pipefail
@@ -11,7 +11,6 @@ set -euo pipefail
 # ─── Configuration ────────────────────────────────────────────────────────────
 BACKEND_URL="${RORCA_API_URL:-http://localhost:3030}"
 HEALTH_ENDPOINT="${BACKEND_URL}/api/health/detailed"
-DB_PATH="${DB_PATH:-/data/rorca.db}"
 DISK_WARN_PERCENT=85
 DISK_CRIT_PERCENT=95
 CURL_TIMEOUT=5
@@ -59,11 +58,11 @@ else
     DB_CONNECTED=$(echo "$HEALTH_RESPONSE" | grep -o '"db_connected":[a-z]*' | head -1 | cut -d: -f2)
 
     if [ "$DB_CONNECTED" = "true" ]; then
-        add_check "database" "ok" "Connected and responsive"
-        log "  OK: Database connected"
+        add_check "database" "ok" "PostgreSQL connected and responsive"
+        log "  OK: PostgreSQL connected"
     else
-        add_check "database" "critical" "Database query failed"
-        log "  CRITICAL: Database not connected"
+        add_check "database" "critical" "PostgreSQL connection failed"
+        log "  CRITICAL: PostgreSQL not connected"
     fi
 
     if [ "$API_STATUS" = "healthy" ]; then
@@ -77,14 +76,9 @@ fi
 
 # ─── Check 2: Disk Space ─────────────────────────────────────────────────────
 log "Checking disk space..."
-if [ -f "$DB_PATH" ]; then
-    DB_DIR=$(dirname "$DB_PATH")
-else
-    DB_DIR="/"
-fi
 
 # Get disk usage percentage (works on Linux and macOS)
-DISK_PERCENT=$(df "$DB_DIR" 2>/dev/null | tail -1 | awk '{gsub(/%/,""); print $5}')
+DISK_PERCENT=$(df "/" 2>/dev/null | tail -1 | awk '{gsub(/%/,""); print $5}')
 
 if [ -n "$DISK_PERCENT" ]; then
     if [ "$DISK_PERCENT" -ge "$DISK_CRIT_PERCENT" ]; then
@@ -121,31 +115,7 @@ else
     log "  CRITICAL: No process on port ${BACKEND_PORT}"
 fi
 
-# ─── Check 4: Database File ──────────────────────────────────────────────────
-log "Checking database file..."
-if [ -f "$DB_PATH" ]; then
-    DB_SIZE=$(du -h "$DB_PATH" 2>/dev/null | cut -f1)
-    DB_WRITABLE=$(test -w "$DB_PATH" && echo "true" || echo "false")
-
-    if [ "$DB_WRITABLE" = "true" ]; then
-        add_check "db_file" "ok" "Size: ${DB_SIZE}, writable"
-        log "  OK: DB file ${DB_SIZE}, writable"
-    else
-        add_check "db_file" "critical" "Size: ${DB_SIZE}, NOT writable"
-        log "  CRITICAL: DB file not writable"
-    fi
-
-    # Check WAL file exists (expected in WAL mode)
-    if [ -f "${DB_PATH}-wal" ]; then
-        WAL_SIZE=$(du -h "${DB_PATH}-wal" 2>/dev/null | cut -f1)
-        log "  INFO: WAL file ${WAL_SIZE}"
-    fi
-else
-    add_check "db_file" "critical" "Database file not found at ${DB_PATH}"
-    log "  CRITICAL: DB file missing"
-fi
-
-# ─── Check 5: Stale Pipeline Runs ────────────────────────────────────────────
+# ─── Check 4: Stale Pipeline Runs ────────────────────────────────────────────
 if [ -n "$HEALTH_RESPONSE" ]; then
     ACTIVE_RUNS=$(echo "$HEALTH_RESPONSE" | grep -o '"active_runs":[0-9]*' | head -1 | cut -d: -f2)
     if [ -n "$ACTIVE_RUNS" ] && [ "$ACTIVE_RUNS" -gt 0 ]; then

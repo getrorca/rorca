@@ -60,7 +60,7 @@ We **explicitly do NOT collect**:
 
 All data is stored **locally** on your machine by default:
 
-- **SQLite Database** (`rorca.db`): Specs, runs, direction stack, workspaces, user data
+- **PostgreSQL Database**: Specs, runs, direction stack, workspaces, user data
 - **Git Repositories**: Your code and commit history
 - **Configuration Files**: `.rorca/`, `CLAUDE.md`, `MEMORY.md` (workspace-scoped, never uploaded)
 

@@ -11,7 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { chatComplete } from './llm-client';
 import type { ChatMessage } from './llm-client';
-import { db } from '../db/index';
+import { queryOne } from '../db/index';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -73,7 +73,7 @@ function loadConventionFiles(workspacePath: string): Record<string, string> {
 /**
  * Load direction stack layers L0-L3 from the DB for a workspace.
  */
-function loadDirectionLayers(workspaceId: string): Record<string, string> {
+async function loadDirectionLayers(workspaceId: string): Promise<Record<string, string>> {
   const layers: Record<string, string> = {};
 
   for (const layerNum of [0, 1, 2, 3]) {
@@ -81,16 +81,18 @@ function loadDirectionLayers(workspaceId: string): Record<string, string> {
 
     if (layerNum <= 2) {
       // L0-L2 are global/domain layers (no workspace_id)
-      row = db.prepare(
+      row = await queryOne<{ content_yaml: string }>(
         `SELECT content_yaml FROM direction_layers
-         WHERE layer = ? AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-      ).get(layerNum) as { content_yaml: string } | undefined;
+         WHERE layer = $1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`,
+        [layerNum]
+      );
     } else {
       // L3 is workspace-specific
-      row = db.prepare(
+      row = await queryOne<{ content_yaml: string }>(
         `SELECT content_yaml FROM direction_layers
-         WHERE layer = ? AND workspace_id = ? AND COALESCE(domain, '') = ''`
-      ).get(layerNum, workspaceId) as { content_yaml: string } | undefined;
+         WHERE layer = $1 AND workspace_id = $2 AND COALESCE(domain, '') = ''`,
+        [layerNum, workspaceId]
+      );
     }
 
     if (row?.content_yaml) {
@@ -322,7 +324,7 @@ export async function detectDrift(
 
   // 1. Load conventions
   const conventions = loadConventionFiles(workspacePath);
-  const directionLayers = loadDirectionLayers(workspaceId);
+  const directionLayers = await loadDirectionLayers(workspaceId);
 
   const conventionsChecked = Object.keys(conventions).length + Object.keys(directionLayers).length;
 

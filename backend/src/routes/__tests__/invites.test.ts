@@ -3,9 +3,9 @@ import * as os from 'os';
 import * as path from 'path';
 import crypto from 'crypto';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -18,7 +18,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -26,36 +25,28 @@ function hashToken(raw: string): string {
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
-function createTestUser(email: string, password: string = 'password123') {
+async function createTestUser(email: string, password: string = 'password123') {
   const bcrypt = require('bcryptjs');
   const id = crypto.randomUUID();
   const hash = bcrypt.hashSync(password, 4);
-  db.prepare(
-    'INSERT INTO users (id, email, display_name, password_hash) VALUES (?, ?, ?, ?)'
-  ).run(id, email, 'Test User', hash);
+  await execute(`INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`, [id, email, 'Test User', hash]);
   return { id, email };
 }
 
-function createTeam(ownerId: string, name: string = 'Test Team') {
+async function createTeam(ownerId: string, name: string = 'Test Team') {
   const id = crypto.randomUUID();
   const slug = 'team-' + id.slice(0, 8);
-  db.prepare('INSERT INTO teams (id, name, slug, owner_id) VALUES (?, ?, ?, ?)').run(
-    id, name, slug, ownerId
-  );
-  db.prepare(
-    "INSERT INTO team_members (team_id, user_id, role, accepted_at, last_active_at) VALUES (?, ?, 'admin', datetime('now'), datetime('now'))"
-  ).run(id, ownerId);
+  await execute(`INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)`, [id, name, slug, ownerId]);
+  await execute(`INSERT INTO team_members (team_id, user_id, role, accepted_at, last_active_at) VALUES ($1, $2, 'admin', NOW(), NOW())`, [id, ownerId]);
   return { id, name, slug };
 }
 
-function createInvite(teamId: string, invitedById: string, email: string, role: string = 'editor', expiresInMs: number = 7 * 24 * 60 * 60 * 1000) {
+async function createInvite(teamId: string, invitedById: string, email: string, role: string = 'editor', expiresInMs: number = 7 * 24 * 60 * 60 * 1000) {
   const rawToken = crypto.randomUUID();
   const tokenHash = hashToken(rawToken);
   const id = crypto.randomUUID();
   const expiresAt = new Date(Date.now() + expiresInMs).toISOString();
-  db.prepare(
-    'INSERT INTO team_invites (id, team_id, email, token_hash, invited_by, role, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(id, teamId, email, tokenHash, invitedById, role, expiresAt);
+  await execute(`INSERT INTO team_invites (id, team_id, email, token_hash, invited_by, role, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [id, teamId, email, tokenHash, invitedById, role, expiresAt]);
   return { id, rawToken, tokenHash, email, role, expiresAt };
 }
 
@@ -74,31 +65,25 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-invites-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── GET /api/invites/:token ───────────────────────────────────────────────
 
 describe('GET /api/invites/:token', () => {
   test('returns invite details for a valid token', async () => {
-    const owner = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
-    const team = createTeam(owner.id);
-    const invite = createInvite(team.id, owner.id, 'invitee@example.com', 'editor');
+    const owner = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
+    const team = await createTeam(owner.id);
+    const invite = await createInvite(team.id, owner.id, 'invitee@example.com', 'editor');
 
     const res = await request(app).get(`/api/invites/${invite.rawToken}`);
 
@@ -118,10 +103,10 @@ describe('GET /api/invites/:token', () => {
   });
 
   test('returns 410 for expired invite', async () => {
-    const owner = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
-    const team = createTeam(owner.id);
+    const owner = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
+    const team = await createTeam(owner.id);
     // Create invite that expired 1ms ago
-    const invite = createInvite(team.id, owner.id, 'expired@example.com', 'viewer', -1);
+    const invite = await createInvite(team.id, owner.id, 'expired@example.com', 'viewer', -1);
 
     const res = await request(app).get(`/api/invites/${invite.rawToken}`);
 
@@ -130,12 +115,12 @@ describe('GET /api/invites/:token', () => {
   });
 
   test('returns 410 for already-accepted invite', async () => {
-    const owner = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
-    const team = createTeam(owner.id);
-    const invite = createInvite(team.id, owner.id, 'accepted@example.com');
+    const owner = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
+    const team = await createTeam(owner.id);
+    const invite = await createInvite(team.id, owner.id, 'accepted@example.com');
 
     // Mark as accepted
-    db.prepare("UPDATE team_invites SET accepted_at = datetime('now') WHERE id = ?").run(invite.id);
+    await execute(`UPDATE team_invites SET accepted_at = NOW() WHERE id = $1`, [invite.id]);
 
     const res = await request(app).get(`/api/invites/${invite.rawToken}`);
 
@@ -148,8 +133,8 @@ describe('GET /api/invites/:token', () => {
 
 describe('POST /api/invites/:token/accept', () => {
   test('accepts a valid invite and adds user to team', async () => {
-    const owner = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
-    const team = createTeam(owner.id);
+    const owner = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
+    const team = await createTeam(owner.id);
 
     // Register the invitee
     const inviteeRes = await request(app)
@@ -157,7 +142,7 @@ describe('POST /api/invites/:token/accept', () => {
       .send({ email: 'invitee@example.com', password: 'password123', displayName: 'Invitee' });
     const inviteeToken = inviteeRes.body.accessToken;
 
-    const invite = createInvite(team.id, owner.id, 'invitee@example.com', 'editor');
+    const invite = await createInvite(team.id, owner.id, 'invitee@example.com', 'editor');
 
     const res = await request(app)
       .post(`/api/invites/${invite.rawToken}/accept`)
@@ -177,9 +162,9 @@ describe('POST /api/invites/:token/accept', () => {
   });
 
   test('returns 403 when email does not match invite', async () => {
-    const owner = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
-    const team = createTeam(owner.id);
-    const invite = createInvite(team.id, owner.id, 'different@example.com');
+    const owner = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
+    const team = await createTeam(owner.id);
+    const invite = await createInvite(team.id, owner.id, 'different@example.com');
 
     // authToken belongs to testauth@example.com, not different@example.com
     const res = await request(app)
@@ -191,9 +176,9 @@ describe('POST /api/invites/:token/accept', () => {
   });
 
   test('returns 410 for expired invite', async () => {
-    const owner = db.prepare("SELECT id FROM users WHERE email = 'testauth@example.com'").get() as { id: string };
-    const team = createTeam(owner.id);
-    const invite = createInvite(team.id, owner.id, 'testauth@example.com', 'editor', -1);
+    const owner = await queryOne(`SELECT id FROM users WHERE email = 'testauth@example.com'`) as { id: string };
+    const team = await createTeam(owner.id);
+    const invite = await createInvite(team.id, owner.id, 'testauth@example.com', 'editor', -1);
 
     const res = await request(app)
       .post(`/api/invites/${invite.rawToken}/accept`)

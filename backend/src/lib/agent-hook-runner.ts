@@ -1,5 +1,5 @@
 import { exec } from 'child_process';
-import { db } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 
@@ -29,16 +29,17 @@ const WAL_TO_HOOK_EVENT: Record<string, string> = {
  * Each hook runs in its own subprocess with RORCA_EVENT set to the event JSON.
  * Results are logged back into wal_events as 'hook_executed'.
  */
-export function fireAgentHooks(walEvent: WalEvent): void {
+export async function fireAgentHooks(walEvent: WalEvent): Promise<void> {
   const hookEventType = WAL_TO_HOOK_EVENT[walEvent.event_type];
   if (!hookEventType) return;
 
   const workspaceId = walEvent.workspace_id;
   if (!workspaceId) return;
 
-  const hooks = db.prepare(
-    `SELECT * FROM agent_hooks WHERE workspace_id = ? AND event_type = ? AND enabled = 1 ORDER BY id ASC`
-  ).all(workspaceId, hookEventType) as AgentHookRow[];
+  const hooks = await query<AgentHookRow>(
+    `SELECT * FROM agent_hooks WHERE workspace_id = $1 AND event_type = $2 AND enabled = 1 ORDER BY id ASC`,
+    [workspaceId, hookEventType]
+  );
 
   if (hooks.length === 0) return;
 
@@ -70,27 +71,27 @@ export function fireAgentHooks(walEvent: WalEvent): void {
         trigger_event_id: walEvent.id,
       });
 
-      try {
-        const result = db.prepare(
-          `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload)
-           VALUES ('hook_executed', ?, ?, ?, 'system', ?)`
-        ).run(
-          workspaceId,
-          walEvent.spec_id ?? null,
-          walEvent.story_id ?? null,
-          resultPayload
-        );
+      (async () => {
+        try {
+          const hookWalEvent = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, actor, payload)
+             VALUES ('hook_executed', $1, $2, $3, 'system', $4)
+             RETURNING *`,
+            [
+              workspaceId,
+              walEvent.spec_id ?? null,
+              walEvent.story_id ?? null,
+              resultPayload,
+            ]
+          );
 
-        const hookWalEvent = db.prepare(
-          'SELECT * FROM wal_events WHERE rowid = ?'
-        ).get(result.lastInsertRowid) as WalEvent;
-
-        if (hookWalEvent) {
-          broadcastAll(hookWalEvent);
+          if (hookWalEvent) {
+            broadcastAll(hookWalEvent);
+          }
+        } catch (err) {
+          logger.error({ err }, `[AgentHooks] Failed to log hook result for hook ${hook.id}`);
         }
-      } catch (err) {
-        logger.error({ err }, `[AgentHooks] Failed to log hook result for hook ${hook.id}`);
-      }
+      })();
     });
   }
 }

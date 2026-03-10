@@ -12,7 +12,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { queryOne } from '../db/index';
 import { PersonaRegistry, PERSONA_CATEGORIES, type PersonaCategory } from '../lib/agent-personas';
 import { loadRorcaConfig, writeRorcaConfig } from '../lib/rorca-config';
 import { markWriting } from '../lib/file-watcher';
@@ -24,10 +24,9 @@ const router = Router();
 // Built-in default personas shipped with Rorca — used when workspace has no custom personas yet
 const DEFAULT_PERSONAS_DIR = path.resolve(__dirname, '..', '..', '..', 'default-personas');
 
-function resolveWorkspacePath(workspaceId: string): string | null {
+async function resolveWorkspacePath(workspaceId: string): Promise<string | null> {
   try {
-    const row = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(workspaceId) as
-      { path: string } | undefined;
+    const row = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
     return row?.path ?? null;
   } catch {
     return null;
@@ -78,13 +77,13 @@ Describe the role and expertise of this persona.
  *       200:
  *         description: Personas grouped by category with disabled status
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string;
   if (!workspaceId) {
     return res.status(400).json({ error: 'workspaceId query parameter required' });
   }
 
-  const wsPath = resolveWorkspacePath(workspaceId);
+  const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
     return res.status(404).json({ error: 'Workspace not found' });
   }
@@ -158,7 +157,7 @@ router.get('/', (req: Request, res: Response) => {
  *         required: true
  *         description: Relative path from workspace root (e.g. .rorca/personas/_specialist/frontend.md)
  */
-router.get('/read', (req: Request, res: Response) => {
+router.get('/read', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string;
   const filePath = req.query.filePath as string;
 
@@ -166,7 +165,7 @@ router.get('/read', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'workspaceId and filePath query parameters required' });
   }
 
-  const wsPath = resolveWorkspacePath(workspaceId);
+  const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
     return res.status(404).json({ error: 'Workspace not found' });
   }
@@ -196,7 +195,7 @@ router.get('/read', (req: Request, res: Response) => {
  *     description: Writes or overwrites the markdown content of a persona file at the specified relative path.
  *     tags: [Personas]
  */
-router.put('/write', (req: Request, res: Response) => {
+router.put('/write', async (req: Request, res: Response) => {
   const { workspaceId, filePath, content } = req.body as {
     workspaceId: string;
     filePath: string;
@@ -207,7 +206,7 @@ router.put('/write', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'workspaceId, filePath, and content required' });
   }
 
-  const wsPath = resolveWorkspacePath(workspaceId);
+  const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
     return res.status(404).json({ error: 'Workspace not found' });
   }
@@ -240,7 +239,7 @@ router.put('/write', (req: Request, res: Response) => {
  *     description: Creates a new persona markdown file from the default template in the appropriate category directory.
  *     tags: [Personas]
  */
-router.post('/create', (req: Request, res: Response) => {
+router.post('/create', async (req: Request, res: Response) => {
   const { workspaceId, name, description, category } = req.body as {
     workspaceId: string;
     name: string;
@@ -252,7 +251,7 @@ router.post('/create', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'workspaceId and name required' });
   }
 
-  const wsPath = resolveWorkspacePath(workspaceId);
+  const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
     return res.status(404).json({ error: 'Workspace not found' });
   }
@@ -273,13 +272,13 @@ router.post('/create', (req: Request, res: Response) => {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  const content = DEFAULT_PERSONA_TEMPLATE
+  const fileContent = DEFAULT_PERSONA_TEMPLATE
     .replace(/\{\{NAME\}\}/g, name)
     .replace(/\{\{DESCRIPTION\}\}/g, description || `${name} specialist persona`)
     .replace(/category: specialist/, `category: ${cat}`);
 
   markWriting(absPath);
-  fs.writeFileSync(absPath, content, 'utf-8');
+  fs.writeFileSync(absPath, fileContent, 'utf-8');
 
   return res.status(201).json({ ok: true, filePath: relativePath, absPath });
 });
@@ -295,7 +294,7 @@ router.post('/create', (req: Request, res: Response) => {
  *     description: Toggles a persona's enabled/disabled state by updating the .rorca/config.json personas.disabled array.
  *     tags: [Personas]
  */
-router.post('/toggle', (req: Request, res: Response) => {
+router.post('/toggle', async (req: Request, res: Response) => {
   const { workspaceId, personaName, enabled } = req.body as {
     workspaceId: string;
     personaName: string;
@@ -306,7 +305,7 @@ router.post('/toggle', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'workspaceId, personaName, and enabled (boolean) required' });
   }
 
-  const wsPath = resolveWorkspacePath(workspaceId);
+  const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
     return res.status(404).json({ error: 'Workspace not found' });
   }

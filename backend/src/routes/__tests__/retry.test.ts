@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -15,23 +14,18 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-retry-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-  authToken = await getAuthToken(app);
+authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
-function createWorkspace(id = 'ws-retry-1') {
+async function createWorkspace(id = 'ws-retry-1') {
   // Create workspace dir with run-loop.sh and spec file
   const scriptsDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'approved');
   fs.mkdirSync(scriptsDir, { recursive: true });
@@ -50,27 +44,17 @@ function createWorkspace(id = 'ws-retry-1') {
   };
   fs.writeFileSync(path.join(scriptsDir, 'test-spec.json'), JSON.stringify(spec));
 
-  db.prepare(
-    `INSERT INTO workspaces (id, label, path) VALUES (?, ?, ?)`
-  ).run(id, 'Retry Test Workspace', tmpDir);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [id, 'Retry Test Workspace', tmpDir]);
 }
 
-function createRunWithStories(workspaceId = 'ws-retry-1') {
-  const result = db.prepare(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at) VALUES (?, ?, 'failed', datetime('now'))`
-  ).run('ralph/specs/approved/test-spec.json', workspaceId);
-  const runId = result.lastInsertRowid as number;
+async function createRunWithStories(workspaceId = 'ws-retry-1') {
+  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at) VALUES ($1, $2, 'failed', NOW()) RETURNING id`, ['ralph/specs/approved/test-spec.json', workspaceId]);
+  const runId = result!.id;
 
   // US-001 passed, US-002 failed, US-003 failed
-  db.prepare(
-    `INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES (?, 'US-001', 'pass', 0, datetime('now'))`
-  ).run(runId);
-  db.prepare(
-    `INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES (?, 'US-002', 'fail', 0, datetime('now'))`
-  ).run(runId);
-  db.prepare(
-    `INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES (?, 'US-003', 'fail', 0, datetime('now'))`
-  ).run(runId);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES ($1, 'US-001', 'pass', 0, NOW())`, [runId]);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES ($1, 'US-002', 'fail', 0, NOW())`, [runId]);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, retries, finished_at) VALUES ($1, 'US-003', 'fail', 0, NOW())`, [runId]);
 
   return runId;
 }
@@ -78,8 +62,8 @@ function createRunWithStories(workspaceId = 'ws-retry-1') {
 // ─── Test 1: Retry all failed stories creates new run ──────────────────────────
 
 test('POST /api/pipeline/runs/:runId/retry creates new run and retries all failed stories when storyIds omitted', async () => {
-  createWorkspace();
-  const originalRunId = createRunWithStories();
+  await createWorkspace();
+  const originalRunId = await createRunWithStories();
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${originalRunId}/retry`)
@@ -96,20 +80,20 @@ test('POST /api/pipeline/runs/:runId/retry creates new run and retries all faile
   expect(res.body.copiedStories).toEqual(['US-001']); // Passed story copied
 
   // New run should be 'running' with retried_from_run_id
-  const newRun = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(res.body.runId) as any;
+  const newRun = await queryOne(`SELECT * FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
   expect(newRun.status).toBe('running');
   expect(newRun.retried_from_run_id).toBe(originalRunId);
 
   // Original run stays as 'failed'
-  const originalRun = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(originalRunId) as any;
+  const originalRun = await queryOne(`SELECT * FROM pipeline_runs WHERE id = $1`, [originalRunId]) as any;
   expect(originalRun.status).toBe('failed');
 });
 
 // ─── Test 2: Retry specific stories via storyIds ─────────────────────────────
 
 test('POST /api/pipeline/runs/:runId/retry retries only specified storyIds', async () => {
-  createWorkspace();
-  const originalRunId = createRunWithStories();
+  await createWorkspace();
+  const originalRunId = await createRunWithStories();
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${originalRunId}/retry`)
@@ -125,8 +109,8 @@ test('POST /api/pipeline/runs/:runId/retry retries only specified storyIds', asy
 // ─── Test 3: New run gets copied pass results + retry placeholders ────────────
 
 test('Retry creates new run with copied pass results and retry placeholders', async () => {
-  createWorkspace();
-  const originalRunId = createRunWithStories();
+  await createWorkspace();
+  const originalRunId = await createRunWithStories();
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${originalRunId}/retry`)
@@ -136,9 +120,7 @@ test('Retry creates new run with copied pass results and retry placeholders', as
   const newRunId = res.body.runId;
 
   // New run should have: 1 copied pass (US-001) + 1 retry placeholder (US-002)
-  const newStories = db.prepare(
-    `SELECT * FROM story_results WHERE run_id = ? ORDER BY story_id ASC`
-  ).all(newRunId) as any[];
+  const newStories = await query(`SELECT * FROM story_results WHERE run_id = $1 ORDER BY story_id ASC`, [newRunId]) as any[];
 
   expect(newStories).toHaveLength(2);
 
@@ -154,12 +136,10 @@ test('Retry creates new run with copied pass results and retry placeholders', as
 // ─── Test 4: Original run's story results are untouched ─────────────────────
 
 test('Original run story_result rows are preserved unchanged', async () => {
-  createWorkspace();
-  const originalRunId = createRunWithStories();
+  await createWorkspace();
+  const originalRunId = await createRunWithStories();
 
-  const beforeStories = db.prepare(
-    `SELECT * FROM story_results WHERE run_id = ?`
-  ).all(originalRunId) as any[];
+  const beforeStories = await query(`SELECT * FROM story_results WHERE run_id = $1`, [originalRunId]) as any[];
   expect(beforeStories).toHaveLength(3);
 
   await request(app)
@@ -168,9 +148,7 @@ test('Original run story_result rows are preserved unchanged', async () => {
     .send({});
 
   // Original run should still have exactly 3 stories, unchanged
-  const afterStories = db.prepare(
-    `SELECT * FROM story_results WHERE run_id = ?`
-  ).all(originalRunId) as any[];
+  const afterStories = await query(`SELECT * FROM story_results WHERE run_id = $1`, [originalRunId]) as any[];
   expect(afterStories).toHaveLength(3);
 
   const originals = afterStories.filter((s: any) => s.retries === 0);
@@ -180,8 +158,8 @@ test('Original run story_result rows are preserved unchanged', async () => {
 // ─── Test 5: story_retried WAL events emitted with new run ID ────────────────
 
 test('Retry emits story_retried WAL events referencing the new run', async () => {
-  createWorkspace();
-  const originalRunId = createRunWithStories();
+  await createWorkspace();
+  const originalRunId = await createRunWithStories();
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${originalRunId}/retry`)
@@ -190,9 +168,7 @@ test('Retry emits story_retried WAL events referencing the new run', async () =>
 
   const newRunId = res.body.runId;
 
-  const events = db.prepare(
-    `SELECT * FROM wal_events WHERE event_type = 'story_retried'`
-  ).all() as any[];
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'story_retried'`) as any[];
 
   expect(events).toHaveLength(2);
 
@@ -206,11 +182,9 @@ test('Retry emits story_retried WAL events referencing the new run', async () =>
 // ─── Test 6: Cannot retry a running run ──────────────────────────────────────
 
 test('POST /api/pipeline/runs/:runId/retry returns 409 for running run', async () => {
-  createWorkspace();
-  const result = db.prepare(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES (?, ?, 'running')`
-  ).run('ralph/specs/approved/test-spec.json', 'ws-retry-1');
-  const runId = result.lastInsertRowid as number;
+  await createWorkspace();
+  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, 'running') RETURNING id`, ['ralph/specs/approved/test-spec.json', 'ws-retry-1']);
+  const runId = result!.id;
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
@@ -236,16 +210,12 @@ test('POST /api/pipeline/runs/:runId/retry returns 404 for nonexistent run', asy
 // ─── Test 8: Returns 422 when no failed stories exist ────────────────────────
 
 test('POST /api/pipeline/runs/:runId/retry returns 422 when no stories have failed', async () => {
-  createWorkspace();
-  const result = db.prepare(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at) VALUES (?, ?, 'done', datetime('now'))`
-  ).run('ralph/specs/approved/test-spec.json', 'ws-retry-1');
-  const runId = result.lastInsertRowid as number;
+  await createWorkspace();
+  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, finished_at) VALUES ($1, $2, 'done', NOW()) RETURNING id`, ['ralph/specs/approved/test-spec.json', 'ws-retry-1']);
+  const runId = result!.id;
 
   // All stories passed
-  db.prepare(
-    `INSERT INTO story_results (run_id, story_id, status, retries) VALUES (?, 'US-001', 'pass', 0)`
-  ).run(runId);
+  await execute(`INSERT INTO story_results (run_id, story_id, status, retries) VALUES ($1, 'US-001', 'pass', 0)`, [runId]);
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
@@ -259,8 +229,8 @@ test('POST /api/pipeline/runs/:runId/retry returns 422 when no stories have fail
 // ─── Test 9: Returns 422 when specified storyIds don't match failed stories ──
 
 test('POST /api/pipeline/runs/:runId/retry returns 422 when storyIds do not match any failed stories', async () => {
-  createWorkspace();
-  const runId = createRunWithStories();
+  await createWorkspace();
+  const runId = await createRunWithStories();
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${runId}/retry`)
@@ -274,8 +244,8 @@ test('POST /api/pipeline/runs/:runId/retry returns 422 when storyIds do not matc
 // ─── Test 10: SSE stream broadcasts story_retried events ─────────────────────
 
 test('story_retried events are broadcast to SSE subscribers', async () => {
-  createWorkspace();
-  const originalRunId = createRunWithStories();
+  await createWorkspace();
+  const originalRunId = await createRunWithStories();
 
   const sseHub = require('../../lib/sse-hub');
   const received: any[] = [];
@@ -303,21 +273,19 @@ test('story_retried events are broadcast to SSE subscribers', async () => {
 
 // ─── Test 11: partial_failure status in pipeline_runs ────────────────────────
 
-test('partial_failure status is accepted in pipeline_runs table', () => {
-  createWorkspace();
-  const result = db.prepare(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES (?, ?, 'partial_failure')`
-  ).run('ralph/specs/approved/test-spec.json', 'ws-retry-1');
+test('partial_failure status is accepted in pipeline_runs table', async () => {
+  await createWorkspace();
+  const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, 'partial_failure') RETURNING id`, ['ralph/specs/approved/test-spec.json', 'ws-retry-1']);
 
-  const run = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(result.lastInsertRowid) as any;
+  const run = await queryOne(`SELECT * FROM pipeline_runs WHERE id = $1`, [result!.id]) as any;
   expect(run.status).toBe('partial_failure');
 });
 
 // ─── Test 12: Retry uses same spec_path and direction as original ─────────────
 
 test('New retry run uses the same spec_path as the original run', async () => {
-  createWorkspace();
-  const originalRunId = createRunWithStories();
+  await createWorkspace();
+  const originalRunId = await createRunWithStories();
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${originalRunId}/retry`)
@@ -325,8 +293,8 @@ test('New retry run uses the same spec_path as the original run', async () => {
     .send({});
 
   const newRunId = res.body.runId;
-  const originalRun = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(originalRunId) as any;
-  const newRun = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(newRunId) as any;
+  const originalRun = await queryOne(`SELECT * FROM pipeline_runs WHERE id = $1`, [originalRunId]) as any;
+  const newRun = await queryOne(`SELECT * FROM pipeline_runs WHERE id = $1`, [newRunId]) as any;
 
   expect(newRun.spec_path).toBe(originalRun.spec_path);
   expect(newRun.workspace_id).toBe(originalRun.workspace_id);
@@ -337,8 +305,8 @@ test('New retry run uses the same spec_path as the original run', async () => {
 // ─── Test 13: run_started WAL event emitted for new retry run ─────────────────
 
 test('run_started WAL event is emitted for the new retry run', async () => {
-  createWorkspace();
-  const originalRunId = createRunWithStories();
+  await createWorkspace();
+  const originalRunId = await createRunWithStories();
 
   const res = await request(app)
     .post(`/api/pipeline/runs/${originalRunId}/retry`)
@@ -347,9 +315,7 @@ test('run_started WAL event is emitted for the new retry run', async () => {
 
   const newRunId = res.body.runId;
 
-  const events = db.prepare(
-    `SELECT * FROM wal_events WHERE event_type = 'run_started'`
-  ).all() as any[];
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'run_started'`) as any[];
 
   expect(events.length).toBeGreaterThanOrEqual(1);
 

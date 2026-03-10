@@ -1,6 +1,6 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
@@ -85,68 +85,86 @@ interface WalEventRow {
  *                 hasMore: { type: boolean }
  *                 eventTypes: { type: array, items: { type: string } }
  */
-router.get('/', (req, res) => {
-  const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 200 });
-  const eventType = req.query.event_type ? String(req.query.event_type) : null;
-  const workspaceId = req.query.workspace_id ? String(req.query.workspace_id) : null;
-  const actor = req.query.actor ? String(req.query.actor) : null;
-  const from = req.query.from ? String(req.query.from) : null;
-  const to = req.query.to ? String(req.query.to) : null;
-  const q = req.query.q ? String(req.query.q) : null;
-  const sort = req.query.sort === 'oldest' ? 'ASC' : 'DESC';
+router.get('/', async (req, res, next) => {
+  try {
+    const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 200 });
+    const eventType = req.query.event_type ? String(req.query.event_type) : null;
+    const workspaceId = req.query.workspace_id ? String(req.query.workspace_id) : null;
+    const actor = req.query.actor ? String(req.query.actor) : null;
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    const q = req.query.q ? String(req.query.q) : null;
+    const sort = req.query.sort === 'oldest' ? 'ASC' : 'DESC';
 
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let paramIdx = 0;
 
-  if (eventType) {
-    conditions.push('event_type = ?');
-    params.push(eventType);
-  }
-  if (workspaceId) {
-    conditions.push('workspace_id = ?');
-    params.push(workspaceId);
-  }
-  if (actor) {
-    conditions.push('actor LIKE ?');
-    params.push(`%${actor}%`);
-  }
-  if (from) {
-    conditions.push('ts >= ?');
-    params.push(from);
-  }
-  if (to) {
-    conditions.push('ts <= ?');
-    params.push(to);
-  }
-  if (q) {
-    conditions.push(
-      `(event_type LIKE ? OR spec_id LIKE ? OR story_id LIKE ? OR actor LIKE ? OR payload LIKE ?)`
+    if (eventType) {
+      paramIdx++;
+      conditions.push(`event_type = $${paramIdx}`);
+      params.push(eventType);
+    }
+    if (workspaceId) {
+      paramIdx++;
+      conditions.push(`workspace_id = $${paramIdx}`);
+      params.push(workspaceId);
+    }
+    if (actor) {
+      paramIdx++;
+      conditions.push(`actor ILIKE $${paramIdx}`);
+      params.push(`%${actor}%`);
+    }
+    if (from) {
+      paramIdx++;
+      conditions.push(`ts >= $${paramIdx}`);
+      params.push(from);
+    }
+    if (to) {
+      paramIdx++;
+      conditions.push(`ts <= $${paramIdx}`);
+      params.push(to);
+    }
+    if (q) {
+      const pattern = `%${q}%`;
+      paramIdx++;
+      const p1 = paramIdx;
+      paramIdx++;
+      const p2 = paramIdx;
+      paramIdx++;
+      const p3 = paramIdx;
+      paramIdx++;
+      const p4 = paramIdx;
+      paramIdx++;
+      const p5 = paramIdx;
+      conditions.push(
+        `(event_type ILIKE $${p1} OR spec_id ILIKE $${p2} OR story_id ILIKE $${p3} OR actor ILIKE $${p4} OR payload::text ILIKE $${p5})`
+      );
+      params.push(pattern, pattern, pattern, pattern, pattern);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const result = await paginateQuery<WalEventRow>({
+      query: `SELECT * FROM wal_events ${whereClause}`,
+      countQuery: `SELECT COUNT(*) as total FROM wal_events ${whereClause}`,
+      params,
+      pagination,
+      orderBy: `id ${sort}`,
+      cursorColumn: 'id',
+      cursorDirection: sort === 'DESC' ? 'desc' : 'asc',
+    });
+
+    // Return distinct event types for filter dropdown
+    const eventTypes = await query<{ event_type: string }>(
+      'SELECT DISTINCT event_type FROM wal_events ORDER BY event_type'
     );
-    const pattern = `%${q}%`;
-    params.push(pattern, pattern, pattern, pattern, pattern);
-  }
 
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  const result = paginateQuery<WalEventRow>(db, {
-    query: `SELECT * FROM wal_events ${whereClause}`,
-    countQuery: `SELECT COUNT(*) as total FROM wal_events ${whereClause}`,
-    params,
-    pagination,
-    orderBy: `id ${sort}`,
-    cursorColumn: 'id',
-    cursorDirection: sort === 'DESC' ? 'desc' : 'asc',
-  });
-
-  // Return distinct event types for filter dropdown
-  const eventTypes = db.prepare(
-    'SELECT DISTINCT event_type FROM wal_events ORDER BY event_type'
-  ).all() as { event_type: string }[];
-
-  res.json({
-    ...result,
-    eventTypes: eventTypes.map(r => r.event_type),
-  });
+    res.json({
+      ...result,
+      eventTypes: eventTypes.map(r => r.event_type),
+    });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -191,27 +209,26 @@ const WalEventSchema = z.object({
   payload: z.record(z.string(), z.unknown()).optional(),
 });
 
-router.post('/', validateBody(WalEventSchema), (req: Request, res: Response) => {
+router.post('/', validateBody(WalEventSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { event_type, workspace_id, story_id, spec_id, payload } = req.body;
 
-    const result = db.prepare(
+    const walEvent = await queryOne<WalEvent>(
       `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(
-      event_type,
-      workspace_id ?? null,
-      spec_id ?? null,
-      story_id ?? null,
-      payload ? JSON.stringify(payload) : null,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [
+        event_type,
+        workspace_id ?? null,
+        spec_id ?? null,
+        story_id ?? null,
+        payload ? JSON.stringify(payload) : null,
+      ],
     );
 
-    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
-      result.lastInsertRowid
-    ) as WalEvent;
-    broadcastAll(walEvent);
+    broadcastAll(walEvent!);
 
-    res.status(201).json({ ok: true, id: result.lastInsertRowid });
+    res.status(201).json({ ok: true, id: walEvent!.id });
   } catch (error: any) {
     logger.error('[WAL] POST error:', error);
     res.status(500).json({ error: error.message });

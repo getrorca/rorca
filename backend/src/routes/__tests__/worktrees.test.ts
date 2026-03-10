@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 // ─── Mock simple-git ────────────────────────────────────────────────────────
 
@@ -23,7 +23,6 @@ jest.mock('simple-git', () => ({
 // ─── Setup ──────────────────────────────────────────────────────────────────
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let dbPath: string;
 let authToken: string;
@@ -43,30 +42,22 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-wt-test-'));
   dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  // Seed a workspace for tests
-  db.prepare(
-    'INSERT INTO workspaces (id, label, path, domains) VALUES (?, ?, ?, ?)'
-  ).run('ws-1', 'Test Workspace', tmpDir, '["frontend"]');
+// Seed a workspace for tests
+  await execute(`INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)`, ['ws-1', 'Test Workspace', tmpDir, '["frontend"]']);
 
   authToken = await getAuthToken(app);
 
   // Clear WAL events from user registration so tests start with a clean slate
-  db.prepare('DELETE FROM wal_events').run();
+  await execute(`DELETE FROM wal_events`);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── GET /api/worktrees ─────────────────────────────────────────────────────
@@ -225,9 +216,7 @@ test('POST /api/worktrees emits WAL event', async () => {
     branchName: 'feat/wal-test',
   });
 
-  const events = db
-    .prepare("SELECT * FROM wal_events WHERE event_type = 'worktree_created'")
-    .all() as Array<{ event_type: string; workspace_id: string; payload: string }>;
+  const events = await query("SELECT * FROM wal_events WHERE event_type = 'worktree_created'") as Array<{ event_type: string; workspace_id: string; payload: string }>;
 
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe('ws-1');
@@ -287,9 +276,7 @@ test('DELETE /api/worktrees/:path emits WAL event', async () => {
 
   await request(app).delete(`/api/worktrees/${encoded}?workspaceId=ws-1`).set('Authorization', `Bearer ${authToken}`);
 
-  const events = db
-    .prepare("SELECT * FROM wal_events WHERE event_type = 'worktree_removed'")
-    .all() as Array<{ event_type: string; workspace_id: string; payload: string }>;
+  const events = await query("SELECT * FROM wal_events WHERE event_type = 'worktree_removed'") as Array<{ event_type: string; workspace_id: string; payload: string }>;
 
   expect(events).toHaveLength(1);
   expect(events[0].workspace_id).toBe('ws-1');
@@ -417,9 +404,7 @@ describe('Integration: full round-trip', () => {
     expect(listAfterDelete.body.worktrees[0].branch).toBe('main');
 
     // Verify WAL events were emitted for both create and delete
-    const events = db
-      .prepare('SELECT * FROM wal_events ORDER BY id ASC')
-      .all() as Array<{ event_type: string; workspace_id: string; payload: string }>;
+    const events = await query('SELECT * FROM wal_events ORDER BY id ASC') as Array<{ event_type: string; workspace_id: string; payload: string }>;
 
     expect(events).toHaveLength(2);
     expect(events[0].event_type).toBe('worktree_created');
@@ -576,9 +561,7 @@ describe('POST /api/worktrees/merge', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-1', branchName: 'feat/wal-sha' });
 
-    const events = db
-      .prepare("SELECT * FROM wal_events WHERE event_type = 'worktree_merged'")
-      .all() as Array<{ event_type: string; workspace_id: string; payload: string }>;
+    const events = await query("SELECT * FROM wal_events WHERE event_type = 'worktree_merged'") as Array<{ event_type: string; workspace_id: string; payload: string }>;
 
     expect(events).toHaveLength(1);
     const payload = JSON.parse(events[0].payload);

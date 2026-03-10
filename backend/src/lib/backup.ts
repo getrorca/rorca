@@ -1,6 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_BACKUP_DIR = path.join(__dirname, '..', '..', 'backups');
 const RETENTION_DAYS = 30;
@@ -10,8 +13,28 @@ export function getBackupDir(): string {
 }
 
 /**
- * Create a SQLite backup using the .backup() API.
- * This produces a consistent snapshot even while the WAL is active.
+ * Build the pg_dump connection args from the same env vars the pool uses.
+ */
+function buildPgDumpEnv(): Record<string, string> {
+  const env: Record<string, string> = { ...process.env as Record<string, string> };
+
+  if (process.env.DATABASE_URL) {
+    // pg_dump can read DATABASE_URL directly via PGDATABASE or connection string
+    // We pass it as the first positional arg instead
+  } else {
+    env.PGHOST = process.env.PGHOST || 'localhost';
+    env.PGPORT = process.env.PGPORT || '5432';
+    env.PGUSER = process.env.PGUSER || 'rorca';
+    env.PGPASSWORD = process.env.PGPASSWORD || 'rorca';
+    env.PGDATABASE = process.env.PGDATABASE || 'rorca';
+  }
+
+  return env;
+}
+
+/**
+ * Create a PostgreSQL backup using pg_dump.
+ * Produces a custom-format dump file for consistent snapshots.
  * Returns the absolute path to the backup file.
  */
 export async function createBackup(): Promise<{ filename: string; path: string; size: number }> {
@@ -19,10 +42,19 @@ export async function createBackup(): Promise<{ filename: string; path: string; 
   fs.mkdirSync(backupDir, { recursive: true });
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filename = `rorca-backup-${timestamp}.db`;
+  const filename = `rorca-backup-${timestamp}.sql`;
   const backupPath = path.join(backupDir, filename);
 
-  await db.backup(backupPath);
+  const args: string[] = ['--format=custom', '--file', backupPath];
+
+  if (process.env.DATABASE_URL) {
+    args.push(process.env.DATABASE_URL);
+  }
+
+  await execFileAsync('pg_dump', args, {
+    env: buildPgDumpEnv(),
+    timeout: 120_000,
+  });
 
   const stat = fs.statSync(backupPath);
   return { filename, path: backupPath, size: stat.size };
@@ -42,7 +74,7 @@ export function listBackups(): BackupInfo[] {
   if (!fs.existsSync(backupDir)) return [];
 
   const files = fs.readdirSync(backupDir)
-    .filter(f => f.startsWith('rorca-backup-') && f.endsWith('.db'));
+    .filter(f => f.startsWith('rorca-backup-') && f.endsWith('.sql'));
 
   return files
     .map(filename => {
@@ -68,7 +100,7 @@ export function pruneOldBackups(): number {
   let deleted = 0;
 
   const files = fs.readdirSync(backupDir)
-    .filter(f => f.startsWith('rorca-backup-') && f.endsWith('.db'));
+    .filter(f => f.startsWith('rorca-backup-') && f.endsWith('.sql'));
 
   for (const filename of files) {
     const filePath = path.join(backupDir, filename);
