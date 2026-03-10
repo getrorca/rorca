@@ -2,12 +2,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -17,26 +16,18 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-profiles-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, 'Test Workspace', ?)"
-  ).run(WORKSPACE_ID, tmpDir);
+await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2)`, [WORKSPACE_ID, tmpDir]);
 
   authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 describe('GET /api/workspaces/:id/agent-profiles', () => {
@@ -50,12 +41,8 @@ describe('GET /api/workspaces/:id/agent-profiles', () => {
   });
 
   it('returns profiles ordered by active first, then name', async () => {
-    db.prepare(
-      "INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES (?, 'Beta', '[]', 0)"
-    ).run(WORKSPACE_ID);
-    db.prepare(
-      "INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES (?, 'Alpha', '[]', 1)"
-    ).run(WORKSPACE_ID);
+    await execute(`INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES ($1, 'Beta', '[]', 0)`, [WORKSPACE_ID]);
+    await execute(`INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES ($1, 'Alpha', '[]', 1)`, [WORKSPACE_ID]);
 
     const res = await request(app)
       .get(`/api/workspaces/${WORKSPACE_ID}/agent-profiles`)
@@ -79,9 +66,7 @@ describe('GET /api/workspaces/:id/agent-profiles/active', () => {
   });
 
   it('returns the active profile', async () => {
-    db.prepare(
-      "INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES (?, 'Active Profile', '[]', 1)"
-    ).run(WORKSPACE_ID);
+    await execute(`INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES ($1, 'Active Profile', '[]', 1)`, [WORKSPACE_ID]);
 
     const res = await request(app)
       .get(`/api/workspaces/${WORKSPACE_ID}/agent-profiles/active`)
@@ -128,18 +113,14 @@ describe('POST /api/workspaces/:id/agent-profiles', () => {
   });
 
   it('deactivates other profiles when creating active one', async () => {
-    db.prepare(
-      "INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES (?, 'Existing Active', '[]', 1)"
-    ).run(WORKSPACE_ID);
+    await execute(`INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES ($1, 'Existing Active', '[]', 1)`, [WORKSPACE_ID]);
 
     await request(app)
       .post(`/api/workspaces/${WORKSPACE_ID}/agent-profiles`)
       .set('Authorization', `Bearer ${authToken}`)
       .send({ name: 'New Active', is_active: true });
 
-    const profiles = db.prepare(
-      'SELECT name, is_active FROM agent_profiles WHERE workspace_id = ? ORDER BY name'
-    ).all(WORKSPACE_ID) as { name: string; is_active: number }[];
+    const profiles = await query(`SELECT name, is_active FROM agent_profiles WHERE workspace_id = $1 ORDER BY name`, [WORKSPACE_ID]) as { name: string; is_active: number }[];
 
     const existingActive = profiles.find(p => p.name === 'Existing Active');
     expect(existingActive!.is_active).toBe(0);
@@ -167,10 +148,8 @@ describe('POST /api/workspaces/:id/agent-profiles', () => {
 
 describe('PUT /api/workspaces/:id/agent-profiles/:profileId', () => {
   it('updates an existing profile', async () => {
-    const result = db.prepare(
-      "INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES (?, 'Old Name', '[]', 0)"
-    ).run(WORKSPACE_ID);
-    const profileId = result.lastInsertRowid;
+    const result = await queryOne<{ id: number }>(`INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES ($1, 'Old Name', '[]', 0) RETURNING id`, [WORKSPACE_ID]);
+    const profileId = result!.id;
 
     const res = await request(app)
       .put(`/api/workspaces/${WORKSPACE_ID}/agent-profiles/${profileId}`)
@@ -203,10 +182,8 @@ describe('PUT /api/workspaces/:id/agent-profiles/:profileId', () => {
 
 describe('DELETE /api/workspaces/:id/agent-profiles/:profileId', () => {
   it('deletes an existing profile', async () => {
-    const result = db.prepare(
-      "INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES (?, 'ToDelete', '[]', 0)"
-    ).run(WORKSPACE_ID);
-    const profileId = result.lastInsertRowid;
+    const result = await queryOne<{ id: number }>(`INSERT INTO agent_profiles (workspace_id, name, allowed_tools, is_active) VALUES ($1, 'ToDelete', '[]', 0) RETURNING id`, [WORKSPACE_ID]);
+    const profileId = result!.id;
 
     const res = await request(app)
       .delete(`/api/workspaces/${WORKSPACE_ID}/agent-profiles/${profileId}`)
@@ -214,7 +191,7 @@ describe('DELETE /api/workspaces/:id/agent-profiles/:profileId', () => {
 
     expect(res.status).toBe(204);
 
-    const gone = db.prepare('SELECT id FROM agent_profiles WHERE id = ?').get(profileId);
+    const gone = await queryOne(`SELECT id FROM agent_profiles WHERE id = $1`, [profileId]);
     expect(gone).toBeUndefined();
   });
 

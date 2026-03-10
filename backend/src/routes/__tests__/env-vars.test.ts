@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
-import type Database from 'better-sqlite3';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
+import { query, queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -20,7 +20,6 @@ jest.mock('../../lib/llm-client', () => ({
 }));
 
 let app: Express;
-let db: Database.Database;
 let tmpDir: string;
 let authToken: string;
 
@@ -43,27 +42,19 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-envvars-test-'));
   const dbPath = path.join(tmpDir, 'test.db');
-  process.env.DB_PATH = dbPath;
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-  const dbMod = require('../../db/index');
-  db = dbMod.db;
-
-  // Seed a workspace
-  db.prepare(
-    "INSERT INTO workspaces (id, label, path) VALUES (?, 'Test Workspace', ?)"
-  ).run(WORKSPACE_ID, tmpDir);
+// Seed a workspace
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2)`, [WORKSPACE_ID, tmpDir]);
 
   authToken = await getAuthToken(app);
 });
 
 afterEach(() => {
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+fs.rmSync(tmpDir, { recursive: true, force: true });
+delete process.env.NODE_ENV;
 });
 
 // ─── POST /api/workspaces/:id/env-vars ──────────────────────────────────────
@@ -288,9 +279,7 @@ describe('encryption', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ key: 'ENCRYPTED_TEST', value: 'plaintext-value' });
 
-    const row = db.prepare(
-      'SELECT encrypted_value FROM workspace_env_vars WHERE workspace_id = ? AND key = ?'
-    ).get(WORKSPACE_ID, 'ENCRYPTED_TEST') as { encrypted_value: string };
+    const row = await queryOne(`SELECT encrypted_value FROM workspace_env_vars WHERE workspace_id = $1 AND key = $2`, [WORKSPACE_ID, 'ENCRYPTED_TEST']) as { encrypted_value: string };
 
     // Encrypted value should NOT be the plaintext
     expect(row.encrypted_value).not.toBe('plaintext-value');

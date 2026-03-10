@@ -14,8 +14,7 @@ let authToken: string;
 beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-ratelimit-test-'));
-  process.env.DB_PATH = path.join(tmpDir, 'test.db');
-  process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test';
   process.env.RATE_LIMIT_ENABLED = 'true';
 
   const serverMod = require('../../server');
@@ -37,8 +36,7 @@ afterEach(() => {
   stopCleanupTimer();
   delete process.env.RATE_LIMIT_ENABLED;
   fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.DB_PATH;
-  delete process.env.NODE_ENV;
+delete process.env.NODE_ENV;
 });
 
 describe('rate_limits table', () => {
