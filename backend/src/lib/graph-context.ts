@@ -14,6 +14,7 @@
 import { createHash } from 'crypto';
 import {
   graphStats,
+  isGraphAvailable,
   parseAgtype,
 } from './knowledge-graph';
 import { get, set } from './context-cache';

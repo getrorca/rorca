@@ -8,11 +8,63 @@
  *
  * All queries are parameterized. The graph is additive (append-only) —
  * historical edges are preserved for temporal analysis.
+ *
+ * PG-019: Graceful degradation when Apache AGE is unavailable.
+ * On managed Postgres services (Supabase, Neon), AGE is not installed.
+ * All graph functions check `isGraphAvailable()` and return empty results
+ * gracefully when AGE is missing. Core functionality (search, memory,
+ * CAG/RAG) works without the graph layer.
  */
 
 import { pool, query } from '../db/index';
 import { logger } from './logger';
 import type { PoolClient } from 'pg';
+
+// ── Graph Availability Flag ─────────────────────────────────────────────────
+
+/**
+ * PG-019: Track whether Apache AGE is available on this Postgres instance.
+ * Checked once on first graph operation, then cached.
+ *   - `null` = not yet checked
+ *   - `true` = AGE available
+ *   - `false` = AGE unavailable (managed service without AGE)
+ */
+let _graphAvailable: boolean | null = null;
+
+/**
+ * Check if Apache AGE is available on the current Postgres instance.
+ * Result is cached after first successful check.
+ */
+export async function isGraphAvailable(): Promise<boolean> {
+  if (_graphAvailable !== null) return _graphAvailable;
+
+  try {
+    const result = await pool.query<{ extname: string }>(
+      "SELECT extname FROM pg_extension WHERE extname = 'age'"
+    );
+    _graphAvailable = result.rows.length > 0;
+
+    if (!_graphAvailable) {
+      logger.warn(
+        '[knowledge-graph] Apache AGE not available — graph features disabled. ' +
+        'Use self-hosted Postgres for full graph support.'
+      );
+    }
+  } catch {
+    _graphAvailable = false;
+    logger.warn('[knowledge-graph] Could not check AGE extension — graph features disabled');
+  }
+
+  return _graphAvailable;
+}
+
+/**
+ * Reset the cached graph availability flag.
+ * Useful after extension installation or for testing.
+ */
+export function resetGraphAvailability(): void {
+  _graphAvailable = null;
+}
 
 // ── agtype Parsing ──────────────────────────────────────────────────────────
 
@@ -186,8 +238,10 @@ export interface SkillNode {
 /**
  * Add or update a Story vertex in the knowledge graph.
  * Uses MERGE to be idempotent.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addStoryNode(story: StoryNode): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cypher = `
     MERGE (s:Story {id: '${escCypher(story.id)}'})
     SET s.specId = '${escCypher(story.specId)}',
@@ -200,8 +254,10 @@ export async function addStoryNode(story: StoryNode): Promise<void> {
 
 /**
  * Add a File vertex (if not exists) and create a TOUCHES edge from a Story.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addFileTouch(storyId: string, filePath: string, workspaceId?: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const wsId = workspaceId || '';
   const cypher = `
     MERGE (s:Story {id: '${escCypher(storyId)}'})
@@ -215,8 +271,10 @@ export async function addFileTouch(storyId: string, filePath: string, workspaceI
 
 /**
  * Link a Memory entry to the Story that produced it.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addMemoryLink(memoryId: string, storyId: string, category?: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cat = category || '';
   const cypher = `
     MERGE (m:Memory {id: '${escCypher(memoryId)}'})
@@ -231,8 +289,10 @@ export async function addMemoryLink(memoryId: string, storyId: string, category?
 
 /**
  * Link a Memory entry to a specific File it references.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addMemoryAboutFile(memoryId: string, filePath: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cypher = `
     MERGE (m:Memory {id: '${escCypher(memoryId)}'})
     MERGE (f:File {path: '${escCypher(filePath)}'})
@@ -244,8 +304,10 @@ export async function addMemoryAboutFile(memoryId: string, filePath: string): Pr
 
 /**
  * Link a Convention to a File pattern it governs.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addConventionLink(conventionName: string, filePath: string, source?: string, layer?: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cypher = `
     MERGE (c:Convention {name: '${escCypher(conventionName)}'})
     ON CREATE SET c.source = '${escCypher(source || '')}',
@@ -259,8 +321,10 @@ export async function addConventionLink(conventionName: string, filePath: string
 
 /**
  * Mark a Convention as violated by a Story.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addConventionViolation(conventionName: string, storyId: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cypher = `
     MERGE (c:Convention {name: '${escCypher(conventionName)}'})
     MERGE (s:Story {id: '${escCypher(storyId)}'})
@@ -272,8 +336,10 @@ export async function addConventionViolation(conventionName: string, storyId: st
 
 /**
  * Track which Skill was injected/used in a Story.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addSkillUsage(skillName: string, storyId: string, source?: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cypher = `
     MERGE (sk:Skill {name: '${escCypher(skillName)}'})
     ON CREATE SET sk.source = '${escCypher(source || '')}'
@@ -286,8 +352,10 @@ export async function addSkillUsage(skillName: string, storyId: string, source?:
 
 /**
  * Add Spec node and link it to a Workspace.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addSpecNode(spec: SpecNode): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cypher = `
     MERGE (sp:Spec {id: '${escCypher(spec.id)}'})
     SET sp.title = '${escCypher(spec.title)}',
@@ -302,8 +370,10 @@ export async function addSpecNode(spec: SpecNode): Promise<void> {
 
 /**
  * Add Story BELONGS_TO Spec edge.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addStoryToSpec(storyId: string, specId: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cypher = `
     MERGE (s:Story {id: '${escCypher(storyId)}'})
     MERGE (sp:Spec {id: '${escCypher(specId)}'})
@@ -314,8 +384,10 @@ export async function addStoryToSpec(storyId: string, specId: string): Promise<v
 
 /**
  * Add Story DEPENDS_ON Story edges from the spec JSON dependsOn field.
+ * PG-019: No-op if AGE is unavailable.
  */
 export async function addStoryDependency(storyId: string, dependsOnId: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
   const cypher = `
     MERGE (s:Story {id: '${escCypher(storyId)}'})
     MERGE (d:Story {id: '${escCypher(dependsOnId)}'})
@@ -349,6 +421,7 @@ export async function queryRelated(
   depth: number = 1,
   edgeTypes?: EdgeType[],
 ): Promise<CypherResult[]> {
+  if (!(await isGraphAvailable())) return [];
   // Build the relationship pattern
   const edgeFilter = edgeTypes && edgeTypes.length > 0
     ? `:${edgeTypes.join('|')}`
@@ -403,6 +476,8 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
     specs: [],
     conventions: [],
   };
+
+  if (!(await isGraphAvailable())) return result;
 
   try {
     // Stories that touch this file
@@ -472,6 +547,8 @@ export async function populateFromRun(
 ): Promise<{ nodesCreated: number; edgesCreated: number }> {
   let nodesCreated = 0;
   let edgesCreated = 0;
+
+  if (!(await isGraphAvailable())) return { nodesCreated, edgesCreated };
 
   try {
     // 1. Get story results for this run
@@ -546,6 +623,8 @@ export async function populateFromSpec(
   workspaceId: string,
   stories: Array<{ id: string; title: string; dependsOn?: string[] }>,
 ): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
   try {
     // Add spec node
     await addSpecNode({
@@ -595,8 +674,13 @@ export interface GraphStats {
 
 /**
  * Check if the AGE graph is available and return basic stats.
+ * PG-019: Returns available: false immediately if AGE extension is not installed.
  */
 export async function graphStats(): Promise<GraphStats> {
+  if (!(await isGraphAvailable())) {
+    return { available: false, vertexCount: 0, edgeCount: 0, labels: [] };
+  }
+
   try {
     // Check if the graph exists
     const graphExists = await cypherQuery<{ cnt: unknown }>(

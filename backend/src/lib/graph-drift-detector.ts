@@ -14,7 +14,7 @@ import { pool } from '../db/index';
 import { logger } from './logger';
 import { chatComplete } from './llm-client';
 import type { ChatMessage } from './llm-client';
-import { addConventionViolation } from './knowledge-graph';
+import { addConventionViolation, isGraphAvailable } from './knowledge-graph';
 import type { PoolClient } from 'pg';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -128,6 +128,12 @@ export async function detectDrift(
 ): Promise<GraphDriftReport> {
   const violations: GraphDriftViolation[] = [];
   const impactMap = new Map<string, ImpactAnalysisEntry>();
+
+  // PG-019: Skip drift detection if AGE is unavailable
+  if (!(await isGraphAvailable())) {
+    logger.info('[graph-drift] AGE unavailable — skipping drift detection');
+    return { violations: [], impactAnalysis: [], score: 0 };
+  }
 
   // 1. Find conventions that apply to files touched by this spec's stories
   const conventionHits = await findConventionFileStoryOverlap(specId);
