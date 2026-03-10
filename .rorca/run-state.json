@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-wiring",
   "runId": 28,
   "startedAt": "2026-03-10T22:49:18.582Z",
-  "lastUpdatedAt": "2026-03-10T23:09:17.813Z",
+  "lastUpdatedAt": "2026-03-10T23:16:01.160Z",
   "completedStories": [
     {
       "storyId": "SW-001",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-10T23:09:17.813Z",
       "agentType": "claude",
       "elapsedMs": 298464
+    },
+    {
+      "storyId": "SW-005",
+      "title": "Populate Knowledge Graph After Each Story Completion",
+      "status": "passed",
+      "startedAt": "2026-03-10T23:09:41.650Z",
+      "finishedAt": "2026-03-10T23:16:01.159Z",
+      "agentType": "claude",
+      "elapsedMs": 379509
     }
   ],
   "failedStories": [],
