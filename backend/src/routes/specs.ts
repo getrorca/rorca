@@ -8294,4 +8294,227 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
   }
 });
 
+// ─── POST /:specId/match-skills — LLM-driven skill matching ────────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/match-skills:
+ *   post:
+ *     tags: [Specs]
+ *     summary: LLM-driven skill matching for a spec
+ *     operationId: matchSkills
+ *     description: >
+ *       Sends the curated skill catalog, spec stories, MEMORY.md, and AGENTS.md to the LLM
+ *       to receive per-story skill assignments with relevance scores and reasoning.
+ *       Writes suggestedSkills arrays back to the spec JSON file. Creates a spec version for audit trail.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Skill matching completed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 matched: { type: integer }
+ *                 stories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       skills:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             name: { type: string }
+ *                             relevance: { type: integer }
+ *                             reason: { type: string }
+ *       400:
+ *         description: Missing workspaceId
+ *       404:
+ *         description: Spec or workspace not found
+ *       422:
+ *         description: No skills installed
+ */
+router.post('/:specId/match-skills', async (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId is required' });
+      return;
+    }
+
+    const workspace = getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Resolve spec file: approved first, then pending
+    const { pendingDir, approvedDir } = specsDirs(workspace.path as string);
+    let specFilePath = path.join(approvedDir, `${specId}.json`);
+    let specStatus = 'approved';
+    if (!fs.existsSync(specFilePath)) {
+      specFilePath = path.join(pendingDir, `${specId}.json`);
+      specStatus = 'pending';
+      if (!fs.existsSync(specFilePath)) {
+        res.status(404).json({ error: 'Spec not found in approved or pending directories' });
+        return;
+      }
+    }
+
+    // Read spec
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    const stories: UserStory[] = specContent.userStories ?? [];
+    if (stories.length === 0) {
+      res.status(422).json({ error: 'Spec has no user stories' });
+      return;
+    }
+
+    // Build skill catalog context
+    const catalogs = buildCatalogContext(workspace.path as string);
+    if (catalogs.skillNames.size === 0) {
+      res.status(422).json({ error: 'No skills installed. Install skills from the Marketplace before matching.' });
+      return;
+    }
+
+    // Truncate MEMORY.md and AGENTS.md to 2000 chars
+    const memoryContext = catalogs.memoryMd ? catalogs.memoryMd.slice(0, 2000) : '';
+    const agentsContext = catalogs.agentsMd ? catalogs.agentsMd.slice(0, 2000) : '';
+
+    // Build numbered story list
+    const storyList = stories.map((s, i) =>
+      `${i + 1}. [${s.id}] ${s.title}\n   ${s.description ?? ''}`
+    ).join('\n');
+
+    // Resolve model: workspace L3 preferred_model > DEFAULT_MODEL
+    let resolvedModel: string = DEFAULT_MODEL;
+    const l3Pref = db.prepare(
+      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+    ).get(workspaceId) as { preferred_model: string | null } | undefined;
+    if (l3Pref?.preferred_model) {
+      resolvedModel = l3Pref.preferred_model;
+    }
+
+    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.
+
+Relevance scoring: 10 = this skill is essential for the story, 7-9 = highly relevant, 4-6 = moderately helpful, 1-3 = tangentially related. Only include skills with relevance >= 4. If no skills apply to a story, return empty suggestedSkills array.
+
+Respond with valid JSON only, no markdown fences. Format:
+{ "matches": [{ "storyId": "US-001", "suggestedSkills": [{ "name": "react", "relevance": 8, "reason": "Story involves React component creation — MEMORY.md notes React 18 conventions are critical" }] }] }
+
+## Installed Skills (one per line: name: description)
+${catalogs.skillCatalog}
+
+## MEMORY.md
+${memoryContext || '(empty)'}
+
+## AGENTS.md
+${agentsContext || '(empty)'}
+
+## Stories to match
+${storyList}`;
+
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: prompt }],
+      { model: resolvedModel as any },
+    );
+
+    // Parse LLM response
+    let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkillRaw[] }> };
+    try {
+      const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      logger.error('[Specs] match-skills: LLM returned invalid JSON:', llmResult.text.slice(0, 500));
+      res.status(500).json({ error: 'LLM returned invalid JSON for skill matching' });
+      return;
+    }
+
+    if (!Array.isArray(parsed.matches)) {
+      res.status(500).json({ error: 'LLM response missing matches array' });
+      return;
+    }
+
+    // Build a map of storyId -> suggestedSkills from LLM response
+    const matchMap = new Map<string, SuggestedSkillRaw[]>();
+    for (const match of parsed.matches) {
+      if (!match.storyId || !Array.isArray(match.suggestedSkills)) continue;
+      // Validate skill names against installed catalog
+      const validated = match.suggestedSkills.filter(sk => {
+        if (typeof sk.name !== 'string') return false;
+        const valid = catalogs.skillNames.has(sk.name.toLowerCase());
+        if (!valid) {
+          logger.warn(`[Specs] match-skills: Stripped unknown skill "${sk.name}" from story ${match.storyId}`);
+        }
+        return valid;
+      });
+      if (validated.length > 0) {
+        matchMap.set(match.storyId, validated);
+      }
+    }
+
+    // Write suggestedSkills back to spec JSON
+    let totalSkillsMatched = 0;
+    let storiesAffected = 0;
+    const responseStories: Array<{ storyId: string; skills: SuggestedSkillRaw[] }> = [];
+
+    for (const story of specContent.userStories) {
+      const skills = matchMap.get(story.id);
+      if (skills && skills.length > 0) {
+        story.suggestedSkills = skills;
+        totalSkillsMatched += skills.length;
+        storiesAffected++;
+        responseStories.push({ storyId: story.id, skills });
+      } else {
+        responseStories.push({ storyId: story.id, skills: [] });
+      }
+    }
+
+    // Write updated spec back to file
+    fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
+
+    // Create spec version for audit trail
+    snapshotVersion(specId, JSON.stringify(specContent), specStatus === 'approved' ? 'approved' : 'pending');
+
+    // Emit WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES (?, ?, ?, ?)`
+    ).run('skill_matched', specId, workspaceId, JSON.stringify({
+      matched_count: totalSkillsMatched,
+      stories_affected: storiesAffected,
+    }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
+
+    res.json({
+      matched: totalSkillsMatched,
+      stories: responseStories,
+    });
+  } catch (error: any) {
+    logger.error('[Specs] match-skills error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
