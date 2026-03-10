@@ -2,7 +2,7 @@
   "specId": "rorca-postgres-migration",
   "runId": 16,
   "startedAt": "2026-03-10T08:21:19.019Z",
-  "lastUpdatedAt": "2026-03-10T12:21:29.904Z",
+  "lastUpdatedAt": "2026-03-10T12:27:09.354Z",
   "completedStories": [
     {
       "storyId": "PG-001",
@@ -156,6 +156,15 @@
       "finishedAt": "2026-03-10T12:21:29.904Z",
       "agentType": "claude",
       "elapsedMs": 447591
+    },
+    {
+      "storyId": "PG-018",
+      "title": "SQLite → Postgres Data Migration Tool",
+      "status": "passed",
+      "startedAt": "2026-03-10T12:21:38.539Z",
+      "finishedAt": "2026-03-10T12:27:09.353Z",
+      "agentType": "claude",
+      "elapsedMs": 330814
     }
   ],
   "failedStories": [],

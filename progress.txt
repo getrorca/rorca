@@ -3,9 +3,9 @@
 Spec: rorca-postgres-migration
 Run ID: 16
 Started: 2026-03-10T08:21:19.019Z
-Last Updated: 2026-03-10T12:21:29.904Z
+Last Updated: 2026-03-10T12:27:09.354Z
 
-## Completed Stories (17)
+## Completed Stories (18)
 - PG-001: PostgreSQL Schema — Convert All Migrations — DONE (claude, 461s)
 - PG-002: Database Connection Layer — pg Pool + Async Helpers — DONE (claude, 190s)
 - PG-003: Route Async Conversion — Wave 1 (Core Routes) — DONE (claude, 1440s)
@@ -23,3 +23,4 @@ Last Updated: 2026-03-10T12:21:29.904Z
 - PG-015: Apache AGE Extension + Knowledge Graph Schema — DONE (claude, 476s)
 - PG-016: Graph-Powered Context Retrieval — DONE (claude, 364s)
 - PG-017: Graph-Based Convention Drift + Impact Analysis — DONE (claude, 448s)
+- PG-018: SQLite → Postgres Data Migration Tool — DONE (claude, 331s)
