@@ -22,6 +22,11 @@ import {
 import { hybridSearch, type SearchResult } from './search';
 import { logger } from './logger';
 import { queryRelated, queryImpact, graphStats } from './knowledge-graph';
+import {
+  getGraphContext,
+  formatGraphContext,
+  type GraphContext as FullGraphContext,
+} from './graph-context';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +56,8 @@ export interface RetrievedContext {
   memory: MemoryEntryResult[];
   skills: SkillContent[];
   graphContext?: GraphContext;
+  /** PG-016: formatted graph context section for prompt injection */
+  graphSection?: string;
   meta: {
     cagHits: number;
     ragHits: number;
@@ -64,6 +71,10 @@ export interface RetrievedContext {
 export interface RetrieveContextOptions {
   maxTokens?: number;
   includeGraph?: boolean;
+  /** Predicted file paths for graph traversal (PG-016) */
+  predictedPaths?: string[];
+  /** Current story ID for graph traversal context */
+  storyId?: string;
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -321,55 +332,89 @@ export async function retrieveContext(
   // ── Step 3: Graph — Knowledge graph context via Apache AGE ───────────────
 
   let graphContext: GraphContext | undefined;
+  let graphSection: string | undefined;
   if (includeGraph) {
     try {
-      const stats = await graphStats();
-      if (stats.available && stats.vertexCount > 0) {
-        // Extract file paths and story IDs from the story text for graph lookup
-        const filePaths = extractFilePaths(storyText);
-        const storyIds = extractStoryIds(storyText);
+      // PG-016: Use getGraphContext() for deep traversal when predictedPaths provided
+      const predictedPaths = options?.predictedPaths ?? extractFilePaths(storyText);
+      const currentStoryId = options?.storyId ?? '';
 
-        const relatedStories: GraphContext['relatedStories'] = [];
-        const fileTouches: GraphContext['fileTouches'] = [];
-        const conventionLinks: GraphContext['conventionLinks'] = [];
+      if (predictedPaths.length > 0 && currentStoryId) {
+        const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId);
 
-        // Query impact for each mentioned file path
-        for (const fp of filePaths.slice(0, 5)) { // limit to 5 paths
-          const impact = await queryImpact(fp);
-          for (const s of impact.stories) {
-            if (!relatedStories.some(rs => rs.id === s.id)) {
-              relatedStories.push({ id: s.id, title: s.title, relevance: 0.8 });
-            }
-          }
-          if (impact.stories.length > 0) {
-            fileTouches.push({ path: fp, storyIds: impact.stories.map(s => s.id) });
-          }
-          for (const c of impact.conventions) {
-            conventionLinks.push({ from: c.name, to: fp, type: 'APPLIES_TO' });
-          }
-        }
-
-        // Query related nodes for each mentioned story ID
-        for (const sid of storyIds.slice(0, 5)) {
-          const related = await queryRelated('Story', sid, 2, ['DEPENDS_ON', 'TOUCHES']);
-          for (const r of related) {
-            const props = r.properties as Record<string, string>;
-            if (r.label === 'Story' && props.id && !relatedStories.some(rs => rs.id === props.id)) {
-              relatedStories.push({ id: props.id, title: props.title || props.id, relevance: 0.6 });
-            }
-          }
-        }
-
-        graphHits = relatedStories.length + fileTouches.length + conventionLinks.length;
-
-        graphContext = { relatedStories, fileTouches, conventionLinks };
-        logger.debug(
-          { workspaceId: wsId, graphHits: graphHits },
-          '[memory-router] Graph context retrieved',
+        // Map full graph context to the simpler GraphContext for backward compat
+        const relatedStories: GraphContext['relatedStories'] = fullCtx.fileHistory.flatMap(fh =>
+          fh.touchedByStories.map(sid => ({ id: sid, title: sid, relevance: 0.7 })),
         );
+        // Deduplicate
+        const seenIds = new Set<string>();
+        const dedupedStories = relatedStories.filter(s => {
+          if (seenIds.has(s.id)) return false;
+          seenIds.add(s.id);
+          return true;
+        });
+
+        const fileTouches: GraphContext['fileTouches'] = fullCtx.fileHistory.map(fh => ({
+          path: fh.path,
+          storyIds: fh.touchedByStories,
+        }));
+
+        const conventionLinks: GraphContext['conventionLinks'] = fullCtx.relatedConventions.map(c => ({
+          from: c.name,
+          to: c.appliesTo,
+          type: 'APPLIES_TO',
+        }));
+
+        graphHits = fullCtx.relatedMemories.length + fullCtx.relatedConventions.length + fullCtx.fileHistory.length;
+        graphContext = { relatedStories: dedupedStories, fileTouches, conventionLinks };
+        graphSection = formatGraphContext(fullCtx);
       } else {
-        graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
+        // Fallback: use queryImpact for file-path-based lookup
+        const stats = await graphStats();
+        if (stats.available && stats.vertexCount > 0) {
+          const filePaths = extractFilePaths(storyText);
+          const storyIds = extractStoryIds(storyText);
+
+          const relatedStories: GraphContext['relatedStories'] = [];
+          const fileTouches: GraphContext['fileTouches'] = [];
+          const conventionLinks: GraphContext['conventionLinks'] = [];
+
+          for (const fp of filePaths.slice(0, 5)) {
+            const impact = await queryImpact(fp);
+            for (const s of impact.stories) {
+              if (!relatedStories.some(rs => rs.id === s.id)) {
+                relatedStories.push({ id: s.id, title: s.title, relevance: 0.8 });
+              }
+            }
+            if (impact.stories.length > 0) {
+              fileTouches.push({ path: fp, storyIds: impact.stories.map(s => s.id) });
+            }
+            for (const c of impact.conventions) {
+              conventionLinks.push({ from: c.name, to: fp, type: 'APPLIES_TO' });
+            }
+          }
+
+          for (const sid of storyIds.slice(0, 5)) {
+            const related = await queryRelated('Story', sid, 2, ['DEPENDS_ON', 'TOUCHES']);
+            for (const r of related) {
+              const props = r.properties as Record<string, string>;
+              if (r.label === 'Story' && props.id && !relatedStories.some(rs => rs.id === props.id)) {
+                relatedStories.push({ id: props.id, title: props.title || props.id, relevance: 0.6 });
+              }
+            }
+          }
+
+          graphHits = relatedStories.length + fileTouches.length + conventionLinks.length;
+          graphContext = { relatedStories, fileTouches, conventionLinks };
+        } else {
+          graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
+        }
       }
+
+      logger.debug(
+        { workspaceId: wsId, graphHits },
+        '[memory-router] Graph context retrieved',
+      );
     } catch (err) {
       logger.warn({ err, workspaceId: wsId }, '[memory-router] Graph context retrieval failed — using empty');
       graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
@@ -416,6 +461,7 @@ export async function retrieveContext(
     memory: memoryEntries,
     skills,
     graphContext,
+    graphSection,
     meta: {
       cagHits,
       ragHits,
