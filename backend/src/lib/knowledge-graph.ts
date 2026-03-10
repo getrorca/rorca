@@ -16,6 +16,8 @@
  * CAG/RAG) works without the graph layer.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { pool, query } from '../db/index';
 import { logger } from './logger';
 import type { PoolClient } from 'pg';
@@ -661,6 +663,108 @@ export async function populateFromSpec(
   } catch (err) {
     logger.error({ err, specId }, '[knowledge-graph] populateFromSpec failed');
   }
+}
+
+// ── Convention Population from Config ─────────────────────────────────────────
+
+/**
+ * SW-008: Populate Convention nodes and APPLIES_TO edges from .rorca/config.json.
+ *
+ * Reads routing.scopes and routing.globals from the workspace config, creates
+ * Convention nodes, and links them to matched File nodes via APPLIES_TO edges.
+ *
+ * - Scope conventions: one Convention per injected context file, linked to files
+ *   matching the scope's path glob via micromatch.
+ * - Global conventions: one Convention per global file (always-injected).
+ *
+ * @param workspaceId - The workspace ID (for logging / future queries)
+ * @param workspacePath - Absolute filesystem path to the workspace root
+ */
+export async function populateConventionsFromConfig(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<{ nodesCreated: number; edgesCreated: number }> {
+  let nodesCreated = 0;
+  let edgesCreated = 0;
+
+  if (!(await isGraphAvailable())) return { nodesCreated, edgesCreated };
+
+  try {
+    const { loadRorcaConfig } = await import('./rorca-config');
+    const micromatch = (await import('micromatch')).default;
+
+    const config = loadRorcaConfig(workspacePath);
+    const { scopes, global: globals } = config.routing;
+
+    // Collect workspace files for micromatch (relative paths)
+    const workspaceFiles = listFilesRecursive(workspacePath, workspacePath);
+
+    // 1. Scope conventions: each inject[] entry becomes a Convention node
+    for (const scope of scopes) {
+      // Match workspace files against the scope path glob
+      const matchedFiles = micromatch(workspaceFiles, scope.path);
+
+      for (const injectFile of scope.inject) {
+        await addConventionLink(injectFile, '', 'config.json', 'scope');
+        nodesCreated++;
+
+        // Link convention to each matched file
+        for (const filePath of matchedFiles) {
+          await addConventionLink(injectFile, filePath, 'config.json', 'scope');
+          edgesCreated++;
+        }
+      }
+    }
+
+    // 2. Global conventions: always-injected files
+    for (const globalFile of globals) {
+      await addConventionLink(globalFile, '', 'config.json', 'global');
+      nodesCreated++;
+    }
+
+    logger.info(
+      { workspaceId, nodesCreated, edgesCreated, scopeCount: scopes.length, globalCount: globals.length },
+      '[knowledge-graph] Conventions populated from config.json',
+    );
+  } catch (err) {
+    logger.error({ err, workspaceId }, '[knowledge-graph] populateConventionsFromConfig failed');
+  }
+
+  return { nodesCreated, edgesCreated };
+}
+
+/**
+ * Recursively list files in a directory, returning paths relative to the base.
+ * Skips node_modules, .git, and other large directories.
+ */
+function listFilesRecursive(dir: string, base: string, maxDepth = 5, depth = 0): string[] {
+  if (depth >= maxDepth) return [];
+
+  const SKIP_DIRS = new Set([
+    'node_modules', '.git', '.next', 'dist', 'build', '.cache',
+    '__pycache__', '.tox', 'vendor', 'target', '.rorca',
+  ]);
+
+  const results: string[] = [];
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name)) continue;
+        results.push(...listFilesRecursive(
+          path.join(dir, entry.name),
+          base,
+          maxDepth,
+          depth + 1,
+        ));
+      } else if (entry.isFile()) {
+        results.push(path.relative(base, path.join(dir, entry.name)));
+      }
+    }
+  } catch {
+    // Permission errors, broken symlinks — skip silently
+  }
+  return results;
 }
 
 // ── Graph Health Check ──────────────────────────────────────────────────────

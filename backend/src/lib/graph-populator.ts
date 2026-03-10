@@ -13,6 +13,7 @@ import {
   isGraphAvailable,
   populateFromRun,
   populateFromSpec,
+  populateConventionsFromConfig,
   addStoryNode,
   addFileTouch,
   addSkillUsage,
@@ -213,6 +214,15 @@ async function handleSpecApproved(event: WalEvent): Promise<void> {
       dependsOn: s.dependsOn,
     })),
   );
+
+  // SW-008: Populate convention nodes from .rorca/config.json
+  const workspace = await queryOne<{ path: string }>(
+    'SELECT path FROM workspaces WHERE id = $1',
+    [event.workspace_id],
+  );
+  if (workspace?.path) {
+    await populateConventionsFromConfig(event.workspace_id, workspace.path);
+  }
 }
 
 function extractSpecId(specPath: string): string {
