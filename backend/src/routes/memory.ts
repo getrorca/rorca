@@ -27,6 +27,7 @@ import { analyzeRunEvents } from '../lib/wal-feedback';
 import { broadcastAll } from '../lib/sse-hub';
 import { invalidateMemory } from '../lib/context-cache';
 import { deduplicateMemory } from '../lib/memory-dedup';
+import { embedText, prepareText } from '../lib/embedding-pipeline';
 
 const router = Router();
 
@@ -1057,6 +1058,357 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
 
   const result = await deduplicateMemory(wsPath, workspaceId, dryRun);
   res.json(result);
+});
+
+// ─── PG-022: DB-backed memory CRUD for curation ─────────────────────────────
+
+/**
+ * @swagger
+ * /api/memory/items:
+ *   get:
+ *     tags: [Memory]
+ *     summary: List memories from the database with filters
+ *     operationId: listMemoryItems
+ *     parameters:
+ *       - name: workspaceId
+ *         in: query
+ *         required: true
+ *         schema: { type: string }
+ *       - name: category
+ *         in: query
+ *         schema: { type: string }
+ *       - name: confidence
+ *         in: query
+ *         schema: { type: string, enum: [high, medium, low] }
+ *       - name: sourceRunId
+ *         in: query
+ *         schema: { type: integer }
+ *       - name: search
+ *         in: query
+ *         schema: { type: string }
+ *         description: Full-text search query
+ *       - name: pinnedOnly
+ *         in: query
+ *         schema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Memory items list with counts
+ */
+router.get('/items', async (req: Request, res: Response) => {
+  const { workspaceId, category, confidence, sourceRunId, search, pinnedOnly } = req.query;
+  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+
+  let sql = `SELECT id, workspace_id, category, content, source_story_id, source_run_id,
+             confidence, related_files, pinned, created_at
+             FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL`;
+  const params: (string | number)[] = [workspaceId as string];
+  let paramIdx = 2;
+
+  if (category) {
+    sql += ` AND category = $${paramIdx}`;
+    params.push(category as string);
+    paramIdx++;
+  }
+
+  if (confidence) {
+    sql += ` AND confidence = $${paramIdx}`;
+    params.push(confidence as string);
+    paramIdx++;
+  }
+
+  if (sourceRunId) {
+    sql += ` AND source_run_id = $${paramIdx}`;
+    params.push(parseInt(sourceRunId as string, 10));
+    paramIdx++;
+  }
+
+  if (search) {
+    sql += ` AND tsv @@ plainto_tsquery('english', $${paramIdx})`;
+    params.push(search as string);
+    paramIdx++;
+  }
+
+  if (pinnedOnly === 'true') {
+    sql += ' AND pinned = true';
+  }
+
+  // Pinned first, then by created_at DESC
+  sql += ' ORDER BY pinned DESC, created_at DESC';
+
+  const rows = await dbQuery<{
+    id: number;
+    workspace_id: string;
+    category: string;
+    content: string;
+    source_story_id: string | null;
+    source_run_id: number | null;
+    confidence: string;
+    related_files: string;
+    pinned: boolean;
+    created_at: string;
+  }>(sql, params);
+
+  // Get counts
+  const countRows = await dbQuery<{ total: string; pinned: string }>(
+    `SELECT
+       COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE pinned = true) AS pinned
+     FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL`,
+    [workspaceId as string],
+  );
+
+  // Get recent run IDs for filter dropdown
+  const runRows = await dbQuery<{ source_run_id: number }>(
+    `SELECT DISTINCT source_run_id FROM memories
+     WHERE workspace_id = $1 AND deleted_at IS NULL AND source_run_id IS NOT NULL
+     ORDER BY source_run_id DESC LIMIT 10`,
+    [workspaceId as string],
+  );
+
+  const items = rows.map(r => ({
+    id: r.id,
+    workspaceId: r.workspace_id,
+    category: r.category,
+    content: r.content,
+    sourceStoryId: r.source_story_id,
+    sourceRunId: r.source_run_id,
+    confidence: r.confidence,
+    relatedFiles: typeof r.related_files === 'string' ? JSON.parse(r.related_files) : r.related_files,
+    pinned: r.pinned,
+    createdAt: r.created_at,
+  }));
+
+  res.json({
+    items,
+    total: parseInt(countRows[0]?.total ?? '0', 10),
+    pinned: parseInt(countRows[0]?.pinned ?? '0', 10),
+    recentRunIds: runRows.map(r => r.source_run_id),
+    categories: MEMORY_CATEGORIES,
+  });
+});
+
+/**
+ * @swagger
+ * /api/memory/items/{id}:
+ *   patch:
+ *     tags: [Memory]
+ *     summary: Update a memory entry (content, pinned status)
+ *     operationId: updateMemoryItem
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               content: { type: string }
+ *               pinned: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Updated memory item
+ *       404:
+ *         description: Memory not found
+ */
+router.patch('/items/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const { content, pinned } = req.body as { content?: string; pinned?: boolean };
+
+  // Check exists
+  const existing = await queryOne<{ id: number; workspace_id: string; content: string }>(
+    'SELECT id, workspace_id, content FROM memories WHERE id = $1 AND deleted_at IS NULL',
+    [id],
+  );
+  if (!existing) return res.status(404).json({ error: 'Memory not found' });
+
+  const setClauses: string[] = [];
+  const params: (string | number | boolean | null)[] = [];
+  let paramIdx = 1;
+
+  if (content !== undefined) {
+    setClauses.push(`content = $${paramIdx}`);
+    params.push(content);
+    paramIdx++;
+
+    // Re-compute embedding when content changes
+    try {
+      const prepared = prepareText('memory', content);
+      const embedding = await embedText(prepared);
+      if (embedding) {
+        setClauses.push(`embedding = $${paramIdx}::vector`);
+        params.push(`[${embedding.join(',')}]`);
+        paramIdx++;
+      }
+    } catch {
+      // Embedding failure is non-fatal — update content without new vector
+    }
+  }
+
+  if (pinned !== undefined) {
+    setClauses.push(`pinned = $${paramIdx}`);
+    params.push(pinned);
+    paramIdx++;
+  }
+
+  if (setClauses.length === 0) {
+    return res.status(400).json({ error: 'No fields to update' });
+  }
+
+  params.push(id);
+  const sql = `UPDATE memories SET ${setClauses.join(', ')} WHERE id = $${paramIdx} RETURNING
+    id, workspace_id, category, content, source_story_id, source_run_id,
+    confidence, related_files, pinned, created_at`;
+
+  const updated = await queryOne<{
+    id: number; workspace_id: string; category: string; content: string;
+    source_story_id: string | null; source_run_id: number | null;
+    confidence: string; related_files: string; pinned: boolean; created_at: string;
+  }>(sql, params);
+
+  invalidateMemory(existing.workspace_id);
+
+  res.json({
+    id: updated!.id,
+    workspaceId: updated!.workspace_id,
+    category: updated!.category,
+    content: updated!.content,
+    sourceStoryId: updated!.source_story_id,
+    sourceRunId: updated!.source_run_id,
+    confidence: updated!.confidence,
+    relatedFiles: typeof updated!.related_files === 'string' ? JSON.parse(updated!.related_files) : updated!.related_files,
+    pinned: updated!.pinned,
+    createdAt: updated!.created_at,
+  });
+});
+
+/**
+ * @swagger
+ * /api/memory/items/{id}:
+ *   delete:
+ *     tags: [Memory]
+ *     summary: Soft-delete a memory entry
+ *     operationId: deleteMemoryItem
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Memory soft-deleted
+ *       404:
+ *         description: Memory not found
+ */
+router.delete('/items/:id', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const existing = await queryOne<{ id: number; workspace_id: string }>(
+    'SELECT id, workspace_id FROM memories WHERE id = $1 AND deleted_at IS NULL',
+    [id],
+  );
+  if (!existing) return res.status(404).json({ error: 'Memory not found' });
+
+  await execute('UPDATE memories SET deleted_at = NOW() WHERE id = $1', [id]);
+  invalidateMemory(existing.workspace_id);
+
+  res.json({ deleted: true, id });
+});
+
+/**
+ * @swagger
+ * /api/memory/items/{id}/undelete:
+ *   post:
+ *     tags: [Memory]
+ *     summary: Restore a soft-deleted memory entry
+ *     operationId: undeleteMemoryItem
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Memory restored
+ *       404:
+ *         description: Memory not found or not deleted
+ */
+router.post('/items/:id/undelete', async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  const existing = await queryOne<{ id: number; workspace_id: string }>(
+    'SELECT id, workspace_id FROM memories WHERE id = $1 AND deleted_at IS NOT NULL',
+    [id],
+  );
+  if (!existing) return res.status(404).json({ error: 'Memory not found or not deleted' });
+
+  await execute('UPDATE memories SET deleted_at = NULL WHERE id = $1', [id]);
+  invalidateMemory(existing.workspace_id);
+
+  res.json({ restored: true, id });
+});
+
+/**
+ * @swagger
+ * /api/memory/items/bulk:
+ *   post:
+ *     tags: [Memory]
+ *     summary: Bulk operations on memory items (delete, pin, unpin)
+ *     operationId: bulkMemoryAction
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [ids, action]
+ *             properties:
+ *               ids: { type: array, items: { type: integer } }
+ *               action: { type: string, enum: [delete, pin, unpin] }
+ *     responses:
+ *       200:
+ *         description: Bulk action result
+ */
+router.post('/items/bulk', async (req: Request, res: Response) => {
+  const { ids, action } = req.body as { ids: number[]; action: 'delete' | 'pin' | 'unpin' };
+
+  if (!ids || !Array.isArray(ids) || ids.length === 0 || !action) {
+    return res.status(400).json({ error: 'ids array and action required' });
+  }
+
+  // Build numbered placeholders for IN clause
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
+
+  let sql: string;
+  if (action === 'delete') {
+    sql = `UPDATE memories SET deleted_at = NOW() WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+  } else if (action === 'pin') {
+    sql = `UPDATE memories SET pinned = true WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+  } else if (action === 'unpin') {
+    sql = `UPDATE memories SET pinned = false WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+  } else {
+    return res.status(400).json({ error: 'action must be delete, pin, or unpin' });
+  }
+
+  const result = await execute(sql, ids);
+
+  // Invalidate cache for affected workspaces
+  const wsRows = await dbQuery<{ workspace_id: string }>(
+    `SELECT DISTINCT workspace_id FROM memories WHERE id IN (${placeholders})`,
+    ids,
+  );
+  for (const ws of wsRows) {
+    invalidateMemory(ws.workspace_id);
+  }
+
+  res.json({ affected: result.rowCount, action });
 });
 
 export default router;
