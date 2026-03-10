@@ -44,6 +44,7 @@ import { startFileWatcher } from './lib/file-watcher';
 import { startEmbeddingPipeline } from './lib/embedding-pipeline';
 import { subscribe, type WalEvent } from './lib/sse-hub';
 import { rotateMemory } from './lib/memory-ledger';
+import { deduplicateMemory } from './lib/memory-dedup';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
 import { rateLimiter } from './lib/rate-limiter';
@@ -280,15 +281,19 @@ startGraphPopulator();
 startDriftSubscriber();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
+// PR-018: Auto-deduplicate memory after rotation (post-run)
 subscribe((event: WalEvent) => {
   if (event.event_type !== 'run_finished' || !event.workspace_id) return;
+  const workspaceId = event.workspace_id;
   (async () => {
     try {
-      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [event.workspace_id]);
+      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
       if (!ws) return;
       rotateMemory(ws.path);
+      // Run dedup after rotation — removes semantically duplicate entries
+      await deduplicateMemory(ws.path, workspaceId);
     } catch {
-      // Non-fatal — rotation failure must not affect the run result
+      // Non-fatal — rotation/dedup failure must not affect the run result
     }
   })();
 });
