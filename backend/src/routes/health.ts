@@ -87,6 +87,11 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       ...(healthResult.pgVersion ? { pgVersion: healthResult.pgVersion } : {}),
       ...(healthResult.extensions ? { extensions: healthResult.extensions } : {}),
       poolStats: healthResult.poolStats,
+      // PG-019: Cloud managed service compatibility
+      cloud: healthResult.cloud,
+      provider: healthResult.provider,
+      ...(healthResult.extensionStatus ? { extensionStatus: healthResult.extensionStatus } : {}),
+      ...(healthResult.connectionLimit ? { connectionLimit: healthResult.connectionLimit } : {}),
       // CA-021: Report MCP transport mode
       mcpTransport: 'http',
       // PR-005: Report telemetry status
