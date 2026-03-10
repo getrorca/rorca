@@ -4910,6 +4910,164 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
   }
 });
 
+// ─── SL-004: Skills Usage Per-Run API Endpoint ──────────────────────────────
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/skills:
+ *   get:
+ *     summary: Get per-story skill usage data for a specific pipeline run
+ *     tags: [Pipeline]
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Skill usage data with per-story breakdown and run-level summary
+ *       400:
+ *         description: Invalid runId
+ *       404:
+ *         description: Run not found
+ */
+router.get('/runs/:runId/skills', (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const run = db.prepare(
+      'SELECT id, spec_path, workspace_id FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as { id: number; spec_path: string; workspace_id: string } | undefined;
+
+    if (!run) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    // Get all story results for this run
+    const storyRows = db.prepare(
+      'SELECT story_id, status, active_skills FROM story_results WHERE run_id = ? ORDER BY id ASC'
+    ).all(runId) as Array<{ story_id: string; status: string; active_skills: string | null }>;
+
+    // Try to read spec JSON for suggestedSkills and story titles
+    const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(run.workspace_id) as { path: string } | undefined;
+
+    let specStories: Array<{
+      id: string;
+      title: string;
+      suggestedSkills?: Array<{ name: string; relevance: number; reason: string }>;
+    }> = [];
+
+    if (workspace) {
+      try {
+        const absSpecPath = path.join(workspace.path, run.spec_path);
+        const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
+        specStories = specJson.userStories || [];
+      } catch {
+        // Spec file missing/unreadable — titles and relevance will be null
+      }
+    }
+
+    // Build title and suggestedSkills lookup maps
+    const titleMap = new Map<string, string>();
+    const skillSuggestionsMap = new Map<string, Array<{ name: string; relevance: number; reason: string }>>();
+    for (const s of specStories) {
+      titleMap.set(s.id, s.title);
+      if (s.suggestedSkills) {
+        skillSuggestionsMap.set(s.id, s.suggestedSkills);
+      }
+    }
+
+    // Get installed skill descriptions
+    const installedSkills = db.prepare('SELECT name, description FROM installed_skills').all() as Array<{ name: string; description: string }>;
+    const descriptionMap = new Map<string, string>();
+    for (const sk of installedSkills) {
+      descriptionMap.set(sk.name, sk.description);
+    }
+
+    // Build per-story data
+    const skillCounts = new Map<string, { count: number; passCount: number; totalCount: number }>();
+
+    const perStory = storyRows.map((row) => {
+      let activeSkillNames: string[] = [];
+      if (row.active_skills) {
+        try {
+          activeSkillNames = JSON.parse(row.active_skills);
+        } catch { /* malformed JSON */ }
+      }
+
+      const suggestions = skillSuggestionsMap.get(row.story_id) || [];
+      const suggestionMap = new Map<string, { relevance: number; reason: string }>();
+      for (const s of suggestions) {
+        suggestionMap.set(s.name, { relevance: s.relevance, reason: s.reason });
+      }
+
+      const skills = activeSkillNames.map((name) => {
+        const suggestion = suggestionMap.get(name);
+        return {
+          name,
+          relevance: suggestion?.relevance ?? null,
+          reason: suggestion?.reason ?? null,
+          description: descriptionMap.get(name) ?? null,
+          category: null as string | null,
+        };
+      });
+
+      // Update frequency counts
+      for (const name of activeSkillNames) {
+        const existing = skillCounts.get(name) || { count: 0, passCount: 0, totalCount: 0 };
+        existing.count++;
+        existing.totalCount++;
+        if (row.status === 'pass') existing.passCount++;
+        skillCounts.set(name, existing);
+      }
+
+      return {
+        storyId: row.story_id,
+        storyTitle: titleMap.get(row.story_id) || row.story_id,
+        storyStatus: row.status,
+        skills,
+      };
+    });
+
+    // Build summary
+    const skillFrequency = Array.from(skillCounts.entries())
+      .map(([name, data]) => ({
+        name,
+        count: data.count,
+        passRate: data.totalCount > 0 ? data.passCount / data.totalCount : 0,
+        category: null as string | null,
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    const uniqueSkills = skillFrequency.map((s) => s.name);
+    const storiesWithSkills = perStory.filter((s) => s.skills.length > 0).length;
+    const storiesWithoutSkills = perStory.filter((s) => s.skills.length === 0).length;
+    const totalSkillInjections = perStory.reduce((sum, s) => sum + s.skills.length, 0);
+
+    res.json({
+      runId,
+      perStory,
+      summary: {
+        totalSkillInjections,
+        uniqueSkills,
+        skillFrequency,
+        storiesWithSkills,
+        storiesWithoutSkills,
+      },
+    });
+  } catch (error: any) {
+    logger.error('[Pipeline] Get run skills error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── OC-015: Orphan Process Cleanup on Backend Startup ──────────────────────
 // Scans pipeline_runs WHERE status='running', kills orphan PIDs (engine + OpenCode server),
 // marks runs as failed. Called once at server startup.
