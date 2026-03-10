@@ -3,9 +3,9 @@
 Spec: rorca-postgres-migration
 Run ID: 16
 Started: 2026-03-10T08:21:19.019Z
-Last Updated: 2026-03-10T11:59:36.316Z
+Last Updated: 2026-03-10T12:07:41.313Z
 
-## Completed Stories (14)
+## Completed Stories (15)
 - PG-001: PostgreSQL Schema — Convert All Migrations — DONE (claude, 461s)
 - PG-002: Database Connection Layer — pg Pool + Async Helpers — DONE (claude, 190s)
 - PG-003: Route Async Conversion — Wave 1 (Core Routes) — DONE (claude, 1440s)
@@ -20,3 +20,4 @@ Last Updated: 2026-03-10T11:59:36.316Z
 - PG-012: Selective Retrieval in synthesize() — DONE (claude, 378s)
 - PG-013: CAG — In-Memory Context Cache (Hot Layer) — DONE (claude, 598s)
 - PG-014: Memory Tiering Router — CAG/RAG Fallback Chain — DONE (claude, 385s)
+- PG-015: Apache AGE Extension + Knowledge Graph Schema — DONE (claude, 476s)
