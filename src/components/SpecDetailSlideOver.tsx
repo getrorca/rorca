@@ -10,12 +10,14 @@ import { createPortal } from 'react-dom';
 import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
   Download, Copy, Check, ChevronRight, Play, GitBranch, GitFork,
-  Loader2, Plus, Sparkles, Trash2, History,
+  Loader2, Plus, Sparkles, Trash2, History, FileSearch,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
+import ContextSummaryCard from './ContextSummaryCard';
+import type { ContextSummary } from '../panels/SpecForgeOutput';
 import { StoryCard } from './StoryCard';
 import type { Story } from './StoryCard';
 import { InlineStoryEditor } from './InlineStoryEditor';
@@ -30,7 +32,7 @@ import type { PanelId } from './Sidebar';
 /* ─── Types ───────────────────────────────────────────────────────── */
 
 type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
-type PreviewTab = 'stories' | 'history' | 'graph' | 'diagram' | 'json';
+type PreviewTab = 'stories' | 'history' | 'context' | 'graph' | 'diagram' | 'json';
 
 export interface SpecSlideOverSummary {
   id: string;
@@ -393,6 +395,7 @@ function SpecDetailContent({
   const tabs: { id: PreviewTab; label: string; badge?: string; icon?: typeof History }[] = [
     { id: 'stories', label: 'Stories', badge: `${stories.length}` },
     { id: 'history', label: 'History', icon: History },
+    { id: 'context', label: 'Context', icon: FileSearch },
     { id: 'graph', label: 'Graph' },
     { id: 'diagram', label: 'Dependencies' },
     { id: 'json', label: 'Raw JSON' },
@@ -494,6 +497,7 @@ function SpecDetailContent({
                 onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
+            {activeTab === 'context' && <GenerationLogTab specId={specId} />}
             {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
             {activeTab === 'json' && <JsonTab spec={detail} specId={specId} />}
@@ -691,6 +695,186 @@ function JsonTab({ spec, specId }: { spec: SpecDetailData; specId: string }) {
           {rawJson}
         </pre>
       </div>
+    </div>
+  );
+}
+
+/* ─── LST-004: Generation Log Tab ──────────────────────────────── */
+
+interface GenerationLog {
+  id: number;
+  spec_slug: string;
+  model: string;
+  provider: string | null;
+  duration_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  context_summary: string;
+  error: string | null;
+  error_category: string | null;
+  status: string;
+  created_at: string;
+}
+
+/** Rough per-1K-token cost estimates by model family (input/output). */
+function estimateCost(model: string, inputTokens: number, outputTokens: number): number | null {
+  const rates: Record<string, [number, number]> = {
+    'claude-opus': [0.015, 0.075],
+    'claude-sonnet': [0.003, 0.015],
+    'claude-haiku': [0.00025, 0.00125],
+    'gpt-4o': [0.0025, 0.01],
+    'gpt-4': [0.03, 0.06],
+    'o3': [0.01, 0.04],
+    'gemini': [0.00025, 0.001],
+  };
+  const m = model.toLowerCase();
+  for (const [key, [inRate, outRate]] of Object.entries(rates)) {
+    if (m.includes(key)) {
+      return (inputTokens / 1000) * inRate + (outputTokens / 1000) * outRate;
+    }
+  }
+  return null;
+}
+
+function GenerationLogTab({ specId }: { specId: string }) {
+  const [logs, setLogs] = useState<GenerationLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+
+    apiFetch<GenerationLog | { logs: GenerationLog[] }>(
+      `/api/specs/${specId}/generation-log${showAll ? '?all=true' : ''}`
+    )
+      .then(res => {
+        if (cancelled) return;
+        if ('logs' in res) setLogs(res.logs);
+        else setLogs([res]);
+      })
+      .catch(() => { if (!cancelled) setLogs([]); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [specId, showAll]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-muted text-sm">
+        <Loader2 size={16} className="animate-spin mr-2" />Loading generation data...
+      </div>
+    );
+  }
+
+  if (logs.length === 0) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <p className="text-sm text-muted">No generation data available</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4 space-y-4">
+      {logs.map((log, i) => {
+        let contextSummary: ContextSummary | null = null;
+        try { contextSummary = JSON.parse(log.context_summary); } catch { /* ignore */ }
+        const cost = log.input_tokens && log.output_tokens
+          ? estimateCost(log.model, log.input_tokens, log.output_tokens)
+          : null;
+
+        return (
+          <div key={log.id} className="border border-border rounded-lg bg-panel overflow-hidden">
+            {/* Header */}
+            <div className="px-4 py-3 border-b border-border/50">
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2">
+                  {log.status === 'completed' ? (
+                    <CheckCircle2 size={14} className="text-success" />
+                  ) : (
+                    <XCircle size={14} className="text-error" />
+                  )}
+                  <span className="text-xs font-medium text-text">
+                    {log.status === 'completed' ? 'Generation Succeeded' : 'Generation Failed'}
+                  </span>
+                  {i === 0 && logs.length > 1 && (
+                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">Latest</span>
+                  )}
+                </div>
+                <span className="text-[10px] text-muted">{formatDate(log.created_at)}</span>
+              </div>
+
+              {/* Stats row */}
+              <div className="flex flex-wrap items-center gap-3 text-xs text-muted mt-1">
+                <span className="px-1.5 py-0.5 font-mono rounded bg-panel border border-border text-[10px]">
+                  {log.model}
+                </span>
+                {log.provider && (
+                  <span>via {log.provider}</span>
+                )}
+                {log.duration_ms != null && (
+                  <span className="flex items-center gap-1">
+                    <Clock size={10} />
+                    {log.duration_ms < 1000
+                      ? `${log.duration_ms}ms`
+                      : `${(log.duration_ms / 1000).toFixed(1)}s`}
+                  </span>
+                )}
+              </div>
+
+              {/* Token usage */}
+              {(log.input_tokens != null || log.output_tokens != null) && (
+                <div className="flex items-center gap-3 text-xs text-muted mt-2">
+                  {log.input_tokens != null && (
+                    <span>Input: {(log.input_tokens / 1000).toFixed(1)}K tokens</span>
+                  )}
+                  {log.output_tokens != null && (
+                    <span>Output: {(log.output_tokens / 1000).toFixed(1)}K tokens</span>
+                  )}
+                  {cost != null && (
+                    <span className="text-text font-medium">Cost: ~${cost.toFixed(3)}</span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Error detail (for failed generations) */}
+            {log.error && (
+              <div className="px-4 py-2 bg-error/5 border-b border-error/20">
+                <div className="flex items-start gap-2">
+                  <AlertCircle size={12} className="text-error mt-0.5 shrink-0" />
+                  <div className="text-xs">
+                    {log.error_category && (
+                      <span className="inline-block px-1.5 py-0.5 mb-1 text-[10px] font-medium rounded bg-error/15 text-error">
+                        {log.error_category}
+                      </span>
+                    )}
+                    <p className="text-error/80 break-words">{log.error}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Context summary card */}
+            {contextSummary && contextSummary.directionLayers && (
+              <div className="p-3">
+                <ContextSummaryCard summary={contextSummary} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Show all toggle */}
+      {!showAll && (
+        <button
+          onClick={() => setShowAll(true)}
+          className="w-full text-center text-xs text-accent hover:text-accent/80 py-2 transition-colors"
+        >
+          Show all generation attempts
+        </button>
+      )}
     </div>
   );
 }
