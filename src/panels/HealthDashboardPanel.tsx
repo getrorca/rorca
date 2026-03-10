@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { HeartPulse, Database, Clock, Cpu, HardDrive, FileText, RefreshCw, AlertTriangle, CheckCircle, ShieldCheck, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { HeartPulse, Database, Clock, Cpu, HardDrive, FileText, RefreshCw, AlertTriangle, CheckCircle, ShieldCheck, ChevronDown, ChevronRight, Loader2, Network, Braces, Search, Zap } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { BASE_URL, apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -33,6 +33,14 @@ interface HistoryPoint {
   heapUsed: number;
   activeRuns: number;
   dbConnected: boolean;
+}
+
+interface SemanticStats {
+  graphAvailable: boolean;
+  vertices: number;
+  edges: number;
+  embeddings: { total: number; specs: number; stories: number; memories: number };
+  searchMode: 'hybrid' | 'keyword-only';
 }
 
 interface DriftViolation {
@@ -102,6 +110,10 @@ export default function HealthDashboardPanel() {
   const [driftReport, setDriftReport] = useState<DriftReport | null>(null);
   const [driftLoading, setDriftLoading] = useState(false);
   const [driftExpanded, setDriftExpanded] = useState(false);
+
+  // SW-009: Semantic engine state
+  const [semantic, setSemantic] = useState<SemanticStats | null>(null);
+  const [backfilling, setBackfilling] = useState(false);
 
   const fetchHealth = useCallback(async () => {
     try {
@@ -185,6 +197,39 @@ export default function HealthDashboardPanel() {
       setDriftLoading(false);
     }
   }, [workspaceId]);
+
+  // SW-009: Fetch semantic stats from workspace health endpoint
+  const fetchSemantic = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const data = await apiFetch<{ semantic?: SemanticStats }>(`/api/workspaces/${workspaceId}/health`);
+      if (data.semantic) setSemantic(data.semantic);
+    } catch {
+      // Non-fatal — semantic stats just won't show
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    fetchSemantic();
+  }, [fetchSemantic]);
+
+  const handleBackfill = useCallback(async () => {
+    if (!workspaceId) return;
+    setBackfilling(true);
+    try {
+      await apiFetch('/api/admin/embed-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      // Re-fetch after a short delay to show updated counts
+      setTimeout(() => fetchSemantic(), 2000);
+    } catch {
+      // Error handled silently
+    } finally {
+      setBackfilling(false);
+    }
+  }, [workspaceId, fetchSemantic]);
 
   const statusColor = health?.status === 'healthy' ? 'text-green-400' : health?.status === 'degraded' ? 'text-yellow-400' : 'text-red-400';
   const statusBg = health?.status === 'healthy' ? 'bg-green-500/10 border-green-500/30' : health?.status === 'degraded' ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-red-500/10 border-red-500/30';
@@ -346,6 +391,96 @@ export default function HealthDashboardPanel() {
               )}
             </p>
           </div>
+
+          {/* SW-009: Semantic Engine */}
+          {workspaceId && semantic && (
+            <div className="bg-panel border border-border rounded-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Network size={16} className="text-accent" />
+                  <h2 className="text-sm font-semibold">Semantic Engine</h2>
+                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
+                    semantic.searchMode === 'hybrid'
+                      ? 'bg-green-500/15 text-green-400'
+                      : 'bg-amber-500/15 text-amber-400'
+                  }`}>
+                    {semantic.searchMode === 'hybrid' ? 'Hybrid' : 'Keyword-only'}
+                  </span>
+                </div>
+                {semantic.embeddings.total === 0 && (
+                  <button
+                    onClick={handleBackfill}
+                    disabled={backfilling}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-accent/10 text-accent rounded text-sm hover:bg-accent/20 transition-colors disabled:opacity-60"
+                  >
+                    {backfilling ? (
+                      <><Loader2 size={14} className="animate-spin" /> Backfilling...</>
+                    ) : (
+                      <><Zap size={14} /> Backfill Now</>
+                    )}
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                {/* Graph stats */}
+                <div>
+                  <div className="flex items-center gap-1.5 text-muted text-xs mb-1">
+                    <Braces size={12} />
+                    Graph
+                  </div>
+                  {semantic.graphAvailable ? (
+                    <span className="font-medium">
+                      {semantic.vertices} nodes, {semantic.edges} edges
+                    </span>
+                  ) : (
+                    <span className="text-muted">Not available</span>
+                  )}
+                </div>
+
+                {/* Embedding total */}
+                <div>
+                  <div className="flex items-center gap-1.5 text-muted text-xs mb-1">
+                    <Database size={12} />
+                    Embeddings
+                  </div>
+                  {semantic.embeddings.total > 0 ? (
+                    <span className="font-medium">{semantic.embeddings.total} vectors</span>
+                  ) : (
+                    <span className="text-muted">No embeddings</span>
+                  )}
+                </div>
+
+                {/* Breakdown */}
+                <div>
+                  <div className="flex items-center gap-1.5 text-muted text-xs mb-1">
+                    <FileText size={12} />
+                    Breakdown
+                  </div>
+                  {semantic.embeddings.total > 0 ? (
+                    <span className="font-medium text-xs">
+                      {semantic.embeddings.specs} specs, {semantic.embeddings.stories} stories, {semantic.embeddings.memories} memories
+                    </span>
+                  ) : (
+                    <span className="text-muted">&mdash;</span>
+                  )}
+                </div>
+
+                {/* Search mode */}
+                <div>
+                  <div className="flex items-center gap-1.5 text-muted text-xs mb-1">
+                    <Search size={12} />
+                    Search Mode
+                  </div>
+                  <span className={`font-medium ${
+                    semantic.searchMode === 'hybrid' ? 'text-green-400' : 'text-amber-400'
+                  }`}>
+                    {semantic.searchMode === 'hybrid' ? 'Hybrid (vector + keyword)' : 'Keyword-only'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Convention Compliance */}
           {workspaceId && (

@@ -14,6 +14,8 @@ import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { echolocate, computeHealthReport, discoverMonorepo, generateMonorepoCLAUDESection, inferSkillsFromStack } from '../lib/workspace-echolocation';
+import { graphStats } from '../lib/knowledge-graph';
+import { getEmbeddingCounts } from '../lib/embedding-pipeline';
 import { loadRorcaConfig, writeRorcaConfig, hasRorcaDir, ensureRorcaDirStructure, defaultRorcaConfig } from '../lib/rorca-config';
 import type { RorcaConfig } from '../lib/rorca-config';
 import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-scaffold';
@@ -1156,7 +1158,9 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
  *     description: >
  *       CIE-012: Returns context/intent completeness score (0-100%) with per-component
  *       breakdown showing CLAUDE.md depth, AGENTS.md roles, config scopes, MEMORY.md
- *       entries, and skill file count. Appends score to health history log.
+ *       entries, and skill file count. SW-009: Includes semantic section with knowledge
+ *       graph stats (vertices, edges) and embedding counts by source type. Appends score
+ *       to health history log.
  *     parameters:
  *       - in: path
  *         name: id
@@ -1183,6 +1187,41 @@ router.get('/:id/health', async (req, res, next) => {
 
     try {
       const report = computeHealthReport(workspace.path);
+
+      // SW-009: Semantic engine stats (graph + embeddings)
+      let semantic: {
+        graphAvailable: boolean;
+        vertices: number;
+        edges: number;
+        embeddings: { total: number; specs: number; stories: number; memories: number };
+        searchMode: 'hybrid' | 'keyword-only';
+      };
+      try {
+        const [gs, ec] = await Promise.all([
+          graphStats(),
+          getEmbeddingCounts(),
+        ]);
+        semantic = {
+          graphAvailable: gs.available,
+          vertices: gs.vertexCount,
+          edges: gs.edgeCount,
+          embeddings: {
+            total: ec.embeddingCount,
+            specs: ec.specCount,
+            stories: ec.storyCount,
+            memories: ec.memoryCount,
+          },
+          searchMode: ec.embeddingCount > 0 ? 'hybrid' : 'keyword-only',
+        };
+      } catch {
+        semantic = {
+          graphAvailable: false,
+          vertices: 0,
+          edges: 0,
+          embeddings: { total: 0, specs: 0, stories: 0, memories: 0 },
+          searchMode: 'keyword-only',
+        };
+      }
 
       // Append to health history log
       const memoryDir = path.join(workspace.path, '.rorca', 'memory');
@@ -1216,7 +1255,7 @@ router.get('/:id/health', async (req, res, next) => {
         }
       } catch {}
 
-      res.json({ ...report, trend });
+      res.json({ ...report, semantic, trend });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Health check failed' });
     }
