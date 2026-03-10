@@ -72,7 +72,7 @@ function isDue(schedule: ScheduleRow): boolean {
 async function checkSchedules(): Promise<void> {
   try {
     const schedules = await query<ScheduleRow>(
-      'SELECT * FROM pipeline_schedules WHERE enabled = 1',
+      'SELECT * FROM pipeline_schedules WHERE enabled = true',
       []
     );
 

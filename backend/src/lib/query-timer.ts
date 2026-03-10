@@ -107,7 +107,7 @@ export async function runQueryPlanAudit(): Promise<{
     // Notifications: by user_id unread
     {
       label: 'notifications: unread by user',
-      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM notifications WHERE user_id = 'u1' AND is_read = false ORDER BY created_at DESC`,
+      sql: `EXPLAIN (FORMAT TEXT) SELECT * FROM notifications WHERE user_id = 'u1' AND read_at IS NULL ORDER BY created_at DESC`,
     },
   ];
 
