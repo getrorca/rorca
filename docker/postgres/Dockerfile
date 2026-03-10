@@ -10,7 +10,7 @@ RUN apt-get update && \
       flex \
       bison \
       postgresql-server-dev-16 && \
-    git clone --branch release/PG16/1.5.0 --depth 1 https://github.com/apache/age.git /tmp/age && \
+    GIT_SSL_NO_VERIFY=true git clone --branch release/PG16/1.5.0 --depth 1 https://github.com/apache/age.git /tmp/age && \
     cd /tmp/age && \
     make && make install && \
     cd / && rm -rf /tmp/age && \
