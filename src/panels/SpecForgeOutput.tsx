@@ -48,6 +48,7 @@ export interface ContextSummary {
 }
 
 export interface GeneratedSpec {
+  slug?: string;
   specName: string;
   stories: Story[];
   diagram?: string;

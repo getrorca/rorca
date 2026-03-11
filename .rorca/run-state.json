@@ -1,62 +1,17 @@
 {
-  "specId": "rorca-memory-source-tracking",
-  "runId": 33,
-  "startedAt": "2026-03-11T08:01:46.608Z",
-  "lastUpdatedAt": "2026-03-11T08:18:12.863Z",
+  "specId": "rorca-marketplace-panel-fix",
+  "runId": 34,
+  "startedAt": "2026-03-11T18:48:42.365Z",
+  "lastUpdatedAt": "2026-03-11T18:50:43.900Z",
   "completedStories": [
     {
-      "storyId": "MST-001",
-      "title": "Add source_type column to memories table",
+      "storyId": "MP-001",
+      "title": "Fix live search with real debounced API call and suggestions fallback when empty",
       "status": "passed",
-      "startedAt": "2026-03-11T08:01:49.267Z",
-      "finishedAt": "2026-03-11T08:04:04.206Z",
+      "startedAt": "2026-03-11T18:50:15.316Z",
+      "finishedAt": "2026-03-11T18:50:43.900Z",
       "agentType": "claude",
-      "elapsedMs": 134939
-    },
-    {
-      "storyId": "MST-002",
-      "title": "Set source_type on all memory creation paths",
-      "status": "passed",
-      "startedAt": "2026-03-11T08:04:26.931Z",
-      "finishedAt": "2026-03-11T08:09:26.673Z",
-      "agentType": "claude",
-      "elapsedMs": 299742
-    },
-    {
-      "storyId": "MST-003",
-      "title": "Return source_type in all memory API responses",
-      "status": "passed",
-      "startedAt": "2026-03-11T08:09:48.914Z",
-      "finishedAt": "2026-03-11T08:12:58.024Z",
-      "agentType": "claude",
-      "elapsedMs": 189110
-    },
-    {
-      "storyId": "MST-004",
-      "title": "Display source type badges on Memory tab cards",
-      "status": "passed",
-      "startedAt": "2026-03-11T08:13:19.504Z",
-      "finishedAt": "2026-03-11T08:13:29.679Z",
-      "agentType": "claude",
-      "elapsedMs": 10175
-    },
-    {
-      "storyId": "MST-005",
-      "title": "Add source type filter to Memory tab",
-      "status": "passed",
-      "startedAt": "2026-03-11T08:13:52.784Z",
-      "finishedAt": "2026-03-11T08:17:14.742Z",
-      "agentType": "claude",
-      "elapsedMs": 201958
-    },
-    {
-      "storyId": "MST-006",
-      "title": "Backfill source_type for existing memories",
-      "status": "passed",
-      "startedAt": "2026-03-11T08:17:35.703Z",
-      "finishedAt": "2026-03-11T08:18:12.863Z",
-      "agentType": "claude",
-      "elapsedMs": 37160
+      "elapsedMs": 28584
     }
   ],
   "failedStories": [],

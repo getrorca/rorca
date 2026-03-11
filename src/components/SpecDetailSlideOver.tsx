@@ -16,8 +16,6 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
-import ContextSummaryCard from './ContextSummaryCard';
-import type { ContextSummary } from '../panels/SpecForgeOutput';
 import { StoryCard } from './StoryCard';
 import type { Story } from './StoryCard';
 import { InlineStoryEditor } from './InlineStoryEditor';
@@ -932,8 +930,6 @@ function GenerationLogTab({ specId }: { specId: string }) {
   return (
     <div className="p-4 space-y-4">
       {logs.map((log, i) => {
-        let contextSummary: ContextSummary | null = null;
-        try { contextSummary = JSON.parse(log.context_summary); } catch { /* ignore */ }
         const cost = log.input_tokens && log.output_tokens
           ? estimateCost(log.model, log.input_tokens, log.output_tokens)
           : null;
@@ -1010,12 +1006,6 @@ function GenerationLogTab({ specId }: { specId: string }) {
               </div>
             )}
 
-            {/* Context summary card */}
-            {contextSummary && contextSummary.directionLayers && (
-              <div className="p-3">
-                <ContextSummaryCard summary={contextSummary} />
-              </div>
-            )}
           </div>
         );
       })}
