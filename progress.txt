@@ -3,10 +3,11 @@
 Spec: rorca-marketplace-panel-fix
 Run ID: 35
 Started: 2026-03-11T18:52:03.542Z
-Last Updated: 2026-03-11T18:59:58.041Z
+Last Updated: 2026-03-11T19:00:38.833Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - MP-001: Fix live search with real debounced API call and suggestions fallback when empty — DONE (claude, 29s)
 - MP-002: Implement GitHub Repos and Custom source tabs with correct per-source UI in the left discovery panel — DONE (claude, 158s)
 - MP-002: Implement GitHub Repos and Custom source tabs with correct per-source UI in the left discovery panel — DONE (claude, 245s)
 - MP-003: Add expand toggle with content preview to discovery cards and library cards — DONE (claude, 284s)
+- MP-003: Add expand toggle with content preview to discovery cards and library cards — DONE (claude, 297s)
