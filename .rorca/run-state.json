@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-gaps",
   "runId": 29,
   "startedAt": "2026-03-11T01:30:14.478Z",
-  "lastUpdatedAt": "2026-03-11T01:44:54.549Z",
+  "lastUpdatedAt": "2026-03-11T01:46:38.989Z",
   "completedStories": [
     {
       "storyId": "SG-001",
@@ -57,6 +57,15 @@
       "finishedAt": "2026-03-11T01:44:54.548Z",
       "agentType": "claude",
       "elapsedMs": 79074
+    },
+    {
+      "storyId": "SG-007",
+      "title": "Add Memory Count to Context Injection Summary",
+      "status": "passed",
+      "startedAt": "2026-03-11T01:45:13.265Z",
+      "finishedAt": "2026-03-11T01:46:38.988Z",
+      "agentType": "claude",
+      "elapsedMs": 85723
     }
   ],
   "failedStories": [],
