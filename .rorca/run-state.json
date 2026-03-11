@@ -1,11 +1,22 @@
 {
-  "specId": "",
-  "runId": 0,
-  "startedAt": "",
-  "lastUpdatedAt": "2026-03-11T19:03:11.358Z",
-  "completedStories": [],
+  "specId": "skills-top-24-hours",
+  "runId": 37,
+  "startedAt": "2026-03-11T19:12:03.913Z",
+  "lastUpdatedAt": "2026-03-11T19:16:05.631Z",
+  "completedStories": [
+    {
+      "storyId": "US-001",
+      "title": "Add GET /api/skills/top backend route proxying skills.sh leaderboard",
+      "status": "passed",
+      "startedAt": "2026-03-11T19:12:13.292Z",
+      "finishedAt": "2026-03-11T19:16:05.631Z",
+      "agentType": "claude",
+      "elapsedMs": 232339
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
-  "decisions": []
+  "decisions": [],
+  "resumedFromStory": null
 }

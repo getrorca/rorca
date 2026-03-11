@@ -240,6 +240,113 @@ router.post('/install', async (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/skills/top:
+ *   get:
+ *     tags: [Skills]
+ *     summary: Get top skills from skills.sh ranked by install count
+ *     operationId: getTopSkills
+ *     description: |
+ *       Proxies the skills.sh top skills endpoint and returns results mapped to
+ *       the standard SkillResult shape with an additional installs field.
+ *       Results are sorted by install count descending.
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: number
+ *           default: 50
+ *         description: Maximum number of results (default 50, max 100)
+ *     responses:
+ *       200:
+ *         description: Top skills sorted by installs descending
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *                       author:
+ *                         type: string
+ *                       url:
+ *                         type: string
+ *                       installs:
+ *                         type: number
+ *                 total:
+ *                   type: number
+ *       502:
+ *         description: skills.sh API unavailable or returned an error
+ *       504:
+ *         description: Upstream request timed out
+ */
+router.get('/top', async (req: Request, res: Response) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+
+  let response: globalThis.Response;
+  try {
+    response = await fetch('https://skills.sh/api/skills/top', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (err: any) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      res.status(504).json({ error: 'Upstream skills.sh request timed out' });
+      return;
+    }
+    logger.error('[Skills] top fetch error:', err);
+    res.status(502).json({ error: 'skills.sh API unavailable', detail: err.message || 'Network error' });
+    return;
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    logger.error(`[Skills] top upstream error: ${response.status} ${detail}`);
+    res.status(502).json({ error: `skills.sh API returned ${response.status}`, detail });
+    return;
+  }
+
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    res.status(502).json({ error: 'skills.sh returned invalid JSON' });
+    return;
+  }
+
+  // Normalize — API may return { skills: [...] } or { results: [...] } or bare array
+  const raw: any[] = Array.isArray(data?.skills)
+    ? data.skills
+    : Array.isArray(data?.results)
+      ? data.results
+      : Array.isArray(data)
+        ? data
+        : [];
+
+  // Map to SkillResult shape + installs, sort by installs desc
+  const results = raw
+    .map((r: any) => ({
+      name: r.name || r.skillId || r.slug || '',
+      description: r.description || r.summary || '',
+      author: r.author || r.owner || r.source || '',
+      url: r.url || r.homepage || '',
+      installs: typeof r.installs === 'number' ? r.installs : 0,
+    }))
+    .sort((a, b) => b.installs - a.installs)
+    .slice(0, limit);
+
+  res.json({ results, total: results.length });
+});
+
+/**
+ * @swagger
  * /api/skills/preview:
  *   get:
  *     tags: [Skills]
