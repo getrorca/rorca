@@ -31,6 +31,12 @@ import { embedText, prepareText } from '../lib/embedding-pipeline';
 
 const router = Router();
 
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+/** Valid source_type values for the memories table (must match CHECK constraint in migration 059) */
+const VALID_SOURCE_TYPES = ['synthesis', 'manual', 'mcp', 'auto-extracted', 'import'] as const;
+type SourceType = typeof VALID_SOURCE_TYPES[number];
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 async function getWorkspacePath(workspaceId: string): Promise<string | null> {
@@ -164,7 +170,7 @@ router.get('/', async (req: Request, res: Response) => {
  *       404: { description: "Workspace not found" }
  */
 router.post('/', async (req: Request, res: Response) => {
-  const { workspaceId, category, title, rule, context, source } = req.body;
+  const { workspaceId, category, title, rule, context, source, sourceType } = req.body;
 
   if (!workspaceId || !category || !title || !rule) {
     return res.status(400).json({ error: 'workspaceId, category, title, and rule are required' });
@@ -172,6 +178,12 @@ router.post('/', async (req: Request, res: Response) => {
 
   if (!MEMORY_CATEGORIES.includes(category as MemoryCategory)) {
     return res.status(400).json({ error: `Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}` });
+  }
+
+  // Validate sourceType if provided; default to 'manual'
+  const resolvedSourceType: SourceType = sourceType ?? 'manual';
+  if (!VALID_SOURCE_TYPES.includes(resolvedSourceType as SourceType)) {
+    return res.status(400).json({ error: `Invalid sourceType. Must be one of: ${VALID_SOURCE_TYPES.join(', ')}` });
   }
 
   const wsPath = await getWorkspacePath(workspaceId);
@@ -186,7 +198,33 @@ router.post('/', async (req: Request, res: Response) => {
     source: source ?? '',
   };
 
+  // Write to filesystem MEMORY.md
   const entries = append(wsPath, entry, getLedgerPath(workspaceId));
+
+  // Also insert into memories DB table with source_type
+  let embedding: number[] | null = null;
+  try {
+    const prepared = prepareText('memory', `${title}: ${rule}`);
+    embedding = await embedText(prepared);
+  } catch {
+    // Embedding failure is non-fatal
+  }
+  const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+
+  await queryOne<{ id: string }>(
+    `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+     VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+    [
+      workspaceId,
+      category,
+      `${title}: ${rule}`,
+      'high',
+      '[]',
+      embeddingStr,
+      resolvedSourceType,
+    ],
+  );
+
   invalidateMemory(workspaceId); // PG-013
   res.status(201).json({ entry, total: entries.length });
 });
@@ -497,6 +535,22 @@ router.post('/proposals', async (req: Request, res: Response) => {
         `UPDATE memory_proposals SET status = $1, resolved_at = NOW() WHERE proposal_id = $2 AND workspace_id = $3`,
         ['approved', p.proposalId, workspaceId]
       );
+
+      // Also insert into memories DB table with source_type='synthesis' (proposals originate from synthesis)
+      let embedding: number[] | null = null;
+      try {
+        const prepared = prepareText('memory', `${entryToAppend.title}: ${entryToAppend.rule}`);
+        embedding = await embedText(prepared);
+      } catch {
+        // Embedding failure is non-fatal
+      }
+      const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+      await queryOne<{ id: string }>(
+        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+         VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+        [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis'],
+      );
+
       results.push({ proposalId: p.proposalId, action: 'approve', success: true });
     } else if (p.action === 'reject') {
       logRejected(wsPath, p.entry, p.proposalId);
@@ -517,6 +571,22 @@ router.post('/proposals', async (req: Request, res: Response) => {
         `UPDATE memory_proposals SET status = 'approved', resolved_at = NOW(), title = $1, rule = $2, context = $3, category = $4 WHERE proposal_id = $5 AND workspace_id = $6`,
         [edited.title, edited.rule, edited.context, edited.category, p.proposalId, workspaceId]
       );
+
+      // Insert into memories DB table with source_type='synthesis' (edited proposals still originate from synthesis)
+      let editEmbedding: number[] | null = null;
+      try {
+        const prepared = prepareText('memory', `${edited.title}: ${edited.rule}`);
+        editEmbedding = await embedText(prepared);
+      } catch {
+        // Embedding failure is non-fatal
+      }
+      const editEmbeddingStr = editEmbedding ? `[${editEmbedding.join(',')}]` : null;
+      await queryOne<{ id: string }>(
+        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+         VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+        [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', editEmbeddingStr, 'synthesis'],
+      );
+
       results.push({ proposalId: p.proposalId, action: 'edit', success: true });
     }
   }
