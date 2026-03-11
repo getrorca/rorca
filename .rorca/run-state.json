@@ -2,7 +2,7 @@
   "specId": "rorca-memory-source-tracking",
   "runId": 33,
   "startedAt": "2026-03-11T08:01:46.608Z",
-  "lastUpdatedAt": "2026-03-11T08:12:58.024Z",
+  "lastUpdatedAt": "2026-03-11T08:13:29.680Z",
   "completedStories": [
     {
       "storyId": "MST-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-11T08:12:58.024Z",
       "agentType": "claude",
       "elapsedMs": 189110
+    },
+    {
+      "storyId": "MST-004",
+      "title": "Display source type badges on Memory tab cards",
+      "status": "passed",
+      "startedAt": "2026-03-11T08:13:19.504Z",
+      "finishedAt": "2026-03-11T08:13:29.679Z",
+      "agentType": "claude",
+      "elapsedMs": 10175
     }
   ],
   "failedStories": [],
