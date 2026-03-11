@@ -94,6 +94,26 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   const [installState, setInstallState] = useState<Record<string, 'installing' | 'done' | 'error'>>({});
   const [removingSkill, setRemovingSkill] = useState<string | null>(null);
 
+  // Export installed skills as JSON
+  const handleExportSkills = useCallback(() => {
+    const exported = installedSkills.map((skill) => ({
+      name: skill.name,
+      category: inferCategory(skill.name, skill.description),
+      installedAt: null, // not tracked by API
+    }));
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const filename = `rorca-skills-export-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.json`;
+    const blob = new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.show('Skills exported successfully', 'success');
+  }, [installedSkills, toast]);
+
   // Installed names set for O(1) lookup
   const installedNames = useMemo(
     () => new Set(installedSkills.map(s => s.name.toLowerCase())),
@@ -405,13 +425,24 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
           <div className="w-[40%] overflow-y-auto p-4">
             {activeTab === 'skills' && (
               <>
-                <h2 className="text-sm font-semibold text-text mb-1">
-                  Your Library{' '}
-                  {!loadingInstalled && (
-                    <span className="text-xs font-normal text-muted">({installedSkills.length})</span>
-                  )}
-                  {loadingInstalled && <Loader2 size={12} className="inline animate-spin text-muted ml-1" />}
-                </h2>
+                <div className="flex items-center justify-between mb-1">
+                  <h2 className="text-sm font-semibold text-text">
+                    Your Library{' '}
+                    {!loadingInstalled && (
+                      <span className="text-xs font-normal text-muted">({installedSkills.length})</span>
+                    )}
+                    {loadingInstalled && <Loader2 size={12} className="inline animate-spin text-muted ml-1" />}
+                  </h2>
+                  <button
+                    onClick={handleExportSkills}
+                    disabled={installedSkills.length === 0}
+                    className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-text rounded-md hover:bg-surface transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
+                    title="Export skills as JSON"
+                  >
+                    <Download size={12} />
+                    Export
+                  </button>
+                </div>
                 <p className="text-xs text-muted mb-4">
                   {installedSkills.length > 0
                     ? 'Manage your installed skills'

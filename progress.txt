@@ -4,9 +4,9 @@ Spec: Extract the Marketplace view from the Specs panel so that the Specs header
 
 Run ID: 32
 Started: 2026-03-11T07:32:32.328Z
-Last Updated: 2026-03-11T07:58:30.025Z
+Last Updated: 2026-03-11T08:01:31.095Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - US-001: Add 'marketplace' to PanelId type and update SIDEBAR_ITEMS with Package icon — DONE (claude, 180s)
 - US-002: Create MarketplacePanel.tsx with three-tab layout structure — DONE (claude, 170s)
 - US-003: Add /marketplace route to App.tsx with lazy-loaded MarketplacePanel — DONE (claude, 59s)
@@ -16,3 +16,4 @@ Last Updated: 2026-03-11T07:58:30.025Z
 - US-007: Implement Your Library right panel with installed skills and category filters — DONE (claude, 13s)
 - US-008: Add real-time sync between left and right panels on install/remove actions — DONE (claude, 265s)
 - US-009: Add Templates and Convention Packs tab implementations with placeholder UIs — DONE (claude, 188s)
+- US-010: Add Export action to Your Library panel with JSON download — DONE (claude, 158s)
