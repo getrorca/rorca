@@ -2,7 +2,7 @@
   "specId": "rorca-marketplace-panel-fix",
   "runId": 35,
   "startedAt": "2026-03-11T18:52:03.542Z",
-  "lastUpdatedAt": "2026-03-11T18:55:16.321Z",
+  "lastUpdatedAt": "2026-03-11T18:59:58.041Z",
   "completedStories": [
     {
       "storyId": "MP-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-11T18:55:16.321Z",
       "agentType": "claude",
       "elapsedMs": 244717
+    },
+    {
+      "storyId": "MP-003",
+      "title": "Add expand toggle with content preview to discovery cards and library cards",
+      "status": "passed",
+      "startedAt": "2026-03-11T18:55:14.280Z",
+      "finishedAt": "2026-03-11T18:59:58.041Z",
+      "agentType": "claude",
+      "elapsedMs": 283761
     }
   ],
   "failedStories": [],
