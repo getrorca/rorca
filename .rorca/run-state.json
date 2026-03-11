@@ -1,116 +1,17 @@
 {
-  "specId": "rorca-semantic-engine",
-  "runId": 30,
-  "startedAt": "2026-03-11T04:35:11.672Z",
-  "lastUpdatedAt": "2026-03-11T05:18:45.206Z",
+  "specId": "rorca-memory-source-tracking",
+  "runId": 33,
+  "startedAt": "2026-03-11T08:01:46.608Z",
+  "lastUpdatedAt": "2026-03-11T08:04:04.206Z",
   "completedStories": [
     {
-      "storyId": "SE-001",
-      "title": "Emit memory_created WAL Events from Auto-Memory",
+      "storyId": "MST-001",
+      "title": "Add source_type column to memories table",
       "status": "passed",
-      "startedAt": "2026-03-11T04:35:14.314Z",
-      "finishedAt": "2026-03-11T04:37:23.336Z",
+      "startedAt": "2026-03-11T08:01:49.267Z",
+      "finishedAt": "2026-03-11T08:04:04.206Z",
       "agentType": "claude",
-      "elapsedMs": 129022
-    },
-    {
-      "storyId": "SE-002",
-      "title": "Backfill Embeddings from memories Table",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:37:40.778Z",
-      "finishedAt": "2026-03-11T04:39:02.965Z",
-      "agentType": "claude",
-      "elapsedMs": 82187
-    },
-    {
-      "storyId": "SE-003",
-      "title": "Fix context-cache and search.ts to Read from memories Table",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:39:20.291Z",
-      "finishedAt": "2026-03-11T04:41:01.776Z",
-      "agentType": "claude",
-      "elapsedMs": 101485
-    },
-    {
-      "storyId": "SE-004",
-      "title": "Fix AGE Cypher Execution — Root Cause: isGraphAvailable and Session Setup",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:41:20.694Z",
-      "finishedAt": "2026-03-11T04:44:04.080Z",
-      "agentType": "claude",
-      "elapsedMs": 163386
-    },
-    {
-      "storyId": "SE-005",
-      "title": "Add Graph Backfill and Stats Endpoints (Including Memories)",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:44:22.601Z",
-      "finishedAt": "2026-03-11T04:47:04.655Z",
-      "agentType": "claude",
-      "elapsedMs": 162054
-    },
-    {
-      "storyId": "SE-006",
-      "title": "Show Actual Memory Count in Context Injection Summary",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:47:22.571Z",
-      "finishedAt": "2026-03-11T04:48:51.479Z",
-      "agentType": "claude",
-      "elapsedMs": 88908
-    },
-    {
-      "storyId": "SE-007",
-      "title": "Add OpenRouter Embedding Provider",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:49:08.500Z",
-      "finishedAt": "2026-03-11T04:51:33.319Z",
-      "agentType": "claude",
-      "elapsedMs": 144819
-    },
-    {
-      "storyId": "SE-008",
-      "title": "Add Google Embedding Provider with Dimension-Safe Strategy",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:51:50.433Z",
-      "finishedAt": "2026-03-11T04:55:05.937Z",
-      "agentType": "claude",
-      "elapsedMs": 195504
-    },
-    {
-      "storyId": "SE-009",
-      "title": "Auto-Detect Embedding Provider from Vault Keys with Cache Invalidation",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:55:23.083Z",
-      "finishedAt": "2026-03-11T05:01:05.532Z",
-      "agentType": "claude",
-      "elapsedMs": 342449
-    },
-    {
-      "storyId": "SE-010",
-      "title": "Settings UI — Semantic Engine Section in Providers Tab",
-      "status": "passed",
-      "startedAt": "2026-03-11T05:01:23.707Z",
-      "finishedAt": "2026-03-11T05:09:26.624Z",
-      "agentType": "claude",
-      "elapsedMs": 482917
-    },
-    {
-      "storyId": "SE-011",
-      "title": "Graph-Powered Skill Recommendation via Match-Skills Endpoint",
-      "status": "passed",
-      "startedAt": "2026-03-11T05:09:44.934Z",
-      "finishedAt": "2026-03-11T05:14:31.413Z",
-      "agentType": "claude",
-      "elapsedMs": 286479
-    },
-    {
-      "storyId": "SE-012",
-      "title": "Embedding Provider Config in .rorca/config.json",
-      "status": "passed",
-      "startedAt": "2026-03-11T05:14:48.600Z",
-      "finishedAt": "2026-03-11T05:18:45.205Z",
-      "agentType": "claude",
-      "elapsedMs": 236605
+      "elapsedMs": 134939
     }
   ],
   "failedStories": [],
