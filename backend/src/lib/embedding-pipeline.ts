@@ -166,6 +166,87 @@ class OpenRouterEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+// ─── Google Provider ─────────────────────────────────────────────────────────
+
+/**
+ * Google text-embedding-004 via batchEmbedContents API.
+ * Native dimension: 768. Free tier: 1500 req/min.
+ *
+ * Embeddings are zero-padded to 1536 for storage in the vector(1536) column.
+ * This is safe because we filter by `dimensions = 768` at search time,
+ * so Google embeddings are only compared against other Google embeddings.
+ * Within same-provider comparisons, the zero-padded dimensions cancel out
+ * in cosine similarity (0*0 = 0 contributes nothing to dot product or magnitude).
+ */
+class GoogleEmbeddingProvider implements EmbeddingProvider {
+  readonly name = 'google';
+  readonly model = 'text-embedding-004';
+  readonly dimension = 768;
+  readonly maxBatchSize = 100; // batchEmbedContents supports up to 100
+
+  async embed(texts: string[]): Promise<{ embeddings: number[][]; tokenCount: number }> {
+    const apiKey = await resolveApiKey('google');
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${apiKey}`;
+
+    const requests = texts.map(text => ({
+      model: 'models/text-embedding-004',
+      content: { parts: [{ text }] },
+    }));
+
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) {
+        const delayMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+        logger.warn({ attempt, delayMs }, '[Embeddings] Google rate limited, retrying after %dms', delayMs);
+        await sleep(delayMs);
+      }
+
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requests }),
+        });
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        logger.warn({ err: lastError, attempt }, '[Embeddings] Google network error on attempt %d', attempt + 1);
+        if (attempt < 3) continue;
+        throw new EmbeddingApiError(`Google network error after ${attempt + 1} attempts: ${lastError.message}`);
+      }
+
+      if (res.status === 429 && attempt < 3) {
+        lastError = new EmbeddingApiError(`Google rate limited (429)`, 429);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new EmbeddingApiError(`Google embedding API error ${res.status}: ${body}`, res.status);
+      }
+
+      const json = await res.json() as {
+        embeddings: Array<{ values: number[] }>;
+      };
+
+      // Zero-pad 768 → 1536 for storage compatibility.
+      // Safe within same-provider: see class docstring.
+      const padded = json.embeddings.map(e => {
+        const vec = e.values;
+        while (vec.length < 1536) vec.push(0);
+        return vec;
+      });
+
+      // Google doesn't return token counts; estimate from char length
+      const tokenCount = texts.reduce((sum, t) => sum + Math.ceil(t.length / 4), 0);
+
+      return { embeddings: padded, tokenCount };
+    }
+
+    throw lastError || new EmbeddingApiError('Google embedding failed after retries');
+  }
+}
+
 // ─── Local TF-IDF Provider (no API key required) ────────────────────────────
 
 /**
@@ -282,6 +363,8 @@ export function getProvider(): EmbeddingProvider {
       return new OpenRouterEmbeddingProvider();
     case 'voyage':
       return new VoyageEmbeddingProvider();
+    case 'google':
+      return new GoogleEmbeddingProvider();
     case 'local':
       return new LocalEmbeddingProvider();
     case 'auto':
@@ -290,9 +373,11 @@ export function getProvider(): EmbeddingProvider {
         logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
       }
       // Auto-detect: env vars first (sync), then vault check will happen at embed() time via resolveApiKey
+      // Order: openai → openrouter → voyage → google → local
       if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
       if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
       if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
+      if (process.env.GOOGLE_API_KEY) return new GoogleEmbeddingProvider();
       return new LocalEmbeddingProvider();
     }
   }
@@ -307,12 +392,13 @@ export async function getProviderAsync(): Promise<EmbeddingProvider> {
   // Explicit provider — return immediately
   if (providerName !== 'auto') return getProvider();
 
-  // Check env vars first
+  // Check env vars first: openai → openrouter → voyage → google
   if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
   if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
   if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
+  if (process.env.GOOGLE_API_KEY) return new GoogleEmbeddingProvider();
 
-  // Check vault: openai → openrouter → voyage
+  // Check vault: openai → openrouter → voyage → google
   if (await hasVaultKey('openai') || await hasVaultKey('openai-compat')) {
     return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
   }
@@ -321,6 +407,9 @@ export async function getProviderAsync(): Promise<EmbeddingProvider> {
   }
   if (await hasVaultKey('voyage')) {
     return new VoyageEmbeddingProvider();
+  }
+  if (await hasVaultKey('google')) {
+    return new GoogleEmbeddingProvider();
   }
 
   return new LocalEmbeddingProvider();
@@ -335,7 +424,7 @@ class EmbeddingApiError extends Error {
   }
 }
 
-async function resolveApiKey(provider: 'openai' | 'voyage' | 'openrouter'): Promise<string> {
+async function resolveApiKey(provider: 'openai' | 'voyage' | 'openrouter' | 'google'): Promise<string> {
   // 1. Check vault_keys table (most recent key for provider)
   try {
     const vaultAliases: string[] = [provider];
@@ -369,6 +458,7 @@ async function resolveApiKey(provider: 'openai' | 'voyage' | 'openrouter'): Prom
     openai: process.env.OPENAI_API_KEY,
     openrouter: process.env.OPENROUTER_API_KEY,
     voyage: process.env.VOYAGE_API_KEY,
+    google: process.env.GOOGLE_API_KEY,
   };
   if (envMap[provider]) {
     return envMap[provider]!;
@@ -468,15 +558,17 @@ async function upsertEmbedding(
   const vectorStr = `[${embedding.join(',')}]`;
 
   await execute(
-    `INSERT INTO embeddings (workspace_id, source_type, source_id, content_hash, embedding, model, token_count)
-     VALUES ($1, $2, $3, $4, $5::vector, $6, $7)
+    `INSERT INTO embeddings (workspace_id, source_type, source_id, content_hash, embedding, model, token_count, provider, dimensions)
+     VALUES ($1, $2, $3, $4, $5::vector, $6, $7, $8, $9)
      ON CONFLICT (workspace_id, source_type, source_id)
      DO UPDATE SET content_hash = EXCLUDED.content_hash,
                    embedding = EXCLUDED.embedding,
                    model = EXCLUDED.model,
                    token_count = EXCLUDED.token_count,
+                   provider = EXCLUDED.provider,
+                   dimensions = EXCLUDED.dimensions,
                    updated_at = NOW()`,
-    [workspaceId, sourceType, sourceId, contentHash, vectorStr, provider.model, tokenCount]
+    [workspaceId, sourceType, sourceId, contentHash, vectorStr, provider.model, tokenCount, provider.name, provider.dimension]
   );
 }
 
