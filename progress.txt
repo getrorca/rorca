@@ -3,11 +3,12 @@
 Spec: rorca-semantic-gaps
 Run ID: 29
 Started: 2026-03-11T01:30:14.478Z
-Last Updated: 2026-03-11T01:43:17.052Z
+Last Updated: 2026-03-11T01:44:54.549Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - SG-001: Emit memory_created WAL Events from Auto-Memory — DONE (claude, 203s)
 - SG-002: Backfill Embeddings from memories Table (Not Just MEMORY.md) — DONE (claude, 207s)
 - SG-003: Fix context-cache getRecentMemory to Read from memories Table — DONE (claude, 53s)
 - SG-004: Fix AGE Cypher Execution — Per-Connection Session Setup — DONE (claude, 145s)
 - SG-005: Add Graph Backfill Endpoint — Populate from Existing Runs and Specs — DONE (claude, 99s)
+- SG-006: Fix search.ts Keyword Search to Query memories Table — DONE (claude, 79s)
