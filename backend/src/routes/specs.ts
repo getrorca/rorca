@@ -779,9 +779,15 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const skillNamesList = catalogs.skillCatalog
       ? catalogs.skillCatalog.split('\n').map(l => l.split(':')[0]?.trim()).filter(Boolean)
       : [];
-    const memoryEntryCount = catalogs.memoryMd
+    const fsMemoryCount = catalogs.memoryMd
       ? (catalogs.memoryMd.match(/^## \d{4}-\d{2}-\d{2}/gm) || []).length
       : 0;
+    const dbMemoryRow = await queryOne<{ cnt: string }>(
+      'SELECT COUNT(*) as cnt FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL',
+      [workspaceId]
+    );
+    const dbMemoryCount = parseInt(dbMemoryRow?.cnt || '0', 10);
+    const memoryEntryCount = Math.max(fsMemoryCount, dbMemoryCount);
     const catalogTokens = Math.ceil(
       (catalogs.skillCatalog.length + catalogs.personaCatalog.length +
        catalogs.memoryMd.length + catalogs.agentsMd.length + templateContext.length) / 4
