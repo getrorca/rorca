@@ -4,9 +4,10 @@ Spec: Extract the Marketplace view from the Specs panel so that the Specs header
 
 Run ID: 32
 Started: 2026-03-11T07:32:32.328Z
-Last Updated: 2026-03-11T07:40:10.202Z
+Last Updated: 2026-03-11T07:43:50.604Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - US-001: Add 'marketplace' to PanelId type and update SIDEBAR_ITEMS with Package icon — DONE (claude, 180s)
 - US-002: Create MarketplacePanel.tsx with three-tab layout structure — DONE (claude, 170s)
 - US-003: Add /marketplace route to App.tsx with lazy-loaded MarketplacePanel — DONE (claude, 59s)
+- US-004: Remove 'marketplace' from SpecsPanel ViewMode type and extract MarketplaceView component — DONE (claude, 199s)
