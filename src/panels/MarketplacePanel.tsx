@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle, Trash2, Check } from 'lucide-react';
+import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle, Trash2, Check, TrendingUp } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
@@ -487,6 +487,12 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                               ? skill.description.slice(0, 100) + (skill.description.length > 100 ? '...' : '')
                               : 'No description available'}
                           </p>
+                          {!searchQuery.trim() && skill.installs != null && skill.installs > 0 && (
+                            <span className="inline-flex items-center gap-1 self-start px-2 py-0.5 text-[10px] font-medium text-purple-400 bg-purple-500/10 border border-purple-500/20 rounded-full">
+                              <TrendingUp size={10} />
+                              {new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(skill.installs)} installs
+                            </span>
+                          )}
                           {installed ? (
                             <span className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-green-400">
                               <Check size={12} />
