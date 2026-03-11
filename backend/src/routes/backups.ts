@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { createBackup, listBackups, pruneOldBackups } from '../lib/backup';
-import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts } from '../lib/embedding-pipeline';
+import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts, getProvider } from '../lib/embedding-pipeline';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -101,6 +101,7 @@ router.get('/backups', (_req: Request, res: Response) => {
  *             type: object
  *             properties:
  *               workspaceId: { type: string, description: "Optional workspace ID to limit backfill scope" }
+ *               force: { type: boolean, description: "When true, skip content_hash staleness check and re-embed everything (use when switching providers)" }
  *     responses:
  *       200:
  *         description: Backfill queued
@@ -121,8 +122,8 @@ router.post('/embed-all', async (req: Request, res: Response) => {
   }
 
   try {
-    const { workspaceId } = req.body || {};
-    const result = await backfillAll(workspaceId);
+    const { workspaceId, force } = req.body || {};
+    const result = await backfillAll(workspaceId, !!force);
     res.json(result);
   } catch (error: any) {
     logger.error({ err: error }, '[Embeddings] Backfill error');
@@ -162,6 +163,35 @@ router.get('/embed-all/status', async (_req: Request, res: Response) => {
     running: isBackfillRunning(),
     ...stats,
     ...counts,
+  });
+});
+
+/**
+ * @swagger
+ * /api/admin/embedding-provider:
+ *   get:
+ *     tags: [Admin]
+ *     summary: Get current embedding provider configuration
+ *     operationId: getEmbeddingProvider
+ *     description: Returns the active embedding provider name, model identifier, and vector dimensions.
+ *     responses:
+ *       200:
+ *         description: Current embedding provider info
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 provider: { type: string, enum: [openai, openai-large, voyage, local] }
+ *                 model: { type: string }
+ *                 dimensions: { type: integer }
+ */
+router.get('/embedding-provider', (_req: Request, res: Response) => {
+  const provider = getProvider();
+  res.json({
+    provider: provider.name,
+    model: provider.model,
+    dimensions: provider.dimension,
   });
 });
 

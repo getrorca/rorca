@@ -185,7 +185,7 @@ class LocalEmbeddingProvider implements EmbeddingProvider {
 
 // ─── Provider Resolution ────────────────────────────────────────────────────
 
-function getProvider(): EmbeddingProvider {
+export function getProvider(): EmbeddingProvider {
   const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
   switch (providerName) {
     case 'openai':
@@ -705,12 +705,22 @@ export function isBackfillRunning(): boolean {
   return backfillInProgress;
 }
 
-export async function backfillAll(workspaceId?: string): Promise<BackfillResult> {
+export async function backfillAll(workspaceId?: string, force?: boolean): Promise<BackfillResult> {
   backfillInProgress = true;
   let queued = 0;
   let skippedStale = 0;
 
+  // When force=true, skip content_hash staleness checks and re-embed everything
+  const needsEmbed = async (wsId: string, sourceType: string, sourceId: string, contentHash: string): Promise<boolean> => {
+    if (force) return true;
+    return isStale(wsId, sourceType, sourceId, contentHash);
+  };
+
   try {
+    if (force) {
+      logger.info('[Embeddings] Force re-embed requested — skipping staleness checks');
+    }
+
     // Get workspaces to process
     const workspaces = workspaceId
       ? await query<{ id: string; path: string }>('SELECT id, path FROM workspaces WHERE id = $1', [workspaceId])
@@ -739,8 +749,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
             // Check staleness for spec summary
             const specText = prepareText('spec', [specJson.title || specId, specJson.brief || '', `${stories.length} stories`].join('\n'));
             const specHash = computeHash(specText);
-            const specStale = await isStale(ws.id, 'spec', specId, specHash);
-            if (specStale) {
+            if (await needsEmbed(ws.id, 'spec', specId, specHash)) {
               enqueueJob({ workspaceId: ws.id, sourceType: 'spec', sourceId: specId, text: specText });
               queued++;
             } else {
@@ -751,8 +760,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
             for (const story of stories) {
               const storyText = prepareText('story', [story.title, story.description, ...(story.acceptanceCriteria || [])].join('\n'));
               const storyHash = computeHash(storyText);
-              const storyStale = await isStale(ws.id, 'story', story.id, storyHash);
-              if (storyStale) {
+              if (await needsEmbed(ws.id, 'story', story.id, storyHash)) {
                 enqueueJob({ workspaceId: ws.id, sourceType: 'story', sourceId: story.id, text: storyText });
                 queued++;
               } else {
@@ -778,8 +786,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
 
             const specText = prepareText('spec', [specJson.title || specId, specJson.brief || ''].join('\n'));
             const specHash = computeHash(specText);
-            const specStale = await isStale(ws.id, 'spec', specId, specHash);
-            if (specStale) {
+            if (await needsEmbed(ws.id, 'spec', specId, specHash)) {
               enqueueJob({ workspaceId: ws.id, sourceType: 'spec', sourceId: specId, text: specText });
               queued++;
             } else {
@@ -806,8 +813,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
 
             const specText = prepareText('spec', [specJson.title || row.spec_slug, specJson.brief || '', `${stories.length} stories`].join('\n'));
             const specHash = computeHash(specText);
-            const specStale = await isStale(ws.id, 'spec', row.spec_slug, specHash);
-            if (specStale) {
+            if (await needsEmbed(ws.id, 'spec', row.spec_slug, specHash)) {
               enqueueJob({ workspaceId: ws.id, sourceType: 'spec', sourceId: row.spec_slug, text: specText });
               queued++;
             } else {
@@ -817,8 +823,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
             for (const story of stories) {
               const storyText = prepareText('story', [story.title, story.description, ...(story.acceptanceCriteria || [])].join('\n'));
               const storyHash = computeHash(storyText);
-              const storyStale = await isStale(ws.id, 'story', story.id, storyHash);
-              if (storyStale) {
+              if (await needsEmbed(ws.id, 'story', story.id, storyHash)) {
                 enqueueJob({ workspaceId: ws.id, sourceType: 'story', sourceId: story.id, text: storyText });
                 queued++;
               } else {
@@ -841,8 +846,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
         for (const entry of entries) {
           const entryText = prepareText('memory', entry.text);
           const entryHash = computeHash(entryText);
-          const entryStale = await isStale(ws.id, 'memory', entry.id, entryHash);
-          if (entryStale) {
+          if (await needsEmbed(ws.id, 'memory', entry.id, entryHash)) {
             enqueueJob({ workspaceId: ws.id, sourceType: 'memory', sourceId: entry.id, text: entryText });
             queued++;
           } else {
@@ -852,7 +856,7 @@ export async function backfillAll(workspaceId?: string): Promise<BackfillResult>
       }
     }
 
-    logger.info({ queued, skippedStale }, '[Embeddings] Backfill complete: %d jobs queued, %d skipped (unchanged)', queued, skippedStale);
+    logger.info({ queued, skippedStale, force: !!force }, '[Embeddings] Backfill complete: %d jobs queued, %d skipped (unchanged)', queued, skippedStale);
     return { queued, skippedStale };
   } finally {
     // Mark backfill as complete once all jobs are queued (not processed)
