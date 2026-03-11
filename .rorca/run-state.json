@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-gaps",
   "runId": 29,
   "startedAt": "2026-03-11T01:30:14.478Z",
-  "lastUpdatedAt": "2026-03-11T01:41:19.162Z",
+  "lastUpdatedAt": "2026-03-11T01:43:17.052Z",
   "completedStories": [
     {
       "storyId": "SG-001",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-11T01:41:19.162Z",
       "agentType": "claude",
       "elapsedMs": 144850
+    },
+    {
+      "storyId": "SG-005",
+      "title": "Add Graph Backfill Endpoint — Populate from Existing Runs and Specs",
+      "status": "passed",
+      "startedAt": "2026-03-11T01:41:38.177Z",
+      "finishedAt": "2026-03-11T01:43:17.052Z",
+      "agentType": "claude",
+      "elapsedMs": 98875
     }
   ],
   "failedStories": [],
