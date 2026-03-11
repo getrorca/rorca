@@ -854,6 +854,27 @@ export async function backfillAll(workspaceId?: string, force?: boolean): Promis
           }
         }
       }
+
+      // 4b. Embed memory entries from the memories DB table
+      try {
+        const dbMemories = await query<{ id: number; content: string }>(
+          'SELECT id, content FROM memories WHERE deleted_at IS NULL AND workspace_id = $1',
+          [ws.id]
+        );
+        for (const mem of dbMemories) {
+          const memText = prepareText('memory', mem.content);
+          const memHash = computeHash(memText);
+          const memSourceId = `mem-${mem.id}`;
+          if (await needsEmbed(ws.id, 'memory', memSourceId, memHash)) {
+            enqueueJob({ workspaceId: ws.id, sourceType: 'memory', sourceId: memSourceId, text: memText });
+            queued++;
+          } else {
+            skippedStale++;
+          }
+        }
+      } catch {
+        // memories table may not exist in older installations — skip gracefully
+      }
     }
 
     logger.info({ queued, skippedStale, force: !!force }, '[Embeddings] Backfill complete: %d jobs queued, %d skipped (unchanged)', queued, skippedStale);
