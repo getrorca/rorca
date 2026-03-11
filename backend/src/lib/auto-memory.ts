@@ -157,9 +157,9 @@ export async function autoSynthesizeMemory(
 
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
-      await execute(
+      const memRow = await queryOne<{ id: string }>(
         `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector) RETURNING id`,
         [
           workspaceId,
           entry.category,
@@ -171,6 +171,18 @@ export async function autoSynthesizeMemory(
           embeddingStr,
         ],
       );
+
+      if (memRow) {
+        try {
+          const walEvent = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            ['memory_created', workspaceId, null, storyId, JSON.stringify({ id: memRow.id, text: entry.content, category: entry.category })],
+          );
+          if (walEvent) broadcastAll(walEvent);
+        } catch (walErr) {
+          logger.warn(`[auto-memory] WAL event emission failed for memory ${memRow.id}: ${(walErr as Error).message}`);
+        }
+      }
 
       categories.push(entry.category);
     }
@@ -333,9 +345,9 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
 
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
-      await execute(
+      const memRow = await queryOne<{ id: string }>(
         `INSERT INTO memories (workspace_id, category, content, source_spec_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::vector)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7::vector) RETURNING id`,
         [
           workspaceId,
           entry.category,
@@ -346,6 +358,18 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
           embeddingStr,
         ],
       );
+
+      if (memRow) {
+        try {
+          const walEvent = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            ['memory_created', workspaceId, specId, null, JSON.stringify({ id: memRow.id, text: entry.content, category: entry.category })],
+          );
+          if (walEvent) broadcastAll(walEvent);
+        } catch (walErr) {
+          logger.warn(`[auto-memory] WAL event emission failed for spec memory ${memRow.id}: ${(walErr as Error).message}`);
+        }
+      }
     }
 
     logger.info(`[auto-memory] Saved ${entries.length} spec memories for ${specId} (${Date.now() - t0}ms)`);
@@ -561,9 +585,9 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
       // Run memories: source_story_id is NULL, category is 'Run Synthesis'
-      await execute(
+      const memRow = await queryOne<{ id: string }>(
         `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::vector)`,
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::vector) RETURNING id`,
         [
           workspaceId,
           'Run Synthesis',
@@ -574,6 +598,18 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
           embeddingStr,
         ],
       );
+
+      if (memRow) {
+        try {
+          const walEvent = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            ['memory_created', workspaceId, null, null, JSON.stringify({ id: memRow.id, text: entry.content, category: 'Run Synthesis' })],
+          );
+          if (walEvent) broadcastAll(walEvent);
+        } catch (walErr) {
+          logger.warn(`[auto-memory] WAL event emission failed for run memory ${memRow.id}: ${(walErr as Error).message}`);
+        }
+      }
 
       categories.push(entry.category);
       savedCount++;
