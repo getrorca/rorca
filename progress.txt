@@ -3,7 +3,8 @@
 Spec: rorca-semantic-gaps
 Run ID: 29
 Started: 2026-03-11T01:30:14.478Z
-Last Updated: 2026-03-11T01:33:40.260Z
+Last Updated: 2026-03-11T01:37:26.247Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - SG-001: Emit memory_created WAL Events from Auto-Memory — DONE (claude, 203s)
+- SG-002: Backfill Embeddings from memories Table (Not Just MEMORY.md) — DONE (claude, 207s)
