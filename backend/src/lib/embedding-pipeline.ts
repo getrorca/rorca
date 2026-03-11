@@ -102,6 +102,70 @@ class VoyageEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+// ─── OpenRouter Provider ─────────────────────────────────────────────────────
+
+class OpenRouterEmbeddingProvider implements EmbeddingProvider {
+  readonly name = 'openrouter';
+  readonly model = 'openai/text-embedding-3-small';
+  readonly dimension = 1536;
+  readonly maxBatchSize = 100;
+
+  async embed(texts: string[]): Promise<{ embeddings: number[][]; tokenCount: number }> {
+    const apiKey = await resolveApiKey('openrouter');
+
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) {
+        const delayMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+        logger.warn({ attempt, delayMs }, '[Embeddings] OpenRouter rate limited, retrying after %dms', delayMs);
+        await sleep(delayMs);
+      }
+
+      let res: Response;
+      try {
+        res = await fetch('https://openrouter.ai/api/v1/embeddings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'HTTP-Referer': 'https://rorca.app',
+            'X-Title': 'Rorca',
+          },
+          body: JSON.stringify({ input: texts, model: this.model }),
+        });
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        logger.warn({ err: lastError, attempt }, '[Embeddings] OpenRouter network error on attempt %d', attempt + 1);
+        if (attempt < 3) continue;
+        throw new EmbeddingApiError(`OpenRouter network error after ${attempt + 1} attempts: ${lastError.message}`);
+      }
+
+      if (res.status === 429 && attempt < 3) {
+        lastError = new EmbeddingApiError(`OpenRouter rate limited (429)`, 429);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new EmbeddingApiError(`OpenRouter embedding API error ${res.status}: ${body}`, res.status);
+      }
+
+      const json = await res.json() as {
+        data: Array<{ embedding: number[]; index: number }>;
+        usage: { total_tokens: number };
+      };
+
+      const sorted = json.data.sort((a, b) => a.index - b.index);
+      return {
+        embeddings: sorted.map(d => d.embedding),
+        tokenCount: json.usage.total_tokens,
+      };
+    }
+
+    throw lastError || new EmbeddingApiError('OpenRouter embedding failed after retries');
+  }
+}
+
 // ─── Local TF-IDF Provider (no API key required) ────────────────────────────
 
 /**
@@ -185,6 +249,28 @@ class LocalEmbeddingProvider implements EmbeddingProvider {
 
 // ─── Provider Resolution ────────────────────────────────────────────────────
 
+// Cache for vault key existence checks (refreshed every 60s)
+let vaultKeyCache: Map<string, boolean> | null = null;
+let vaultKeyCacheTs = 0;
+const VAULT_CACHE_TTL = 60_000;
+
+async function hasVaultKey(provider: string): Promise<boolean> {
+  const now = Date.now();
+  if (!vaultKeyCache || now - vaultKeyCacheTs > VAULT_CACHE_TTL) {
+    vaultKeyCache = new Map();
+    vaultKeyCacheTs = now;
+    try {
+      const rows = await query<{ provider: string }>(
+        `SELECT DISTINCT provider FROM api_key_vault`
+      );
+      for (const r of rows) vaultKeyCache.set(r.provider, true);
+    } catch {
+      // Table may not exist — treat as empty
+    }
+  }
+  return vaultKeyCache.get(provider) ?? false;
+}
+
 export function getProvider(): EmbeddingProvider {
   const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
   switch (providerName) {
@@ -192,22 +278,52 @@ export function getProvider(): EmbeddingProvider {
       return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
     case 'openai-large':
       return new OpenAIEmbeddingProvider('text-embedding-3-large', 3072);
+    case 'openrouter':
+      return new OpenRouterEmbeddingProvider();
     case 'voyage':
       return new VoyageEmbeddingProvider();
     case 'local':
       return new LocalEmbeddingProvider();
-    case 'auto': {
-      // Auto-detect: use API provider if key available, else local fallback
+    case 'auto':
+    default: {
+      if (providerName !== 'auto') {
+        logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
+      }
+      // Auto-detect: env vars first (sync), then vault check will happen at embed() time via resolveApiKey
       if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+      if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
       if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
       return new LocalEmbeddingProvider();
     }
-    default:
-      logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
-      if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
-      if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
-      return new LocalEmbeddingProvider();
   }
+}
+
+/**
+ * Async auto-detect that also checks the vault. Call this at startup or
+ * when you need vault-aware provider resolution.
+ */
+export async function getProviderAsync(): Promise<EmbeddingProvider> {
+  const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
+  // Explicit provider — return immediately
+  if (providerName !== 'auto') return getProvider();
+
+  // Check env vars first
+  if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+  if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
+  if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
+
+  // Check vault: openai → openrouter → voyage
+  if (await hasVaultKey('openai') || await hasVaultKey('openai-compat')) {
+    return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+  }
+  if (await hasVaultKey('openrouter')) {
+    return new OpenRouterEmbeddingProvider();
+  }
+  if (await hasVaultKey('voyage')) {
+    return new VoyageEmbeddingProvider();
+  }
+
+  return new LocalEmbeddingProvider();
 }
 
 // ─── API Key Resolution ─────────────────────────────────────────────────────
@@ -219,20 +335,18 @@ class EmbeddingApiError extends Error {
   }
 }
 
-async function resolveApiKey(provider: 'openai' | 'voyage'): Promise<string> {
-  // 1. Check vault_keys table (most recent key for first user)
+async function resolveApiKey(provider: 'openai' | 'voyage' | 'openrouter'): Promise<string> {
+  // 1. Check vault_keys table (most recent key for provider)
   try {
-    const vaultProvider = provider === 'openai' ? 'openai' : 'voyage';
-    // Vault uses 'openai-compat' for OpenAI keys in some setups
+    const vaultAliases: string[] = [provider];
+    if (provider === 'openai') vaultAliases.push('openai-compat');
     const row = await queryOne<{ encrypted_key: string }>(
       `SELECT encrypted_key FROM api_key_vault
-       WHERE provider IN ($1, $2)
+       WHERE provider = ANY($1::text[])
        ORDER BY created_at DESC LIMIT 1`,
-      [vaultProvider, provider === 'openai' ? 'openai-compat' : vaultProvider]
+      [vaultAliases]
     );
     if (row) {
-      // Decrypt using the same approach as vault.ts
-      // Import is avoided to prevent circular deps — key decryption inline
       const jwtSecret = process.env.JWT_SECRET || 'rorca-dev-secret';
       const vaultKey = crypto.createHash('sha256').update(jwtSecret).digest();
       const [ivHex, authTagHex, ciphertextHex] = row.encrypted_key.split(':');
@@ -251,11 +365,13 @@ async function resolveApiKey(provider: 'openai' | 'voyage'): Promise<string> {
   }
 
   // 2. Check env vars
-  if (provider === 'openai' && process.env.OPENAI_API_KEY) {
-    return process.env.OPENAI_API_KEY;
-  }
-  if (provider === 'voyage' && process.env.VOYAGE_API_KEY) {
-    return process.env.VOYAGE_API_KEY;
+  const envMap: Record<string, string | undefined> = {
+    openai: process.env.OPENAI_API_KEY,
+    openrouter: process.env.OPENROUTER_API_KEY,
+    voyage: process.env.VOYAGE_API_KEY,
+  };
+  if (envMap[provider]) {
+    return envMap[provider]!;
   }
 
   // 3. Return 'local' sentinel — enables local TF-IDF fallback without API key
