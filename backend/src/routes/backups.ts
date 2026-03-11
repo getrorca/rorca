@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import { createBackup, listBackups, pruneOldBackups } from '../lib/backup';
 import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts, getProvider } from '../lib/embedding-pipeline';
+import { isGraphAvailable, graphStats, populateFromSpec, populateFromRun } from '../lib/knowledge-graph';
+import { query } from '../db/index';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -193,6 +197,149 @@ router.get('/embedding-provider', (_req: Request, res: Response) => {
     model: provider.model,
     dimensions: provider.dimension,
   });
+});
+
+/**
+ * @swagger
+ * /api/admin/graph-backfill:
+ *   post:
+ *     tags: [Admin]
+ *     summary: Backfill the knowledge graph from existing specs and runs
+ *     operationId: graphBackfill
+ *     description: |
+ *       Populates the Apache AGE knowledge graph from all approved spec JSONs
+ *       found on disk and all completed pipeline runs in the database.
+ *       Requires Apache AGE to be installed — returns 400 if unavailable.
+ *     responses:
+ *       200:
+ *         description: Backfill completed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specsProcessed: { type: integer }
+ *                 runsProcessed: { type: integer }
+ *                 stats:
+ *                   type: object
+ *                   properties:
+ *                     available: { type: boolean }
+ *                     vertexCount: { type: integer }
+ *                     edgeCount: { type: integer }
+ *                     labels: { type: array, items: { type: string } }
+ *       400:
+ *         description: Apache AGE is not installed
+ */
+router.post('/graph-backfill', async (_req: Request, res: Response) => {
+  try {
+    const available = await isGraphAvailable();
+    if (!available) {
+      res.status(400).json({ error: 'Apache AGE is not installed — graph features unavailable' });
+      return;
+    }
+
+    let specsProcessed = 0;
+    let runsProcessed = 0;
+
+    // 1. Process all approved specs from all workspace filesystem paths
+    const workspaces = await query<{ id: number; path: string }>(
+      'SELECT id, path FROM workspaces'
+    );
+
+    for (const ws of workspaces) {
+      const approvedDir = path.join(ws.path, 'forge', 'specs', 'approved');
+      let files: string[] = [];
+      try {
+        files = fs.readdirSync(approvedDir).filter(f => f.endsWith('.json'));
+      } catch {
+        // Directory doesn't exist for this workspace — skip
+        continue;
+      }
+
+      for (const file of files) {
+        try {
+          const specPath = path.join(approvedDir, file);
+          const raw = fs.readFileSync(specPath, 'utf-8');
+          const spec = JSON.parse(raw);
+          const specId = file.replace(/\.json$/, '');
+          const stories: Array<{ id: string; title: string; dependsOn?: string[] }> =
+            (spec.userStories || []).map((s: { id: string; title?: string; dependsOn?: string[] }) => ({
+              id: s.id,
+              title: s.title || s.id,
+              dependsOn: s.dependsOn,
+            }));
+
+          if (stories.length > 0) {
+            await populateFromSpec(specId, String(ws.id), stories);
+            specsProcessed++;
+          }
+        } catch (err) {
+          logger.warn({ err, file, workspace: ws.path }, '[graph-backfill] Failed to process spec');
+        }
+      }
+    }
+
+    // 2. Process all completed pipeline runs
+    const completedRuns = await query<{ id: number; spec_path: string; workspace_id: number }>(
+      "SELECT id, spec_path, workspace_id FROM pipeline_runs WHERE status IN ('done', 'passed')"
+    );
+
+    for (const run of completedRuns) {
+      try {
+        // Extract spec ID from spec_path (e.g. "forge/specs/approved/my-spec.json" → "my-spec")
+        const specId = path.basename(run.spec_path, '.json');
+        await populateFromRun(run.id, specId, String(run.workspace_id));
+        runsProcessed++;
+      } catch (err) {
+        logger.warn({ err, runId: run.id }, '[graph-backfill] Failed to process run');
+      }
+    }
+
+    const stats = await graphStats();
+
+    logger.info(
+      { specsProcessed, runsProcessed, stats },
+      '[graph-backfill] Backfill completed'
+    );
+
+    res.json({ specsProcessed, runsProcessed, stats });
+  } catch (error: any) {
+    logger.error({ err: error }, '[graph-backfill] Backfill error');
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/graph-stats:
+ *   get:
+ *     tags: [Admin]
+ *     summary: Get knowledge graph statistics
+ *     operationId: getGraphStats
+ *     description: Returns current vertex count, edge count, and label list from the Apache AGE knowledge graph. Returns available=false if AGE is not installed.
+ *     responses:
+ *       200:
+ *         description: Graph statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 available: { type: boolean }
+ *                 vertexCount: { type: integer }
+ *                 edgeCount: { type: integer }
+ *                 labels:
+ *                   type: array
+ *                   items: { type: string }
+ */
+router.get('/graph-stats', async (_req: Request, res: Response) => {
+  try {
+    const stats = await graphStats();
+    res.json(stats);
+  } catch (error: any) {
+    logger.error({ err: error }, '[graph-stats] Error fetching graph stats');
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;
