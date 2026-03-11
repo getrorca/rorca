@@ -140,36 +140,70 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   // Fetch installed on mount
   useEffect(() => { fetchInstalled(); }, [fetchInstalled]);
 
-  // Fetch skills from skills.sh on mount when tab is skills + source is skills.sh
-  const fetchSkills = useCallback(async () => {
-    if (activeTab !== 'skills' || activeSource !== 'skills.sh') return;
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await apiFetch<SkillSearchResponse>('/api/skills/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: 'skill', limit: 20 }),
-      });
-      setSkills(data.results);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch skills');
-    } finally {
-      setLoading(false);
-    }
-  }, [activeTab, activeSource]);
+  // Debounced live search for skills.sh + workspace suggestions fallback
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => {
-    fetchSkills();
-  }, [fetchSkills]);
+    if (activeTab !== 'skills' || activeSource !== 'skills.sh') {
+      setSkills([]);
+      setError(null);
+      return;
+    }
 
-  // Client-side filter
-  const filteredSkills = searchQuery.trim()
-    ? skills.filter((s) => {
-        const q = searchQuery.toLowerCase();
-        return s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q);
-      })
-    : skills;
+    clearTimeout(debounceRef.current);
+
+    const trimmed = searchQuery.trim();
+
+    if (trimmed) {
+      setLoading(true);
+      debounceRef.current = setTimeout(async () => {
+        try {
+          const data = await apiFetch<SkillSearchResponse>('/api/skills/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: trimmed, limit: 20 }),
+          });
+          setSkills(data.results);
+          setError(null);
+        } catch (err: unknown) {
+          setError(err instanceof Error ? err.message : 'Failed to search skills');
+        } finally {
+          setLoading(false);
+        }
+      }, 300);
+    } else {
+      // No query — fetch workspace suggestions immediately
+      setLoading(true);
+      const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
+      apiFetch<{ suggestions: { skill: string; triggeredBy: string[]; installed: boolean }[] }>(
+        `/api/skills/suggestions${params}`,
+      )
+        .then((data) => {
+          setSkills(
+            data.suggestions.map((s) => ({
+              name: s.skill,
+              description: s.triggeredBy.join(', '),
+              author: '',
+              url: '',
+            })),
+          );
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          setError(err instanceof Error ? err.message : 'Failed to fetch suggestions');
+        })
+        .finally(() => {
+          setLoading(false);
+        });
+    }
+
+    return () => clearTimeout(debounceRef.current);
+  }, [searchQuery, activeTab, activeSource, workspaceId]);
+
+  // Cleanup debounce on unmount
+  useEffect(() => {
+    return () => clearTimeout(debounceRef.current);
+  }, []);
 
   // Install handler
   const handleInstall = async (skillName: string) => {
@@ -305,8 +339,8 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
               <>
                 <h2 className="text-sm font-semibold text-text mb-3">
                   Discovery Results
-                  {!loading && filteredSkills.length > 0 && (
-                    <span className="ml-2 text-xs font-normal text-muted">({filteredSkills.length})</span>
+                  {!loading && skills.length > 0 && (
+                    <span className="ml-2 text-xs font-normal text-muted">({skills.length})</span>
                   )}
                 </h2>
 
@@ -327,18 +361,18 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                 )}
 
                 {/* Empty state */}
-                {!loading && !error && filteredSkills.length === 0 && (
+                {!loading && !error && skills.length === 0 && (
                   <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
                     {searchQuery
                       ? `No skills matching "${searchQuery}"`
-                      : 'No skills found'}
+                      : 'No suggestions found for this workspace'}
                   </div>
                 )}
 
                 {/* Skills grid */}
-                {!loading && !error && filteredSkills.length > 0 && (
+                {!loading && !error && skills.length > 0 && (
                   <div className="grid grid-cols-2 gap-4">
-                    {filteredSkills.map((skill) => {
+                    {skills.map((skill) => {
                       const category = inferCategory(skill.name, skill.description);
                       const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS.general;
                       const installed = isInstalled(skill.name);

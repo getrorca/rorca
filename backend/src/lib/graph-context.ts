@@ -120,7 +120,7 @@ async function cypherQuery<T = Record<string, unknown>>(
 export async function getGraphContext(
   storyId: string,
   predictedPaths: string[],
-  workspaceId: number,
+  workspaceId: string | number,
   maxDepth: number = 2,
 ): Promise<GraphContext> {
   const start = Date.now();

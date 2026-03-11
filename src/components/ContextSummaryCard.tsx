@@ -164,7 +164,9 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
               Vector (RAG){' '}
               {vectorHits != null && vectorHits > 0
                 ? <span className="text-success">{vectorHits} hit{vectorHits !== 1 ? 's' : ''}</span>
-                : <span>⬚ No embeddings</span>}
+                : retrievalTier === 'cache'
+                  ? <span>— skipped (cache sufficient)</span>
+                  : <span>⬚ No embeddings</span>}
             </span>
             <span
               className={`inline-flex items-center gap-1 ${graphHits && graphHits > 0 ? 'text-text' : 'text-zinc-400'}`}
@@ -174,7 +176,9 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
               Graph{' '}
               {graphHits != null && graphHits > 0
                 ? <span className="text-success">{graphHits} node{graphHits !== 1 ? 's' : ''}</span>
-                : <span>⬚ No graph data</span>}
+                : retrievalTier === 'cache'
+                  ? <span>— skipped (cache sufficient)</span>
+                  : <span>⬚ No graph data</span>}
             </span>
             {retrievalTier && (
               <span className="px-1.5 py-0 rounded bg-muted/15 text-[10px] font-medium text-muted" title="cache = in-memory (~0ms), search = vector+keyword (50-200ms), hybrid = both">
@@ -188,23 +192,32 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
 
           {/* Skills */}
           <div className="flex items-start gap-1.5 text-xs">
-            <Puzzle className="w-3 h-3 text-muted mt-0.5 shrink-0" />
-            <span className="text-muted">Skills:</span>
-            {skills.length > 0 ? (
-              <span className="text-text">{skills.join(', ')}</span>
-            ) : (
-              <span className="text-muted italic">none</span>
+            <span className={`inline-flex items-center gap-1 ${skills.length > 0 ? 'text-text' : 'text-muted'}`}>
+              <Puzzle className="w-3 h-3 mt-0.5 shrink-0" />
+              Skills{' '}
+              {skills.length > 0
+                ? <span className="text-success">✓ {skills.length}</span>
+                : <span>—</span>}
+            </span>
+            {skills.length > 0 && (
+              <span className="text-muted">{skills.join(', ')}</span>
             )}
           </div>
 
           {/* Memory + Template */}
           <div className="flex flex-wrap items-center gap-3 text-xs">
-            <span className="inline-flex items-center gap-1 text-muted">
+            <span className={`inline-flex items-center gap-1 ${memoryEntries > 0 ? 'text-text' : 'text-muted'}`}>
               <Brain className="w-3 h-3" />
-              Memory: <span className={memoryEntries > 0 ? 'text-text' : ''}>{memoryEntries} entries</span>
+              Memory{' '}
+              {memoryEntries > 0
+                ? <><span className="text-success">✓</span> {memoryEntries} entries</>
+                : <span>— 0 entries</span>}
             </span>
-            <span className="inline-flex items-center gap-1 text-muted">
-              Template: <span className={template ? 'text-text' : ''}>{template || 'none'}</span>
+            <span className={`inline-flex items-center gap-1 ${template ? 'text-text' : 'text-muted'}`}>
+              Template{' '}
+              {template
+                ? <><span className="text-success">✓</span> {template}</>
+                : <span>— none</span>}
             </span>
           </div>
 
