@@ -1,116 +1,17 @@
 {
-  "specId": "rorca-semantic-wiring",
-  "runId": 28,
-  "startedAt": "2026-03-10T22:49:18.582Z",
-  "lastUpdatedAt": "2026-03-11T00:34:15.712Z",
+  "specId": "rorca-semantic-engine",
+  "runId": 30,
+  "startedAt": "2026-03-11T04:35:11.672Z",
+  "lastUpdatedAt": "2026-03-11T04:37:23.336Z",
   "completedStories": [
     {
-      "storyId": "SW-001",
-      "title": "Populate Embeddings on Spec Approval + Run Completion",
+      "storyId": "SE-001",
+      "title": "Emit memory_created WAL Events from Auto-Memory",
       "status": "passed",
-      "startedAt": "2026-03-10T22:49:27.367Z",
-      "finishedAt": "2026-03-10T22:55:09.368Z",
+      "startedAt": "2026-03-11T04:35:14.314Z",
+      "finishedAt": "2026-03-11T04:37:23.336Z",
       "agentType": "claude",
-      "elapsedMs": 342001
-    },
-    {
-      "storyId": "SW-002",
-      "title": "Auto-Index Specs in tsvector for Keyword Search",
-      "status": "passed",
-      "startedAt": "2026-03-10T22:55:33.750Z",
-      "finishedAt": "2026-03-10T22:59:08.529Z",
-      "agentType": "claude",
-      "elapsedMs": 214779
-    },
-    {
-      "storyId": "SW-003",
-      "title": "Wire retrieveContext() into Spec Generation Prompt",
-      "status": "passed",
-      "startedAt": "2026-03-10T22:59:32.157Z",
-      "finishedAt": "2026-03-10T23:03:57.429Z",
-      "agentType": "claude",
-      "elapsedMs": 265272
-    },
-    {
-      "storyId": "SW-004",
-      "title": "Wire Graph Context into Execution Engine buildPrompt()",
-      "status": "passed",
-      "startedAt": "2026-03-10T23:04:19.349Z",
-      "finishedAt": "2026-03-10T23:09:17.813Z",
-      "agentType": "claude",
-      "elapsedMs": 298464
-    },
-    {
-      "storyId": "SW-005",
-      "title": "Populate Knowledge Graph After Each Story Completion",
-      "status": "passed",
-      "startedAt": "2026-03-10T23:09:41.650Z",
-      "finishedAt": "2026-03-10T23:16:01.159Z",
-      "agentType": "claude",
-      "elapsedMs": 379509
-    },
-    {
-      "storyId": "SW-006",
-      "title": "Update Context Injection Summary UI with Semantic Stats",
-      "status": "passed",
-      "startedAt": "2026-03-10T23:16:23.060Z",
-      "finishedAt": "2026-03-10T23:18:48.496Z",
-      "agentType": "claude",
-      "elapsedMs": 145436
-    },
-    {
-      "storyId": "SW-007",
-      "title": "Backfill Existing Specs and Memories into Embeddings Table",
-      "status": "passed",
-      "startedAt": "2026-03-10T23:19:10.778Z",
-      "finishedAt": "2026-03-10T23:21:21.087Z",
-      "agentType": "claude",
-      "elapsedMs": 130309
-    },
-    {
-      "storyId": "SW-008",
-      "title": "Populate Convention Graph Edges from .rorca/config.json Scopes",
-      "status": "passed",
-      "startedAt": "2026-03-10T23:21:44.146Z",
-      "finishedAt": "2026-03-10T23:42:28.028Z",
-      "agentType": "claude",
-      "elapsedMs": 1243882
-    },
-    {
-      "storyId": "SW-009",
-      "title": "Add Graph Stats to Health Dashboard",
-      "status": "passed",
-      "startedAt": "2026-03-10T23:42:51.932Z",
-      "finishedAt": "2026-03-10T23:47:23.579Z",
-      "agentType": "claude",
-      "elapsedMs": 271647
-    },
-    {
-      "storyId": "SW-010",
-      "title": "Log Retrieval Stats in spec_generation_logs",
-      "status": "passed",
-      "startedAt": "2026-03-10T23:47:44.708Z",
-      "finishedAt": "2026-03-11T00:24:56.265Z",
-      "agentType": "claude",
-      "elapsedMs": 2231557
-    },
-    {
-      "storyId": "SW-011",
-      "title": "Add Embedding Dimension Flexibility for Local vs API Providers",
-      "status": "passed",
-      "startedAt": "2026-03-11T00:25:18.433Z",
-      "finishedAt": "2026-03-11T00:29:56.583Z",
-      "agentType": "claude",
-      "elapsedMs": 278150
-    },
-    {
-      "storyId": "SW-012",
-      "title": "Wire retrieveContext() into Add Stories Endpoint",
-      "status": "passed",
-      "startedAt": "2026-03-11T00:30:18.193Z",
-      "finishedAt": "2026-03-11T00:34:15.712Z",
-      "agentType": "claude",
-      "elapsedMs": 237519
+      "elapsedMs": 129022
     }
   ],
   "failedStories": [],
