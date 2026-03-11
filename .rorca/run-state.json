@@ -2,7 +2,7 @@
   "specId": "rorca-memory-source-tracking",
   "runId": 33,
   "startedAt": "2026-03-11T08:01:46.608Z",
-  "lastUpdatedAt": "2026-03-11T08:13:29.680Z",
+  "lastUpdatedAt": "2026-03-11T08:17:14.742Z",
   "completedStories": [
     {
       "storyId": "MST-001",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-11T08:13:29.679Z",
       "agentType": "claude",
       "elapsedMs": 10175
+    },
+    {
+      "storyId": "MST-005",
+      "title": "Add source type filter to Memory tab",
+      "status": "passed",
+      "startedAt": "2026-03-11T08:13:52.784Z",
+      "finishedAt": "2026-03-11T08:17:14.742Z",
+      "agentType": "claude",
+      "elapsedMs": 201958
     }
   ],
   "failedStories": [],
