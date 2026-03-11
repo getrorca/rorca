@@ -32,6 +32,19 @@ interface InstalledSkill {
   tags?: string[];
 }
 
+interface GitHubSkillResult {
+  name: string;
+  description: string;
+  path: string;
+  installed: boolean;
+}
+
+interface GitHubBrowseResponse {
+  repo: string;
+  branch: string;
+  skills: GitHubSkillResult[];
+}
+
 interface MarketplacePanelProps {
   onNavigate: (panel: PanelId) => void;
 }
@@ -93,6 +106,17 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   const [loadingInstalled, setLoadingInstalled] = useState(true);
   const [installState, setInstallState] = useState<Record<string, 'installing' | 'done' | 'error'>>({});
   const [removingSkill, setRemovingSkill] = useState<string | null>(null);
+
+  // GitHub browse state
+  const [githubRepoUrl, setGithubRepoUrl] = useState('');
+  const [githubSkills, setGithubSkills] = useState<GitHubSkillResult[]>([]);
+  const [githubLoading, setGithubLoading] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
+
+  // Custom install state
+  const [customContent, setCustomContent] = useState('');
+  const [customName, setCustomName] = useState('');
+  const [customInstalling, setCustomInstalling] = useState(false);
 
   // Export installed skills as JSON
   const handleExportSkills = useCallback(() => {
@@ -243,6 +267,79 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
     }
   };
 
+  // GitHub browse handler
+  const handleBrowseGitHub = useCallback(async () => {
+    const url = githubRepoUrl.trim();
+    if (!url) return;
+    setGithubLoading(true);
+    setGithubError(null);
+    try {
+      const data = await apiFetch<GitHubBrowseResponse>('/api/skills/browse-github', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: url }),
+      });
+      setGithubSkills(data.skills);
+    } catch (err: unknown) {
+      setGithubError(err instanceof Error ? err.message : 'Failed to browse repository');
+    } finally {
+      setGithubLoading(false);
+    }
+  }, [githubRepoUrl]);
+
+  // Install from GitHub handler
+  const handleInstallFromGitHub = useCallback(async (skill: GitHubSkillResult) => {
+    setInstallState(s => ({ ...s, [skill.name]: 'installing' }));
+    try {
+      await apiFetch('/api/skills/install-from-github', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: githubRepoUrl.trim(), skillPath: skill.path, workspaceId }),
+      });
+      setInstallState(s => ({ ...s, [skill.name]: 'done' }));
+      toast.show(`Skill "${skill.name}" installed`, 'success');
+      setGithubSkills(prev => prev.map(s => s.name === skill.name ? { ...s, installed: true } : s));
+      await fetchInstalled();
+    } catch {
+      setInstallState(s => ({ ...s, [skill.name]: 'error' }));
+      toast.show(`Failed to install "${skill.name}"`, 'error');
+    }
+  }, [githubRepoUrl, workspaceId, fetchInstalled, toast]);
+
+  // Custom install handler
+  const handleInstallCustom = useCallback(async () => {
+    const name = customName.trim();
+    const content = customContent.trim();
+    if (!name || !content) return;
+    setCustomInstalling(true);
+    try {
+      await apiFetch('/api/skills/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, content, source: 'user' }),
+      });
+      toast.show(`Skill "${name}" installed`, 'success');
+      setCustomContent('');
+      setCustomName('');
+      await fetchInstalled();
+    } catch (err: unknown) {
+      toast.show(err instanceof Error ? err.message : 'Install failed', 'error');
+    } finally {
+      setCustomInstalling(false);
+    }
+  }, [customName, customContent, fetchInstalled, toast]);
+
+  // Reset source-specific state when switching activeSource
+  useEffect(() => {
+    if (activeSource === 'github') {
+      setGithubSkills([]);
+      setGithubError(null);
+    } else if (activeSource === 'custom') {
+      setCustomContent('');
+      setCustomName('');
+    }
+  }, [activeSource]);
+
   useEffect(() => {
     searchInputRef.current?.focus();
   }, []);
@@ -288,54 +385,58 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
         id={`marketplace-tabpanel-${activeTab}`}
         aria-labelledby={`marketplace-tab-${activeTab}`}
       >
-        {/* Search bar */}
-        <div className="px-4 pt-3 pb-2 shrink-0">
-          <div className="relative">
-            <Search
-              size={14}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none"
-              aria-hidden="true"
-            />
-            <input
-              ref={searchInputRef}
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search skills, templates, or packs..."
-              className="w-full pl-9 pr-3 py-2 text-sm bg-surface border border-border rounded-md
-                         text-text placeholder:text-muted
-                         focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent
-                         transition-colors"
-            />
-          </div>
-        </div>
+        {/* Search bar + Source pills — only for skills tab */}
+        {activeTab === 'skills' && (
+          <>
+            <div className="px-4 pt-3 pb-2 shrink-0">
+              <div className="relative">
+                <Search
+                  size={14}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none"
+                  aria-hidden="true"
+                />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search skills.sh..."
+                  className="w-full pl-9 pr-3 py-2 text-sm bg-surface border border-border rounded-md
+                             text-text placeholder:text-muted
+                             focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent
+                             transition-colors"
+                />
+              </div>
+            </div>
 
-        {/* Source pills */}
-        <div className="flex items-center gap-2 px-4 pb-3 shrink-0">
-          {SOURCE_PILLS.map((source) => {
-            const isActive = activeSource === source.id;
-            return (
-              <button
-                key={source.id}
-                onClick={() => setActiveSource(source.id)}
-                className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
-                  isActive
-                    ? 'bg-accent text-white'
-                    : 'bg-surface border border-border text-muted hover:text-text hover:border-text/20'
-                }`}
-                aria-pressed={isActive}
-              >
-                {source.label}
-              </button>
-            );
-          })}
-        </div>
+            <div className="flex items-center gap-2 px-4 pb-3 shrink-0">
+              {SOURCE_PILLS.map((source) => {
+                const isActive = activeSource === source.id;
+                return (
+                  <button
+                    key={source.id}
+                    onClick={() => setActiveSource(source.id)}
+                    className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
+                      isActive
+                        ? 'bg-accent text-white'
+                        : 'bg-surface border border-border text-muted hover:text-text hover:border-text/20'
+                    }`}
+                    aria-pressed={isActive}
+                  >
+                    {source.label}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
 
         {/* Split view: Discovery (60%) | Your Library (40%) */}
         <div className="flex-1 min-h-0 flex gap-0">
           {/* Left panel — Discovery / Browse */}
           <div className="w-[60%] border-r border-border overflow-y-auto p-4">
-            {activeTab === 'skills' && (
+            {/* skills.sh source */}
+            {activeTab === 'skills' && activeSource === 'skills.sh' && (
               <>
                 <h2 className="text-sm font-semibold text-text mb-3">
                   Discovery Results
@@ -344,7 +445,6 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                   )}
                 </h2>
 
-                {/* Loading state */}
                 {loading && (
                   <div className="flex items-center justify-center h-32 text-muted text-xs">
                     <Loader2 size={16} className="animate-spin mr-2" />
@@ -352,7 +452,6 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                   </div>
                 )}
 
-                {/* Error state */}
                 {!loading && error && (
                   <div className="flex items-center justify-center h-32 text-red-400 text-xs border border-dashed border-red-500/30 rounded-md gap-2">
                     <AlertTriangle size={14} />
@@ -360,7 +459,6 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                   </div>
                 )}
 
-                {/* Empty state */}
                 {!loading && !error && skills.length === 0 && (
                   <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
                     {searchQuery
@@ -369,7 +467,6 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                   </div>
                 )}
 
-                {/* Skills grid */}
                 {!loading && !error && skills.length > 0 && (
                   <div className="grid grid-cols-2 gap-4">
                     {skills.map((skill) => {
@@ -431,6 +528,159 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                     })}
                   </div>
                 )}
+              </>
+            )}
+
+            {/* GitHub source */}
+            {activeTab === 'skills' && activeSource === 'github' && (
+              <>
+                <h2 className="text-sm font-semibold text-text mb-3">Browse GitHub Repository</h2>
+
+                <div className="flex items-center gap-2 mb-4">
+                  <input
+                    type="text"
+                    value={githubRepoUrl}
+                    onChange={(e) => setGithubRepoUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleBrowseGitHub()}
+                    placeholder="https://github.com/owner/repo or owner/repo"
+                    className="flex-1 px-3 py-2 text-sm bg-surface border border-border rounded-md
+                               text-text placeholder:text-muted
+                               focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent
+                               transition-colors"
+                  />
+                  <button
+                    onClick={handleBrowseGitHub}
+                    disabled={githubLoading || !githubRepoUrl.trim()}
+                    className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium
+                               bg-accent text-white rounded-md hover:bg-accent/90
+                               transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {githubLoading ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
+                    Browse
+                  </button>
+                </div>
+
+                {githubError && (
+                  <div className="flex items-center gap-2 p-3 rounded-md border border-red-500/30 bg-red-500/5 text-red-400 text-xs mb-4">
+                    <AlertTriangle size={14} className="shrink-0" />
+                    <span>{githubError}</span>
+                  </div>
+                )}
+
+                {githubLoading && (
+                  <div className="flex items-center justify-center h-32 text-muted text-xs">
+                    <Loader2 size={16} className="animate-spin mr-2" />
+                    Browsing repository...
+                  </div>
+                )}
+
+                {!githubLoading && githubSkills.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted mb-2">
+                      {githubSkills.length} skill{githubSkills.length !== 1 ? 's' : ''} found
+                    </p>
+                    {githubSkills.map((skill) => {
+                      const installed = skill.installed || isInstalled(skill.name) || installState[skill.name] === 'done';
+                      const installing = installState[skill.name] === 'installing';
+                      const errored = installState[skill.name] === 'error';
+                      return (
+                        <div
+                          key={skill.path}
+                          className={`flex items-start gap-3 p-3 rounded-lg border transition-colors ${
+                            installed ? 'border-green-500/25 bg-green-500/5' : 'border-border bg-surface'
+                          }`}
+                        >
+                          <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
+                          <div className="min-w-0 flex-1">
+                            <span className="text-sm font-medium text-text">{skill.name}</span>
+                            {skill.description && <p className="text-xs text-muted mt-0.5 line-clamp-2">{skill.description}</p>}
+                            <p className="text-[10px] text-muted/50 font-mono mt-0.5">{skill.path}</p>
+                          </div>
+                          <div className="shrink-0">
+                            {installed ? (
+                              <span className="flex items-center gap-1 px-2 py-1 text-xs text-green-400">
+                                <Check size={12} /> Installed
+                              </span>
+                            ) : installing ? (
+                              <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
+                                <Loader2 size={12} className="animate-spin" /> Installing...
+                              </div>
+                            ) : errored ? (
+                              <button
+                                onClick={() => handleInstallFromGitHub(skill)}
+                                className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:bg-red-500/10 rounded transition-colors"
+                              >
+                                <AlertTriangle size={12} /> Retry
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleInstallFromGitHub(skill)}
+                                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent/90 rounded transition-colors"
+                              >
+                                <Download size={12} /> Install
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {!githubLoading && !githubError && githubSkills.length === 0 && !githubRepoUrl.trim() && (
+                  <div className="flex flex-col items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md gap-2">
+                    <Wrench size={24} className="opacity-40" />
+                    Enter a GitHub repo URL to browse for skills
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Custom source */}
+            {activeTab === 'skills' && activeSource === 'custom' && (
+              <>
+                <h2 className="text-sm font-semibold text-text mb-3">Install Custom Skill</h2>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-muted mb-1">Skill Name</label>
+                    <input
+                      type="text"
+                      value={customName}
+                      onChange={(e) => setCustomName(e.target.value)}
+                      placeholder="my-skill"
+                      className="w-full px-3 py-2 text-sm bg-surface border border-border rounded-md
+                                 text-text placeholder:text-muted
+                                 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent
+                                 transition-colors"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-muted mb-1">SKILL.md Content</label>
+                    <textarea
+                      value={customContent}
+                      onChange={(e) => setCustomContent(e.target.value)}
+                      rows={10}
+                      placeholder="Paste your SKILL.md content here..."
+                      className="w-full px-3 py-2 text-sm font-mono bg-surface border border-border rounded-md
+                                 text-text placeholder:text-muted
+                                 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent
+                                 transition-colors resize-y"
+                    />
+                  </div>
+
+                  <button
+                    onClick={handleInstallCustom}
+                    disabled={customInstalling || !customName.trim() || !customContent.trim()}
+                    className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium
+                               bg-accent text-white rounded-md hover:bg-accent/90
+                               transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {customInstalling ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                    Install
+                  </button>
+                </div>
               </>
             )}
 
