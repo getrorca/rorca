@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-engine",
   "runId": 30,
   "startedAt": "2026-03-11T04:35:11.672Z",
-  "lastUpdatedAt": "2026-03-11T04:41:01.777Z",
+  "lastUpdatedAt": "2026-03-11T04:44:04.080Z",
   "completedStories": [
     {
       "storyId": "SE-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-11T04:41:01.776Z",
       "agentType": "claude",
       "elapsedMs": 101485
+    },
+    {
+      "storyId": "SE-004",
+      "title": "Fix AGE Cypher Execution — Root Cause: isGraphAvailable and Session Setup",
+      "status": "passed",
+      "startedAt": "2026-03-11T04:41:20.694Z",
+      "finishedAt": "2026-03-11T04:44:04.080Z",
+      "agentType": "claude",
+      "elapsedMs": 163386
     }
   ],
   "failedStories": [],
