@@ -279,173 +279,229 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
 
         {/* Split view: Discovery (60%) | Your Library (40%) */}
         <div className="flex-1 min-h-0 flex gap-0">
-          {/* Left panel — Discovery Results */}
+          {/* Left panel — Discovery / Browse */}
           <div className="w-[60%] border-r border-border overflow-y-auto p-4">
-            <h2 className="text-sm font-semibold text-text mb-3">
-              Discovery Results
-              {!loading && filteredSkills.length > 0 && (
-                <span className="ml-2 text-xs font-normal text-muted">({filteredSkills.length})</span>
-              )}
-            </h2>
+            {activeTab === 'skills' && (
+              <>
+                <h2 className="text-sm font-semibold text-text mb-3">
+                  Discovery Results
+                  {!loading && filteredSkills.length > 0 && (
+                    <span className="ml-2 text-xs font-normal text-muted">({filteredSkills.length})</span>
+                  )}
+                </h2>
 
-            {/* Loading state */}
-            {loading && (
-              <div className="flex items-center justify-center h-32 text-muted text-xs">
-                <Loader2 size={16} className="animate-spin mr-2" />
-                Searching skills.sh...
-              </div>
-            )}
+                {/* Loading state */}
+                {loading && (
+                  <div className="flex items-center justify-center h-32 text-muted text-xs">
+                    <Loader2 size={16} className="animate-spin mr-2" />
+                    Searching skills.sh...
+                  </div>
+                )}
 
-            {/* Error state */}
-            {!loading && error && (
-              <div className="flex items-center justify-center h-32 text-red-400 text-xs border border-dashed border-red-500/30 rounded-md gap-2">
-                <AlertTriangle size={14} />
-                {error}
-              </div>
-            )}
+                {/* Error state */}
+                {!loading && error && (
+                  <div className="flex items-center justify-center h-32 text-red-400 text-xs border border-dashed border-red-500/30 rounded-md gap-2">
+                    <AlertTriangle size={14} />
+                    {error}
+                  </div>
+                )}
 
-            {/* Empty state */}
-            {!loading && !error && filteredSkills.length === 0 && (
-              <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
-                {searchQuery
-                  ? `No skills matching "${searchQuery}"`
-                  : 'No skills found'}
-              </div>
-            )}
+                {/* Empty state */}
+                {!loading && !error && filteredSkills.length === 0 && (
+                  <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
+                    {searchQuery
+                      ? `No skills matching "${searchQuery}"`
+                      : 'No skills found'}
+                  </div>
+                )}
 
-            {/* Skills grid */}
-            {!loading && !error && filteredSkills.length > 0 && (
-              <div className="grid grid-cols-2 gap-4">
-                {filteredSkills.map((skill) => {
-                  const category = inferCategory(skill.name, skill.description);
-                  const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS.general;
-                  const installed = isInstalled(skill.name);
-                  const installing = installState[skill.name] === 'installing';
-                  return (
-                    <div
-                      key={skill.name}
-                      className={`flex flex-col gap-2 p-3 bg-surface border rounded-lg transition-colors ${
-                        installed
-                          ? 'border-green-500/25 bg-green-500/5'
-                          : 'border-border hover:border-text/20'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <h3 className="text-sm font-medium text-text truncate" title={skill.name}>
-                          {skill.name}
-                        </h3>
-                        <span className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded-full capitalize ${colorClass}`}>
-                          {category}
-                        </span>
-                      </div>
-                      <p className="text-xs text-muted line-clamp-2 min-h-[2rem]">
-                        {skill.description
-                          ? skill.description.slice(0, 100) + (skill.description.length > 100 ? '...' : '')
-                          : 'No description available'}
-                      </p>
-                      {installed ? (
-                        <span className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-green-400">
-                          <Check size={12} />
-                          Installed
-                        </span>
-                      ) : (
-                        <button
-                          onClick={() => handleInstall(skill.name)}
-                          disabled={installing}
-                          className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                                     bg-accent/10 text-accent border border-accent/20 rounded-md
-                                     hover:bg-accent/20 transition-colors
-                                     disabled:opacity-50 disabled:cursor-not-allowed"
+                {/* Skills grid */}
+                {!loading && !error && filteredSkills.length > 0 && (
+                  <div className="grid grid-cols-2 gap-4">
+                    {filteredSkills.map((skill) => {
+                      const category = inferCategory(skill.name, skill.description);
+                      const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS.general;
+                      const installed = isInstalled(skill.name);
+                      const installing = installState[skill.name] === 'installing';
+                      return (
+                        <div
+                          key={skill.name}
+                          className={`flex flex-col gap-2 p-3 bg-surface border rounded-lg transition-colors ${
+                            installed
+                              ? 'border-green-500/25 bg-green-500/5'
+                              : 'border-border hover:border-text/20'
+                          }`}
                         >
-                          {installing ? (
-                            <>
-                              <Loader2 size={12} className="animate-spin" />
-                              Installing...
-                            </>
+                          <div className="flex items-start justify-between gap-2">
+                            <h3 className="text-sm font-medium text-text truncate" title={skill.name}>
+                              {skill.name}
+                            </h3>
+                            <span className={`shrink-0 px-2 py-0.5 text-[10px] font-medium rounded-full capitalize ${colorClass}`}>
+                              {category}
+                            </span>
+                          </div>
+                          <p className="text-xs text-muted line-clamp-2 min-h-[2rem]">
+                            {skill.description
+                              ? skill.description.slice(0, 100) + (skill.description.length > 100 ? '...' : '')
+                              : 'No description available'}
+                          </p>
+                          {installed ? (
+                            <span className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-green-400">
+                              <Check size={12} />
+                              Installed
+                            </span>
                           ) : (
-                            <>
-                              <Download size={12} />
-                              Install
-                            </>
+                            <button
+                              onClick={() => handleInstall(skill.name)}
+                              disabled={installing}
+                              className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                         bg-accent/10 text-accent border border-accent/20 rounded-md
+                                         hover:bg-accent/20 transition-colors
+                                         disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {installing ? (
+                                <>
+                                  <Loader2 size={12} className="animate-spin" />
+                                  Installing...
+                                </>
+                              ) : (
+                                <>
+                                  <Download size={12} />
+                                  Install
+                                </>
+                              )}
+                            </button>
                           )}
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+
+            {activeTab === 'templates' && (
+              <>
+                <h2 className="text-sm font-semibold text-text mb-3">Browse Templates</h2>
+                <div className="flex flex-col items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md gap-2">
+                  <FileText size={24} className="opacity-40" />
+                  Templates marketplace coming soon
+                </div>
+              </>
+            )}
+
+            {activeTab === 'packs' && (
+              <>
+                <h2 className="text-sm font-semibold text-text mb-3">Browse Convention Packs</h2>
+                <div className="flex flex-col items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md gap-2">
+                  <Package size={24} className="opacity-40" />
+                  Convention packs marketplace coming soon
+                </div>
+              </>
             )}
           </div>
 
-          {/* Right panel — Your Library */}
+          {/* Right panel — Your Library / Your Items */}
           <div className="w-[40%] overflow-y-auto p-4">
-            <h2 className="text-sm font-semibold text-text mb-1">
-              Your Library{' '}
-              {!loadingInstalled && (
-                <span className="text-xs font-normal text-muted">({installedSkills.length})</span>
-              )}
-              {loadingInstalled && <Loader2 size={12} className="inline animate-spin text-muted ml-1" />}
-            </h2>
-            <p className="text-xs text-muted mb-4">
-              {installedSkills.length > 0
-                ? 'Manage your installed skills'
-                : 'Installed skills will appear here'}
-            </p>
+            {activeTab === 'skills' && (
+              <>
+                <h2 className="text-sm font-semibold text-text mb-1">
+                  Your Library{' '}
+                  {!loadingInstalled && (
+                    <span className="text-xs font-normal text-muted">({installedSkills.length})</span>
+                  )}
+                  {loadingInstalled && <Loader2 size={12} className="inline animate-spin text-muted ml-1" />}
+                </h2>
+                <p className="text-xs text-muted mb-4">
+                  {installedSkills.length > 0
+                    ? 'Manage your installed skills'
+                    : 'Installed skills will appear here'}
+                </p>
 
-            {/* Loading state */}
-            {loadingInstalled && installedSkills.length === 0 && (
-              <div className="flex items-center justify-center h-32 text-muted text-xs">
-                <Loader2 size={16} className="animate-spin mr-2" />
-                Loading installed skills...
-              </div>
-            )}
+                {/* Loading state */}
+                {loadingInstalled && installedSkills.length === 0 && (
+                  <div className="flex items-center justify-center h-32 text-muted text-xs">
+                    <Loader2 size={16} className="animate-spin mr-2" />
+                    Loading installed skills...
+                  </div>
+                )}
 
-            {/* Empty state */}
-            {!loadingInstalled && installedSkills.length === 0 && (
-              <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
-                No skills installed yet
-              </div>
-            )}
+                {/* Empty state */}
+                {!loadingInstalled && installedSkills.length === 0 && (
+                  <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
+                    No skills installed yet
+                  </div>
+                )}
 
-            {/* Installed skills list */}
-            {installedSkills.length > 0 && (
-              <div className="space-y-2">
-                {installedSkills.map((skill) => {
-                  const category = inferCategory(skill.name, skill.description);
-                  const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS.general;
-                  const isRemoving = removingSkill === skill.name;
-                  return (
-                    <div
-                      key={skill.name}
-                      className="flex items-start gap-2 p-2.5 rounded-lg border border-border bg-panel hover:border-border/80 transition-colors group"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-sm font-semibold text-text">{skill.name}</span>
-                          <span className={`px-1 py-0.5 text-[10px] font-mono rounded capitalize ${colorClass}`}>
-                            {category}
-                          </span>
+                {/* Installed skills list */}
+                {installedSkills.length > 0 && (
+                  <div className="space-y-2">
+                    {installedSkills.map((skill) => {
+                      const category = inferCategory(skill.name, skill.description);
+                      const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS.general;
+                      const isRemoving = removingSkill === skill.name;
+                      return (
+                        <div
+                          key={skill.name}
+                          className="flex items-start gap-2 p-2.5 rounded-lg border border-border bg-panel hover:border-border/80 transition-colors group"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-sm font-semibold text-text">{skill.name}</span>
+                              <span className={`px-1 py-0.5 text-[10px] font-mono rounded capitalize ${colorClass}`}>
+                                {category}
+                              </span>
+                            </div>
+                            {skill.description && (
+                              <p className="text-xs text-muted mt-0.5 line-clamp-2">{skill.description}</p>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => handleRemove(skill.name)}
+                            disabled={isRemoving}
+                            className="shrink-0 mt-0.5 text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all disabled:opacity-50"
+                            title="Remove skill"
+                          >
+                            {isRemoving ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : (
+                              <Trash2 size={12} />
+                            )}
+                          </button>
                         </div>
-                        {skill.description && (
-                          <p className="text-xs text-muted mt-0.5 line-clamp-2">{skill.description}</p>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => handleRemove(skill.name)}
-                        disabled={isRemoving}
-                        className="shrink-0 mt-0.5 text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all disabled:opacity-50"
-                        title="Remove skill"
-                      >
-                        {isRemoving ? (
-                          <Loader2 size={12} className="animate-spin" />
-                        ) : (
-                          <Trash2 size={12} />
-                        )}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+
+            {activeTab === 'templates' && (
+              <>
+                <h2 className="text-sm font-semibold text-text mb-1">
+                  Your Templates <span className="text-xs font-normal text-muted">(0)</span>
+                </h2>
+                <p className="text-xs text-muted mb-4">
+                  Saved templates will appear here
+                </p>
+                <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
+                  No templates saved yet
+                </div>
+              </>
+            )}
+
+            {activeTab === 'packs' && (
+              <>
+                <h2 className="text-sm font-semibold text-text mb-1">
+                  Your Packs <span className="text-xs font-normal text-muted">(0)</span>
+                </h2>
+                <p className="text-xs text-muted mb-4">
+                  Installed packs will appear here
+                </p>
+                <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
+                  No packs installed yet
+                </div>
+              </>
             )}
           </div>
         </div>
