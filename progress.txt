@@ -3,9 +3,10 @@
 Spec: skills-top-24-hours
 Run ID: 37
 Started: 2026-03-11T19:12:03.913Z
-Last Updated: 2026-03-11T19:20:30.321Z
+Last Updated: 2026-03-11T19:23:13.012Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - US-001: Add GET /api/skills/top backend route proxying skills.sh leaderboard — DONE (claude, 232s)
 - US-002: Extend SkillResult interface with optional installs field — DONE (claude, 53s)
 - US-003: Replace empty search state with Top Skills leaderboard fetch in MarketplacePanel — DONE (claude, 164s)
+- US-004: Render Top Skills leaderboard heading and install count badge on discovery cards — DONE (claude, 141s)
