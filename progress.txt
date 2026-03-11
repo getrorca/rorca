@@ -3,7 +3,8 @@
 Spec: skills-top-24-hours
 Run ID: 37
 Started: 2026-03-11T19:12:03.913Z
-Last Updated: 2026-03-11T19:16:05.631Z
+Last Updated: 2026-03-11T19:17:24.051Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Add GET /api/skills/top backend route proxying skills.sh leaderboard — DONE (claude, 232s)
+- US-002: Extend SkillResult interface with optional installs field — DONE (claude, 53s)

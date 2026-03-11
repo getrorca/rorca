@@ -2,7 +2,7 @@
   "specId": "skills-top-24-hours",
   "runId": 37,
   "startedAt": "2026-03-11T19:12:03.913Z",
-  "lastUpdatedAt": "2026-03-11T19:16:05.631Z",
+  "lastUpdatedAt": "2026-03-11T19:17:24.051Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-11T19:16:05.631Z",
       "agentType": "claude",
       "elapsedMs": 232339
+    },
+    {
+      "storyId": "US-002",
+      "title": "Extend SkillResult interface with optional installs field",
+      "status": "passed",
+      "startedAt": "2026-03-11T19:16:30.791Z",
+      "finishedAt": "2026-03-11T19:17:24.051Z",
+      "agentType": "claude",
+      "elapsedMs": 53260
     }
   ],
   "failedStories": [],
