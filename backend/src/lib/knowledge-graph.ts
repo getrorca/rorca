@@ -812,6 +812,112 @@ export interface GraphStats {
  * Check if the AGE graph is available and return basic stats.
  * PG-019: Returns available: false immediately if AGE extension is not installed.
  */
+// ── Skill Effectiveness Queries ──────────────────────────────────────────────
+
+export interface SkillEffectivenessRow {
+  skill: string;
+  passCount: number;
+  totalCount: number;
+}
+
+/**
+ * Query Skill-USED_IN->Story edges to compute per-skill pass rates.
+ * Returns skills ordered by pass count descending.
+ * PG-019: Returns empty array if AGE is unavailable.
+ */
+export async function querySkillEffectiveness(): Promise<SkillEffectivenessRow[]> {
+  if (!(await isGraphAvailable())) return [];
+
+  try {
+    // Total uses per skill
+    const totalRows = await cypherQuery<{ skill: unknown; cnt: unknown }>(
+      `MATCH (sk:Skill)-[:USED_IN]->(st:Story)
+       RETURN sk.name, count(st)`,
+      [
+        { name: 'skill', type: 'agtype' },
+        { name: 'cnt', type: 'agtype' },
+      ],
+    );
+
+    // Passed uses per skill
+    const passRows = await cypherQuery<{ skill: unknown; cnt: unknown }>(
+      `MATCH (sk:Skill)-[:USED_IN]->(st:Story)
+       WHERE st.status = 'pass'
+       RETURN sk.name, count(st)`,
+      [
+        { name: 'skill', type: 'agtype' },
+        { name: 'cnt', type: 'agtype' },
+      ],
+    );
+
+    const passMap = new Map<string, number>();
+    for (const row of passRows) {
+      const name = String(parseAgtype(row.skill) ?? '');
+      const cnt = Number(parseAgtype(row.cnt) ?? 0);
+      if (name) passMap.set(name, cnt);
+    }
+
+    const results: SkillEffectivenessRow[] = [];
+    for (const row of totalRows) {
+      const name = String(parseAgtype(row.skill) ?? '');
+      const total = Number(parseAgtype(row.cnt) ?? 0);
+      if (name && total > 0) {
+        results.push({
+          skill: name,
+          passCount: passMap.get(name) ?? 0,
+          totalCount: total,
+        });
+      }
+    }
+
+    results.sort((a, b) => b.passCount - a.passCount);
+    logger.debug({ count: results.length }, '[knowledge-graph] querySkillEffectiveness complete');
+    return results;
+  } catch (err) {
+    logger.warn({ err }, '[knowledge-graph] querySkillEffectiveness failed');
+    return [];
+  }
+}
+
+export interface SkillPathAffinityRow {
+  skill: string;
+  filePath: string;
+  storyCount: number;
+}
+
+/**
+ * Query which skills were active on stories that touched specific file patterns.
+ * Returns skill-to-file-path associations ordered by frequency.
+ * PG-019: Returns empty array if AGE is unavailable.
+ */
+export async function querySkillPathAffinity(limit: number = 50): Promise<SkillPathAffinityRow[]> {
+  if (!(await isGraphAvailable())) return [];
+
+  try {
+    const rows = await cypherQuery<{ skill: unknown; fpath: unknown; cnt: unknown }>(
+      `MATCH (sk:Skill)-[:USED_IN]->(st:Story)-[:TOUCHES]->(f:File)
+       WHERE st.status = 'pass'
+       RETURN sk.name, f.path, count(st)
+       ORDER BY count(st) DESC
+       LIMIT ${limit}`,
+      [
+        { name: 'skill', type: 'agtype' },
+        { name: 'fpath', type: 'agtype' },
+        { name: 'cnt', type: 'agtype' },
+      ],
+    );
+
+    return rows.map(row => ({
+      skill: String(parseAgtype(row.skill) ?? ''),
+      filePath: String(parseAgtype(row.fpath) ?? ''),
+      storyCount: Number(parseAgtype(row.cnt) ?? 0),
+    })).filter(r => r.skill && r.filePath);
+  } catch (err) {
+    logger.warn({ err }, '[knowledge-graph] querySkillPathAffinity failed');
+    return [];
+  }
+}
+
 export async function graphStats(): Promise<GraphStats> {
   if (!(await isGraphAvailable())) {
     return { available: false, vertexCount: 0, edgeCount: 0, labels: [] };
