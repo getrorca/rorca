@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-engine",
   "runId": 30,
   "startedAt": "2026-03-11T04:35:11.672Z",
-  "lastUpdatedAt": "2026-03-11T04:51:33.320Z",
+  "lastUpdatedAt": "2026-03-11T04:55:05.937Z",
   "completedStories": [
     {
       "storyId": "SE-001",
@@ -66,6 +66,15 @@
       "finishedAt": "2026-03-11T04:51:33.319Z",
       "agentType": "claude",
       "elapsedMs": 144819
+    },
+    {
+      "storyId": "SE-008",
+      "title": "Add Google Embedding Provider with Dimension-Safe Strategy",
+      "status": "passed",
+      "startedAt": "2026-03-11T04:51:50.433Z",
+      "finishedAt": "2026-03-11T04:55:05.937Z",
+      "agentType": "claude",
+      "elapsedMs": 195504
     }
   ],
   "failedStories": [],
