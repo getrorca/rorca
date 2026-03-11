@@ -451,42 +451,21 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {filteredInstalled.map(skill => {
-                  const cat = inferSkillCategory(skill);
-                  const colorClass = CATEGORY_COLORS[cat];
-                  const sourceLabel = skill.source.startsWith('github:')
-                    ? skill.source
-                    : skill.source === 'skills.sh' || skill.source === 'db' || skill.source === 'rorca-skills' || skill.source === 'claude-skills'
-                      ? 'skills.sh'
-                      : skill.source === 'user'
-                        ? 'custom'
-                        : skill.source;
-                  return (
-                    <div
-                      key={skill.name}
-                      className="flex items-start gap-2 p-2.5 rounded-lg border border-border bg-panel hover:border-border/80 transition-colors group"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-sm font-semibold text-[var(--text)]">{skill.name}</span>
-                          <span className={`px-1 py-0.5 text-[10px] font-mono rounded ${colorClass}`}>{cat}</span>
-                          <span className="px-1 py-0.5 text-[10px] font-mono rounded bg-zinc-500/10 text-zinc-400">{sourceLabel}</span>
-                        </div>
-                        {skill.description && (
-                          <p className="text-xs text-muted mt-0.5 line-clamp-2">{skill.description}</p>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => removeSkill(skill.name)}
-                        className="shrink-0 mt-0.5 text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all"
-                        title="Remove skill"
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </div>
-                  );
-                })}
+              <div className="space-y-2">
+                {filteredInstalled.map(skill => (
+                  <SkillRegistryCard
+                    key={skill.name}
+                    name={skill.name}
+                    description={skill.description ?? ''}
+                    author=""
+                    badge={null}
+                    installed={true}
+                    installing={installState[skill.name] === 'installing'}
+                    installError={false}
+                    onInstall={() => {}}
+                    onRemove={() => removeSkill(skill.name)}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -1321,14 +1300,19 @@ function SkillRegistryCard({
   const handleToggle = () => {
     const next = !expanded;
     setExpanded(next);
-    if (next && installed && !contentCache && !contentLoading) {
+    if (next && !contentCache && !contentLoading) {
       setContentLoading(true);
       setContentError(null);
-      apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
-        `/api/skills/${encodeURIComponent(name)}/content`
-      )
+      const fetcher = installed
+        ? apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
+            `/api/skills/${encodeURIComponent(name)}/content`
+          )
+        : apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
+            `/api/skills/preview?query=${encodeURIComponent(name)}`
+          );
+      fetcher
         .then(data => setContentCache({ content: data.content, wordCount: data.wordCount, estimatedTokens: data.estimatedTokens }))
-        .catch(err => setContentError(err instanceof Error ? err.message : 'Failed to load content'))
+        .catch(err => setContentError(err instanceof Error ? err.message : 'Preview not available'))
         .finally(() => setContentLoading(false));
     }
   };
@@ -1337,10 +1321,10 @@ function SkillRegistryCard({
     <div className={`rounded-lg border transition-colors ${
       installed ? 'border-green-500/25 bg-green-500/5' : 'border-border bg-panel hover:border-border/80'
     }`}>
-      <div className="flex items-start gap-3 p-3">
-        <button onClick={handleToggle} className="mt-0.5 shrink-0 text-muted hover:text-[var(--text)] transition-colors">
+      <div className="flex items-start gap-3 p-3 cursor-pointer" onClick={handleToggle}>
+        <div className="mt-0.5 shrink-0 text-muted">
           <ChevronRight size={14} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
-        </button>
+        </div>
         <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
@@ -1360,7 +1344,7 @@ function SkillRegistryCard({
             <p className="text-xs text-muted mt-0.5 line-clamp-2">{description}</p>
           )}
         </div>
-        <div className="shrink-0">
+        <div className="shrink-0" onClick={e => e.stopPropagation()}>
           {installed ? (
             <button
               onClick={onRemove}
@@ -1396,19 +1380,7 @@ function SkillRegistryCard({
 
       {expanded && (
         <div className="px-3 pb-3 pt-0">
-          {!installed ? (
-            <div className="flex items-center gap-3 p-3 rounded bg-bg text-xs text-muted">
-              <span className="flex-1">Install to preview content</span>
-              <button
-                onClick={onInstall}
-                disabled={installing}
-                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
-              >
-                {installing ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-                Install
-              </button>
-            </div>
-          ) : contentLoading ? (
+          {contentLoading ? (
             <div className="flex items-center justify-center py-6">
               <Loader2 size={16} className="animate-spin text-muted" />
             </div>

@@ -221,7 +221,7 @@ function calculateBudgets(
  *   Step 3 — Graph: knowledge graph context (if includeGraph, future PG-015)
  */
 export async function retrieveContext(
-  workspaceId: number,
+  workspaceId: string | number,
   storyText: string,
   options?: RetrieveContextOptions,
 ): Promise<RetrievedContext> {

@@ -1,14 +1,9 @@
 # Run State Summary
 
-Spec: rorca-memory-source-tracking
-Run ID: 33
-Started: 2026-03-11T08:01:46.608Z
-Last Updated: 2026-03-11T08:18:12.863Z
+Spec: rorca-marketplace-panel-fix
+Run ID: 34
+Started: 2026-03-11T18:48:42.365Z
+Last Updated: 2026-03-11T18:50:43.900Z
 
-## Completed Stories (6)
-- MST-001: Add source_type column to memories table — DONE (claude, 135s)
-- MST-002: Set source_type on all memory creation paths — DONE (claude, 300s)
-- MST-003: Return source_type in all memory API responses — DONE (claude, 189s)
-- MST-004: Display source type badges on Memory tab cards — DONE (claude, 10s)
-- MST-005: Add source type filter to Memory tab — DONE (claude, 202s)
-- MST-006: Backfill source_type for existing memories — DONE (claude, 37s)
+## Completed Stories (1)
+- MP-001: Fix live search with real debounced API call and suggestions fallback when empty — DONE (claude, 29s)
