@@ -197,25 +197,15 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
         }
       }, 300);
     } else {
-      // No query — fetch workspace suggestions immediately
+      // No query — fetch top skills leaderboard
       setLoading(true);
-      const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
-      apiFetch<{ suggestions: { skill: string; triggeredBy: string[]; installed: boolean }[] }>(
-        `/api/skills/suggestions${params}`,
-      )
+      apiFetch<SkillSearchResponse>('/api/skills/top')
         .then((data) => {
-          setSkills(
-            data.suggestions.map((s) => ({
-              name: s.skill,
-              description: s.triggeredBy.join(', '),
-              author: '',
-              url: '',
-            })),
-          );
+          setSkills(data.results);
           setError(null);
         })
         .catch((err: unknown) => {
-          setError(err instanceof Error ? err.message : 'Failed to fetch suggestions');
+          setError(err instanceof Error ? err.message : 'Failed to fetch top skills');
         })
         .finally(() => {
           setLoading(false);
@@ -223,7 +213,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
     }
 
     return () => clearTimeout(debounceRef.current);
-  }, [searchQuery, activeTab, activeSource, workspaceId]);
+  }, [searchQuery, activeTab, activeSource]);
 
   // Cleanup debounce on unmount
   useEffect(() => {
@@ -440,7 +430,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
             {activeTab === 'skills' && activeSource === 'skills.sh' && (
               <>
                 <h2 className="text-sm font-semibold text-text mb-3">
-                  Discovery Results
+                  {searchQuery.trim() ? 'Search Results' : 'Top Skills'}
                   {!loading && skills.length > 0 && (
                     <span className="ml-2 text-xs font-normal text-muted">({skills.length})</span>
                   )}
@@ -449,7 +439,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                 {loading && (
                   <div className="flex items-center justify-center h-32 text-muted text-xs">
                     <Loader2 size={16} className="animate-spin mr-2" />
-                    Searching skills.sh...
+                    {searchQuery.trim() ? 'Searching skills.sh...' : 'Loading top skills...'}
                   </div>
                 )}
 
@@ -464,7 +454,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                   <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
                     {searchQuery
                       ? `No skills matching "${searchQuery}"`
-                      : 'No suggestions found for this workspace'}
+                      : 'No top skills available'}
                   </div>
                 )}
 
