@@ -7,7 +7,7 @@ import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../
 import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
 import { query, queryOne, execute } from '../db/index';
 import { getVaultKey } from './vault';
-import { getProviderAsync, getProviderSource } from '../lib/embedding-pipeline';
+import { getProviderAsync, getProviderSource, invalidateProviderCache } from '../lib/embedding-pipeline';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -972,6 +972,55 @@ router.get('/embedding-provider', async (_req: Request, res: Response) => {
     provider: provider.name,
     model: provider.model,
     dimensions: provider.dimension,
+    source,
+  });
+});
+
+/**
+ * @swagger
+ * /api/config/embedding-provider:
+ *   put:
+ *     summary: Set embedding provider
+ *     operationId: setEmbeddingProvider
+ *     description: Sets the active embedding provider. Use 'auto' to revert to auto-detection.
+ *     tags: [Config]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [provider]
+ *             properties:
+ *               provider: { type: string, enum: [auto, openai, openai-large, openrouter, voyage, google, local] }
+ *     responses:
+ *       200:
+ *         description: Provider updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 provider: { type: string }
+ *                 model: { type: string }
+ *                 dimensions: { type: integer }
+ *                 source: { type: string }
+ */
+router.put('/embedding-provider', async (req: Request, res: Response) => {
+  const { provider } = req.body ?? {};
+  const valid = ['auto', 'openai', 'openai-large', 'openrouter', 'voyage', 'google', 'local'];
+  if (!provider || !valid.includes(provider)) {
+    res.status(400).json({ error: `Invalid provider. Must be one of: ${valid.join(', ')}` });
+    return;
+  }
+  process.env.EMBEDDING_PROVIDER = provider;
+  invalidateProviderCache();
+  const resolved = await getProviderAsync();
+  const source = getProviderSource();
+  res.json({
+    provider: resolved.name,
+    model: resolved.model,
+    dimensions: resolved.dimension,
     source,
   });
 });
