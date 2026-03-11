@@ -19,11 +19,12 @@ import {
   BookOpen,
   Layers,
   ChevronRight,
-  ChevronDown,
   AlertTriangle,
   Upload,
+  ExternalLink,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
+import { renderMarkdown } from '../lib/renderMarkdown';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
 
@@ -297,6 +298,9 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
   // Install tracking (shared across sub-tabs)
   const [installState, setInstallState] = useState<Record<string, 'installing' | 'done' | 'error'>>({});
 
+  // Preview modal state
+  const [previewSkill, setPreviewSkill] = useState<SkillPreviewModalState | null>(null);
+
   const fetchInstalled = useCallback(async () => {
     setLoadingInstalled(true);
     try {
@@ -323,6 +327,25 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
       await fetchInstalled();
     } catch { /* silent */ }
   }, [fetchInstalled, toast]);
+
+  const installSkillFromSh = useCallback(async (skillName: string) => {
+    setInstallState(s => ({ ...s, [skillName]: 'installing' }));
+    try {
+      await apiFetch('/api/skills/install-from-sh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: skillName, workspaceId }),
+      });
+      setInstallState(s => ({ ...s, [skillName]: 'done' }));
+      await fetchInstalled();
+    } catch {
+      setInstallState(s => ({ ...s, [skillName]: 'error' }));
+    }
+  }, [workspaceId, fetchInstalled, setInstallState]);
+
+  const openPreview = useCallback((name: string, installed: boolean, source?: string, category?: string) => {
+    setPreviewSkill({ name, installed, source, category });
+  }, []);
 
   const handleRemoveAll = useCallback(async () => {
     if (installedSkills.length === 0) return;
@@ -470,6 +493,7 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
                     installError={false}
                     onInstall={() => {}}
                     onRemove={() => removeSkill(skill.name)}
+                    onCardClick={() => openPreview(skill.name, true, skill.source, skill.category)}
                     workspaceId={workspaceId}
                   />
                 ))}
@@ -507,6 +531,7 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
               workspaceId={workspaceId}
               fetchInstalled={fetchInstalled}
               toast={toast}
+              onCardClick={openPreview}
             />
           )}
           {sourceTab === 'github' && (
@@ -517,6 +542,7 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
               workspaceId={workspaceId}
               fetchInstalled={fetchInstalled}
               toast={toast}
+              onCardClick={openPreview}
             />
           )}
           {sourceTab === 'custom' && (
@@ -528,6 +554,17 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
           )}
         </div>
       </div>
+
+      {/* Skill Preview Modal */}
+      {previewSkill && (
+        <SkillPreviewModal
+          skill={previewSkill}
+          workspaceId={workspaceId}
+          onClose={() => setPreviewSkill(null)}
+          onInstall={(name) => { installSkillFromSh(name); }}
+          onUninstall={(name) => { removeSkill(name); }}
+        />
+      )}
 
       {/* Remove All confirmation dialog */}
       {confirmRemoveAll && (
@@ -573,7 +610,7 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
 /* ─── Sub-Tab 1: skills.sh ─────────────────────────────────────── */
 
 function SkillsShSubTab({
-  isInstalled, installState, setInstallState, workspaceId, fetchInstalled, toast,
+  isInstalled, installState, setInstallState, workspaceId, fetchInstalled, toast, onCardClick,
 }: {
   isInstalled: (name: string) => boolean;
   installState: Record<string, 'installing' | 'done' | 'error'>;
@@ -581,6 +618,7 @@ function SkillsShSubTab({
   workspaceId: string | null;
   fetchInstalled: () => Promise<void>;
   toast: ReturnType<typeof useGlobalToast>;
+  onCardClick: (name: string, installed: boolean, source?: string, category?: string) => void;
 }) {
   const [query, setQuery] = useState('');
   const debouncedQuery = useDebounce(query, 300);
@@ -769,6 +807,7 @@ function SkillsShSubTab({
                   installError={installState[result.name] === 'error'}
                   onInstall={() => installSkill(result.name)}
                   onRemove={() => {}}
+                  onCardClick={() => onCardClick(result.name, isInstalled(result.name), result.url)}
                   workspaceId={workspaceId}
                 />
               ))}
@@ -847,6 +886,7 @@ function SkillsShSubTab({
                       installError={installState[name] === 'error'}
                       onInstall={() => installSkill(name)}
                       onRemove={() => {}}
+                      onCardClick={() => onCardClick(name, s.installed || isInstalled(name))}
                       workspaceId={workspaceId}
                     />
                   );
@@ -863,7 +903,7 @@ function SkillsShSubTab({
 /* ─── Sub-Tab 2: GitHub Repos ──────────────────────────────────── */
 
 function GitHubSubTab({
-  isInstalled, installState, setInstallState, workspaceId, fetchInstalled, toast,
+  isInstalled, installState, setInstallState, workspaceId, fetchInstalled, toast, onCardClick,
 }: {
   isInstalled: (name: string) => boolean;
   installState: Record<string, 'installing' | 'done' | 'error'>;
@@ -871,6 +911,7 @@ function GitHubSubTab({
   workspaceId: string | null;
   fetchInstalled: () => Promise<void>;
   toast: ReturnType<typeof useGlobalToast>;
+  onCardClick: (name: string, installed: boolean, source?: string, category?: string) => void;
 }) {
   const [repoUrl, setRepoUrl] = useState('');
   const [browsing, setBrowsing] = useState(false);
@@ -1047,6 +1088,7 @@ function GitHubSubTab({
                   installError={installState[skill.name] === 'error'}
                   onInstall={() => installFromGitHub(skill)}
                   onRemove={() => {}}
+                  onCardClick={() => onCardClick(skill.name, installed, browseResults.repo)}
                   workspaceId={workspaceId}
                 />
               );
@@ -1253,18 +1295,200 @@ function CustomSubTab({
   );
 }
 
-/* ─── Skill Registry Card (shared) ────────────────────────────── */
+/* ─── Skill Preview Modal ─────────────────────────────────────── */
 
-interface SkillContentCache {
-  content: string;
-  wordCount: number;
-  estimatedTokens: number;
+interface SkillPreviewModalState {
+  name: string;
+  installed: boolean;
+  source?: string;
+  category?: string;
 }
+
+function SkillPreviewModal({
+  skill,
+  workspaceId,
+  onClose,
+  onInstall,
+  onUninstall,
+}: {
+  skill: SkillPreviewModalState;
+  workspaceId: string | null;
+  onClose: () => void;
+  onInstall: (name: string) => void;
+  onUninstall: (name: string) => void;
+}) {
+  const [content, setContent] = useState<string | null>(null);
+  const [description, setDescription] = useState<string | null>(null);
+  const [wordCount, setWordCount] = useState(0);
+  const [estimatedTokens, setEstimatedTokens] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [isInstalled, setIsInstalled] = useState(skill.installed);
+  const toast = useGlobalToast();
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    const fetcher = isInstalled
+      ? apiFetch<{ content: string; description?: string; wordCount: number; estimatedTokens: number }>(
+          `/api/skills/${encodeURIComponent(skill.name)}/content${workspaceId ? '?workspaceId=' + workspaceId : ''}`
+        )
+      : apiFetch<{ content: string; description?: string; wordCount: number; estimatedTokens: number }>(
+          `/api/skills/preview?query=${encodeURIComponent(skill.name)}`
+        );
+
+    fetcher
+      .then(data => {
+        if (cancelled) return;
+        setContent(data.content);
+        setDescription(data.description ?? null);
+        setWordCount(data.wordCount);
+        setEstimatedTokens(data.estimatedTokens);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Failed to load skill content');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [skill.name, isInstalled, workspaceId]);
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const handleInstall = async () => {
+    setActionLoading(true);
+    try {
+      onInstall(skill.name);
+      setIsInstalled(true);
+      toast.show(`Skill "${skill.name}" installed`, 'success');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleUninstall = async () => {
+    setActionLoading(true);
+    try {
+      onUninstall(skill.name);
+      toast.show(`Skill "${skill.name}" removed`, 'success');
+      onClose();
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const category = skill.category || inferSkillCategory({ name: skill.name, description });
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-panel border border-border rounded-xl shadow-2xl w-[700px] max-w-[90vw] max-h-[85vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-start justify-between px-5 pt-5 pb-3 border-b border-border shrink-0">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <Wrench size={16} className={isInstalled ? 'text-green-400' : 'text-accent'} />
+              <h2 className="text-base font-semibold text-[var(--text)]">{skill.name}</h2>
+              <span className={`px-2 py-0.5 text-[10px] rounded-full font-medium ${CATEGORY_COLORS[category as keyof typeof CATEGORY_COLORS] ?? 'bg-zinc-500/15 text-zinc-400'}`}>
+                {category}
+              </span>
+              {isInstalled ? (
+                <span className="px-2 py-0.5 text-[10px] rounded-full font-medium bg-green-500/15 text-green-400">Installed</span>
+              ) : (
+                <span className="px-2 py-0.5 text-[10px] rounded-full font-medium bg-zinc-500/15 text-zinc-400">Not Installed</span>
+              )}
+            </div>
+            <div className="flex items-center gap-3 mt-1.5 text-xs text-muted">
+              {skill.source && (
+                <span className="flex items-center gap-1">
+                  <ExternalLink size={10} />
+                  {skill.source}
+                </span>
+              )}
+              {!loading && content && (
+                <span>{wordCount.toLocaleString()} words · ~{estimatedTokens.toLocaleString()} tokens</span>
+              )}
+            </div>
+          </div>
+          <button onClick={onClose} className="text-muted hover:text-[var(--text)] transition-colors p-1 -mr-1 -mt-1">
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 min-h-0">
+          {loading ? (
+            <div className="flex items-center justify-center py-16">
+              <Loader2 size={20} className="animate-spin text-muted mr-2" />
+              <span className="text-sm text-muted">Loading skill content…</span>
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center py-12 text-center">
+              <AlertTriangle size={24} className="text-red-400 mb-2" />
+              <p className="text-sm text-red-400">{error}</p>
+            </div>
+          ) : content ? (
+            <div
+              className="skill-preview"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+            />
+          ) : null}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border shrink-0">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs text-muted hover:text-[var(--text)] rounded border border-border transition-colors"
+          >
+            Close
+          </button>
+          {isInstalled ? (
+            <button
+              onClick={handleUninstall}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/30 hover:bg-red-500/10 rounded transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+              Uninstall
+            </button>
+          ) : (
+            <button
+              onClick={handleInstall}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+              Install
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Skill Registry Card (shared) ────────────────────────────── */
 
 function SkillRegistryCard({
   name, description, author, badge,
   installed, installing, installError,
-  onInstall, onRemove, workspaceId,
+  onInstall, onRemove, onCardClick,
 }: {
   name: string;
   description: string;
@@ -1275,41 +1499,14 @@ function SkillRegistryCard({
   installError: boolean;
   onInstall: () => void;
   onRemove: () => void;
+  onCardClick?: () => void;
   workspaceId?: string | null;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const [contentCache, setContentCache] = useState<SkillContentCache | null>(null);
-  const [contentLoading, setContentLoading] = useState(false);
-  const [contentError, setContentError] = useState<string | null>(null);
-
-  const handleToggle = () => {
-    const next = !expanded;
-    setExpanded(next);
-    if (next && !contentCache && !contentLoading) {
-      setContentLoading(true);
-      setContentError(null);
-      const fetcher = installed
-        ? apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
-            `/api/skills/${encodeURIComponent(name)}/content${workspaceId ? '?workspaceId=' + workspaceId : ''}`
-          )
-        : apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
-            `/api/skills/preview?query=${encodeURIComponent(name)}`
-          );
-      fetcher
-        .then(data => setContentCache({ content: data.content, wordCount: data.wordCount, estimatedTokens: data.estimatedTokens }))
-        .catch(err => setContentError(err instanceof Error ? err.message : 'Preview not available'))
-        .finally(() => setContentLoading(false));
-    }
-  };
-
   return (
     <div className={`rounded-lg border transition-colors ${
       installed ? 'border-green-500/25 bg-green-500/5' : 'border-border bg-panel hover:border-border/80'
     }`}>
-      <div className="flex items-start gap-3 p-3 cursor-pointer" onClick={handleToggle}>
-        <div className="mt-0.5 shrink-0 text-muted">
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </div>
+      <div className="flex items-start gap-3 p-3 cursor-pointer" onClick={onCardClick}>
         <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
@@ -1322,6 +1519,9 @@ function SkillRegistryCard({
                     ? 'bg-green-500/15 text-green-400'
                     : 'bg-border text-muted'
               }`}>{badge}</span>
+            )}
+            {installed && (
+              <span className="px-1.5 py-0.5 text-[10px] rounded font-medium bg-green-500/15 text-green-400">installed</span>
             )}
             {author && <span className="text-[11px] text-muted/50">{author}</span>}
           </div>
@@ -1362,27 +1562,6 @@ function SkillRegistryCard({
           )}
         </div>
       </div>
-
-      {expanded && (
-        <div className="px-3 pb-3 pt-0">
-          {contentLoading ? (
-            <div className="flex items-center justify-center py-6">
-              <Loader2 size={16} className="animate-spin text-muted" />
-            </div>
-          ) : contentError ? (
-            <div className="p-3 rounded bg-red-500/5 border border-red-500/20 text-xs text-red-400">
-              {contentError}
-            </div>
-          ) : contentCache ? (
-            <div>
-              <p className="text-[11px] text-muted mb-1.5">
-                {contentCache.wordCount.toLocaleString()} words · ~{contentCache.estimatedTokens.toLocaleString()} tokens
-              </p>
-              <pre className="text-[10px] text-muted whitespace-pre-wrap break-words max-h-48 overflow-y-auto font-mono bg-panel/50 p-2 rounded mt-1">{contentCache.content}</pre>
-            </div>
-          ) : null}
-        </div>
-      )}
     </div>
   );
 }
