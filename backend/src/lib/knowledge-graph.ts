@@ -36,25 +36,50 @@ let _graphAvailable: boolean | null = null;
 /**
  * Check if Apache AGE is available on the current Postgres instance.
  * Result is cached after first successful check.
+ *
+ * SG-004: Uses a dedicated client with LOAD 'age' + search_path setup
+ * to verify AGE is fully functional (not just installed). A bare pool.query
+ * against pg_extension only checks installation, not whether LOAD 'age'
+ * and Cypher queries actually work on this connection.
  */
 export async function isGraphAvailable(): Promise<boolean> {
   if (_graphAvailable !== null) return _graphAvailable;
 
+  const client = await pool.connect();
   try {
-    const result = await pool.query<{ extname: string }>(
+    // Step 1: Check extension exists
+    const extResult = await client.query<{ extname: string }>(
       "SELECT extname FROM pg_extension WHERE extname = 'age'"
     );
-    _graphAvailable = result.rows.length > 0;
-
-    if (!_graphAvailable) {
+    if (extResult.rows.length === 0) {
+      _graphAvailable = false;
       logger.warn(
         '[knowledge-graph] Apache AGE not available — graph features disabled. ' +
         'Use self-hosted Postgres for full graph support.'
       );
+      return _graphAvailable;
     }
-  } catch {
+
+    // Step 2: Verify LOAD 'age' + search_path work on this connection
+    await setupAgeSession(client);
+
+    // Step 3: Verify the 'rorca' graph exists (created by migration 041)
+    const graphResult = await client.query<{ name: string }>(
+      "SELECT name FROM ag_catalog.ag_graph WHERE name = 'rorca'"
+    );
+    if (graphResult.rows.length === 0) {
+      _graphAvailable = false;
+      logger.warn('[knowledge-graph] AGE extension loaded but "rorca" graph not found — run migrations');
+      return _graphAvailable;
+    }
+
+    _graphAvailable = true;
+    logger.info('[knowledge-graph] Apache AGE available — graph features enabled');
+  } catch (err) {
     _graphAvailable = false;
-    logger.warn('[knowledge-graph] Could not check AGE extension — graph features disabled');
+    logger.warn({ err }, '[knowledge-graph] Could not verify AGE availability — graph features disabled');
+  } finally {
+    client.release();
   }
 
   return _graphAvailable;
@@ -157,12 +182,17 @@ async function cypherQuery<T = Record<string, unknown>>(
 
   const p = pool;
   const client = await p.connect();
+  logger.debug('[knowledge-graph] Graph client acquired for cypherQuery');
   try {
     await setupAgeSession(client);
     const result = await client.query(sql);
     return result.rows.map(row => parseAgtypeRow<T>(row));
+  } catch (err) {
+    logger.error({ err, cypher: cypher.trim() }, '[knowledge-graph] cypherQuery failed');
+    throw err;
   } finally {
     client.release();
+    logger.debug('[knowledge-graph] Graph client released from cypherQuery');
   }
 }
 
@@ -174,11 +204,16 @@ async function cypherMutate(cypher: string): Promise<void> {
 
   const p = pool;
   const client = await p.connect();
+  logger.debug('[knowledge-graph] Graph client acquired for cypherMutate');
   try {
     await setupAgeSession(client);
     await client.query(sql);
+  } catch (err) {
+    logger.error({ err, cypher: cypher.trim() }, '[knowledge-graph] cypherMutate failed');
+    throw err;
   } finally {
     client.release();
+    logger.debug('[knowledge-graph] Graph client released from cypherMutate');
   }
 }
 
