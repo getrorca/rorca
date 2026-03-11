@@ -1282,7 +1282,7 @@ Follow this workflow for implementation:
 ## Agent Role: Frontend
 
 
-## Skill: react-review (relevance: 7)
+## Skill: react-review (relevance: 9)
 ---
 name: react-review
 description: Review React components for best practices and performance issues
@@ -1493,12 +1493,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-003):
-Add a route for /marketplace in App.tsx that renders the MarketplacePanel component. Lazy-load MarketplacePanel using React.lazy like other panels. Update the AppLayout Routes section to include the marketplace route. Change the existing <Route path='marketplace'> redirect from <Navigate to='/specs'> to <PanelRoute panel='marketplace'>. Update ActivePanel switch statement to render MarketplacePanel when id === 'marketplace'. Update getPanelSkeleton to return BoardSkeleton for marketplace panel.
+In src/panels/MarketplacePanel.tsx, when activeSource === 'skills.sh' and searchQuery is empty (trimmed length === 0), fetch GET /api/skills/top instead of GET /api/skills/suggestions. Store the result in the existing discovery results state. When searchQuery becomes non-empty, revert to the normal search fetch path. The fetch should fire on mount and whenever searchQuery transitions from non-empty to empty (or vice versa). A loading state should be shown while the leaderboard is fetching.
 
 Acceptance Criteria:
-- MarketplacePanel is lazy-loaded at the top of App.tsx alongside other panel imports
-- Route path='marketplace' renders <PanelRoute panel='marketplace'> instead of redirecting to /specs
-- ActivePanel switch includes case 'marketplace' that returns <MarketplacePanel onNavigate={onNavigate} />
-- getPanelSkeleton function returns BoardSkeleton for 'marketplace' case
-- Navigation to /marketplace successfully loads and displays MarketplacePanel
-- No TypeScript errors related to the new marketplace route or panel
+- When activeSource === 'skills.sh' and searchQuery is empty, GET /api/skills/top is called (not GET /api/skills/suggestions)
+- When searchQuery is non-empty, GET /api/skills/search (or the existing search endpoint) is called as before — leaderboard fetch is not triggered
+- Transitioning searchQuery from non-empty back to empty re-fetches the leaderboard without a stale results flash
+- A loading spinner or skeleton is shown while the leaderboard fetch is in flight
+- If GET /api/skills/top fails, an inline error message is shown in the discovery grid area (not a full-page error)

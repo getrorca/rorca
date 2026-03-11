@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle, Trash2, Check, TrendingUp } from 'lucide-react';
+import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle, Trash2, Check, TrendingUp, X, ExternalLink } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { renderMarkdown } from '../lib/renderMarkdown';
 
 /* ─── Types ───────────────────────────────────────────────────── */
 
@@ -87,6 +88,149 @@ function inferCategory(name: string, description: string): string {
   return 'general';
 }
 
+/* ─── Skill Preview Modal ─────────────────────────────────────── */
+
+interface SkillPreviewState {
+  name: string;
+  installed: boolean;
+  source?: string;
+  category?: string;
+}
+
+function SkillPreviewModal({
+  skill,
+  workspaceId,
+  onClose,
+  onInstall,
+  onUninstall,
+}: {
+  skill: SkillPreviewState;
+  workspaceId: string | null;
+  onClose: () => void;
+  onInstall: (name: string) => Promise<void>;
+  onUninstall: (name: string) => Promise<void>;
+}) {
+  const [content, setContent] = useState<string | null>(null);
+  const [wordCount, setWordCount] = useState(0);
+  const [estimatedTokens, setEstimatedTokens] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [isInstalled, setIsInstalled] = useState(skill.installed);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const url = isInstalled
+      ? `/api/skills/${encodeURIComponent(skill.name)}/content${workspaceId ? '?workspaceId=' + workspaceId : ''}`
+      : `/api/skills/preview?query=${encodeURIComponent(skill.name)}`;
+    apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(url)
+      .then(data => {
+        if (cancelled) return;
+        setContent(data.content);
+        setWordCount(data.wordCount);
+        setEstimatedTokens(data.estimatedTokens);
+      })
+      .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [skill.name, isInstalled, workspaceId]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const category = skill.category ?? inferCategory(skill.name, '');
+  const colorClass = CATEGORY_COLORS[category] ?? 'bg-zinc-500/15 text-zinc-400';
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-panel border border-border rounded-xl shadow-2xl w-[700px] max-w-[90vw] max-h-[85vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-start justify-between px-5 pt-5 pb-3 border-b border-border shrink-0">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <Wrench size={16} className={isInstalled ? 'text-green-400' : 'text-accent'} />
+              <h2 className="text-base font-semibold text-text">{skill.name}</h2>
+              <span className={`px-2 py-0.5 text-[10px] rounded-full font-medium capitalize ${colorClass}`}>{category}</span>
+              {isInstalled
+                ? <span className="px-2 py-0.5 text-[10px] rounded-full font-medium bg-green-500/15 text-green-400">Installed</span>
+                : <span className="px-2 py-0.5 text-[10px] rounded-full font-medium bg-zinc-500/15 text-zinc-400">Not Installed</span>
+              }
+            </div>
+            <div className="flex items-center gap-3 mt-1.5 text-xs text-muted">
+              {skill.source && (
+                <span className="flex items-center gap-1"><ExternalLink size={10} />{skill.source}</span>
+              )}
+              {!loading && content && (
+                <span>{wordCount.toLocaleString()} words · ~{estimatedTokens.toLocaleString()} tokens</span>
+              )}
+            </div>
+          </div>
+          <button onClick={onClose} className="text-muted hover:text-text transition-colors p-1 -mr-1 -mt-1">
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 min-h-0">
+          {loading ? (
+            <div className="flex items-center justify-center py-16">
+              <Loader2 size={20} className="animate-spin text-muted mr-2" />
+              <span className="text-sm text-muted">Loading skill content…</span>
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center py-12 text-center">
+              <AlertTriangle size={24} className="text-red-400 mb-2" />
+              <p className="text-sm text-red-400">{error}</p>
+            </div>
+          ) : content ? (
+            <div
+              className="prose prose-sm prose-invert max-w-none text-text"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+            />
+          ) : null}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border shrink-0">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs text-muted hover:text-text rounded border border-border transition-colors"
+          >
+            Close
+          </button>
+          {isInstalled ? (
+            <button
+              onClick={async () => { setActionLoading(true); await onUninstall(skill.name); setActionLoading(false); onClose(); }}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/30 hover:bg-red-500/10 rounded transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+              Uninstall
+            </button>
+          ) : (
+            <button
+              onClick={async () => { setActionLoading(true); await onInstall(skill.name); setIsInstalled(true); setActionLoading(false); }}
+              disabled={actionLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-accent hover:bg-accent/90 rounded transition-colors disabled:opacity-50"
+            >
+              {actionLoading ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+              Install
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Component ───────────────────────────────────────────────── */
 
 export default function MarketplacePanel({ onNavigate: _onNavigate }: MarketplacePanelProps) {
@@ -118,6 +262,13 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   const [customContent, setCustomContent] = useState('');
   const [customName, setCustomName] = useState('');
   const [customInstalling, setCustomInstalling] = useState(false);
+
+  // Preview modal state
+  const [previewSkill, setPreviewSkill] = useState<SkillPreviewState | null>(null);
+
+  const openPreview = useCallback((name: string, installed: boolean, source?: string, category?: string) => {
+    setPreviewSkill({ name, installed, source, category });
+  }, []);
 
   // Export installed skills as JSON
   const handleExportSkills = useCallback(() => {
@@ -468,7 +619,8 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                       return (
                         <div
                           key={skill.name}
-                          className={`flex flex-col gap-2 p-3 bg-surface border rounded-lg transition-colors ${
+                          onClick={() => openPreview(skill.name, installed, skill.url, inferCategory(skill.name, skill.description))}
+                          className={`flex flex-col gap-2 p-3 bg-surface border rounded-lg transition-colors cursor-pointer ${
                             installed
                               ? 'border-green-500/25 bg-green-500/5'
                               : 'border-border hover:border-text/20'
@@ -500,7 +652,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                             </span>
                           ) : (
                             <button
-                              onClick={() => handleInstall(skill.name)}
+                              onClick={(e) => { e.stopPropagation(); handleInstall(skill.name); }}
                               disabled={installing}
                               className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium
                                          bg-accent/10 text-accent border border-accent/20 rounded-md
@@ -755,7 +907,8 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                       return (
                         <div
                           key={skill.name}
-                          className="flex items-start gap-2 p-2.5 rounded-lg border border-border bg-panel hover:border-border/80 transition-colors group"
+                          onClick={() => openPreview(skill.name, true, skill.source, inferCategory(skill.name, skill.description))}
+                          className="flex items-start gap-2 p-2.5 rounded-lg border border-border bg-panel hover:border-border/80 transition-colors group cursor-pointer"
                         >
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5 flex-wrap">
@@ -769,7 +922,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                             )}
                           </div>
                           <button
-                            onClick={() => handleRemove(skill.name)}
+                            onClick={(e) => { e.stopPropagation(); handleRemove(skill.name); }}
                             disabled={isRemoving}
                             className="shrink-0 mt-0.5 text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all disabled:opacity-50"
                             title="Remove skill"
@@ -818,6 +971,17 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
           </div>
         </div>
       </div>
+
+      {/* Skill Preview Modal */}
+      {previewSkill && (
+        <SkillPreviewModal
+          skill={previewSkill}
+          workspaceId={workspaceId ?? null}
+          onClose={() => setPreviewSkill(null)}
+          onInstall={handleInstall}
+          onUninstall={handleRemove}
+        />
+      )}
     </div>
   );
 }
