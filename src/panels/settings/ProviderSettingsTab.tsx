@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search } from 'lucide-react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';
 import AgentPicker from '../../components/AgentPicker';
@@ -181,6 +181,9 @@ export function ProviderSettingsTab() {
       <DisplaySection />
       <div className="border-t border-border pt-6">
         <ExecutionEngineSection />
+      </div>
+      <div className="border-t border-border pt-6">
+        <SemanticEngineSection />
       </div>
       <div className="border-t border-border pt-6">
         <ModelRoutingSection />
@@ -983,6 +986,315 @@ function ExecutionEngineSection() {
         {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
         {saved ? 'Saved' : 'Save Engine Configuration'}
       </button>
+    </div>
+  );
+}
+
+// ─── Semantic Engine Section (SE-010) ────────────────────────────────────────
+
+type EmbeddingProviderOption = 'auto' | 'openai' | 'openrouter' | 'google' | 'voyage' | 'local';
+
+interface EmbeddingProviderStatus {
+  provider: string;
+  model: string;
+  dimensions: number;
+  source: 'config' | 'env' | 'vault' | 'local';
+}
+
+interface EmbedAllStatus {
+  running: boolean;
+  queueDepth: number;
+  processed: number;
+  failed: number;
+  embeddingCount: number;
+  specCount: number;
+  storyCount: number;
+  memoryCount: number;
+}
+
+interface GraphStats {
+  available: boolean;
+  vertexCount: number;
+  edgeCount: number;
+  labels: string[];
+}
+
+const EMBEDDING_PROVIDERS: Array<{ value: EmbeddingProviderOption; label: string; description: string }> = [
+  { value: 'auto', label: 'Auto-detect (recommended)', description: 'Automatically selects the best available provider from vault keys and env vars' },
+  { value: 'openai', label: 'OpenAI (text-embedding-3-small)', description: 'High quality, 1536 dimensions' },
+  { value: 'openrouter', label: 'OpenRouter (via existing key)', description: 'Uses your existing OpenRouter API key' },
+  { value: 'google', label: 'Google (text-embedding-004, free tier)', description: 'Free tier available, 768 dimensions' },
+  { value: 'voyage', label: 'Voyage (voyage-3)', description: 'Specialized for code and retrieval' },
+  { value: 'local', label: 'Local only (TF-IDF, no API key — limited)', description: 'No API key required, keyword-based matching only' },
+];
+
+function SemanticEngineSection() {
+  const toast = useGlobalToast();
+  const [status, setStatus] = useState<EmbeddingProviderStatus | null>(null);
+  const [embedStatus, setEmbedStatus] = useState<EmbedAllStatus | null>(null);
+  const [graphStats, setGraphStats] = useState<GraphStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedProvider, setSelectedProvider] = useState<EmbeddingProviderOption>('auto');
+  const [saving, setSaving] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [showStats, setShowStats] = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    try {
+      const [providerData, embedData] = await Promise.all([
+        apiFetch<EmbeddingProviderStatus>('/api/config/embedding-provider'),
+        apiFetch<EmbedAllStatus>('/api/admin/embed-all/status'),
+      ]);
+      setStatus(providerData);
+      setEmbedStatus(embedData);
+
+      // Map provider name back to selection value
+      const nameToValue: Record<string, EmbeddingProviderOption> = {
+        openai: 'openai', 'openai-large': 'openai',
+        openrouter: 'openrouter', google: 'google',
+        voyage: 'voyage', local: 'local',
+      };
+      if (providerData.source === 'config') {
+        setSelectedProvider(nameToValue[providerData.provider] ?? 'auto');
+      } else {
+        setSelectedProvider('auto');
+      }
+    } catch { /* silent */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  const handleProviderChange = async (value: EmbeddingProviderOption) => {
+    setSelectedProvider(value);
+    setSaving(true);
+    try {
+      const result = await apiFetch<EmbeddingProviderStatus>('/api/config/embedding-provider', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: value }),
+      });
+      setStatus(result);
+      toast.show(`Embedding provider set to ${result.provider}`, 'success');
+    } catch (err: any) {
+      toast.show(err.message || 'Failed to update provider', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRebuild = async () => {
+    setShowConfirm(false);
+    setRebuilding(true);
+    try {
+      const result = await apiFetch<{ queued: number; skippedStale: number }>('/api/admin/embed-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true }),
+      });
+      toast.show(`Rebuild started — ${result.queued} items queued`, 'success');
+      // Re-fetch status after a delay
+      setTimeout(() => fetchAll(), 2000);
+    } catch (err: any) {
+      const msg = err.message || 'Failed to start rebuild';
+      toast.show(msg, 'error');
+    } finally {
+      setRebuilding(false);
+    }
+  };
+
+  const handleViewStats = async () => {
+    if (showStats) {
+      setShowStats(false);
+      return;
+    }
+    try {
+      const stats = await apiFetch<GraphStats>('/api/admin/graph-stats');
+      setGraphStats(stats);
+    } catch { /* silent */ }
+    setShowStats(true);
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading semantic engine config...</div>;
+  }
+
+  // Determine if selected provider has a key configured
+  const providerHasKey = status && (
+    status.source !== 'local' ||
+    selectedProvider === 'auto' ||
+    selectedProvider === 'local'
+  );
+  const showKeyWarning = selectedProvider !== 'auto' && selectedProvider !== 'local' && status?.provider === 'local';
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+            <Database size={16} className="text-accent" />
+            Semantic Engine (Embeddings)
+          </h2>
+          <p className="text-xs text-muted mt-0.5">
+            Vector embeddings power semantic search, memory recall, and knowledge graph features
+          </p>
+        </div>
+      </div>
+
+      {/* Provider radio buttons */}
+      <div className="space-y-1.5">
+        {EMBEDDING_PROVIDERS.map(p => (
+          <label
+            key={p.value}
+            className={`flex items-start gap-3 px-3 py-2.5 rounded border cursor-pointer transition-colors ${
+              selectedProvider === p.value
+                ? 'border-accent/40 bg-accent/5'
+                : 'border-border bg-bg hover:border-accent/20'
+            }`}
+          >
+            <input
+              type="radio"
+              name="embedding-provider"
+              value={p.value}
+              checked={selectedProvider === p.value}
+              onChange={() => handleProviderChange(p.value)}
+              disabled={saving}
+              className="mt-0.5 accent-[var(--accent)]"
+            />
+            <div className="min-w-0">
+              <span className="text-sm text-[var(--text)]">{p.label}</span>
+              <p className="text-[11px] text-muted mt-0.5">{p.description}</p>
+            </div>
+          </label>
+        ))}
+      </div>
+
+      {/* Saving indicator */}
+      {saving && (
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <Loader2 size={12} className="animate-spin" /> Updating provider...
+        </div>
+      )}
+
+      {/* Warning: no API key */}
+      {showKeyWarning && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-amber-500/10 border border-amber-500/20 text-amber-400">
+          <AlertTriangle size={14} />
+          {selectedProvider.charAt(0).toUpperCase() + selectedProvider.slice(1)} selected but no API key found — using local TF-IDF fallback
+        </div>
+      )}
+
+      {/* Status line */}
+      {status && (
+        <div className="flex items-center gap-2 px-3 py-2.5 rounded border border-border bg-bg">
+          <div className={`w-2 h-2 rounded-full shrink-0 ${status.provider === 'local' ? 'bg-zinc-500' : 'bg-green-500'}`} />
+          <span className="text-xs text-[var(--text)]">
+            <span className="font-medium capitalize">{status.provider}</span> active
+            <span className="text-muted"> ({status.model}, {status.dimensions}d)</span>
+            <span className="text-muted"> — via {status.source}</span>
+          </span>
+        </div>
+      )}
+
+      {/* Vector counts */}
+      {embedStatus && (
+        <div className="px-3 py-2.5 rounded border border-border bg-bg">
+          <div className="flex items-center gap-1.5 text-xs text-[var(--text)]">
+            <span className="font-mono font-medium">{embedStatus.embeddingCount.toLocaleString()}</span>
+            <span className="text-muted">vectors</span>
+            <span className="text-muted mx-1">·</span>
+            <span className="font-mono">{embedStatus.specCount}</span>
+            <span className="text-muted">specs</span>
+            <span className="text-muted mx-1">·</span>
+            <span className="font-mono">{embedStatus.storyCount}</span>
+            <span className="text-muted">stories</span>
+            <span className="text-muted mx-1">·</span>
+            <span className="font-mono">{embedStatus.memoryCount}</span>
+            <span className="text-muted">memories</span>
+          </div>
+          {embedStatus.running && (
+            <div className="flex items-center gap-2 mt-2 text-[11px] text-amber-400">
+              <Loader2 size={12} className="animate-spin" />
+              Embedding job in progress ({embedStatus.processed} processed, {embedStatus.queueDepth} queued)
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Action buttons */}
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => setShowConfirm(true)}
+          disabled={rebuilding}
+          className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+        >
+          {rebuilding ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          Rebuild All Embeddings
+        </button>
+        <button
+          onClick={handleViewStats}
+          className="flex items-center gap-2 px-4 py-2 text-sm border border-border rounded text-[var(--text)] hover:border-accent/40 transition-colors"
+        >
+          {showStats ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          View Stats
+        </button>
+      </div>
+
+      {/* Confirmation dialog */}
+      {showConfirm && (
+        <div className="border border-amber-500/30 rounded p-4 bg-amber-500/5 space-y-3">
+          <p className="text-sm text-[var(--text)]">
+            This will re-embed all content with the selected provider. Existing embeddings from other providers will be replaced. Continue?
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleRebuild}
+              className="flex items-center gap-2 px-4 py-1.5 text-xs bg-amber-500 text-white rounded hover:bg-amber-500/90 transition-colors"
+            >
+              <RefreshCw size={12} />
+              Yes, Rebuild
+            </button>
+            <button
+              onClick={() => setShowConfirm(false)}
+              className="px-4 py-1.5 text-xs text-muted hover:text-[var(--text)] transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Graph stats expandable */}
+      {showStats && (
+        <div className="border border-border rounded p-4 bg-bg space-y-2">
+          <h3 className="text-xs font-semibold text-[var(--text)]">Knowledge Graph Statistics</h3>
+          {graphStats ? (
+            graphStats.available ? (
+              <div className="space-y-1.5 text-xs">
+                <div className="flex items-center gap-3">
+                  <span className="text-muted">Vertices:</span>
+                  <span className="font-mono text-[var(--text)]">{graphStats.vertexCount.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-muted">Edges:</span>
+                  <span className="font-mono text-[var(--text)]">{graphStats.edgeCount.toLocaleString()}</span>
+                </div>
+                {graphStats.labels.length > 0 && (
+                  <div className="flex items-center gap-3">
+                    <span className="text-muted">Labels:</span>
+                    <span className="text-[var(--text)]">{graphStats.labels.join(', ')}</span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-muted">Apache AGE extension not available — graph features disabled</p>
+            )
+          ) : (
+            <p className="text-xs text-muted">No graph stats available</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

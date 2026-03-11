@@ -3,9 +3,9 @@
 Spec: rorca-semantic-engine
 Run ID: 30
 Started: 2026-03-11T04:35:11.672Z
-Last Updated: 2026-03-11T05:01:05.532Z
+Last Updated: 2026-03-11T05:09:26.625Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - SE-001: Emit memory_created WAL Events from Auto-Memory — DONE (claude, 129s)
 - SE-002: Backfill Embeddings from memories Table — DONE (claude, 82s)
 - SE-003: Fix context-cache and search.ts to Read from memories Table — DONE (claude, 101s)
@@ -15,3 +15,4 @@ Last Updated: 2026-03-11T05:01:05.532Z
 - SE-007: Add OpenRouter Embedding Provider — DONE (claude, 145s)
 - SE-008: Add Google Embedding Provider with Dimension-Safe Strategy — DONE (claude, 196s)
 - SE-009: Auto-Detect Embedding Provider from Vault Keys with Cache Invalidation — DONE (claude, 342s)
+- SE-010: Settings UI — Semantic Engine Section in Providers Tab — DONE (claude, 483s)
