@@ -2,7 +2,7 @@
   "specId": "rorca-memory-source-tracking",
   "runId": 33,
   "startedAt": "2026-03-11T08:01:46.608Z",
-  "lastUpdatedAt": "2026-03-11T08:17:14.742Z",
+  "lastUpdatedAt": "2026-03-11T08:18:12.863Z",
   "completedStories": [
     {
       "storyId": "MST-001",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-11T08:17:14.742Z",
       "agentType": "claude",
       "elapsedMs": 201958
+    },
+    {
+      "storyId": "MST-006",
+      "title": "Backfill source_type for existing memories",
+      "status": "passed",
+      "startedAt": "2026-03-11T08:17:35.703Z",
+      "finishedAt": "2026-03-11T08:18:12.863Z",
+      "agentType": "claude",
+      "elapsedMs": 37160
     }
   ],
   "failedStories": [],
