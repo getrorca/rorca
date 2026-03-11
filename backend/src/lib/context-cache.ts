@@ -283,25 +283,16 @@ export async function getRecentMemory(workspaceId: string): Promise<Array<{ text
 
   logger.debug({ workspaceId }, '[context-cache] recent memory MISS — fetching from DB');
 
-  const rows = await query<{ payload: string; ts: string }>(
-    `SELECT payload, ts FROM wal_events
-     WHERE event_type IN ('memory_created', 'memory_updated')
-       AND workspace_id = $1
-       AND ts > NOW() - INTERVAL '30 days'
-     ORDER BY ts DESC LIMIT 50`,
+  const rows = await query<{ content: string; created_at: string }>(
+    `SELECT content, created_at FROM memories
+     WHERE workspace_id = $1 AND deleted_at IS NULL
+     ORDER BY created_at DESC LIMIT 50`,
     [workspaceId],
   );
 
   const entries = rows
-    .map(r => {
-      try {
-        const p = JSON.parse(r.payload || '{}');
-        return { text: p.text || p.content || p.rule || '', ts: r.ts };
-      } catch {
-        return { text: '', ts: r.ts };
-      }
-    })
-    .filter(e => e.text.length > 0);
+    .filter(r => r.content.length > 0)
+    .map(r => ({ text: r.content, ts: r.created_at }));
 
   set(cacheKey, entries, 'warm');
   return entries;
