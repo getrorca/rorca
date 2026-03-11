@@ -3601,6 +3601,28 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
     const existingList = existingStories.map(s => `- ${s.id}: ${s.title}`).join('\n');
 
+    // Semantic retrieval via memory-router (CAG/RAG + knowledge graph)
+    let semanticGraphSection = '';
+    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+    try {
+      const retrieved = await retrieveContext(Number(workspaceId), brief || specContent.title || specId, {
+        maxTokens: 16000,
+        includeGraph: true,
+      });
+      if (retrieved.graphSection) {
+        semanticGraphSection = retrieved.graphSection;
+      }
+      retrievalMeta = {
+        cagHits: retrieved.meta.cagHits,
+        ragHits: retrieved.meta.ragHits,
+        graphHits: retrieved.meta.graphHits,
+        latencyMs: retrieved.meta.latencyMs,
+        tier: retrieved.meta.tier,
+      };
+    } catch (err) {
+      logger.warn({ err, workspaceId }, '[Specs] add-stories: retrieveContext failed — using plaintext context only');
+    }
+
     const fullPrompt = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
@@ -3609,6 +3631,13 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
       '=== END INSTRUCTIONS ===',
       '',
       synthesized,
+      ...(semanticGraphSection ? [
+        '',
+        '=== KNOWLEDGE GRAPH CONTEXT ===',
+        semanticGraphSection,
+        '=== END KNOWLEDGE GRAPH CONTEXT ===',
+        '',
+      ] : []),
       '---',
       `TASK: Add ${storyCount} NEW user stories to an existing spec.`,
       `Spec title: ${specContent.title ?? specId}`,
@@ -3660,7 +3689,22 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
-    res.json({ ok: true, addedCount: newStories.length, stories: newStories });
+    res.json({
+      ok: true,
+      addedCount: newStories.length,
+      stories: newStories,
+      ...(retrievalMeta ? {
+        contextSummary: {
+          retrieval: {
+            cagHits: retrievalMeta.cagHits,
+            ragHits: retrievalMeta.ragHits,
+            graphHits: retrievalMeta.graphHits,
+            tier: retrievalMeta.tier,
+            latencyMs: retrievalMeta.latencyMs,
+          },
+        },
+      } : {}),
+    });
   } catch (error: any) {
     logger.error('[Specs] Add stories error:', error);
     res.status(500).json({ error: error.message });
@@ -8300,6 +8344,30 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     const memoryContext = catalogs.memoryMd ? catalogs.memoryMd.slice(0, 2000) : '';
     const agentsContext = catalogs.agentsMd ? catalogs.agentsMd.slice(0, 2000) : '';
 
+    // Semantic retrieval via memory-router (CAG/RAG + knowledge graph)
+    // Graph context about past skill effectiveness (Skill-USED_IN->Story edges) helps matching
+    let skillGraphSection = '';
+    let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+    try {
+      const storyBrief = stories.map(s => `${s.title}: ${s.description ?? ''}`).join('\n');
+      const retrieved = await retrieveContext(Number(workspaceId), storyBrief, {
+        maxTokens: 8000,
+        includeGraph: true,
+      });
+      if (retrieved.graphSection) {
+        skillGraphSection = retrieved.graphSection;
+      }
+      retrievalMeta = {
+        cagHits: retrieved.meta.cagHits,
+        ragHits: retrieved.meta.ragHits,
+        graphHits: retrieved.meta.graphHits,
+        latencyMs: retrieved.meta.latencyMs,
+        tier: retrieved.meta.tier,
+      };
+    } catch (err) {
+      logger.warn({ err, workspaceId }, '[Specs] match-skills: retrieveContext failed — using catalog context only');
+    }
+
     // Build numbered story list
     const storyList = stories.map((s, i) =>
       `${i + 1}. [${s.id}] ${s.title}\n   ${s.description ?? ''}`
@@ -8312,7 +8380,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       resolvedModel = l3Pref.preferred_model;
     }
 
-    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.
+    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.${skillGraphSection ? ' Use the KNOWLEDGE GRAPH CONTEXT to see which skills were effective on similar stories in the past (USED_IN edges) — prefer skills with proven track records.' : ''}
 
 Relevance scoring: 10 = this skill is essential for the story, 7-9 = highly relevant, 4-6 = moderately helpful, 1-3 = tangentially related. Only include skills with relevance >= 4. If no skills apply to a story, return empty suggestedSkills array.
 
@@ -8321,7 +8389,10 @@ Respond with valid JSON only, no markdown fences. Format:
 
 ## Installed Skills (one per line: name: description)
 ${catalogs.skillCatalog}
-
+${skillGraphSection ? `
+## KNOWLEDGE GRAPH CONTEXT
+${skillGraphSection}
+` : ''}
 ## MEMORY.md
 ${memoryContext || '(empty)'}
 
@@ -8403,6 +8474,17 @@ ${storyList}`;
     res.json({
       matched: totalSkillsMatched,
       stories: responseStories,
+      ...(retrievalMeta ? {
+        contextSummary: {
+          retrieval: {
+            cagHits: retrievalMeta.cagHits,
+            ragHits: retrievalMeta.ragHits,
+            graphHits: retrievalMeta.graphHits,
+            tier: retrievalMeta.tier,
+            latencyMs: retrievalMeta.latencyMs,
+          },
+        },
+      } : {}),
     });
   } catch (error: any) {
     logger.error('[Specs] match-skills error:', error);
