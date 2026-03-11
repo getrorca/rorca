@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-wiring",
   "runId": 28,
   "startedAt": "2026-03-10T22:49:18.582Z",
-  "lastUpdatedAt": "2026-03-11T00:29:56.583Z",
+  "lastUpdatedAt": "2026-03-11T00:34:15.712Z",
   "completedStories": [
     {
       "storyId": "SW-001",
@@ -102,6 +102,15 @@
       "finishedAt": "2026-03-11T00:29:56.583Z",
       "agentType": "claude",
       "elapsedMs": 278150
+    },
+    {
+      "storyId": "SW-012",
+      "title": "Wire retrieveContext() into Add Stories Endpoint",
+      "status": "passed",
+      "startedAt": "2026-03-11T00:30:18.193Z",
+      "finishedAt": "2026-03-11T00:34:15.712Z",
+      "agentType": "claude",
+      "elapsedMs": 237519
     }
   ],
   "failedStories": [],
