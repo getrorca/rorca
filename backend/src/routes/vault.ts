@@ -5,6 +5,7 @@ import { JWT_SECRET } from './auth';
 import type { AuthUser } from './auth';
 import { chatComplete } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
+import { invalidateProviderCache } from '../lib/embedding-pipeline';
 
 const router = Router();
 
@@ -135,6 +136,9 @@ router.post('/', async (req: Request, res: Response) => {
     [id, user.id, provider, encryptedKey, safeLabel, safeBaseUrl]
   );
 
+  // Invalidate embedding provider cache so auto-detection picks up the new key immediately
+  invalidateProviderCache();
+
   res.status(201).json({
     id,
     provider,
@@ -242,6 +246,9 @@ router.delete('/:id', async (req: Request, res: Response) => {
   }
 
   await execute('DELETE FROM api_key_vault WHERE id = $1 AND user_id = $2', [keyId, user.id]);
+
+  // Invalidate embedding provider cache so auto-detection reflects the removed key
+  invalidateProviderCache();
 
   res.json({ deleted: true, spend_total_usd: existing.spend_total_usd });
 });
