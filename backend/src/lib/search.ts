@@ -8,7 +8,7 @@
  */
 
 import { query, queryOne } from '../db/index';
-import { embedText, prepareText } from './embedding-pipeline';
+import { embedText, prepareText, getProvider } from './embedding-pipeline';
 import { logger } from './logger';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -248,6 +248,20 @@ async function semanticSearch(
     LIMIT ${SEMANTIC_CANDIDATE_LIMIT}`,
     params,
   );
+
+  // Check for mixed embedding models
+  if (rows.length > 0) {
+    const queryModel = getProvider().model;
+    const storedModelRow = await queryOne<{ model: string }>(
+      `SELECT DISTINCT model FROM embeddings LIMIT 1`
+    );
+    if (storedModelRow && storedModelRow.model !== queryModel) {
+      logger.warn(
+        '[search] Mixed embedding models detected (query: %s, stored: %s). Results may be degraded. Run POST /api/admin/embed-all to re-embed with current provider.',
+        queryModel, storedModelRow.model,
+      );
+    }
+  }
 
   // Filter by cosine threshold
   return rows
