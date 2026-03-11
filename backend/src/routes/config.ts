@@ -8,6 +8,7 @@ import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib
 import { query, queryOne, execute } from '../db/index';
 import { getVaultKey } from './vault';
 import { getProviderAsync, getProviderSource, invalidateProviderCache } from '../lib/embedding-pipeline';
+import { loadRorcaConfig, writeRorcaConfig, invalidateConfigCache } from '../lib/rorca-config';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -965,9 +966,11 @@ router.post('/codex-auth/logout', async (_req: Request, res: Response) => {
  *                 dimensions: { type: integer }
  *                 source: { type: string, enum: [config, env, vault, local] }
  */
-router.get('/embedding-provider', async (_req: Request, res: Response) => {
-  const provider = await getProviderAsync();
-  const source = getProviderSource();
+router.get('/embedding-provider', async (req: Request, res: Response) => {
+  const workspaceId = req.query.workspaceId as string | undefined;
+  const wsPath = await resolveWorkspacePath(workspaceId);
+  const provider = await getProviderAsync(wsPath ?? undefined);
+  const source = getProviderSource(wsPath ?? undefined);
   res.json({
     provider: provider.name,
     model: provider.model,
@@ -980,9 +983,9 @@ router.get('/embedding-provider', async (_req: Request, res: Response) => {
  * @swagger
  * /api/config/embedding-provider:
  *   put:
- *     summary: Set embedding provider
+ *     summary: Set embedding provider (persisted to .rorca/config.json)
  *     operationId: setEmbeddingProvider
- *     description: Sets the active embedding provider. Use 'auto' to revert to auto-detection.
+ *     description: Sets the active embedding provider in the workspace config. Use 'auto' to revert to auto-detection.
  *     tags: [Config]
  *     requestBody:
  *       required: true
@@ -993,6 +996,8 @@ router.get('/embedding-provider', async (_req: Request, res: Response) => {
  *             required: [provider]
  *             properties:
  *               provider: { type: string, enum: [auto, openai, openai-large, openrouter, voyage, google, local] }
+ *               workspaceId: { type: string }
+ *               model: { type: string }
  *     responses:
  *       200:
  *         description: Provider updated
@@ -1005,18 +1010,31 @@ router.get('/embedding-provider', async (_req: Request, res: Response) => {
  *                 model: { type: string }
  *                 dimensions: { type: integer }
  *                 source: { type: string }
+ *       400:
+ *         description: Invalid provider
+ *       404:
+ *         description: Workspace not found
  */
 router.put('/embedding-provider', async (req: Request, res: Response) => {
-  const { provider } = req.body ?? {};
+  const { provider, workspaceId, model } = req.body ?? {};
   const valid = ['auto', 'openai', 'openai-large', 'openrouter', 'voyage', 'google', 'local'];
   if (!provider || !valid.includes(provider)) {
     res.status(400).json({ error: `Invalid provider. Must be one of: ${valid.join(', ')}` });
     return;
   }
-  process.env.EMBEDDING_PROVIDER = provider;
+
+  const wsPath = await resolveWorkspacePath(workspaceId);
+  if (wsPath) {
+    // Persist to .rorca/config.json
+    const config = loadRorcaConfig(wsPath);
+    config.embedding = { provider, model: model || undefined };
+    writeRorcaConfig(wsPath, config);
+    invalidateConfigCache();
+  }
+
   invalidateProviderCache();
-  const resolved = await getProviderAsync();
-  const source = getProviderSource();
+  const resolved = await getProviderAsync(wsPath ?? undefined);
+  const source = getProviderSource(wsPath ?? undefined);
   res.json({
     provider: resolved.name,
     model: resolved.model,
