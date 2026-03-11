@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-wiring",
   "runId": 28,
   "startedAt": "2026-03-10T22:49:18.582Z",
-  "lastUpdatedAt": "2026-03-10T23:47:23.579Z",
+  "lastUpdatedAt": "2026-03-11T00:24:56.265Z",
   "completedStories": [
     {
       "storyId": "SW-001",
@@ -84,6 +84,15 @@
       "finishedAt": "2026-03-10T23:47:23.579Z",
       "agentType": "claude",
       "elapsedMs": 271647
+    },
+    {
+      "storyId": "SW-010",
+      "title": "Log Retrieval Stats in spec_generation_logs",
+      "status": "passed",
+      "startedAt": "2026-03-10T23:47:44.708Z",
+      "finishedAt": "2026-03-11T00:24:56.265Z",
+      "agentType": "claude",
+      "elapsedMs": 2231557
     }
   ],
   "failedStories": [],

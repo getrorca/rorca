@@ -809,6 +809,18 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         graphHits: retrievalMeta.graphHits,
         retrievalTier: retrievalMeta.tier,
         retrievalLatencyMs: retrievalMeta.latencyMs,
+        // SW-010: Nested retrieval object with full semantic retrieval metrics
+        // Three retrieval tiers:
+        //   cache  = all context from in-memory cache (fast, ~0ms)
+        //   search = hybrid vector+keyword search triggered (50-200ms)
+        //   hybrid = both cache and search used
+        retrieval: {
+          cagHits: retrievalMeta.cagHits,
+          ragHits: retrievalMeta.ragHits,
+          graphHits: retrievalMeta.graphHits,
+          tier: retrievalMeta.tier,
+          latencyMs: retrievalMeta.latencyMs,
+        },
       } : {}),
     };
 
