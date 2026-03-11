@@ -1,14 +1,12 @@
 # Run State Summary
 
-Spec: rorca-marketplace-panel-fix
-Run ID: 35
-Started: 2026-03-11T18:52:03.542Z
-Last Updated: 2026-03-11T19:02:56.394Z
+Spec: skills-top-24-hours
+Run ID: 37
+Started: 2026-03-11T19:12:03.913Z
+Last Updated: 2026-03-11T19:23:13.012Z
 
-## Completed Stories (6)
-- MP-001: Fix live search with real debounced API call and suggestions fallback when empty — DONE (claude, 29s)
-- MP-002: Implement GitHub Repos and Custom source tabs with correct per-source UI in the left discovery panel — DONE (claude, 158s)
-- MP-002: Implement GitHub Repos and Custom source tabs with correct per-source UI in the left discovery panel — DONE (claude, 245s)
-- MP-003: Add expand toggle with content preview to discovery cards and library cards — DONE (claude, 284s)
-- MP-003: Add expand toggle with content preview to discovery cards and library cards — DONE (claude, 297s)
-- MP-004: Remove Skills sub-tab from DirectionStackPanel — DONE (claude, 153s)
+## Completed Stories (4)
+- US-001: Add GET /api/skills/top backend route proxying skills.sh leaderboard — DONE (claude, 232s)
+- US-002: Extend SkillResult interface with optional installs field — DONE (claude, 53s)
+- US-003: Replace empty search state with Top Skills leaderboard fetch in MarketplacePanel — DONE (claude, 164s)
+- US-004: Render Top Skills leaderboard heading and install count badge on discovery cards — DONE (claude, 141s)
