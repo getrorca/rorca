@@ -26,35 +26,53 @@ import type { PoolClient } from 'pg';
 
 /**
  * PG-019: Track whether Apache AGE is available on this Postgres instance.
- * Checked once on first graph operation, then cached.
+ * Checked on first graph operation, then cached with TTL.
  *   - `null` = not yet checked
- *   - `true` = AGE available
- *   - `false` = AGE unavailable (managed service without AGE)
+ *   - `true` = AGE available (cached indefinitely)
+ *   - `false` = AGE unavailable — re-checked every 60s so recovery is automatic
  */
 let _graphAvailable: boolean | null = null;
+let _graphAvailableCheckedAt = 0;
+const GRAPH_AVAILABLE_NEGATIVE_TTL_MS = 60_000; // re-check every 60s on negative result
 
 /**
  * Check if Apache AGE is available on the current Postgres instance.
- * Result is cached after first successful check.
+ * Positive results are cached indefinitely. Negative results expire after 60s
+ * so the system auto-recovers if AGE becomes available after startup.
  */
 export async function isGraphAvailable(): Promise<boolean> {
-  if (_graphAvailable !== null) return _graphAvailable;
+  if (_graphAvailable === true) return true;
+
+  // Negative result with TTL — re-check after expiry
+  if (_graphAvailable === false) {
+    const elapsed = Date.now() - _graphAvailableCheckedAt;
+    if (elapsed < GRAPH_AVAILABLE_NEGATIVE_TTL_MS) return false;
+    // TTL expired, re-check below
+    _graphAvailable = null;
+  }
 
   try {
     const result = await pool.query<{ extname: string }>(
       "SELECT extname FROM pg_extension WHERE extname = 'age'"
     );
     _graphAvailable = result.rows.length > 0;
+    _graphAvailableCheckedAt = Date.now();
 
-    if (!_graphAvailable) {
-      logger.warn(
-        '[knowledge-graph] Apache AGE not available — graph features disabled. ' +
-        'Use self-hosted Postgres for full graph support.'
+    if (_graphAvailable) {
+      logger.info('[knowledge-graph] isGraphAvailable=true — AGE extension found');
+    } else {
+      logger.info(
+        '[knowledge-graph] isGraphAvailable=false — AGE extension not found in pg_extension. ' +
+        'Will re-check in 60s. Use self-hosted Postgres for full graph support.'
       );
     }
-  } catch {
+  } catch (err) {
     _graphAvailable = false;
-    logger.warn('[knowledge-graph] Could not check AGE extension — graph features disabled');
+    _graphAvailableCheckedAt = Date.now();
+    logger.info(
+      { err },
+      '[knowledge-graph] isGraphAvailable=false — query error checking AGE extension. Will re-check in 60s.'
+    );
   }
 
   return _graphAvailable;
@@ -66,6 +84,7 @@ export async function isGraphAvailable(): Promise<boolean> {
  */
 export function resetGraphAvailability(): void {
   _graphAvailable = null;
+  _graphAvailableCheckedAt = 0;
 }
 
 // ── agtype Parsing ──────────────────────────────────────────────────────────
@@ -122,6 +141,7 @@ function parseAgtypeRow<T>(row: Record<string, unknown>): T {
  * This must be called before any Cypher query on a given client.
  */
 async function setupAgeSession(client: PoolClient): Promise<void> {
+  logger.debug('[knowledge-graph] setupAgeSession: running LOAD age + SET search_path');
   await client.query("LOAD 'age'");
   await client.query("SET search_path = ag_catalog, \"$user\", public");
 }
@@ -156,13 +176,16 @@ async function cypherQuery<T = Record<string, unknown>>(
   const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (${columnDef})`;
 
   const p = pool;
+  logger.debug('[knowledge-graph] cypherQuery: acquiring pool client');
   const client = await p.connect();
   try {
     await setupAgeSession(client);
     const result = await client.query(sql);
+    logger.debug({ rowCount: result.rowCount }, '[knowledge-graph] cypherQuery: query complete');
     return result.rows.map(row => parseAgtypeRow<T>(row));
   } finally {
     client.release();
+    logger.debug('[knowledge-graph] cypherQuery: pool client released');
   }
 }
 
@@ -173,12 +196,21 @@ async function cypherMutate(cypher: string): Promise<void> {
   const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (v agtype)`;
 
   const p = pool;
+  logger.debug('[knowledge-graph] cypherMutate: acquiring pool client');
   const client = await p.connect();
   try {
     await setupAgeSession(client);
     await client.query(sql);
+    logger.debug('[knowledge-graph] cypherMutate: mutation complete');
+  } catch (err) {
+    logger.error(
+      { err, cypher: cypher.trim().substring(0, 500) },
+      '[knowledge-graph] cypherMutate failed — Cypher query text included',
+    );
+    throw err;
   } finally {
     client.release();
+    logger.debug('[knowledge-graph] cypherMutate: pool client released');
   }
 }
 
