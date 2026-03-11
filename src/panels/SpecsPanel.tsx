@@ -279,14 +279,16 @@ interface SpecsPanelProps {
   onNavigateToSpecReview?: (specId: string) => void;
   initialBrief?: string | null;
   onBriefConsumed?: () => void;
+  initialView?: ViewMode;
 }
 
-export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview, initialBrief, onBriefConsumed }: SpecsPanelProps) {
+export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview, initialBrief, onBriefConsumed, initialView }: SpecsPanelProps) {
   const { workspaceId } = useWorkspace();
   const toast = useGlobalToast();
 
   // View mode: board or list (persisted in localStorage)
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (initialView) return initialView;
     try { return (localStorage.getItem(VIEW_MODE_KEY) as ViewMode) || 'board'; } catch { return 'board'; }
   });
 
