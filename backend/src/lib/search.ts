@@ -195,6 +195,7 @@ async function semanticSearch(
 
   // Embed the query text
   let queryEmbedding: number[];
+  const provider = getProvider();
   try {
     const prepared = prepareText('query', queryText);
     queryEmbedding = await embedText(prepared);
@@ -209,6 +210,13 @@ async function semanticSearch(
   const conditions: string[] = [];
   const params: unknown[] = [vectorStr];
   let paramIdx = 2;
+
+  // Filter by matching dimensions to avoid cross-provider cosine comparison.
+  // Different providers produce different-dimension embeddings (e.g. OpenAI 1536, Google 768).
+  // Comparing across dimensions gives mathematically invalid cosine similarity results.
+  conditions.push(`dimensions = $${paramIdx}`);
+  params.push(provider.dimension);
+  paramIdx++;
 
   if (sourceTypes.length > 0) {
     const placeholders = sourceTypes.map((_, i) => `$${paramIdx + i}`);
