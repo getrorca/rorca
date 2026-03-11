@@ -22,6 +22,7 @@ import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
+import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 
 const BRIEF_STOP_WORDS = new Set([
@@ -8374,6 +8375,50 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       logger.warn({ err, workspaceId }, '[Specs] match-skills: retrieveContext failed — using catalog context only');
     }
 
+    // Query graph for skill effectiveness and file-path affinity (SE-011)
+    let skillEffectivenessData: SkillEffectivenessRow[] = [];
+    let skillPathAffinityData: SkillPathAffinityRow[] = [];
+    let skillEffectivenessSection = '';
+    try {
+      const [effectiveness, pathAffinity] = await Promise.all([
+        querySkillEffectiveness(),
+        querySkillPathAffinity(50),
+      ]);
+      skillEffectivenessData = effectiveness;
+      skillPathAffinityData = pathAffinity;
+
+      if (effectiveness.length > 0) {
+        const lines: string[] = ['## SKILL EFFECTIVENESS (from past runs)'];
+        for (const row of effectiveness) {
+          const passRate = Math.round((row.passCount / row.totalCount) * 100);
+          lines.push(`- ${row.skill}: used in ${row.totalCount} stories, ${row.passCount} passed (${passRate}% pass rate)`);
+        }
+
+        if (pathAffinity.length > 0) {
+          lines.push('');
+          lines.push('## SKILL FILE-PATH AFFINITY (skills effective on specific file patterns)');
+          // Group by skill
+          const bySkill = new Map<string, Array<{ filePath: string; storyCount: number }>>();
+          for (const pa of pathAffinity) {
+            const existing = bySkill.get(pa.skill) ?? [];
+            existing.push({ filePath: pa.filePath, storyCount: pa.storyCount });
+            bySkill.set(pa.skill, existing);
+          }
+          for (const [skill, paths] of bySkill) {
+            const pathList = paths.slice(0, 5).map(p => `\`${p.filePath}\` (${p.storyCount}x)`).join(', ');
+            lines.push(`- ${skill}: effective on ${pathList}`);
+          }
+        }
+
+        skillEffectivenessSection = lines.join('\n');
+        logger.debug({ effectivenessCount: effectiveness.length, pathAffinityCount: pathAffinity.length }, '[Specs] match-skills: graph skill effectiveness data available');
+      } else {
+        logger.debug('[Specs] match-skills: graph returned 0 skill effectiveness results — prompt works without it');
+      }
+    } catch (err) {
+      logger.debug({ err }, '[Specs] match-skills: graph skill effectiveness query unavailable — prompt works without it');
+    }
+
     // Build numbered story list
     const storyList = stories.map((s, i) =>
       `${i + 1}. [${s.id}] ${s.title}\n   ${s.description ?? ''}`
@@ -8386,7 +8431,9 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       resolvedModel = l3Pref.preferred_model;
     }
 
-    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.${skillGraphSection ? ' Use the KNOWLEDGE GRAPH CONTEXT to see which skills were effective on similar stories in the past (USED_IN edges) — prefer skills with proven track records.' : ''}
+    const hasEffectiveness = skillEffectivenessSection.length > 0;
+    const hasGraphContext = !!skillGraphSection;
+    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.${hasGraphContext ? ' Use the KNOWLEDGE GRAPH CONTEXT to see which skills were effective on similar stories in the past (USED_IN edges) — prefer skills with proven track records.' : ''}${hasEffectiveness ? ' Use the SKILL EFFECTIVENESS data to prefer skills with high pass rates. Use FILE-PATH AFFINITY to match skills to stories that will touch similar files.' : ''}
 
 Relevance scoring: 10 = this skill is essential for the story, 7-9 = highly relevant, 4-6 = moderately helpful, 1-3 = tangentially related. Only include skills with relevance >= 4. If no skills apply to a story, return empty suggestedSkills array.
 
@@ -8395,7 +8442,9 @@ Respond with valid JSON only, no markdown fences. Format:
 
 ## Installed Skills (one per line: name: description)
 ${catalogs.skillCatalog}
-${skillGraphSection ? `
+${skillEffectivenessSection ? `
+${skillEffectivenessSection}
+` : ''}${skillGraphSection ? `
 ## KNOWLEDGE GRAPH CONTEXT
 ${skillGraphSection}
 ` : ''}
@@ -8480,15 +8529,32 @@ ${storyList}`;
     res.json({
       matched: totalSkillsMatched,
       stories: responseStories,
-      ...(retrievalMeta ? {
+      ...((retrievalMeta || skillEffectivenessData.length > 0) ? {
         contextSummary: {
-          retrieval: {
-            cagHits: retrievalMeta.cagHits,
-            ragHits: retrievalMeta.ragHits,
-            graphHits: retrievalMeta.graphHits,
-            tier: retrievalMeta.tier,
-            latencyMs: retrievalMeta.latencyMs,
-          },
+          ...(retrievalMeta ? {
+            retrieval: {
+              cagHits: retrievalMeta.cagHits,
+              ragHits: retrievalMeta.ragHits,
+              graphHits: retrievalMeta.graphHits,
+              tier: retrievalMeta.tier,
+              latencyMs: retrievalMeta.latencyMs,
+            },
+          } : {}),
+          ...(skillEffectivenessData.length > 0 ? {
+            skillEffectiveness: skillEffectivenessData.map(row => ({
+              skill: row.skill,
+              passCount: row.passCount,
+              totalCount: row.totalCount,
+              passRate: Math.round((row.passCount / row.totalCount) * 100),
+            })),
+          } : {}),
+          ...(skillPathAffinityData.length > 0 ? {
+            skillPathAffinity: skillPathAffinityData.slice(0, 20).map(row => ({
+              skill: row.skill,
+              filePath: row.filePath,
+              storyCount: row.storyCount,
+            })),
+          } : {}),
         },
       } : {}),
     });
