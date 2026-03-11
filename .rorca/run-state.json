@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-gaps",
   "runId": 29,
   "startedAt": "2026-03-11T01:30:14.478Z",
-  "lastUpdatedAt": "2026-03-11T01:38:36.680Z",
+  "lastUpdatedAt": "2026-03-11T01:41:19.162Z",
   "completedStories": [
     {
       "storyId": "SG-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-11T01:38:36.679Z",
       "agentType": "claude",
       "elapsedMs": 52620
+    },
+    {
+      "storyId": "SG-004",
+      "title": "Fix AGE Cypher Execution — Per-Connection Session Setup",
+      "status": "passed",
+      "startedAt": "2026-03-11T01:38:54.312Z",
+      "finishedAt": "2026-03-11T01:41:19.162Z",
+      "agentType": "claude",
+      "elapsedMs": 144850
     }
   ],
   "failedStories": [],
