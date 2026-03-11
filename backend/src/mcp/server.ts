@@ -936,34 +936,30 @@ server.registerTool(
   }
 );
 
-// ─── Memory MCP Tools (MST-002) ─────────────────────────────────────────────
+// ─── Memory & Decision Logging MCP Tools ────────────────────────────────────
 
 server.registerTool(
   'rorca_save_memory',
   {
-    description: 'Save a structured memory entry (rule, convention, gotcha, etc.) to a workspace memory ledger. The entry is persisted to both the filesystem MEMORY.md and the database. Use this to record reusable insights discovered during implementation.',
+    description: 'Save a memory entry to the Rorca memory ledger for a workspace. Memories persist across sessions and are injected into future spec generation and story execution as context. Use this to record architectural decisions, conventions, bug fixes, patterns, and gotchas discovered during development. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.',
     inputSchema: {
-      workspaceId: z.string().describe('Rorca workspace ID'),
+      workspaceId: z.string().describe('Rorca workspace ID (use rorca_list_workspaces to find it)'),
       category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).describe('Memory category'),
-      title: z.string().describe('Short descriptive title'),
-      rule: z.string().describe('The actionable rule or insight (1-2 sentences)'),
-      context: z.string().optional().describe('Why this matters or when it applies'),
-      source: z.string().optional().describe('Source story ID (e.g. US-001)'),
+      title: z.string().describe('Short title summarizing the memory (e.g. "Always use parameterized queries")'),
+      rule: z.string().describe('The actual rule, convention, or lesson learned. Be specific and actionable.'),
+      context: z.string().optional().describe('Additional context: why this matters, what triggered it, related files'),
+      source: z.string().optional().describe('Source of the memory (e.g. "manual", "code-review", "debugging session")'),
     },
   },
   async ({ workspaceId, category, title, rule, context, source }) => {
+    const body: Record<string, string> = { workspaceId, category, title, rule };
+    if (context !== undefined) body.context = context;
+    if (source !== undefined) body.source = source;
+
     const res = await fetch(`${RORCA_API}/api/memory`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        workspaceId,
-        category,
-        title,
-        rule,
-        context: context ?? '',
-        source: source ?? '',
-        sourceType: 'mcp',
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
@@ -971,12 +967,12 @@ server.registerTool(
       throw new Error(`Failed to save memory (${res.status}): ${err}`);
     }
 
-    const data = await res.json() as { entry: { category: string; title: string; rule: string }; total: number };
+    const data = await res.json() as { entry: { date: string; category: string; title: string; rule: string }; total: number };
     return {
       content: [{
         type: 'text' as const,
-        text: `Memory saved [${data.entry.category}]: ${data.entry.title}\nRule: ${data.entry.rule}\nTotal entries: ${data.total}`,
-      }],
+        text: `Memory saved to workspace ${workspaceId}:\n  [${data.entry.category}] ${data.entry.title}\n  Rule: ${data.entry.rule}\n  Total memories: ${data.total}\n\nThis will be injected into future spec generations and story executions.`
+      }]
     };
   }
 );
@@ -984,16 +980,19 @@ server.registerTool(
 server.registerTool(
   'rorca_log_decision',
   {
-    description: 'Log an architectural or design decision to the workspace memory ledger. A convenience wrapper around rorca_save_memory that defaults to the "Decision" category. Use this when making significant design choices that future stories should be aware of.',
+    description: 'Shortcut to save an architectural or technical decision as a memory. Wraps rorca_save_memory with category "Decision" and adds structured reasoning (alternatives considered, why this was chosen). Use when making significant technical choices during development.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID'),
-      title: z.string().describe('Short title for the decision'),
-      rule: z.string().describe('The decision and its rationale (1-2 sentences)'),
-      context: z.string().optional().describe('Additional context, trade-offs considered, or alternatives rejected'),
-      source: z.string().optional().describe('Source story ID (e.g. US-001)'),
+      title: z.string().describe('Decision title (e.g. "Use Zustand over Redux for state management")'),
+      decision: z.string().describe('What was decided and why'),
+      alternatives: z.string().optional().describe('What alternatives were considered and why they were rejected'),
     },
   },
-  async ({ workspaceId, title, rule, context, source }) => {
+  async ({ workspaceId, title, decision, alternatives }) => {
+    const rule = alternatives
+      ? `${decision}\n\nAlternatives considered: ${alternatives}`
+      : decision;
+
     const res = await fetch(`${RORCA_API}/api/memory`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1002,9 +1001,7 @@ server.registerTool(
         category: 'Decision',
         title,
         rule,
-        context: context ?? '',
-        source: source ?? '',
-        sourceType: 'mcp',
+        source: 'mcp-cli',
       }),
     });
 
@@ -1013,12 +1010,55 @@ server.registerTool(
       throw new Error(`Failed to log decision (${res.status}): ${err}`);
     }
 
-    const data = await res.json() as { entry: { title: string; rule: string }; total: number };
+    const data = await res.json() as { entry: { date: string; title: string; rule: string }; total: number };
     return {
       content: [{
         type: 'text' as const,
-        text: `Decision logged: ${data.entry.title}\nRule: ${data.entry.rule}\nTotal entries: ${data.total}`,
-      }],
+        text: `Decision logged: ${data.entry.title}\n\n${data.entry.rule}\n\nTotal memories: ${data.total}`
+      }]
+    };
+  }
+);
+
+server.registerTool(
+  'rorca_get_memories',
+  {
+    description: 'Retrieve memories from the Rorca memory ledger for a workspace. Returns recent memories or filters by category. Use this to check what conventions, decisions, and patterns have been recorded for a project before making changes.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter by category. If omitted, returns recent memories across all categories.'),
+      limit: z.number().min(1).max(100).optional().default(20).describe('Maximum entries to return (default 20)'),
+    },
+  },
+  async ({ workspaceId, category, limit }) => {
+    const params = new URLSearchParams({ workspaceId });
+    if (category) params.set('category', category);
+    if (limit) params.set('limit', String(limit ?? 20));
+
+    const res = await fetch(`${RORCA_API}/api/memory?${params.toString()}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to get memories (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as {
+      items: Array<{ date: string; category: string; title: string; rule: string; context?: string }>;
+      total: number;
+    };
+
+    if (data.items.length === 0) {
+      return { content: [{ type: 'text' as const, text: `No memories found for workspace ${workspaceId}${category ? ` in category ${category}` : ''}` }] };
+    }
+
+    const lines = data.items.map(m =>
+      `[${m.date}] [${m.category}] ${m.title}\n  ${m.rule}${m.context ? `\n  Context: ${m.context}` : ''}`
+    );
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Memories (${data.items.length}/${data.total}):\n\n${lines.join('\n\n')}`
+      }]
     };
   }
 );

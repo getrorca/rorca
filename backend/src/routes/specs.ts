@@ -271,7 +271,7 @@ function safeReadFile(filePath: string): string {
  * Build skill + persona catalog context for spec generation prompts.
  * Discovers installed skills and personas from the workspace, reads MEMORY.md and AGENTS.md.
  */
-async function buildCatalogContext(workspacePath: string): Promise<{
+async function buildCatalogContext(workspacePath: string, workspaceId?: string): Promise<{
   skillCatalog: string;
   personaCatalog: string;
   memoryMd: string;
@@ -285,7 +285,28 @@ async function buildCatalogContext(workspacePath: string): Promise<{
   const skillCatalog = skillRegistry.getCatalogForPrompt();
   const personaCatalog = personaRegistry.getPersonaCatalogForPrompt();
 
-  const memoryMd = safeReadFile(path.join(rorcaDir, 'MEMORY.md'));
+  let memoryMd = safeReadFile(path.join(rorcaDir, 'MEMORY.md'))
+    || safeReadFile(path.join(rorcaDir, 'memory', 'MEMORY.md'))
+    || safeReadFile(path.join(workspacePath, 'MEMORY.md'));
+
+  // Fallback: if no MEMORY.md file found, build from DB memories table
+  if (!memoryMd && workspaceId) {
+    try {
+      const dbMemories = await query<{ category: string; content: string; created_at: string }>(
+        `SELECT category, content, created_at FROM memories
+         WHERE workspace_id = $1 AND deleted_at IS NULL
+         ORDER BY created_at DESC LIMIT 50`,
+        [workspaceId]
+      );
+      if (dbMemories.length > 0) {
+        memoryMd = dbMemories.map(m => {
+          const date = new Date(m.created_at).toISOString().slice(0, 10);
+          return `## ${date} [${m.category}]\n${m.content}`;
+        }).join('\n\n');
+      }
+    } catch { /* DB memories optional — don't block spec gen */ }
+  }
+
   const agentsMd = safeReadFile(path.join(workspacePath, 'AGENTS.md'))
     || safeReadFile(path.join(rorcaDir, 'AGENTS.md'));
 
@@ -731,7 +752,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     let semanticGraphSection = '';
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
-      const retrieved = await retrieveContext(Number(workspaceId), brief, {
+      const retrieved = await retrieveContext(workspaceId, brief, {
         maxTokens: 16000,
         includeGraph: true,
       });
@@ -774,7 +795,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 6c. Discover skill + persona catalogs and read context files
-    const catalogs = await buildCatalogContext(workspace.path as string);
+    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
 
     // 6d. Pre-compute contextSummary for error responses (also used in success response)
     const skillNamesList = catalogs.skillCatalog
@@ -2003,7 +2024,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const storyPrefix = 'US';
 
   // Discover skill + persona catalogs for batch brief
-  const batchCatalogs = await buildCatalogContext(workspace.path);
+  const batchCatalogs = await buildCatalogContext(workspace.path, workspace.id);
   const batchCatalogSections: string[] = [];
   if (batchCatalogs.memoryMd) {
     batchCatalogSections.push('=== PROJECT MEMORY ===', batchCatalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
@@ -3612,7 +3633,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     let semanticGraphSection = '';
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
-      const retrieved = await retrieveContext(Number(workspaceId), brief || specContent.title || specId, {
+      const retrieved = await retrieveContext(workspaceId, brief || specContent.title || specId, {
         maxTokens: 16000,
         includeGraph: true,
       });
@@ -8341,7 +8362,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     }
 
     // Build skill catalog context
-    const catalogs = await buildCatalogContext(workspace.path as string);
+    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
     if (catalogs.skillNames.size === 0) {
       res.status(422).json({ error: 'No skills installed. Install skills from the Marketplace before matching.' });
       return;
@@ -8357,7 +8378,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
       const storyBrief = stories.map(s => `${s.title}: ${s.description ?? ''}`).join('\n');
-      const retrieved = await retrieveContext(Number(workspaceId), storyBrief, {
+      const retrieved = await retrieveContext(workspaceId, storyBrief, {
         maxTokens: 8000,
         includeGraph: true,
       });

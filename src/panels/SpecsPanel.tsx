@@ -2187,19 +2187,25 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     setIsGenerating(true);
     setGenerateError(null);
     setApiDone(false);
-    const modelUsed = selectedModel || defaultModelId || 'claude-sonnet-4-5-20250929';
+    const modelUsed = selectedModel || defaultModelId || 'claude-sonnet-4-6';
     try {
       const result = await apiFetch<GeneratedSpec>('/api/specs/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
         body: JSON.stringify({ workspaceId, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined }),
       });
       setApiDone(true);
+      // Map backend response fields: backend returns { slug, title } but GeneratedSpec expects { slug, specName }
+      const raw = result as unknown as Record<string, unknown>;
+      if (raw.slug && !result.specName) {
+        result.slug = raw.slug as string;
+        result.specName = (raw.title as string) || (raw.slug as string);
+      }
       setGeneratedSpec(result);
       setModelSuggestions(null);
       setTimeout(() => setIsGenerating(false), 800);
 
       // Fire-and-forget auto-match and auto-suggest
-      const specId = result.specName;
+      const specId = result.slug || result.specName;
       (async () => {
         // Auto-match skills
         if (autoMatchSkills && skillsCount && skillsCount > 0 && workspaceId) {
@@ -2210,7 +2216,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
               body: JSON.stringify({ workspaceId }),
             });
           } catch {
-            showToast('Skill matching failed — you can retry from the spec review', 'warning');
+            console.warn('[Forge] Skill matching failed — can retry from spec review');
           }
         } else if (autoMatchSkills && (!skillsCount || skillsCount === 0)) {
           // No skills to match — show briefly then continue
@@ -2427,7 +2433,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       {(!generatedSpec || isGenerating) && (
         <div className="space-y-2">
           {isGenerating || (generateError && !generatedSpec) ? (
-            <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} onRetry={handleRetry} onRetryWithModel={handleRetryWithModel} model={selectedModel || defaultModelId || 'claude-sonnet-4-5-20250929'} provider={activeProvider} />
+            <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} onRetry={handleRetry} onRetryWithModel={handleRetryWithModel} model={selectedModel || defaultModelId || 'claude-sonnet-4-6'} provider={activeProvider} />
           ) : !generatedSpec ? (
             <>
               <button onClick={handleGenerate} disabled={!canGenerate || isGenerating}
