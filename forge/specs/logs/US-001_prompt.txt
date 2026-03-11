@@ -1279,68 +1279,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
-
-
-## Skill: react-review (relevance: 6)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
+## Agent Role: Backend Routes
 
 ---
 name: rorca
@@ -1493,11 +1432,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-001):
-Extend the PanelId type in Sidebar.tsx to include 'marketplace' as a 6th nav item. Add a new entry to SIDEBAR_ITEMS array with id='marketplace', label='Marketplace', and icon=Package (from lucide-react). Update NAV_SECTIONS to include the marketplace item. Update PANEL_LABELS in App.tsx to include marketplace: 'Marketplace'.
+Create a new Express route GET /api/skills/top in the skills route file that proxies GET https://skills.sh/api/skills/top. The route should fetch the top skills from the Mastra-compatible endpoint, map the response to the existing SkillResult[] shape (used by search), add an installs field from the API response, sort by install count descending, and return the array. Error handling should follow the existing AppError pattern used in other skills routes.
 
 Acceptance Criteria:
-- PanelId type in Sidebar.tsx includes 'marketplace' as a valid value
-- SIDEBAR_ITEMS array has 6 items total, with marketplace using the Package icon
-- NAV_SECTIONS includes a marketplace section matching the sidebar structure
-- PANEL_LABELS in App.tsx includes marketplace key with 'Marketplace' label
-- TypeScript compilation passes with no errors related to PanelId
+- GET /api/skills/top returns HTTP 200 with a JSON array matching SkillResult[] shape including an optional installs: number field
+- Results are sorted by installs descending before being returned to the client
+- Upstream fetch errors from skills.sh are caught and re-thrown as AppError (502 or 503) with a descriptive message
+- Route has a JSDoc @swagger annotation describing the endpoint, query params (if any), and response schema
+- Response is returned within 5 seconds; a timeout guard aborts the upstream fetch and returns 504 if exceeded
