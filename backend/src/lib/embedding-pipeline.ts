@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import { subscribe, type WalEvent } from './sse-hub';
 import { logger } from './logger';
+import { loadRorcaConfig, type EmbeddingConfig } from './rorca-config';
 
 // ─── Provider Interface ─────────────────────────────────────────────────────
 
@@ -376,48 +377,77 @@ let cachedAsyncProvider: EmbeddingProvider | null = null;
 let cachedAsyncProviderTs = 0;
 let cachedAsyncProviderSource: 'config' | 'env' | 'vault' | 'local' = 'local';
 
-export function getProvider(): EmbeddingProvider {
-  const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
-  switch (providerName) {
-    case 'openai':
-      return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
-    case 'openai-large':
-      return new OpenAIEmbeddingProvider('text-embedding-3-large', 3072);
-    case 'openrouter':
-      return new OpenRouterEmbeddingProvider();
-    case 'voyage':
-      return new VoyageEmbeddingProvider();
-    case 'google':
-      return new GoogleEmbeddingProvider();
-    case 'local':
-      return new LocalEmbeddingProvider();
-    case 'auto':
-    default: {
-      if (providerName !== 'auto') {
-        logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
+/**
+ * Resolve the provider name from config.json → env var → 'auto'.
+ * Config.json takes priority: if a workspace has embedding.provider set to
+ * anything other than 'auto', that value wins over the EMBEDDING_PROVIDER env var.
+ */
+function resolveProviderName(workspacePath?: string): { name: string; source: 'config' | 'env' | 'auto' } {
+  // 1. Check .rorca/config.json
+  if (workspacePath) {
+    try {
+      const cfg = loadRorcaConfig(workspacePath);
+      if (cfg.embedding?.provider && cfg.embedding.provider !== 'auto') {
+        return { name: cfg.embedding.provider, source: 'config' };
       }
-      // Auto-detect: env vars first (sync)
-      // Order: openai → openrouter → voyage → google → vault cache → local
-      if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
-      if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
-      if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
-      if (process.env.GOOGLE_API_KEY) return new GoogleEmbeddingProvider();
-
-      // Use cached vault-resolved provider if available and fresh
-      const now = Date.now();
-      if (cachedAsyncProvider && now - cachedAsyncProviderTs < VAULT_CACHE_TTL) {
-        return cachedAsyncProvider;
-      }
-
-      return new LocalEmbeddingProvider();
+    } catch {
+      // Config load failed — fall through
     }
+  }
+
+  // 2. Check env var
+  const envProvider = process.env.EMBEDDING_PROVIDER;
+  if (envProvider && envProvider !== 'auto') {
+    return { name: envProvider, source: 'env' };
+  }
+
+  return { name: 'auto', source: 'auto' };
+}
+
+function providerFromName(name: string): EmbeddingProvider | null {
+  switch (name) {
+    case 'openai': return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+    case 'openai-large': return new OpenAIEmbeddingProvider('text-embedding-3-large', 3072);
+    case 'openrouter': return new OpenRouterEmbeddingProvider();
+    case 'voyage': return new VoyageEmbeddingProvider();
+    case 'google': return new GoogleEmbeddingProvider();
+    case 'local': return new LocalEmbeddingProvider();
+    default: return null;
   }
 }
 
+export function getProvider(workspacePath?: string): EmbeddingProvider {
+  const { name: providerName } = resolveProviderName(workspacePath);
+
+  const explicit = providerFromName(providerName);
+  if (explicit) return explicit;
+
+  if (providerName !== 'auto') {
+    logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
+  }
+
+  // Auto-detect: env vars first (sync)
+  // Order: openai → openrouter → voyage → google → vault cache → local
+  if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+  if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
+  if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
+  if (process.env.GOOGLE_API_KEY) return new GoogleEmbeddingProvider();
+
+  // Use cached vault-resolved provider if available and fresh
+  const now = Date.now();
+  if (cachedAsyncProvider && now - cachedAsyncProviderTs < VAULT_CACHE_TTL) {
+    return cachedAsyncProvider;
+  }
+
+  return new LocalEmbeddingProvider();
+}
+
 /** Returns the source of the currently active provider resolution. */
-export function getProviderSource(): 'config' | 'env' | 'vault' | 'local' {
-  const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
-  if (providerName !== 'auto') return 'config';
+export function getProviderSource(workspacePath?: string): 'config' | 'env' | 'vault' | 'local' {
+  const { source } = resolveProviderName(workspacePath);
+  if (source === 'config') return 'config';
+  if (source === 'env') return 'env';
+  // source === 'auto' — check further
   if (process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY ||
       process.env.VOYAGE_API_KEY || process.env.GOOGLE_API_KEY) return 'env';
   if (cachedAsyncProvider && Date.now() - cachedAsyncProviderTs < VAULT_CACHE_TTL) {
@@ -431,12 +461,14 @@ export function getProviderSource(): 'config' | 'env' | 'vault' | 'local' {
  * when you need vault-aware provider resolution.
  * Populates the sync cache so subsequent getProvider() calls benefit.
  */
-export async function getProviderAsync(): Promise<EmbeddingProvider> {
-  const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
-  // Explicit provider — return immediately
-  if (providerName !== 'auto') return getProvider();
+export async function getProviderAsync(workspacePath?: string): Promise<EmbeddingProvider> {
+  const { name: providerName } = resolveProviderName(workspacePath);
 
-  // Check env vars first: openai → openrouter → voyage → google
+  // Explicit provider from config or env — return immediately
+  const explicit = providerFromName(providerName);
+  if (explicit) return explicit;
+
+  // Auto mode: check env vars first: openai → openrouter → voyage → google
   if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
   if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
   if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
