@@ -2,7 +2,7 @@
   "specId": "rorca-memory-source-tracking",
   "runId": 33,
   "startedAt": "2026-03-11T08:01:46.608Z",
-  "lastUpdatedAt": "2026-03-11T08:04:04.206Z",
+  "lastUpdatedAt": "2026-03-11T08:09:26.673Z",
   "completedStories": [
     {
       "storyId": "MST-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-11T08:04:04.206Z",
       "agentType": "claude",
       "elapsedMs": 134939
+    },
+    {
+      "storyId": "MST-002",
+      "title": "Set source_type on all memory creation paths",
+      "status": "passed",
+      "startedAt": "2026-03-11T08:04:26.931Z",
+      "finishedAt": "2026-03-11T08:09:26.673Z",
+      "agentType": "claude",
+      "elapsedMs": 299742
     }
   ],
   "failedStories": [],
