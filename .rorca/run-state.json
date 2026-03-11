@@ -2,7 +2,7 @@
   "specId": "rorca-memory-source-tracking",
   "runId": 33,
   "startedAt": "2026-03-11T08:01:46.608Z",
-  "lastUpdatedAt": "2026-03-11T08:09:26.673Z",
+  "lastUpdatedAt": "2026-03-11T08:12:58.024Z",
   "completedStories": [
     {
       "storyId": "MST-001",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-11T08:09:26.673Z",
       "agentType": "claude",
       "elapsedMs": 299742
+    },
+    {
+      "storyId": "MST-003",
+      "title": "Return source_type in all memory API responses",
+      "status": "passed",
+      "startedAt": "2026-03-11T08:09:48.914Z",
+      "finishedAt": "2026-03-11T08:12:58.024Z",
+      "agentType": "claude",
+      "elapsedMs": 189110
     }
   ],
   "failedStories": [],

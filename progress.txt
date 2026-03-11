@@ -3,8 +3,9 @@
 Spec: rorca-memory-source-tracking
 Run ID: 33
 Started: 2026-03-11T08:01:46.608Z
-Last Updated: 2026-03-11T08:09:26.673Z
+Last Updated: 2026-03-11T08:12:58.024Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - MST-001: Add source_type column to memories table — DONE (claude, 135s)
 - MST-002: Set source_type on all memory creation paths — DONE (claude, 300s)
+- MST-003: Return source_type in all memory API responses — DONE (claude, 189s)
