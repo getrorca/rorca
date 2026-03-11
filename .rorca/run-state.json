@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-gaps",
   "runId": 29,
   "startedAt": "2026-03-11T01:30:14.478Z",
-  "lastUpdatedAt": "2026-03-11T01:37:26.247Z",
+  "lastUpdatedAt": "2026-03-11T01:38:36.680Z",
   "completedStories": [
     {
       "storyId": "SG-001",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-11T01:37:26.247Z",
       "agentType": "claude",
       "elapsedMs": 207163
+    },
+    {
+      "storyId": "SG-003",
+      "title": "Fix context-cache getRecentMemory to Read from memories Table",
+      "status": "passed",
+      "startedAt": "2026-03-11T01:37:44.059Z",
+      "finishedAt": "2026-03-11T01:38:36.679Z",
+      "agentType": "claude",
+      "elapsedMs": 52620
     }
   ],
   "failedStories": [],
