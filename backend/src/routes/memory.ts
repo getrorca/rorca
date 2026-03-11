@@ -53,6 +53,19 @@ function todayDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Infer source_type from the file-based source field text */
+function inferSourceType(source: string): SourceType {
+  if (!source) return 'manual';
+  if (source === 'mcp-cli' || source === 'mcp') return 'mcp';
+  // Story ID patterns: US-001, CIE-003, MST-002, SL-017, etc.
+  if (/^[A-Z]{1,6}-\d{1,4}$/.test(source.trim())) return 'synthesis';
+  // Source contains "story-" prefix (e.g. "story-US-001")
+  if (/story-/i.test(source)) return 'synthesis';
+  // Source contains "run-" prefix (e.g. "run-42")
+  if (/^run-\d+$/i.test(source.trim())) return 'synthesis';
+  return 'manual';
+}
+
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 /**
@@ -96,6 +109,7 @@ function todayDate(): string {
  *                       rule: { type: string }
  *                       context: { type: string }
  *                       source: { type: string }
+ *                       sourceType: { type: string, enum: [synthesis, manual, mcp, auto-extracted, import], description: "Inferred from source field" }
  *                 total: { type: integer }
  *                 categories: { type: array, items: { type: string } }
  *       400: { description: "Missing workspaceId" }
@@ -119,8 +133,13 @@ router.get('/', async (req: Request, res: Response) => {
     entries = readMemory(wsPath, ledgerPath);
   }
 
+  const itemsWithSourceType = entries.map(e => ({
+    ...e,
+    sourceType: inferSourceType(e.source),
+  }));
+
   res.json({
-    items: entries,
+    items: itemsWithSourceType,
     total: entries.length,
     categories: MEMORY_CATEGORIES,
   });
@@ -380,6 +399,7 @@ router.delete('/entry', async (req: Request, res: Response) => {
  *                       rule: { type: string }
  *                       context: { type: string }
  *                       source: { type: string }
+ *                       sourceType: { type: string, enum: [synthesis], description: "Always synthesis for proposals" }
  *                       status: { type: string }
  *                       proposedAt: { type: string }
  *                       resolvedAt: { type: string, nullable: true }
@@ -434,6 +454,7 @@ router.get('/proposals', async (req: Request, res: Response) => {
     rule: r.rule,
     context: r.context,
     source: r.source_story,
+    sourceType: 'synthesis' as SourceType,
     status: r.status,
     proposedAt: r.proposed_at,
     resolvedAt: r.resolved_at,
@@ -1163,13 +1184,39 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  *     responses:
  *       200:
  *         description: Memory items list with counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       workspaceId: { type: string }
+ *                       category: { type: string }
+ *                       content: { type: string }
+ *                       sourceStoryId: { type: string, nullable: true }
+ *                       sourceRunId: { type: integer, nullable: true }
+ *                       confidence: { type: string, enum: [high, medium, low] }
+ *                       relatedFiles: { type: array, items: { type: string } }
+ *                       pinned: { type: boolean }
+ *                       sourceType: { type: string, enum: [synthesis, manual, mcp, auto-extracted, import] }
+ *                       createdAt: { type: string, format: date-time }
+ *                 total: { type: integer }
+ *                 pinned: { type: integer }
+ *                 recentRunIds: { type: array, items: { type: integer } }
+ *                 categories: { type: array, items: { type: string } }
+ *       400: { description: "Missing workspaceId" }
  */
 router.get('/items', async (req: Request, res: Response) => {
   const { workspaceId, category, confidence, sourceRunId, search, pinnedOnly } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
   let sql = `SELECT id, workspace_id, category, content, source_story_id, source_run_id,
-             confidence, related_files, pinned, created_at
+             confidence, related_files, pinned, source_type, created_at
              FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL`;
   const params: (string | number)[] = [workspaceId as string];
   let paramIdx = 2;
@@ -1215,6 +1262,7 @@ router.get('/items', async (req: Request, res: Response) => {
     confidence: string;
     related_files: string;
     pinned: boolean;
+    source_type: string;
     created_at: string;
   }>(sql, params);
 
@@ -1245,6 +1293,7 @@ router.get('/items', async (req: Request, res: Response) => {
     confidence: r.confidence,
     relatedFiles: typeof r.related_files === 'string' ? JSON.parse(r.related_files) : r.related_files,
     pinned: r.pinned,
+    sourceType: r.source_type,
     createdAt: r.created_at,
   }));
 
