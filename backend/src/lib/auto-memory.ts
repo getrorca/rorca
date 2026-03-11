@@ -157,9 +157,9 @@ export async function autoSynthesizeMemory(
 
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
-      await execute(
+      const inserted = await queryOne<{ id: number }>(
         `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector) RETURNING id`,
         [
           workspaceId,
           entry.category,
@@ -172,33 +172,24 @@ export async function autoSynthesizeMemory(
         ],
       );
 
+      // Emit memory_created WAL event (persisted + broadcast)
+      if (inserted) {
+        const walPayload = JSON.stringify({ id: inserted.id, text: entry.content, category: entry.category });
+        try {
+          const walEvent = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            ['memory_created', workspaceId, null, storyId, walPayload],
+          );
+          if (walEvent) broadcastAll(walEvent);
+        } catch {
+          // Best-effort WAL event — don't block on failure
+        }
+      }
+
       categories.push(entry.category);
     }
 
     logger.info(`[auto-memory] Saved ${entries.length} memories for ${storyId} [${categories.join(', ')}] (${Date.now() - t0}ms)`);
-
-    // ── WAL event ───────────────────────────────────────────────────────
-    if (port) {
-      try {
-        await fetch(`http://localhost:${port}/api/wal`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            event_type: 'memory_auto_saved',
-            workspace_id: workspaceId,
-            story_id: storyId,
-            payload: {
-              storyId,
-              runId: runId ?? null,
-              entriesCount: entries.length,
-              categories,
-            },
-          }),
-        });
-      } catch {
-        // Best-effort WAL event — don't block on failure
-      }
-    }
   } catch (err: any) {
     const elapsed = Date.now() - t0;
     if (err.message === 'synthesis_timeout') {
@@ -333,9 +324,9 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
 
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
-      await execute(
+      const inserted = await queryOne<{ id: number }>(
         `INSERT INTO memories (workspace_id, category, content, source_spec_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::vector)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7::vector) RETURNING id`,
         [
           workspaceId,
           entry.category,
@@ -346,6 +337,20 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
           embeddingStr,
         ],
       );
+
+      // Emit memory_created WAL event (persisted + broadcast)
+      if (inserted) {
+        const walPayload = JSON.stringify({ id: inserted.id, text: entry.content, category: entry.category });
+        try {
+          const walEvent = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            ['memory_created', workspaceId, specId, null, walPayload],
+          );
+          if (walEvent) broadcastAll(walEvent);
+        } catch {
+          // Best-effort WAL event — don't block on failure
+        }
+      }
     }
 
     logger.info(`[auto-memory] Saved ${entries.length} spec memories for ${specId} (${Date.now() - t0}ms)`);
@@ -561,9 +566,9 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
       // Run memories: source_story_id is NULL, category is 'Run Synthesis'
-      await execute(
+      const inserted = await queryOne<{ id: number }>(
         `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::vector)`,
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::vector) RETURNING id`,
         [
           workspaceId,
           'Run Synthesis',
@@ -574,6 +579,20 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
           embeddingStr,
         ],
       );
+
+      // Emit memory_created WAL event (persisted + broadcast)
+      if (inserted) {
+        const walPayload = JSON.stringify({ id: inserted.id, text: entry.content, category: entry.category });
+        try {
+          const walEvent = await queryOne<WalEvent>(
+            `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            ['memory_created', workspaceId, null, null, walPayload],
+          );
+          if (walEvent) broadcastAll(walEvent);
+        } catch {
+          // Best-effort WAL event — don't block on failure
+        }
+      }
 
       categories.push(entry.category);
       savedCount++;
