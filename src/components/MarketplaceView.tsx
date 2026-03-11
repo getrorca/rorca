@@ -259,6 +259,12 @@ interface GitHubSkillResult {
   installed: boolean;
 }
 
+interface GitHubBrowseResponse {
+  repo: string;
+  branch: string;
+  skills: GitHubSkillResult[];
+}
+
 type SkillSourceTab = 'skills-sh' | 'github' | 'custom';
 
 const SOURCE_TABS: { id: SkillSourceTab; label: string; icon: typeof Star }[] = [
@@ -877,7 +883,7 @@ function GitHubSubTab({
     setBrowseError(null);
     try {
       const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
-      const data = await apiFetch<{ repo: string; branch: string; skills: GitHubSkillResult[] }>(
+      const data = await apiFetch<GitHubBrowseResponse>(
         `/api/skills/browse-github${params}`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repoUrl: url }) },
       );

@@ -1,9 +1,10 @@
 # Run State Summary
 
 Spec: rorca-marketplace-panel-fix
-Run ID: 34
-Started: 2026-03-11T18:48:42.365Z
-Last Updated: 2026-03-11T18:50:43.900Z
+Run ID: 35
+Started: 2026-03-11T18:52:03.542Z
+Last Updated: 2026-03-11T18:54:50.525Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - MP-001: Fix live search with real debounced API call and suggestions fallback when empty — DONE (claude, 29s)
+- MP-002: Implement GitHub Repos and Custom source tabs with correct per-source UI in the left discovery panel — DONE (claude, 158s)

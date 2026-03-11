@@ -1,8 +1,8 @@
 {
   "specId": "rorca-marketplace-panel-fix",
-  "runId": 34,
-  "startedAt": "2026-03-11T18:48:42.365Z",
-  "lastUpdatedAt": "2026-03-11T18:50:43.900Z",
+  "runId": 35,
+  "startedAt": "2026-03-11T18:52:03.542Z",
+  "lastUpdatedAt": "2026-03-11T18:54:50.525Z",
   "completedStories": [
     {
       "storyId": "MP-001",
@@ -12,11 +12,20 @@
       "finishedAt": "2026-03-11T18:50:43.900Z",
       "agentType": "claude",
       "elapsedMs": 28584
+    },
+    {
+      "storyId": "MP-002",
+      "title": "Implement GitHub Repos and Custom source tabs with correct per-source UI in the left discovery panel",
+      "status": "passed",
+      "startedAt": "2026-03-11T18:52:12.990Z",
+      "finishedAt": "2026-03-11T18:54:50.524Z",
+      "agentType": "claude",
+      "elapsedMs": 157534
     }
   ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "MP-001"
 }
