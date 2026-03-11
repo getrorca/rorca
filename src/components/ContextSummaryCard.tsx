@@ -74,7 +74,13 @@ function TokenBar({ estimated, contextWindow }: { estimated: number; contextWind
 export default function ContextSummaryCard({ summary, isGenerating }: ContextSummaryCardProps) {
   const [expanded, setExpanded] = useState(!!isGenerating);
 
-  const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow, vectorHits, graphHits, retrievalTier, retrievalLatencyMs } = summary;
+  const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow, retrieval } = summary;
+  // Prefer nested retrieval object (SW-010); fall back to legacy flat fields for older logs
+  const cagHits = retrieval?.cagHits ?? 0;
+  const vectorHits = retrieval?.ragHits ?? summary.vectorHits;
+  const graphHits = retrieval?.graphHits ?? summary.graphHits;
+  const retrievalTier = retrieval?.tier ?? summary.retrievalTier;
+  const retrievalLatencyMs = retrieval?.latencyMs ?? summary.retrievalLatencyMs;
 
   return (
     <div
@@ -141,33 +147,43 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
           {/* Semantic retrieval */}
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span
+              className={`inline-flex items-center gap-1 ${cagHits > 0 ? 'text-text' : 'text-zinc-400'}`}
+              title="Cache-augmented generation: direction layers, memory, and skills resolved from in-memory cache"
+            >
+              <Brain className="w-3 h-3" />
+              Cache (CAG){' '}
+              {cagHits > 0
+                ? <span className="text-success">{cagHits} hit{cagHits !== 1 ? 's' : ''}</span>
+                : <span>0 hits</span>}
+            </span>
+            <span
               className={`inline-flex items-center gap-1 ${vectorHits && vectorHits > 0 ? 'text-text' : 'text-zinc-400'}`}
-              title="Vector search and knowledge graph require embeddings. Run POST /api/admin/embed-all or set OPENAI_API_KEY to enable."
+              title="Retrieval-augmented generation: hybrid vector+keyword search for unfamiliar concepts"
             >
               <Search className="w-3 h-3" />
-              Vector Search{' '}
+              Vector (RAG){' '}
               {vectorHits != null && vectorHits > 0
-                ? <span className="text-success">✅ {vectorHits} hit{vectorHits !== 1 ? 's' : ''}</span>
+                ? <span className="text-success">{vectorHits} hit{vectorHits !== 1 ? 's' : ''}</span>
                 : <span>⬚ No embeddings</span>}
-              {retrievalTier && (
-                <span className="ml-1 px-1.5 py-0 rounded bg-muted/15 text-[10px] font-medium text-muted">
-                  {retrievalTier}
-                </span>
-              )}
-              {retrievalLatencyMs != null && (
-                <span className="text-muted text-[10px] ml-0.5">{retrievalLatencyMs}ms</span>
-              )}
             </span>
             <span
               className={`inline-flex items-center gap-1 ${graphHits && graphHits > 0 ? 'text-text' : 'text-zinc-400'}`}
-              title="Vector search and knowledge graph require embeddings. Run POST /api/admin/embed-all or set OPENAI_API_KEY to enable."
+              title="Knowledge graph context via Apache AGE"
             >
               <Share2 className="w-3 h-3" />
-              Knowledge Graph{' '}
+              Graph{' '}
               {graphHits != null && graphHits > 0
-                ? <span className="text-success">✅ {graphHits} node{graphHits !== 1 ? 's' : ''}</span>
+                ? <span className="text-success">{graphHits} node{graphHits !== 1 ? 's' : ''}</span>
                 : <span>⬚ No graph data</span>}
             </span>
+            {retrievalTier && (
+              <span className="px-1.5 py-0 rounded bg-muted/15 text-[10px] font-medium text-muted" title="cache = in-memory (~0ms), search = vector+keyword (50-200ms), hybrid = both">
+                {retrievalTier}
+              </span>
+            )}
+            {retrievalLatencyMs != null && (
+              <span className="text-muted text-[10px]">{retrievalLatencyMs}ms</span>
+            )}
           </div>
 
           {/* Skills */}

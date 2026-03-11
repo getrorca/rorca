@@ -37,6 +37,14 @@ export interface ContextSummary {
   graphHits?: number;
   retrievalTier?: 'cache' | 'search' | 'hybrid';
   retrievalLatencyMs?: number;
+  /** SW-010: Full semantic retrieval metrics from memory-router */
+  retrieval?: {
+    cagHits: number;
+    ragHits: number;
+    graphHits: number;
+    tier: 'cache' | 'search' | 'hybrid';
+    latencyMs: number;
+  };
 }
 
 export interface GeneratedSpec {
