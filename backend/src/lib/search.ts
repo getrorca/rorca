@@ -123,13 +123,15 @@ async function keywordSearch(
     }
   }
 
-  // Search memory entries via wal_events (memory_created/memory_updated have text in payload)
+  // Search memory entries directly from the memories table using tsvector
   if (sourceTypes.includes('memory')) {
+    const memParams: unknown[] = [queryText];
+    let memParamIdx = 2;
+
     const memConditions: string[] = [
-      "event_type IN ('memory_created', 'memory_updated')",
+      'deleted_at IS NULL',
+      `tsv @@ plainto_tsquery('english', $1)`,
     ];
-    const memParams: unknown[] = [];
-    let memParamIdx = 1;
 
     if (workspaceId) {
       memConditions.push(`workspace_id = $${memParamIdx}`);
@@ -137,38 +139,36 @@ async function keywordSearch(
       memParamIdx++;
     }
 
-    // Use ILIKE for memory text search (memory entries live in wal_events payload)
-    memConditions.push(`payload::text ILIKE $${memParamIdx}`);
-    memParams.push(`%${queryText}%`);
-
     const memRows = await query<{
-      spec_id: string;
-      payload: string;
+      source_id: string;
+      title: string;
+      snippet: string;
+      rank: number;
     }>(
-      `SELECT spec_id, payload FROM wal_events
-       WHERE ${memConditions.join(' AND ')}
-       ORDER BY ts DESC
-       LIMIT ${KEYWORD_CANDIDATE_LIMIT}`,
+      `SELECT
+        id::text AS source_id,
+        category AS title,
+        ts_headline('english', content, plainto_tsquery('english', $1),
+          'StartSel=<mark>, StopSel=</mark>, MaxWords=35, MinWords=15'
+        ) AS snippet,
+        ts_rank_cd(tsv, plainto_tsquery('english', $1)) AS rank
+      FROM memories
+      WHERE ${memConditions.join(' AND ')}
+      ORDER BY rank DESC
+      LIMIT ${KEYWORD_CANDIDATE_LIMIT}`,
       memParams,
     );
 
     for (const row of memRows) {
-      try {
-        const payload = JSON.parse(row.payload || '{}');
-        const text = payload.text || payload.content || payload.rule || '';
-        const title = payload.title || payload.category || row.spec_id || 'Memory Entry';
-        const snippet = generateMemorySnippet(text, queryText);
-        hits.push({
-          sourceType: 'memory',
-          sourceId: row.spec_id || `memory-${Date.now()}`,
-          title,
-          snippet,
-          rank: 0.5, // Fixed rank for ILIKE matches
-          highlights: [],
-        });
-      } catch {
-        // Skip malformed payload
-      }
+      const highlights = extractHighlights(row.snippet);
+      hits.push({
+        sourceType: 'memory',
+        sourceId: row.source_id,
+        title: row.title || 'Memory Entry',
+        snippet: row.snippet,
+        rank: row.rank,
+        highlights,
+      });
     }
   }
 
