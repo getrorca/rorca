@@ -19,11 +19,11 @@ import {
   BookOpen,
   Layers,
   ChevronRight,
+  ChevronDown,
   AlertTriangle,
   Upload,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
-import { renderMarkdown } from '../lib/renderMarkdown';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
 
@@ -470,6 +470,7 @@ function SkillsTab({ activeSpecId }: { activeSpecId?: string }) {
                     installError={false}
                     onInstall={() => {}}
                     onRemove={() => removeSkill(skill.name)}
+                    workspaceId={workspaceId}
                   />
                 ))}
               </div>
@@ -768,6 +769,7 @@ function SkillsShSubTab({
                   installError={installState[result.name] === 'error'}
                   onInstall={() => installSkill(result.name)}
                   onRemove={() => {}}
+                  workspaceId={workspaceId}
                 />
               ))}
             </div>
@@ -845,6 +847,7 @@ function SkillsShSubTab({
                       installError={installState[name] === 'error'}
                       onInstall={() => installSkill(name)}
                       onRemove={() => {}}
+                      workspaceId={workspaceId}
                     />
                   );
                 })}
@@ -1033,44 +1036,19 @@ function GitHubSubTab({
             {browseResults.skills.map(skill => {
               const installed = skill.installed || isInstalled(skill.name) || installState[skill.name] === 'done';
               return (
-                <div
+                <SkillRegistryCard
                   key={skill.path}
-                  className={`flex items-start gap-3 p-3 rounded-lg border transition-colors ${
-                    installed ? 'border-green-500/25 bg-green-500/5' : 'border-border bg-panel'
-                  }`}
-                >
-                  <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
-                  <div className="min-w-0 flex-1">
-                    <span className="text-sm font-medium text-[var(--text)]">{skill.name}</span>
-                    {skill.description && <p className="text-xs text-muted mt-0.5 line-clamp-2">{skill.description}</p>}
-                    <p className="text-[10px] text-muted/50 font-mono mt-0.5">{skill.path}</p>
-                  </div>
-                  <div className="shrink-0">
-                    {installed ? (
-                      <span className="flex items-center gap-1 px-2 py-1 text-xs text-green-400">
-                        <Check size={12} /> Installed
-                      </span>
-                    ) : installState[skill.name] === 'installing' ? (
-                      <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
-                        <Loader2 size={12} className="animate-spin" /> Installing…
-                      </div>
-                    ) : installState[skill.name] === 'error' ? (
-                      <button
-                        onClick={() => installFromGitHub(skill)}
-                        className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:bg-red-500/10 rounded transition-colors"
-                      >
-                        <AlertTriangle size={12} /> Retry
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => installFromGitHub(skill)}
-                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-accent hover:bg-accent-hover rounded transition-colors"
-                      >
-                        <Download size={12} /> Install
-                      </button>
-                    )}
-                  </div>
-                </div>
+                  name={skill.name}
+                  description={skill.description ? `${skill.description}\n${skill.path}` : skill.path}
+                  author=""
+                  badge={null}
+                  installed={installed}
+                  installing={installState[skill.name] === 'installing'}
+                  installError={installState[skill.name] === 'error'}
+                  onInstall={() => installFromGitHub(skill)}
+                  onRemove={() => {}}
+                  workspaceId={workspaceId}
+                />
               );
             })}
           </div>
@@ -1286,7 +1264,7 @@ interface SkillContentCache {
 function SkillRegistryCard({
   name, description, author, badge,
   installed, installing, installError,
-  onInstall, onRemove,
+  onInstall, onRemove, workspaceId,
 }: {
   name: string;
   description: string;
@@ -1297,6 +1275,7 @@ function SkillRegistryCard({
   installError: boolean;
   onInstall: () => void;
   onRemove: () => void;
+  workspaceId?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [contentCache, setContentCache] = useState<SkillContentCache | null>(null);
@@ -1311,7 +1290,7 @@ function SkillRegistryCard({
       setContentError(null);
       const fetcher = installed
         ? apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
-            `/api/skills/${encodeURIComponent(name)}/content`
+            `/api/skills/${encodeURIComponent(name)}/content${workspaceId ? '?workspaceId=' + workspaceId : ''}`
           )
         : apiFetch<{ content: string; wordCount: number; estimatedTokens: number }>(
             `/api/skills/preview?query=${encodeURIComponent(name)}`
@@ -1329,7 +1308,7 @@ function SkillRegistryCard({
     }`}>
       <div className="flex items-start gap-3 p-3 cursor-pointer" onClick={handleToggle}>
         <div className="mt-0.5 shrink-0 text-muted">
-          <ChevronRight size={14} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </div>
         <Wrench size={14} className={`mt-0.5 shrink-0 ${installed ? 'text-green-400' : 'text-accent/70'}`} />
         <div className="min-w-0 flex-1">
@@ -1399,10 +1378,7 @@ function SkillRegistryCard({
               <p className="text-[11px] text-muted mb-1.5">
                 {contentCache.wordCount.toLocaleString()} words · ~{contentCache.estimatedTokens.toLocaleString()} tokens
               </p>
-              <div
-                className="prose prose-invert prose-sm max-h-64 overflow-y-auto rounded bg-bg p-3"
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(contentCache.content) }}
-              />
+              <pre className="text-[10px] text-muted whitespace-pre-wrap break-words max-h-48 overflow-y-auto font-mono bg-panel/50 p-2 rounded mt-1">{contentCache.content}</pre>
             </div>
           ) : null}
         </div>
