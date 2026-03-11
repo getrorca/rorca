@@ -335,22 +335,46 @@ let vaultKeyCache: Map<string, boolean> | null = null;
 let vaultKeyCacheTs = 0;
 const VAULT_CACHE_TTL = 60_000;
 
+async function refreshVaultKeyCache(): Promise<Map<string, boolean>> {
+  const cache = new Map<string, boolean>();
+  try {
+    const rows = await query<{ provider: string }>(
+      `SELECT DISTINCT provider FROM api_key_vault`
+    );
+    for (const r of rows) cache.set(r.provider, true);
+  } catch {
+    // Table may not exist — treat as empty
+  }
+  vaultKeyCache = cache;
+  vaultKeyCacheTs = Date.now();
+  return cache;
+}
+
 async function hasVaultKey(provider: string): Promise<boolean> {
   const now = Date.now();
   if (!vaultKeyCache || now - vaultKeyCacheTs > VAULT_CACHE_TTL) {
-    vaultKeyCache = new Map();
-    vaultKeyCacheTs = now;
-    try {
-      const rows = await query<{ provider: string }>(
-        `SELECT DISTINCT provider FROM api_key_vault`
-      );
-      for (const r of rows) vaultKeyCache.set(r.provider, true);
-    } catch {
-      // Table may not exist — treat as empty
-    }
+    await refreshVaultKeyCache();
   }
-  return vaultKeyCache.get(provider) ?? false;
+  return vaultKeyCache!.get(provider) ?? false;
 }
+
+/**
+ * Invalidate the vault key cache immediately. Call this when vault keys
+ * are added or removed so that auto-detection picks up changes without
+ * waiting for the 60s TTL to expire.
+ */
+export function invalidateProviderCache(): void {
+  vaultKeyCache = null;
+  vaultKeyCacheTs = 0;
+  // Also clear the cached async provider so next getProviderAsync() re-resolves
+  cachedAsyncProvider = null;
+  cachedAsyncProviderTs = 0;
+}
+
+// Cached result from getProviderAsync() so getProvider() can return vault-aware results synchronously
+let cachedAsyncProvider: EmbeddingProvider | null = null;
+let cachedAsyncProviderTs = 0;
+let cachedAsyncProviderSource: 'config' | 'env' | 'vault' | 'local' = 'local';
 
 export function getProvider(): EmbeddingProvider {
   const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
@@ -372,20 +396,40 @@ export function getProvider(): EmbeddingProvider {
       if (providerName !== 'auto') {
         logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
       }
-      // Auto-detect: env vars first (sync), then vault check will happen at embed() time via resolveApiKey
-      // Order: openai → openrouter → voyage → google → local
+      // Auto-detect: env vars first (sync)
+      // Order: openai → openrouter → voyage → google → vault cache → local
       if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
       if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
       if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
       if (process.env.GOOGLE_API_KEY) return new GoogleEmbeddingProvider();
+
+      // Use cached vault-resolved provider if available and fresh
+      const now = Date.now();
+      if (cachedAsyncProvider && now - cachedAsyncProviderTs < VAULT_CACHE_TTL) {
+        return cachedAsyncProvider;
+      }
+
       return new LocalEmbeddingProvider();
     }
   }
 }
 
+/** Returns the source of the currently active provider resolution. */
+export function getProviderSource(): 'config' | 'env' | 'vault' | 'local' {
+  const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
+  if (providerName !== 'auto') return 'config';
+  if (process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY ||
+      process.env.VOYAGE_API_KEY || process.env.GOOGLE_API_KEY) return 'env';
+  if (cachedAsyncProvider && Date.now() - cachedAsyncProviderTs < VAULT_CACHE_TTL) {
+    return cachedAsyncProviderSource;
+  }
+  return 'local';
+}
+
 /**
  * Async auto-detect that also checks the vault. Call this at startup or
  * when you need vault-aware provider resolution.
+ * Populates the sync cache so subsequent getProvider() calls benefit.
  */
 export async function getProviderAsync(): Promise<EmbeddingProvider> {
   const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
@@ -400,16 +444,32 @@ export async function getProviderAsync(): Promise<EmbeddingProvider> {
 
   // Check vault: openai → openrouter → voyage → google
   if (await hasVaultKey('openai') || await hasVaultKey('openai-compat')) {
-    return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+    const p = new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+    cachedAsyncProvider = p;
+    cachedAsyncProviderTs = Date.now();
+    cachedAsyncProviderSource = 'vault';
+    return p;
   }
   if (await hasVaultKey('openrouter')) {
-    return new OpenRouterEmbeddingProvider();
+    const p = new OpenRouterEmbeddingProvider();
+    cachedAsyncProvider = p;
+    cachedAsyncProviderTs = Date.now();
+    cachedAsyncProviderSource = 'vault';
+    return p;
   }
   if (await hasVaultKey('voyage')) {
-    return new VoyageEmbeddingProvider();
+    const p = new VoyageEmbeddingProvider();
+    cachedAsyncProvider = p;
+    cachedAsyncProviderTs = Date.now();
+    cachedAsyncProviderSource = 'vault';
+    return p;
   }
   if (await hasVaultKey('google')) {
-    return new GoogleEmbeddingProvider();
+    const p = new GoogleEmbeddingProvider();
+    cachedAsyncProvider = p;
+    cachedAsyncProviderTs = Date.now();
+    cachedAsyncProviderSource = 'vault';
+    return p;
   }
 
   return new LocalEmbeddingProvider();

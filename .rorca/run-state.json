@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-engine",
   "runId": 30,
   "startedAt": "2026-03-11T04:35:11.672Z",
-  "lastUpdatedAt": "2026-03-11T04:55:05.937Z",
+  "lastUpdatedAt": "2026-03-11T05:01:05.532Z",
   "completedStories": [
     {
       "storyId": "SE-001",
@@ -75,6 +75,15 @@
       "finishedAt": "2026-03-11T04:55:05.937Z",
       "agentType": "claude",
       "elapsedMs": 195504
+    },
+    {
+      "storyId": "SE-009",
+      "title": "Auto-Detect Embedding Provider from Vault Keys with Cache Invalidation",
+      "status": "passed",
+      "startedAt": "2026-03-11T04:55:23.083Z",
+      "finishedAt": "2026-03-11T05:01:05.532Z",
+      "agentType": "claude",
+      "elapsedMs": 342449
     }
   ],
   "failedStories": [],

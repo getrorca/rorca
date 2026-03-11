@@ -7,6 +7,7 @@ import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../
 import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
 import { query, queryOne, execute } from '../db/index';
 import { getVaultKey } from './vault';
+import { getProviderAsync, getProviderSource } from '../lib/embedding-pipeline';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -939,6 +940,40 @@ router.post('/codex-auth/logout', async (_req: Request, res: Response) => {
     return;
   }
   res.json({ ok: true, message: 'ChatGPT account disconnected.' });
+});
+
+// ─── Embedding Provider Info (SE-009) ─────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/config/embedding-provider:
+ *   get:
+ *     summary: Get active embedding provider info
+ *     operationId: getEmbeddingProvider
+ *     description: Returns the currently active embedding provider, model, dimensions, and resolution source (config, env, vault, or local).
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: Current embedding provider details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 provider: { type: string }
+ *                 model: { type: string }
+ *                 dimensions: { type: integer }
+ *                 source: { type: string, enum: [config, env, vault, local] }
+ */
+router.get('/embedding-provider', async (_req: Request, res: Response) => {
+  const provider = await getProviderAsync();
+  const source = getProviderSource();
+  res.json({
+    provider: provider.name,
+    model: provider.model,
+    dimensions: provider.dimension,
+    source,
+  });
 });
 
 export default router;
