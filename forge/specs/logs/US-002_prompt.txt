@@ -1282,7 +1282,7 @@ Follow this workflow for implementation:
 ## Agent Role: Frontend
 
 
-## Skill: react-review (relevance: 8)
+## Skill: react-review (relevance: 6)
 ---
 name: react-review
 description: Review React components for best practices and performance issues
@@ -1493,13 +1493,10 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-Create a new MarketplacePanel.tsx file in src/panels/ with a basic component structure. The panel should have three top-level tabs (Skills, Templates, Convention Packs) rendered using the same tab pattern as DirectionTabbedPanel or SettingsPanel. Each tab should have a placeholder content area for now. Include TypeScript interfaces for the component props (onNavigate callback).
+In MarketplacePanel.tsx (and any shared type file if SkillResult is defined centrally), add an optional installs?: number field to the SkillResult interface. Confirm that the existing search results path does not break — installs will simply be undefined for search results. Update any TypeScript type assertions or casts that reference SkillResult to remain compatible.
 
 Acceptance Criteria:
-- MarketplacePanel.tsx exists in src/panels/ directory
-- Component exports a default function MarketplacePanel
-- Three tabs are rendered: Skills, Templates, Convention Packs
-- Tab state is managed via useState with default to 'skills' tab
-- Tab switching updates the active tab and renders corresponding placeholder content
-- Component accepts onNavigate prop typed as (panel: PanelId) => void
-- File imports react, lucide-react icons, and shared UI components as needed
+- SkillResult interface (wherever it is defined) gains installs?: number as an optional field
+- Existing search result rendering compiles without TypeScript errors after the interface change
+- npx tsc --noEmit passes for both frontend and backend after the change
+- No runtime errors occur in the existing search flow due to the new field being undefined

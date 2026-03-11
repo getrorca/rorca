@@ -51,17 +51,6 @@ export interface ModelInfo {
 export const ALL_MODELS: ModelInfo[] = [
   // ── Anthropic (claude-cli or anthropic SDK) ──
   {
-    id: 'claude-sonnet-4-5-20250929',
-    label: 'Claude Sonnet 4.5',
-    provider: 'Anthropic',
-    providerType: 'anthropic',
-    costPer1kInput: 0.003,
-    costPer1kOutput: 0.015,
-    contextWindow: 200000,
-    speedTier: 'medium',
-    costTier: 'medium',
-  },
-  {
     id: 'claude-sonnet-4-6',
     label: 'Claude Sonnet 4.6',
     provider: 'Anthropic',
@@ -277,7 +266,6 @@ export const ALL_MODELS: ModelInfo[] = [
  */
 export const SUPPORTED_MODELS = [
   'claude-sonnet-4-6',
-  'claude-sonnet-4-5-20250929',
   'claude-opus-4-6',
   'claude-haiku-4-5-20251001',
 ] as const;
@@ -292,7 +280,6 @@ export const DEFAULT_MODEL: SupportedModel = 'claude-sonnet-4-6';
  */
 export const MODEL_INFO: Record<SupportedModel, ModelInfo> = {
   'claude-sonnet-4-6': ALL_MODELS.find(m => m.id === 'claude-sonnet-4-6')!,
-  'claude-sonnet-4-5-20250929': ALL_MODELS.find(m => m.id === 'claude-sonnet-4-5-20250929')!,
   'claude-opus-4-6': ALL_MODELS.find(m => m.id === 'claude-opus-4-6')!,
   'claude-haiku-4-5-20251001': ALL_MODELS.find(m => m.id === 'claude-haiku-4-5-20251001')!,
 };

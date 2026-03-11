@@ -18,9 +18,19 @@
       "complexity": 3,
       "suggestedSkills": [
         {
+          "name": "rorca",
+          "relevance": 9,
+          "reason": "Core backend route addition to skills.ts — AGENTS.md mandates AppError pattern and @swagger JSDoc annotations on every public endpoint. This skill encodes Rorca-specific backend conventions."
+        },
+        {
           "name": "security-scan",
+          "relevance": 6,
+          "reason": "Proxying external API (skills.sh) introduces an outbound HTTP dependency — security-scan helps verify no SSRF vectors or unsafe response forwarding patterns are introduced."
+        },
+        {
+          "name": "logging-fundamentals",
           "relevance": 5,
-          "reason": "Proxying external APIs can introduce SSRF or data leakage vectors; a quick security review is warranted"
+          "reason": "New proxy route should log fetch errors and unexpected shapes from the upstream skills.sh API — logging-fundamentals ensures correct log levels and structured error context."
         }
       ],
       "suggestedPersona": "backend",
@@ -28,7 +38,8 @@
         "security",
         "spec-verifier"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-002",
@@ -44,9 +55,14 @@
       "complexity": 1,
       "suggestedSkills": [
         {
-          "name": "react-review",
-          "relevance": 6,
-          "reason": "Interface lives in a React panel file; reviewing downstream component usage ensures no implicit assumptions are broken"
+          "name": "rorca",
+          "relevance": 8,
+          "reason": "Interface extension touches a shared type used across multiple files (MarketplacePanel.tsx + any central type file). MEMORY.md notes that Story interface exists in 3 places — same pattern risk applies to SkillResult. Rorca skill encodes the type-propagation chain audit methodology."
+        },
+        {
+          "name": "spec-gap-analysis",
+          "relevance": 5,
+          "reason": "Adding optional field to an existing interface — gap-analysis helps verify all callsites remain compatible and no TypeScript strict-mode violations are introduced."
         }
       ],
       "suggestedPersona": "frontend",
@@ -54,7 +70,8 @@
         "spec-verifier",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-003",
@@ -76,12 +93,17 @@
         {
           "name": "react-review",
           "relevance": 9,
-          "reason": "Conditional fetch logic, effect dependencies, and state transitions in a React panel are the core of this story"
+          "reason": "Complex React state orchestration: conditional fetch paths (empty vs non-empty query), mount effect, query transition detection, and loading state management. react-review catches common pitfalls like stale closures, missing deps in useEffect, and effect cleanup."
+        },
+        {
+          "name": "rorca",
+          "relevance": 8,
+          "reason": "MarketplacePanel.tsx is a large panel component — AGENTS.md frontend zone rules apply (apiFetch not raw fetch, panel in src/panels/). Rorca skill encodes these conventions."
         },
         {
           "name": "vercel-react-best-practices",
-          "relevance": 7,
-          "reason": "Fetch-on-condition patterns and avoiding stale closure bugs in useEffect are covered by Vercel React guidelines"
+          "relevance": 6,
+          "reason": "Fetch-on-mount + query-driven re-fetch pattern benefits from Vercel React best practices around data fetching, preventing duplicate requests, and avoiding waterfall patterns."
         }
       ],
       "suggestedPersona": "frontend",
@@ -89,7 +111,8 @@
         "qa",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-004",
@@ -108,19 +131,19 @@
       "complexity": 2,
       "suggestedSkills": [
         {
-          "name": "tailwind-design-system",
+          "name": "react-review",
           "relevance": 8,
-          "reason": "Badge and heading styling must follow the existing Tailwind token-based design system without hardcoded colors"
+          "reason": "Rendering conditional badge elements on discovery cards — react-review ensures no unnecessary re-renders, correct conditional rendering patterns, and key prop hygiene on card grids."
         },
         {
-          "name": "react-review",
-          "relevance": 7,
-          "reason": "Conditional rendering logic inside existing card components requires careful React pattern review"
+          "name": "tailwind-design-system",
+          "relevance": 8,
+          "reason": "Badge design (pill, icon, distinct visual treatment) must follow Tailwind CSS conventions and not use hardcoded hex colors. AGENTS.md frontend zone rule: 'CSS custom properties for theming — no hardcoded hex, use tokens from src/styles/tokens.css'. tailwind-design-system encodes the correct token-based approach."
         },
         {
           "name": "accessibility-audit",
           "relevance": 5,
-          "reason": "Install count badges should have appropriate aria-label or sr-only text for screen readers"
+          "reason": "New badge UI element with icon — accessibility-audit ensures the install count is announced correctly by screen readers (aria-label on badge) and the icon is decorative-only with aria-hidden."
         }
       ],
       "suggestedPersona": "frontend",
@@ -128,7 +151,8 @@
         "ux-designer",
         "accessibility-audit"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ],
   "mermaidDiagram": "graph TD\n  US-001[\"US-001: GET /api/skills/top backend route\"]\n  US-002[\"US-002: Extend SkillResult with installs field\"]\n  US-003[\"US-003: Leaderboard fetch in MarketplacePanel\"]\n  US-004[\"US-004: Heading and install count badge rendering\"]\n  US-001 --> US-003\n  US-002 --> US-003\n  US-003 --> US-004",

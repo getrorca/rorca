@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, CheckCircle2, Loader2, Play, X, GitBranch, MinusCircle, PlusCircle, Check, Trash2, AlertTriangle } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2, Loader2, Play, X, GitBranch, MinusCircle, PlusCircle, Check, Trash2, AlertTriangle, Clock } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -105,6 +105,9 @@ export default function SpecForgePreview({
 
   // "Approve & Run" flow: approve first, then show trigger modal
   const [approveAndRunMode, setApproveAndRunMode] = useState(false);
+
+  // "Approve & Queue" flow
+  const [queuingRun, setQueuingRun] = useState(false);
 
   // Excluded stories tracking
   const [excludedIds, setExcludedIds] = useState<Set<string>>(
@@ -258,6 +261,57 @@ export default function SpecForgePreview({
       setTriggering(false);
     }
   };
+
+  const handleApproveAndQueue = useCallback(async () => {
+    if (approving || queuingRun) return;
+    // Step 1: approve (without triggering run)
+    setApproving(true);
+    try {
+      await apiFetch(`/api/specs/${specSlug}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Approval failed', 'error');
+      setApproving(false);
+      return;
+    }
+    setApproving(false);
+    // Step 2: trigger with queue: true
+    setQueuingRun(true);
+    try {
+      const res = await apiFetch<{ ok?: boolean; queued?: boolean; conflict?: boolean; runId?: number; position?: number }>(
+        '/api/pipeline/trigger',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            specPath: `forge/specs/approved/${specSlug}.json`,
+            workspaceId: triggerWorkspaceId,
+            queue: true,
+          }),
+        },
+      );
+      if (res.queued) {
+        show(`Queued at position #${res.position}`, 'success');
+        onReset?.();
+      } else {
+        // Queue was empty — ran immediately
+        show('Spec approved — running now', 'success');
+        onReset?.();
+        if (res.runId && onNavigateToRun) {
+          onNavigateToRun(res.runId);
+        } else if (onNavigate) {
+          onNavigate('runs');
+        }
+      }
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Failed to queue run', 'error');
+    } finally {
+      setQueuingRun(false);
+    }
+  }, [approving, queuingRun, specSlug, workspaceId, triggerWorkspaceId, show, onReset, onNavigateToRun, onNavigate]);
 
   const handleNameBlur = () => {
     setEditingName(false);
@@ -549,6 +603,29 @@ export default function SpecForgePreview({
             <span className="flex items-center gap-1.5">
               <Check size={14} />
               Approve
+            </span>
+          )}
+        </button>
+
+        {/* Approve & Queue — secondary */}
+        <button
+          onClick={handleApproveAndQueue}
+          disabled={approving || triggering || queuingRun || rejecting}
+          className={`px-4 py-2.5 rounded-lg text-sm font-medium border transition-colors ${
+            approving || triggering || queuingRun || rejecting
+              ? 'border-border/50 text-muted/40 cursor-not-allowed'
+              : 'border-border text-text hover:bg-surface-200 cursor-pointer'
+          }`}
+        >
+          {queuingRun ? (
+            <span className="flex items-center gap-1.5">
+              <Loader2 size={14} className="animate-spin" />
+              Queueing...
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5">
+              <Clock size={14} />
+              Approve &amp; Queue
             </span>
           )}
         </button>

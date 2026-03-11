@@ -1279,10 +1279,8 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
 
-
-## Skill: react-review (relevance: 8)
+## Skill: react-review (relevance: 7)
 ---
 name: react-review
 description: Review React components for best practices and performance issues
@@ -1493,13 +1491,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-004):
-In SpecsPanel.tsx, change the ViewMode type from 'board' | 'list' | 'marketplace' to just 'board' | 'list'. Remove all references to the 'marketplace' view mode from the SpecsPanel component including the tab button in the header, the viewMode state management for marketplace, and the conditional rendering of MarketplaceView. Extract the MarketplaceView component code (currently embedded in SpecsPanel.tsx) into a standalone file at src/components/MarketplaceView.tsx for reuse. Update SpecsPanel header to show only 'Board | List' toggle buttons.
+When the leaderboard data is displayed in the discovery grid, render a section heading 'Top Skills' above the card grid. On each skill card, when the SkillResult has installs present and > 0, render a badge showing the install count formatted with Intl.NumberFormat in 'compact' notation (e.g. 12400 → '12.4K installs'). The badge should be visually distinct (e.g. a small pill with a download or trending icon) but not disrupt the existing card layout. Cards without an installs value render unchanged.
 
 Acceptance Criteria:
-- ViewMode type in SpecsPanel.tsx is 'board' | 'list' only (no marketplace)
-- SpecsPanel header displays only two toggle buttons: Board and List
-- All marketplace-related state and rendering logic removed from SpecsPanel
-- MarketplaceView component extracted to src/components/MarketplaceView.tsx as a standalone component
-- MarketplaceView.tsx exports a default component with necessary props typed
-- SpecsPanel no longer imports or renders MarketplaceView
-- Navigating to /specs shows only Board/List tabs, no Marketplace option
+- A 'Top Skills' heading is rendered above the leaderboard card grid when the leaderboard view is active; no heading is shown during normal search results
+- Each card with installs > 0 displays a formatted install count badge using Intl.NumberFormat with notation: 'compact' and maximumFractionDigits: 1 (e.g. '12.4K installs')
+- Cards where installs is undefined or 0 do not render the badge — no empty or '0 installs' badge appears
+- The badge renders inline within the existing card layout without overflowing or breaking card min-width constraints
+- The heading and badges are absent when the user is viewing search results (searchQuery non-empty)
