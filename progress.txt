@@ -3,9 +3,9 @@
 Spec: rorca-semantic-wiring
 Run ID: 28
 Started: 2026-03-10T22:49:18.582Z
-Last Updated: 2026-03-11T00:24:56.265Z
+Last Updated: 2026-03-11T00:29:56.583Z
 
-## Completed Stories (10)
+## Completed Stories (11)
 - SW-001: Populate Embeddings on Spec Approval + Run Completion — DONE (claude, 342s)
 - SW-002: Auto-Index Specs in tsvector for Keyword Search — DONE (claude, 215s)
 - SW-003: Wire retrieveContext() into Spec Generation Prompt — DONE (claude, 265s)
@@ -16,3 +16,4 @@ Last Updated: 2026-03-11T00:24:56.265Z
 - SW-008: Populate Convention Graph Edges from .rorca/config.json Scopes — DONE (claude, 1244s)
 - SW-009: Add Graph Stats to Health Dashboard — DONE (claude, 272s)
 - SW-010: Log Retrieval Stats in spec_generation_logs — DONE (claude, 2232s)
+- SW-011: Add Embedding Dimension Flexibility for Local vs API Providers — DONE (claude, 278s)
