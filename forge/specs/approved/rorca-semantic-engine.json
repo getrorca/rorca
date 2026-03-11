@@ -24,7 +24,24 @@
       ],
       "dependsOn": [],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "logging-fundamentals",
+          "relevance": 8,
+          "reason": "Story requires emitting WAL events and broadcasting via SSE hub — proper structured logging patterns ensure observability for the new memory_created events. MEMORY.md notes backend requires restart after changes; logging helps diagnose event emission issues."
+        },
+        {
+          "name": "database-optimization",
+          "relevance": 7,
+          "reason": "Story changes INSERT statements to use RETURNING id, which requires understanding PostgreSQL query patterns. MEMORY.md explicitly notes pg is async — always await DB calls, and $1/$2 numbered placeholders — critical for the new queryOne calls."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 5,
+          "reason": "Story assumes broadcastAll is already imported (line 14) — MEMORY.md warns about interface assumptions causing file-not-found errors. Verifying the import exists before proceeding prevents duplicate import bugs."
+        }
+      ]
     },
     {
       "id": "SE-002",
@@ -41,7 +58,24 @@
       ],
       "dependsOn": [],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "database-optimization",
+          "relevance": 9,
+          "reason": "Story queries the memories table, filters by workspaceId, checks for existing embeddings, and enqueues with sourceType. MEMORY.md notes pg is async with numbered placeholders — this story involves multiple DB query patterns that must follow PostgreSQL conventions."
+        },
+        {
+          "name": "logging-fundamentals",
+          "relevance": 7,
+          "reason": "Story requires logging count of memories queued vs skipped. MEMORY.md notes structured logging and context propagation are critical for observability — the backfill operation needs clear progress logging."
+        },
+        {
+          "name": "data-validation",
+          "relevance": 5,
+          "reason": "Story must filter rows that already have a non-null embedding column (embedded at insert time). Proper validation logic prevents double-embedding and collision between filesystem MEMORY.md IDs and DB row IDs."
+        }
+      ]
     },
     {
       "id": "SE-003",
@@ -58,7 +92,24 @@
       ],
       "dependsOn": [],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "database-optimization",
+          "relevance": 9,
+          "reason": "Story replaces ILIKE full scan on wal_events with tsvector index query on memories table — a significant query optimization. MEMORY.md notes pg async patterns and numbered placeholders are critical. The tsvector query with ts_rank_cd requires understanding PostgreSQL full-text search."
+        },
+        {
+          "name": "spec-gap-analysis",
+          "relevance": 6,
+          "reason": "Story fixes two functions reading from wrong sources (wal_events instead of memories table). Systematic comparison of current implementation vs intended behavior matches the spec-gap-analysis skill's purpose."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 5,
+          "reason": "Story assumes the memories table has a tsv tsvector column — verifying this schema assumption before writing queries prevents runtime errors. MEMORY.md pattern: verify interfaces before use."
+        }
+      ]
     },
     {
       "id": "SE-004",
@@ -77,7 +128,29 @@
       ],
       "dependsOn": [],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "logging-fundamentals",
+          "relevance": 10,
+          "reason": "Story is entirely about adding diagnostic logging — the fix requires adding logger.info at isGraphAvailable(), cypherQuery(), cypherMutate(), graph-populator.ts handlers. MEMORY.md notes backend requires restart to see log output — structured logging is the primary debugging mechanism here."
+        },
+        {
+          "name": "observability-logging",
+          "relevance": 8,
+          "reason": "Story adds observability to the knowledge graph pipeline (WAL event receipt, session setup, Cypher execution). This maps directly to distributed system observability — knowing whether events are received and dispatched is an observability concern."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 6,
+          "reason": "Story identifies that isGraphAvailable() may cache a negative result permanently (startup race condition). MEMORY.md warns about assumption patterns causing silent failures — challenging the cache-forever assumption is the core of this fix."
+        },
+        {
+          "name": "database-optimization",
+          "relevance": 5,
+          "reason": "AGE requires LOAD 'age' and SET search_path per connection checkout from pg Pool. Understanding PostgreSQL connection pool behavior is essential — MEMORY.md notes pg pool patterns are critical."
+        }
+      ]
     },
     {
       "id": "SE-005",
@@ -97,7 +170,29 @@
         "SE-004"
       ],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "database-optimization",
+          "relevance": 8,
+          "reason": "Story creates backfill endpoints that scan specs, runs, and memories tables with batch processing. MEMORY.md notes pg async patterns and numbered placeholders are critical. The endpoint queries multiple tables and must handle large result sets efficiently."
+        },
+        {
+          "name": "logging-fundamentals",
+          "relevance": 7,
+          "reason": "Story requires logging progress every 10 items during backfill. MEMORY.md notes structured logging is essential for long-running operations — progress logging is explicitly specified."
+        },
+        {
+          "name": "api-documentation",
+          "relevance": 6,
+          "reason": "Story explicitly requires @swagger JSDoc annotations for both new endpoints (POST /api/admin/graph-backfill and GET /api/admin/graph-stats). AGENTS.md mandates JSDoc @swagger annotations on every public endpoint."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 5,
+          "reason": "Story adds addMemoryLink() call — verifying this function exists in knowledge-graph.ts before referencing it prevents ghost function errors. MEMORY.md warns about interface assumptions."
+        }
+      ]
     },
     {
       "id": "SE-006",
@@ -112,7 +207,24 @@
       ],
       "dependsOn": [],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "database-optimization",
+          "relevance": 8,
+          "reason": "Story adds a COUNT query on the memories table. MEMORY.md explicitly warns workspace IDs are strings, NOT numbers — do NOT cast with Number(). This is a direct MEMORY.md-cited gotcha for this exact story type."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 6,
+          "reason": "Story explicitly notes workspace IDs are strings (e.g., 'rorcha'), NOT numbers — MEMORY.md warns about type assumptions. Verifying the workspace ID type before constructing the query prevents silent wrong-result bugs."
+        },
+        {
+          "name": "data-validation",
+          "relevance": 5,
+          "reason": "Story takes the max of DB count and filesystem count — validating that both sources return valid numbers (not null/undefined) before Math.max prevents NaN in the UI."
+        }
+      ]
     },
     {
       "id": "SE-007",
@@ -131,7 +243,24 @@
       ],
       "dependsOn": [],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "security-scan",
+          "relevance": 8,
+          "reason": "Story adds an API key resolution chain with AES-256-GCM vault decryption and auth header construction. AGENTS.md backend rules require security review on credential handling. The ivHex:authTagHex:ciphertextHex format and Authorization header construction are security-sensitive."
+        },
+        {
+          "name": "database-optimization",
+          "relevance": 6,
+          "reason": "Story extends resolveApiKey() to query api_key_vault for provider='openrouter'. MEMORY.md notes pg async patterns — the vault query must use await and numbered placeholders."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 5,
+          "reason": "Story adds auto-detection that checks vault keys — assuming the vault table always has valid data could cause silent fallback failures. Verifying the query returns expected provider strings prevents mapping errors."
+        }
+      ]
     },
     {
       "id": "SE-008",
@@ -151,7 +280,29 @@
       ],
       "dependsOn": [],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "security-scan",
+          "relevance": 7,
+          "reason": "Story adds Google API key handling via query parameter (?key=...) rather than Authorization header — a different auth pattern that needs security review. AGENTS.md requires security review on credential handling."
+        },
+        {
+          "name": "database-optimization",
+          "relevance": 7,
+          "reason": "Story adds a DB migration (050_embedding_dimensions.sql) and modifies hybridSearch() to filter by dimensions. MEMORY.md notes pg async patterns and migration patterns — the ALTER TABLE and WHERE dimensions filter require proper PostgreSQL knowledge."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 6,
+          "reason": "Story identifies a CRITICAL DIMENSION MISMATCH (768 vs 1536) and argues against zero-padding as harmful. This is an adversarial assumption challenge — the pragmatic zero-padding solution is explicitly noted as a temporary workaround requiring same-provider comparison logic."
+        },
+        {
+          "name": "data-validation",
+          "relevance": 5,
+          "reason": "Story requires validating that cosine similarity only operates on embeddings with matching dimensions — the WHERE dimensions = $X filter is a data validation concern for semantic correctness."
+        }
+      ]
     },
     {
       "id": "SE-009",
@@ -171,7 +322,24 @@
         "SE-008"
       ],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "database-optimization",
+          "relevance": 8,
+          "reason": "Story adds vault DB queries to auto-detection with 60s caching. MEMORY.md notes pg async patterns — the vault query SELECT provider FROM api_key_vault must use await and numbered placeholders. Cache invalidation on vault updates is also a DB-interaction concern."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 6,
+          "reason": "Story adds 60s cache that could serve stale results after a user removes an API key. Challenging the assumption that cached provider is still valid (key might be deleted) is important for correctness."
+        },
+        {
+          "name": "api-documentation",
+          "relevance": 5,
+          "reason": "Story adds GET /api/config/embedding-provider endpoint. AGENTS.md mandates @swagger JSDoc annotations on every public endpoint."
+        }
+      ]
     },
     {
       "id": "SE-010",
@@ -193,7 +361,29 @@
         "SE-009"
       ],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "react-review",
+          "relevance": 9,
+          "reason": "Story creates a new UI section in ProviderSettingsTab.tsx with radio buttons, status line, vector counts, confirmation dialog, and expandable stats section. MEMORY.md notes React 18 conventions are critical — this is a moderately complex React component."
+        },
+        {
+          "name": "vercel-react-best-practices",
+          "relevance": 7,
+          "reason": "Story adds multiple fetch calls on mount (GET /api/config/embedding-provider and GET /api/admin/embed-all/status) and conditional rendering based on provider status. React performance patterns for data fetching and conditional rendering are relevant."
+        },
+        {
+          "name": "tailwind-design-system",
+          "relevance": 7,
+          "reason": "Story requires matching the existing card/section styling of ProviderSettingsTab.tsx using Tailwind. AGENTS.md frontend rules: CSS custom properties for theming, no hardcoded hex. The warning badge and status dot styling must follow existing design tokens."
+        },
+        {
+          "name": "accessibility-audit",
+          "relevance": 5,
+          "reason": "Story adds radio buttons and interactive controls. AGENTS.md notes accessibility requirements — radio groups need proper aria-labelledby and keyboard nav for WCAG compliance."
+        }
+      ]
     },
     {
       "id": "SE-011",
@@ -212,7 +402,24 @@
         "SE-005"
       ],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "database-optimization",
+          "relevance": 7,
+          "reason": "Story adds a Cypher query via cypherQuery() to retrieve skill effectiveness data. The query result feeds into LLM prompt construction — proper async handling and error fallback for graph queries is essential per MEMORY.md async patterns."
+        },
+        {
+          "name": "logging-fundamentals",
+          "relevance": 6,
+          "reason": "Story requires logging at debug level when graph data is available vs unavailable. MEMORY.md notes structured logging is the primary observability mechanism — distinguishing graph-available vs graph-empty states helps diagnose the SE-004 fix."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 5,
+          "reason": "Story assumes graph effectiveness data flows automatically once SE-004/005 fix the graph — but the Cypher query format and result mapping need verification. Checking that USED_IN edges actually exist after backfill prevents silent empty-data scenarios."
+        }
+      ]
     },
     {
       "id": "SE-012",
@@ -230,7 +437,29 @@
       ],
       "dependsOn": [],
       "passes": true,
-      "notes": "Completed by Rorca engine"
+      "notes": "Completed by Rorca engine",
+      "suggestedSkills": [
+        {
+          "name": "database-optimization",
+          "relevance": 6,
+          "reason": "Story threads workspacePath through getProvider() to load .rorca/config.json, which may involve checking all call sites. MEMORY.md notes pg async patterns — any DB reads for config must use await. The PUT endpoint must also call invalidateConfigCache() and invalidateProviderCache()."
+        },
+        {
+          "name": "data-validation",
+          "relevance": 7,
+          "reason": "Story adds Zod schema validation (EmbeddingSchema) for the embedding config section. The PUT endpoint must validate the provider enum value and return 400 if invalid — proper schema validation prevents invalid config from reaching the embedding pipeline."
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 5,
+          "reason": "Story threads workspacePath through getProvider() — assuming all call sites can provide workspacePath without breaking changes is a critical assumption. Identifying call sites that don't have workspace context requires systematic analysis."
+        },
+        {
+          "name": "api-documentation",
+          "relevance": 5,
+          "reason": "Story adds GET and PUT /api/config/embedding-provider endpoints. AGENTS.md mandates @swagger JSDoc annotations on every public endpoint."
+        }
+      ]
     }
   ]
 }

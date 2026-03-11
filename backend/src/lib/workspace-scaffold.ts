@@ -383,7 +383,7 @@ export async function generateScaffoldPreview(
   // 4. Build prompt and call LLM
   const prompt = buildScaffoldPrompt(workspacePath, report, sourceFiles, dirStructure, skillFiles);
   const result = await chatComplete([{ role: 'user', content: prompt }], {
-    model: 'claude-sonnet-4-5-20250929',
+    model: 'claude-sonnet-4-6',
   });
 
   // 5. Parse LLM output
