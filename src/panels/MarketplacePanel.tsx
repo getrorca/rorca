@@ -15,6 +15,7 @@ interface SkillResult {
   description: string;
   author: string;
   url: string;
+  installs?: number;
 }
 
 interface SkillSearchResponse {
