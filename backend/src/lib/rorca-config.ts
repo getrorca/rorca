@@ -133,6 +133,11 @@ const PersonasConfigSchema = z.object({
   disabled: z.array(z.string()).default([]),
 });
 
+const EmbeddingSchema = z.object({
+  provider: z.enum(['auto', 'openai', 'openai-large', 'openrouter', 'voyage', 'google', 'local']).default('auto'),
+  model: z.string().optional(),
+});
+
 export const RorcaConfigSchema = z.object({
   $schema: z.string().optional(),
   version: z.number().int().min(1).default(1),
@@ -142,6 +147,7 @@ export const RorcaConfigSchema = z.object({
   orchestration: OrchestrationSchema.default(() => OrchestrationSchema.parse({})),
   execution: ExecutionSchema.default(() => ExecutionSchema.parse({})),
   personas: PersonasConfigSchema.default(() => PersonasConfigSchema.parse({})),
+  embedding: EmbeddingSchema.default(() => EmbeddingSchema.parse({})),
 });
 
 // ─── Exported Types ──────────────────────────────────────────────────────────
@@ -159,6 +165,7 @@ export type ExecutionConfig = z.infer<typeof ExecutionSchema>;
 export type GatesConfig = z.infer<typeof GatesSchema>;
 export type AdversarialReviewConfig = z.infer<typeof AdversarialReviewSchema>;
 export type PersonasConfig = z.infer<typeof PersonasConfigSchema>;
+export type EmbeddingConfig = z.infer<typeof EmbeddingSchema>;
 
 // ─── Config Loading ──────────────────────────────────────────────────────────
 

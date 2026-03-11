@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-engine",
   "runId": 30,
   "startedAt": "2026-03-11T04:35:11.672Z",
-  "lastUpdatedAt": "2026-03-11T05:14:31.414Z",
+  "lastUpdatedAt": "2026-03-11T05:18:45.206Z",
   "completedStories": [
     {
       "storyId": "SE-001",
@@ -102,6 +102,15 @@
       "finishedAt": "2026-03-11T05:14:31.413Z",
       "agentType": "claude",
       "elapsedMs": 286479
+    },
+    {
+      "storyId": "SE-012",
+      "title": "Embedding Provider Config in .rorca/config.json",
+      "status": "passed",
+      "startedAt": "2026-03-11T05:14:48.600Z",
+      "finishedAt": "2026-03-11T05:18:45.205Z",
+      "agentType": "claude",
+      "elapsedMs": 236605
     }
   ],
   "failedStories": [],
