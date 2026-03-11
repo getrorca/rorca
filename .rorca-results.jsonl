@@ -1,1 +1,0 @@
-{"type":"wal","storyId":"SE-002","status":"story_token_update","runId":30,"retries":3,"ts":"2026-03-11T04:39:02.237Z","payload":{"event_type":"story_token_update","workspace_id":"rorcha","story_id":"SE-002","spec_id":null,"payload":{"run_id":30,"story_id":"SE-002","input_tokens":13,"output_tokens":2735,"cumulative_input":13,"cumulative_output":2735,"turn":1}}}
