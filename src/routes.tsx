@@ -27,6 +27,7 @@ export const PANEL_ROUTES: Record<PanelId, string> = {
   analytics: '/analytics',
   direction: '/direction',
   settings: '/settings',
+  marketplace: '/marketplace',
   'run-view': '/runs',
   'spec-review': '/specs',
 };
@@ -40,6 +41,7 @@ export function pathToPanelId(pathname: string): PanelId {
   if (pathname === '/specs') return 'specs';
   if (pathname === '/runs') return 'runs';
   if (pathname === '/direction') return 'direction';
+  if (pathname === '/marketplace') return 'marketplace';
   return 'specs';
 }
 

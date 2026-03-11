@@ -154,6 +154,7 @@ const PANEL_LABELS: Record<PanelId, string> = {
   analytics: 'Analytics',
   direction: 'Direction',
   settings: 'Settings',
+  marketplace: 'Marketplace',
   'run-view': 'Run View',
   'spec-review': 'Spec Review',
 };
@@ -197,7 +198,8 @@ function AppRoutes() {
         <Route path="forge" element={<Navigate to="/specs" replace />} />
         <Route path="queue" element={<Navigate to="/specs" replace />} />
         <Route path="archive" element={<Navigate to="/specs" replace />} />
-        <Route path="marketplace" element={<Navigate to="/specs" replace />} />
+        {/* Marketplace — extracted from Specs panel */}
+        <Route path="marketplace" element={<PanelRoute panel="marketplace" />} />
         <Route path="pipeline" element={<Navigate to="/runs" replace />} />
         <Route path="worktrees" element={<Navigate to="/runs" replace />} />
         <Route path="compare" element={<Navigate to="/runs" replace />} />
@@ -239,6 +241,8 @@ function getPanelSkeleton(panel: PanelId) {
       return <AnalyticsSkeleton />;
     case 'settings':
       return <SettingsFormSkeleton />;
+    case 'marketplace':
+      return <ListSkeleton />;
     default: return <BoardSkeleton />;
   }
 }
@@ -296,6 +300,9 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
 
     case 'settings':
       return <SettingsPanel />;
+
+    case 'marketplace':
+      return <SpecsPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} initialView="marketplace" />;
 
     default: return null;
   }
