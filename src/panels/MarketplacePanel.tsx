@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
-import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle, Trash2, Check } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
+import { useWorkspace } from '../contexts/WorkspaceContext';
 
 /* ─── Types ───────────────────────────────────────────────────── */
 
@@ -20,6 +21,15 @@ interface SkillSearchResponse {
   results: SkillResult[];
   query: string;
   total: number;
+}
+
+interface InstalledSkill {
+  name: string;
+  description: string;
+  source: string;
+  filePath: string;
+  category?: string;
+  tags?: string[];
 }
 
 interface MarketplacePanelProps {
@@ -66,6 +76,7 @@ function inferCategory(name: string, description: string): string {
 /* ─── Component ───────────────────────────────────────────────── */
 
 export default function MarketplacePanel({ onNavigate: _onNavigate }: MarketplacePanelProps) {
+  const { workspaceId } = useWorkspace();
   const [activeTab, setActiveTab] = useState<MarketplaceTab>('skills');
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSource, setActiveSource] = useState<SourceFilter>('skills.sh');
@@ -76,7 +87,38 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   const [skills, setSkills] = useState<SkillResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [installingSkill, setInstallingSkill] = useState<string | null>(null);
+
+  // Installed skills state (shared between left + right panels)
+  const [installedSkills, setInstalledSkills] = useState<InstalledSkill[]>([]);
+  const [loadingInstalled, setLoadingInstalled] = useState(true);
+  const [installState, setInstallState] = useState<Record<string, 'installing' | 'done' | 'error'>>({});
+  const [removingSkill, setRemovingSkill] = useState<string | null>(null);
+
+  // Installed names set for O(1) lookup
+  const installedNames = useMemo(
+    () => new Set(installedSkills.map(s => s.name.toLowerCase())),
+    [installedSkills],
+  );
+
+  const isInstalled = useCallback(
+    (name: string) => installedNames.has(name.toLowerCase()) || installState[name] === 'done',
+    [installedNames, installState],
+  );
+
+  // Fetch installed skills
+  const fetchInstalled = useCallback(async () => {
+    setLoadingInstalled(true);
+    try {
+      const params = workspaceId ? `?workspaceId=${workspaceId}` : '';
+      const data = await apiFetch<{ skills: InstalledSkill[] }>(`/api/skills${params}`);
+      setInstalledSkills(data.skills);
+    } catch { /* silent */ } finally {
+      setLoadingInstalled(false);
+    }
+  }, [workspaceId]);
+
+  // Fetch installed on mount
+  useEffect(() => { fetchInstalled(); }, [fetchInstalled]);
 
   // Fetch skills from skills.sh on mount when tab is skills + source is skills.sh
   const fetchSkills = useCallback(async () => {
@@ -111,18 +153,39 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
 
   // Install handler
   const handleInstall = async (skillName: string) => {
-    setInstallingSkill(skillName);
+    setInstallState(s => ({ ...s, [skillName]: 'installing' }));
     try {
       await apiFetch('/api/skills/install-from-sh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: skillName }),
       });
+      setInstallState(s => ({ ...s, [skillName]: 'done' }));
       toast.show(`Installed "${skillName}" successfully`, 'success');
+      await fetchInstalled();
     } catch (err: any) {
+      setInstallState(s => ({ ...s, [skillName]: 'error' }));
       toast.show(err.message || `Failed to install "${skillName}"`, 'error');
+    }
+  };
+
+  // Remove handler
+  const handleRemove = async (skillName: string) => {
+    setRemovingSkill(skillName);
+    try {
+      await apiFetch(`/api/skills/${encodeURIComponent(skillName)}`, { method: 'DELETE' });
+      toast.show(`Skill "${skillName}" removed`, 'success');
+      // Clear install state so the Install button re-enables in left panel
+      setInstallState(s => {
+        const next = { ...s };
+        delete next[skillName];
+        return next;
+      });
+      await fetchInstalled();
+    } catch (err: any) {
+      toast.show(err.message || `Failed to remove "${skillName}"`, 'error');
     } finally {
-      setInstallingSkill(null);
+      setRemovingSkill(null);
     }
   };
 
@@ -256,11 +319,16 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                 {filteredSkills.map((skill) => {
                   const category = inferCategory(skill.name, skill.description);
                   const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS.general;
-                  const isInstalling = installingSkill === skill.name;
+                  const installed = isInstalled(skill.name);
+                  const installing = installState[skill.name] === 'installing';
                   return (
                     <div
                       key={skill.name}
-                      className="flex flex-col gap-2 p-3 bg-surface border border-border rounded-lg hover:border-text/20 transition-colors"
+                      className={`flex flex-col gap-2 p-3 bg-surface border rounded-lg transition-colors ${
+                        installed
+                          ? 'border-green-500/25 bg-green-500/5'
+                          : 'border-border hover:border-text/20'
+                      }`}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <h3 className="text-sm font-medium text-text truncate" title={skill.name}>
@@ -275,26 +343,33 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
                           ? skill.description.slice(0, 100) + (skill.description.length > 100 ? '...' : '')
                           : 'No description available'}
                       </p>
-                      <button
-                        onClick={() => handleInstall(skill.name)}
-                        disabled={isInstalling}
-                        className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                                   bg-accent/10 text-accent border border-accent/20 rounded-md
-                                   hover:bg-accent/20 transition-colors
-                                   disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {isInstalling ? (
-                          <>
-                            <Loader2 size={12} className="animate-spin" />
-                            Installing...
-                          </>
-                        ) : (
-                          <>
-                            <Download size={12} />
-                            Install
-                          </>
-                        )}
-                      </button>
+                      {installed ? (
+                        <span className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-green-400">
+                          <Check size={12} />
+                          Installed
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => handleInstall(skill.name)}
+                          disabled={installing}
+                          className="mt-auto flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                     bg-accent/10 text-accent border border-accent/20 rounded-md
+                                     hover:bg-accent/20 transition-colors
+                                     disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {installing ? (
+                            <>
+                              <Loader2 size={12} className="animate-spin" />
+                              Installing...
+                            </>
+                          ) : (
+                            <>
+                              <Download size={12} />
+                              Install
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
                   );
                 })}
@@ -304,11 +379,74 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
 
           {/* Right panel — Your Library */}
           <div className="w-[40%] overflow-y-auto p-4">
-            <h2 className="text-sm font-semibold text-text mb-1">Your Library (0)</h2>
-            <p className="text-xs text-muted mb-4">Installed skills will appear here</p>
-            <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
-              No skills installed yet
-            </div>
+            <h2 className="text-sm font-semibold text-text mb-1">
+              Your Library{' '}
+              {!loadingInstalled && (
+                <span className="text-xs font-normal text-muted">({installedSkills.length})</span>
+              )}
+              {loadingInstalled && <Loader2 size={12} className="inline animate-spin text-muted ml-1" />}
+            </h2>
+            <p className="text-xs text-muted mb-4">
+              {installedSkills.length > 0
+                ? 'Manage your installed skills'
+                : 'Installed skills will appear here'}
+            </p>
+
+            {/* Loading state */}
+            {loadingInstalled && installedSkills.length === 0 && (
+              <div className="flex items-center justify-center h-32 text-muted text-xs">
+                <Loader2 size={16} className="animate-spin mr-2" />
+                Loading installed skills...
+              </div>
+            )}
+
+            {/* Empty state */}
+            {!loadingInstalled && installedSkills.length === 0 && (
+              <div className="flex items-center justify-center h-32 text-muted text-xs border border-dashed border-border rounded-md">
+                No skills installed yet
+              </div>
+            )}
+
+            {/* Installed skills list */}
+            {installedSkills.length > 0 && (
+              <div className="space-y-2">
+                {installedSkills.map((skill) => {
+                  const category = inferCategory(skill.name, skill.description);
+                  const colorClass = CATEGORY_COLORS[category] || CATEGORY_COLORS.general;
+                  const isRemoving = removingSkill === skill.name;
+                  return (
+                    <div
+                      key={skill.name}
+                      className="flex items-start gap-2 p-2.5 rounded-lg border border-border bg-panel hover:border-border/80 transition-colors group"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-sm font-semibold text-text">{skill.name}</span>
+                          <span className={`px-1 py-0.5 text-[10px] font-mono rounded capitalize ${colorClass}`}>
+                            {category}
+                          </span>
+                        </div>
+                        {skill.description && (
+                          <p className="text-xs text-muted mt-0.5 line-clamp-2">{skill.description}</p>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleRemove(skill.name)}
+                        disabled={isRemoving}
+                        className="shrink-0 mt-0.5 text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all disabled:opacity-50"
+                        title="Remove skill"
+                      >
+                        {isRemoving ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={12} />
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       </div>
