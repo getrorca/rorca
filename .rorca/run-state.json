@@ -2,7 +2,7 @@
   "specId": "skills-top-24-hours",
   "runId": 37,
   "startedAt": "2026-03-11T19:12:03.913Z",
-  "lastUpdatedAt": "2026-03-11T19:20:30.321Z",
+  "lastUpdatedAt": "2026-03-11T19:23:13.012Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-11T19:20:30.321Z",
       "agentType": "claude",
       "elapsedMs": 164390
+    },
+    {
+      "storyId": "US-004",
+      "title": "Render Top Skills leaderboard heading and install count badge on discovery cards",
+      "status": "passed",
+      "startedAt": "2026-03-11T19:20:52.419Z",
+      "finishedAt": "2026-03-11T19:23:13.012Z",
+      "agentType": "claude",
+      "elapsedMs": 140593
     }
   ],
   "failedStories": [],
