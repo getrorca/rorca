@@ -15,6 +15,7 @@ interface MemoryItem {
   confidence: string;
   relatedFiles: string[];
   pinned: boolean;
+  sourceType: string | null;
   createdAt: string;
 }
 
@@ -42,6 +43,24 @@ const CONFIDENCE_COLORS: Record<string, string> = {
   high: 'text-emerald-500',
   medium: 'text-amber-500',
   low: 'text-red-400',
+};
+
+const SOURCE_TYPES = ['synthesis', 'manual', 'mcp', 'auto-extracted', 'import'] as const;
+
+const SOURCE_TYPE_LABELS: Record<string, string> = {
+  synthesis: 'Synthesis',
+  manual: 'Manual',
+  mcp: 'MCP',
+  'auto-extracted': 'Auto-extracted',
+  import: 'Import',
+};
+
+const SOURCE_TYPE_COLORS: Record<string, string> = {
+  synthesis: 'bg-cyan-500/10 text-cyan-500',
+  manual: 'bg-violet-500/10 text-violet-500',
+  mcp: 'bg-indigo-500/10 text-indigo-500',
+  'auto-extracted': 'bg-teal-500/10 text-teal-500',
+  import: 'bg-pink-500/10 text-pink-500',
 };
 
 // ─── Undo Toast ─────────────────────────────────────────────────────────────
@@ -177,6 +196,11 @@ function EntryRow({ item, isSelected, isEditing, onToggleSelect, onEdit, onSaveE
             {item.sourceRunId && (
               <span className="text-[9px] text-muted font-mono">run #{item.sourceRunId}</span>
             )}
+            {item.sourceType && (
+              <span className={`px-1 py-0.5 text-[9px] font-medium rounded ${SOURCE_TYPE_COLORS[item.sourceType] ?? 'bg-gray-500/10 text-gray-500'}`}>
+                {SOURCE_TYPE_LABELS[item.sourceType] ?? item.sourceType}
+              </span>
+            )}
             <span className="text-[10px] text-muted tabular-nums ml-auto shrink-0">{dateStr}</span>
           </div>
 
@@ -285,8 +309,18 @@ export default function MemoryPanel() {
   const [filterCategory, setFilterCategory] = useState<string>('');
   const [filterConfidence, setFilterConfidence] = useState<string>('');
   const [filterRunId, setFilterRunId] = useState<string>('');
+  const [filterSourceType, setFilterSourceType] = useState<string>('');
   const [searchText, setSearchText] = useState('');
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // Reset filters when workspace changes
+  useEffect(() => {
+    setFilterCategory('');
+    setFilterConfidence('');
+    setFilterRunId('');
+    setFilterSourceType('');
+    setSearchText('');
+  }, [workspaceId]);
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -402,15 +436,27 @@ export default function MemoryPanel() {
     });
   };
 
-  // Category counts from current items
-  const categoryCounts = items.reduce<Record<string, number>>((acc, e) => {
+  // Client-side source type filtering
+  const filteredItems = filterSourceType
+    ? items.filter(i => (i.sourceType ?? 'manual') === filterSourceType)
+    : items;
+
+  // Category counts from filtered items
+  const categoryCounts = filteredItems.reduce<Record<string, number>>((acc, e) => {
     acc[e.category] = (acc[e.category] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  // Source type counts from current items (pre-source-filter, so pills always show all counts)
+  const sourceTypeCounts = items.reduce<Record<string, number>>((acc, e) => {
+    const st = e.sourceType ?? 'manual';
+    acc[st] = (acc[st] ?? 0) + 1;
     return acc;
   }, {});
 
   // Count items from the current run (most recent run)
   const currentRunCount = recentRunIds.length > 0
-    ? items.filter(i => i.sourceRunId === recentRunIds[0]).length
+    ? filteredItems.filter(i => i.sourceRunId === recentRunIds[0]).length
     : 0;
 
   if (!loaded) {
@@ -497,6 +543,18 @@ export default function MemoryPanel() {
                 ))}
               </select>
             )}
+
+            <select
+              value={filterSourceType}
+              onChange={(e) => setFilterSourceType(e.target.value)}
+              aria-label="Filter by source type"
+              className="text-xs px-2 py-1.5 rounded border border-border bg-bg text-[var(--text)] focus:border-accent focus:ring-1 focus:ring-accent"
+            >
+              <option value="">All sources</option>
+              {SOURCE_TYPES.map(st => (
+                <option key={st} value={st}>{SOURCE_TYPE_LABELS[st]}</option>
+              ))}
+            </select>
           </div>
 
           {/* Category pills */}
@@ -521,9 +579,31 @@ export default function MemoryPanel() {
             })}
           </div>
 
+          {/* Source type pills */}
+          <div className="flex flex-wrap gap-1.5 items-center">
+            {SOURCE_TYPES.map(st => {
+              const count = sourceTypeCounts[st] ?? 0;
+              if (count === 0) return null;
+              const isActive = filterSourceType === st;
+              return (
+                <button
+                  key={st}
+                  onClick={() => setFilterSourceType(isActive ? '' : st)}
+                  className={`px-2 py-0.5 text-[10px] font-medium rounded-full transition-colors ${
+                    isActive
+                      ? SOURCE_TYPE_COLORS[st]
+                      : 'bg-surface-200 text-muted hover:bg-surface-300'
+                  }`}
+                >
+                  {SOURCE_TYPE_LABELS[st]} ({count})
+                </button>
+              );
+            })}
+          </div>
+
           {/* Entries list */}
           <ul role="list" aria-label="Memory entries" className="space-y-2">
-            {items.length === 0 ? (
+            {filteredItems.length === 0 ? (
               <li role="listitem" className="py-12 text-center">
                 {totalCount === 0 ? (
                   <div className="flex flex-col items-center max-w-[400px] mx-auto">
@@ -543,7 +623,7 @@ export default function MemoryPanel() {
                 )}
               </li>
             ) : (
-              items.map((item) => (
+              filteredItems.map((item) => (
                 <li key={item.id} role="listitem">
                   <EntryRow
                     item={item}
