@@ -1,116 +1,17 @@
 {
-  "specId": "rorca-semantic-engine",
-  "runId": 30,
-  "startedAt": "2026-03-11T04:35:11.672Z",
-  "lastUpdatedAt": "2026-03-11T05:18:45.206Z",
+  "specId": "Extract the Marketplace view from the Specs panel so that the Specs header becomes just \"Board | List\", and add Marketplace as a new 6th sidebar nav item with its own route (/marketplace) and dedicated MarketplacePanel.tsx. The panel has three top-level tabs — Skills, Templates, Convention Packs — and below those tabs a full-width search bar with source-selector pills (skills.sh, GitHub Repos, Custom) that filter the left side of a horizontal split view. The left panel shows discovery results from the selected source with skill name, category badge, description preview, and an \"Install\" button per card; the right panel shows \"Your Library (N)\" — the user's installed skills with category filter pills (All, Frontend, Backend, Security, DevOps, etc.), remove buttons, and an export action. Installing a skill from the left moves it to the right; removing from the right does the inverse. The search bar auto-focuses on panel mount, searches are client-side filtered when browsing installed skills and API-driven (GET /api/skills/search?q=...&source=skills.sh) when browsing external sources. This layout solves the current problem where the skills.sh search and GitHub install UI are buried at the bottom of a 38-card scrollable list and invisible without scrolling.\n",
+  "runId": 32,
+  "startedAt": "2026-03-11T07:32:32.328Z",
+  "lastUpdatedAt": "2026-03-11T07:35:34.648Z",
   "completedStories": [
     {
-      "storyId": "SE-001",
-      "title": "Emit memory_created WAL Events from Auto-Memory",
+      "storyId": "US-001",
+      "title": "Add 'marketplace' to PanelId type and update SIDEBAR_ITEMS with Package icon",
       "status": "passed",
-      "startedAt": "2026-03-11T04:35:14.314Z",
-      "finishedAt": "2026-03-11T04:37:23.336Z",
+      "startedAt": "2026-03-11T07:32:34.980Z",
+      "finishedAt": "2026-03-11T07:35:34.648Z",
       "agentType": "claude",
-      "elapsedMs": 129022
-    },
-    {
-      "storyId": "SE-002",
-      "title": "Backfill Embeddings from memories Table",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:37:40.778Z",
-      "finishedAt": "2026-03-11T04:39:02.965Z",
-      "agentType": "claude",
-      "elapsedMs": 82187
-    },
-    {
-      "storyId": "SE-003",
-      "title": "Fix context-cache and search.ts to Read from memories Table",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:39:20.291Z",
-      "finishedAt": "2026-03-11T04:41:01.776Z",
-      "agentType": "claude",
-      "elapsedMs": 101485
-    },
-    {
-      "storyId": "SE-004",
-      "title": "Fix AGE Cypher Execution — Root Cause: isGraphAvailable and Session Setup",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:41:20.694Z",
-      "finishedAt": "2026-03-11T04:44:04.080Z",
-      "agentType": "claude",
-      "elapsedMs": 163386
-    },
-    {
-      "storyId": "SE-005",
-      "title": "Add Graph Backfill and Stats Endpoints (Including Memories)",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:44:22.601Z",
-      "finishedAt": "2026-03-11T04:47:04.655Z",
-      "agentType": "claude",
-      "elapsedMs": 162054
-    },
-    {
-      "storyId": "SE-006",
-      "title": "Show Actual Memory Count in Context Injection Summary",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:47:22.571Z",
-      "finishedAt": "2026-03-11T04:48:51.479Z",
-      "agentType": "claude",
-      "elapsedMs": 88908
-    },
-    {
-      "storyId": "SE-007",
-      "title": "Add OpenRouter Embedding Provider",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:49:08.500Z",
-      "finishedAt": "2026-03-11T04:51:33.319Z",
-      "agentType": "claude",
-      "elapsedMs": 144819
-    },
-    {
-      "storyId": "SE-008",
-      "title": "Add Google Embedding Provider with Dimension-Safe Strategy",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:51:50.433Z",
-      "finishedAt": "2026-03-11T04:55:05.937Z",
-      "agentType": "claude",
-      "elapsedMs": 195504
-    },
-    {
-      "storyId": "SE-009",
-      "title": "Auto-Detect Embedding Provider from Vault Keys with Cache Invalidation",
-      "status": "passed",
-      "startedAt": "2026-03-11T04:55:23.083Z",
-      "finishedAt": "2026-03-11T05:01:05.532Z",
-      "agentType": "claude",
-      "elapsedMs": 342449
-    },
-    {
-      "storyId": "SE-010",
-      "title": "Settings UI — Semantic Engine Section in Providers Tab",
-      "status": "passed",
-      "startedAt": "2026-03-11T05:01:23.707Z",
-      "finishedAt": "2026-03-11T05:09:26.624Z",
-      "agentType": "claude",
-      "elapsedMs": 482917
-    },
-    {
-      "storyId": "SE-011",
-      "title": "Graph-Powered Skill Recommendation via Match-Skills Endpoint",
-      "status": "passed",
-      "startedAt": "2026-03-11T05:09:44.934Z",
-      "finishedAt": "2026-03-11T05:14:31.413Z",
-      "agentType": "claude",
-      "elapsedMs": 286479
-    },
-    {
-      "storyId": "SE-012",
-      "title": "Embedding Provider Config in .rorca/config.json",
-      "status": "passed",
-      "startedAt": "2026-03-11T05:14:48.600Z",
-      "finishedAt": "2026-03-11T05:18:45.205Z",
-      "agentType": "claude",
-      "elapsedMs": 236605
+      "elapsedMs": 179668
     }
   ],
   "failedStories": [],

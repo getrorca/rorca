@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Settings,
   Search, PlayCircle, Compass,
-  BarChart3,
+  BarChart3, Package,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -15,7 +15,7 @@ import { useBreakpoint } from '../hooks/useBreakpoint';
 
 // ULT-022: 5 primary panels + run-view + spec-review slide-over
 export type PanelId =
-  | 'specs' | 'runs' | 'analytics' | 'direction' | 'settings'
+  | 'specs' | 'runs' | 'analytics' | 'direction' | 'settings' | 'marketplace'
   | 'run-view'
   | 'spec-review';
 
@@ -34,11 +34,12 @@ interface NavSection {
 // ─── ULT-006: 5-item sidebar ────────────────────────────────────────────────
 
 const SIDEBAR_ITEMS: NavItem[] = [
-  { id: 'specs',     label: 'Specs',     icon: Layers },
-  { id: 'runs',      label: 'Runs',      icon: PlayCircle },
-  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
-  { id: 'direction', label: 'Direction', icon: Compass },
-  { id: 'settings',  label: 'Settings',  icon: Settings },
+  { id: 'specs',       label: 'Specs',       icon: Layers },
+  { id: 'runs',        label: 'Runs',        icon: PlayCircle },
+  { id: 'marketplace', label: 'Marketplace', icon: Package },
+  { id: 'analytics',   label: 'Analytics',   icon: BarChart3 },
+  { id: 'direction',   label: 'Direction',   icon: Compass },
+  { id: 'settings',    label: 'Settings',    icon: Settings },
 ];
 
 // ULT-022: Flat list matching the 5 sidebar items — CommandPalette uses NAV_ITEMS.
@@ -69,6 +70,13 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Direction',
     items: [
       { id: 'direction', label: 'Direction', icon: Compass },
+    ],
+  },
+  {
+    id: 'marketplace',
+    label: 'Marketplace',
+    items: [
+      { id: 'marketplace', label: 'Marketplace', icon: Package },
     ],
   },
   {
