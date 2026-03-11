@@ -1,20 +1,9 @@
 # Run State Summary
 
-Spec: rorca-semantic-wiring
-Run ID: 28
-Started: 2026-03-10T22:49:18.582Z
-Last Updated: 2026-03-11T00:34:15.712Z
+Spec: rorca-semantic-gaps
+Run ID: 29
+Started: 2026-03-11T01:30:14.478Z
+Last Updated: 2026-03-11T01:33:40.260Z
 
-## Completed Stories (12)
-- SW-001: Populate Embeddings on Spec Approval + Run Completion — DONE (claude, 342s)
-- SW-002: Auto-Index Specs in tsvector for Keyword Search — DONE (claude, 215s)
-- SW-003: Wire retrieveContext() into Spec Generation Prompt — DONE (claude, 265s)
-- SW-004: Wire Graph Context into Execution Engine buildPrompt() — DONE (claude, 298s)
-- SW-005: Populate Knowledge Graph After Each Story Completion — DONE (claude, 380s)
-- SW-006: Update Context Injection Summary UI with Semantic Stats — DONE (claude, 145s)
-- SW-007: Backfill Existing Specs and Memories into Embeddings Table — DONE (claude, 130s)
-- SW-008: Populate Convention Graph Edges from .rorca/config.json Scopes — DONE (claude, 1244s)
-- SW-009: Add Graph Stats to Health Dashboard — DONE (claude, 272s)
-- SW-010: Log Retrieval Stats in spec_generation_logs — DONE (claude, 2232s)
-- SW-011: Add Embedding Dimension Flexibility for Local vs API Providers — DONE (claude, 278s)
-- SW-012: Wire retrieveContext() into Add Stories Endpoint — DONE (claude, 238s)
+## Completed Stories (1)
+- SG-001: Emit memory_created WAL Events from Auto-Memory — DONE (claude, 203s)
