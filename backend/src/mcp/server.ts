@@ -936,6 +936,93 @@ server.registerTool(
   }
 );
 
+// ─── Memory MCP Tools (MST-002) ─────────────────────────────────────────────
+
+server.registerTool(
+  'rorca_save_memory',
+  {
+    description: 'Save a structured memory entry (rule, convention, gotcha, etc.) to a workspace memory ledger. The entry is persisted to both the filesystem MEMORY.md and the database. Use this to record reusable insights discovered during implementation.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).describe('Memory category'),
+      title: z.string().describe('Short descriptive title'),
+      rule: z.string().describe('The actionable rule or insight (1-2 sentences)'),
+      context: z.string().optional().describe('Why this matters or when it applies'),
+      source: z.string().optional().describe('Source story ID (e.g. US-001)'),
+    },
+  },
+  async ({ workspaceId, category, title, rule, context, source }) => {
+    const res = await fetch(`${RORCA_API}/api/memory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workspaceId,
+        category,
+        title,
+        rule,
+        context: context ?? '',
+        source: source ?? '',
+        sourceType: 'mcp',
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to save memory (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as { entry: { category: string; title: string; rule: string }; total: number };
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Memory saved [${data.entry.category}]: ${data.entry.title}\nRule: ${data.entry.rule}\nTotal entries: ${data.total}`,
+      }],
+    };
+  }
+);
+
+server.registerTool(
+  'rorca_log_decision',
+  {
+    description: 'Log an architectural or design decision to the workspace memory ledger. A convenience wrapper around rorca_save_memory that defaults to the "Decision" category. Use this when making significant design choices that future stories should be aware of.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      title: z.string().describe('Short title for the decision'),
+      rule: z.string().describe('The decision and its rationale (1-2 sentences)'),
+      context: z.string().optional().describe('Additional context, trade-offs considered, or alternatives rejected'),
+      source: z.string().optional().describe('Source story ID (e.g. US-001)'),
+    },
+  },
+  async ({ workspaceId, title, rule, context, source }) => {
+    const res = await fetch(`${RORCA_API}/api/memory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workspaceId,
+        category: 'Decision',
+        title,
+        rule,
+        context: context ?? '',
+        source: source ?? '',
+        sourceType: 'mcp',
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Failed to log decision (${res.status}): ${err}`);
+    }
+
+    const data = await res.json() as { entry: { title: string; rule: string }; total: number };
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Decision logged: ${data.entry.title}\nRule: ${data.entry.rule}\nTotal entries: ${data.total}`,
+      }],
+    };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
