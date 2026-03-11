@@ -854,6 +854,42 @@ export async function backfillAll(workspaceId?: string, force?: boolean): Promis
           }
         }
       }
+
+      // 5. Embed memories from DB (memories table) — covers auto-synthesized entries
+      try {
+        const dbMemoryQuery = workspaceId
+          ? 'SELECT id, workspace_id, category, content, embedding FROM memories WHERE deleted_at IS NULL AND workspace_id = $1'
+          : 'SELECT id, workspace_id, category, content, embedding FROM memories WHERE deleted_at IS NULL';
+        const dbMemoryParams = workspaceId ? [ws.id] : [];
+        const dbMemories = await query<{ id: number; workspace_id: string; category: string; content: string; embedding: unknown }>(
+          dbMemoryQuery, dbMemoryParams
+        );
+
+        let dbMemQueued = 0;
+        let dbMemSkipped = 0;
+        for (const row of dbMemories) {
+          // Skip memories that already have embeddings stored in-row
+          if (row.embedding != null) {
+            dbMemSkipped++;
+            continue;
+          }
+          const sourceId = `mem-${row.id}`;
+          const memText = prepareText('memory', row.content);
+          const memHash = computeHash(memText);
+          if (await needsEmbed(row.workspace_id, 'memory', sourceId, memHash)) {
+            enqueueJob({ workspaceId: row.workspace_id, sourceType: 'memory', sourceId, text: memText });
+            dbMemQueued++;
+            queued++;
+          } else {
+            dbMemSkipped++;
+            skippedStale++;
+          }
+        }
+        logger.info('[Embeddings] DB memories: %d queued, %d skipped (already embedded or unchanged)', dbMemQueued, dbMemSkipped);
+      } catch (err) {
+        // memories table may not exist in older installations — skip gracefully
+        logger.warn({ err }, '[Embeddings] Could not query memories table — skipping DB memories');
+      }
     }
 
     logger.info({ queued, skippedStale, force: !!force }, '[Embeddings] Backfill complete: %d jobs queued, %d skipped (unchanged)', queued, skippedStale);
