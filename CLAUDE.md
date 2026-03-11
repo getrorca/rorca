@@ -314,6 +314,7 @@ Key routes (see `backend/src/server.ts` for full mount list):
 | `POST /api/skills/install` | Install skill from raw markdown content |
 | `POST /api/skills/install-from-sh` | Install from skills.sh registry → GitHub fetch → dual-save |
 | `GET /api/skills/preview` | Preview uninstalled skill from skills.sh WITHOUT installing |
+| `GET /api/skills/top` | Top skills from skills.sh ranked by install count (24h leaderboard) |
 | `GET /api/skills/suggestions` | Echolocation-inferred skill suggestions for current workspace |
 | `GET /api/skills/:name/content` | Full markdown of installed skill (SkillRegistry → DB fallback) |
 | `DELETE /api/skills/:name` | Remove installed skill |
@@ -469,10 +470,53 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
                                                 → Served over HTTP on same :3030 port
 ```
 
-**Current state**: 5 hand-written stdio MCP tools in `backend/src/mcp/server.ts`:
-`rorca_get_context` | `rorca_generate_spec` | `rorca_list_specs` | `rorca_approve_spec` | `rorca_pipeline_status`
+**Current state**: 24 hand-written stdio MCP tools in `backend/src/mcp/server.ts`.
 
-Setup (stdio, legacy): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+Setup (stdio): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+
+**Specs & Pipeline**
+| Tool | Purpose |
+|------|---------|
+| `rorca_get_context` | Get synthesized Direction Stack (L1–L5) for a workspace |
+| `rorca_generate_spec` | Generate a spec JSON from a brief |
+| `rorca_list_specs` | List all specs grouped by status (pending/approved/running) |
+| `rorca_approve_spec` | Approve a pending spec and move it to the queue |
+| `rorca_pipeline_status` | Status of active/most recent pipeline run |
+| `rorca_trigger_run` | Start a pipeline run for an approved spec (supports dry-run + worktree) |
+| `rorca_run_status` | Detailed per-story status for a specific run |
+| `rorca_list_runs` | List recent pipeline runs |
+| `rorca_retry_story` | Retry failed stories in a completed run |
+
+**Story Editing**
+| Tool | Purpose |
+|------|---------|
+| `rorca_edit_story` | Update a story's title/description/acceptance criteria |
+| `rorca_add_stories` | Generate and append new LLM-generated stories to a spec |
+| `rorca_delete_story` | Remove a story (reindexes remaining, snapshots before delete) |
+| `rorca_search_stories` | Full-text search across all stories in all specs |
+
+**Direction Stack**
+| Tool | Purpose |
+|------|---------|
+| `rorca_get_direction` | Get all direction layers (L1–L3) with raw content |
+| `rorca_update_direction` | Update a specific direction layer (L1/L2/L3) |
+| `rorca_synthesize_direction` | Preview the merged direction string exactly as sent to the LLM |
+
+**Workspaces**
+| Tool | Purpose |
+|------|---------|
+| `rorca_list_workspaces` | List all registered workspaces |
+| `rorca_create_workspace` | Register a new workspace by filesystem path |
+| `rorca_workspace_stats` | Spec/run counts, pass rate, last activity |
+| `rorca_team_members` | Get team members for a workspace |
+| `rorca_usage_stats` | Token usage + cost summary over a date range |
+
+**Memory**
+| Tool | Purpose |
+|------|---------|
+| `rorca_save_memory` | Save a memory entry (Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha) |
+| `rorca_log_decision` | Shortcut for saving architectural decisions with structured reasoning |
+| `rorca_get_memories` | Retrieve memories, optionally filtered by category |
 
 **Target state**: MCP Streamable HTTP transport at `http://localhost:3030/mcp`, auto-generated from OpenAPI spec. All API routes become MCP tools automatically. Stdio server kept as offline fallback.
 

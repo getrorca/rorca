@@ -289,49 +289,39 @@ router.post('/install', async (req: Request, res: Response) => {
 router.get('/top', async (req: Request, res: Response) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
 
-  let response: globalThis.Response;
-  try {
-    response = await fetch('https://skills.sh/api/skills/top', {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(5_000),
-    });
-  } catch (err: any) {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-      res.status(504).json({ error: 'Upstream skills.sh request timed out' });
-      return;
+  // skills.sh requires q >= 2 chars — fan out across common seeds and merge
+  const SEED_QUERIES = ['js', 'py', 'ts', 'go', 'css', 'api', 'db', 'git', 'react', 'test'];
+  const perSeed = Math.ceil(limit / 3);
+
+  const fetchSeed = async (q: string): Promise<any[]> => {
+    try {
+      const url = `https://skills.sh/api/search?q=${encodeURIComponent(q)}&limit=${perSeed}`;
+      const r = await fetch(url, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!r.ok) return [];
+      const d = await r.json().catch(() => null);
+      if (!d) return [];
+      return Array.isArray(d?.skills) ? d.skills
+        : Array.isArray(d?.results) ? d.results
+        : Array.isArray(d) ? d : [];
+    } catch {
+      return [];
     }
-    logger.error('[Skills] top fetch error:', err);
-    res.status(502).json({ error: 'skills.sh API unavailable', detail: err.message || 'Network error' });
-    return;
+  };
+
+  const batches = await Promise.all(SEED_QUERIES.slice(0, 5).map(fetchSeed));
+  const seen = new Set<string>();
+  const merged: any[] = [];
+  for (const batch of batches) {
+    for (const r of batch) {
+      const key = (r.name || r.skillId || r.slug || '').toLowerCase();
+      if (key && !seen.has(key)) { seen.add(key); merged.push(r); }
+    }
   }
 
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    logger.error(`[Skills] top upstream error: ${response.status} ${detail}`);
-    res.status(502).json({ error: `skills.sh API returned ${response.status}`, detail });
-    return;
-  }
-
-  let data: any;
-  try {
-    data = await response.json();
-  } catch {
-    res.status(502).json({ error: 'skills.sh returned invalid JSON' });
-    return;
-  }
-
-  // Normalize — API may return { skills: [...] } or { results: [...] } or bare array
-  const raw: any[] = Array.isArray(data?.skills)
-    ? data.skills
-    : Array.isArray(data?.results)
-      ? data.results
-      : Array.isArray(data)
-        ? data
-        : [];
-
-  // Map to SkillResult shape + installs, sort by installs desc
-  const results = raw
+  const results = merged
     .map((r: any) => ({
       name: r.name || r.skillId || r.slug || '',
       description: r.description || r.summary || '',
@@ -339,6 +329,7 @@ router.get('/top', async (req: Request, res: Response) => {
       url: r.url || r.homepage || '',
       installs: typeof r.installs === 'number' ? r.installs : 0,
     }))
+    .filter(r => r.name)
     .sort((a, b) => b.installs - a.installs)
     .slice(0, limit);
 

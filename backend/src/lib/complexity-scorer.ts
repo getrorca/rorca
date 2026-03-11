@@ -84,7 +84,7 @@ const DEFAULT_THRESHOLDS: ScoringThresholds = {
 const DEFAULT_CASCADES: Record<string, CascadeModelIds> = {
   anthropic: {
     haiku: 'claude-haiku-4-5-20251001',
-    sonnet: 'claude-sonnet-4-5-20250929',
+    sonnet: 'claude-sonnet-4-6',
     opus: 'claude-opus-4-6',
   },
   openai: {
@@ -99,7 +99,7 @@ const DEFAULT_CASCADES: Record<string, CascadeModelIds> = {
   },
   openrouter: {
     haiku: 'anthropic/claude-haiku-4-5-20251001',
-    sonnet: 'anthropic/claude-sonnet-4-5-20250929',
+    sonnet: 'anthropic/claude-sonnet-4-6',
     opus: 'anthropic/claude-opus-4-6',
   },
   ollama: {
@@ -116,10 +116,10 @@ const DEFAULT_CASCADES: Record<string, CascadeModelIds> = {
 
 const DEFAULT_TASK_CASCADES: Record<TaskType, string> = {
   echolocation: 'claude-haiku-4-5-20251001',
-  planning: 'claude-sonnet-4-5-20250929',
-  coding: 'claude-sonnet-4-5-20250929',
+  planning: 'claude-sonnet-4-6',
+  coding: 'claude-sonnet-4-6',
   lintFix: 'claude-haiku-4-5-20251001',
-  testing: 'claude-sonnet-4-5-20250929',
+  testing: 'claude-sonnet-4-6',
   documentation: 'claude-haiku-4-5-20251001',
 };
 

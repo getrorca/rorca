@@ -1,44 +1,18 @@
 {
-  "specId": "skills-top-24-hours",
-  "runId": 37,
-  "startedAt": "2026-03-11T19:12:03.913Z",
-  "lastUpdatedAt": "2026-03-11T19:23:13.012Z",
+  "specId": "rorca-forge-approve-and-queue",
+  "runId": 39,
+  "startedAt": "2026-03-11T22:00:06.703Z",
+  "lastUpdatedAt": "2026-03-11T22:01:33.989Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Add GET /api/skills/top backend route proxying skills.sh leaderboard",
+      "storyId": "FAQ-001",
+      "title": "Add Approve & Queue button to SpecForgePreview so specs can be queued when a run is already active",
       "status": "passed",
-      "startedAt": "2026-03-11T19:12:13.292Z",
-      "finishedAt": "2026-03-11T19:16:05.631Z",
+      "startedAt": "2026-03-11T22:00:14.864Z",
+      "finishedAt": "2026-03-11T22:01:33.989Z",
       "agentType": "claude",
-      "elapsedMs": 232339
-    },
-    {
-      "storyId": "US-002",
-      "title": "Extend SkillResult interface with optional installs field",
-      "status": "passed",
-      "startedAt": "2026-03-11T19:16:30.791Z",
-      "finishedAt": "2026-03-11T19:17:24.051Z",
-      "agentType": "claude",
-      "elapsedMs": 53260
-    },
-    {
-      "storyId": "US-003",
-      "title": "Replace empty search state with Top Skills leaderboard fetch in MarketplacePanel",
-      "status": "passed",
-      "startedAt": "2026-03-11T19:17:45.931Z",
-      "finishedAt": "2026-03-11T19:20:30.321Z",
-      "agentType": "claude",
-      "elapsedMs": 164390
-    },
-    {
-      "storyId": "US-004",
-      "title": "Render Top Skills leaderboard heading and install count badge on discovery cards",
-      "status": "passed",
-      "startedAt": "2026-03-11T19:20:52.419Z",
-      "finishedAt": "2026-03-11T19:23:13.012Z",
-      "agentType": "claude",
-      "elapsedMs": 140593
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 79125
     }
   ],
   "failedStories": [],
