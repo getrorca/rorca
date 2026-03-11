@@ -31,6 +31,12 @@ import { embedText, prepareText } from '../lib/embedding-pipeline';
 
 const router = Router();
 
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+/** Valid source_type values for the memories table (must match CHECK constraint in migration 059) */
+const VALID_SOURCE_TYPES = ['synthesis', 'manual', 'mcp', 'auto-extracted', 'import'] as const;
+type SourceType = typeof VALID_SOURCE_TYPES[number];
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 async function getWorkspacePath(workspaceId: string): Promise<string | null> {
@@ -45,6 +51,19 @@ function getLedgerPath(workspaceId: string): string | undefined {
 
 function todayDate(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** Infer source_type from the file-based source field text */
+function inferSourceType(source: string): SourceType {
+  if (!source) return 'manual';
+  if (source === 'mcp-cli' || source === 'mcp') return 'mcp';
+  // Story ID patterns: US-001, CIE-003, MST-002, SL-017, etc.
+  if (/^[A-Z]{1,6}-\d{1,4}$/.test(source.trim())) return 'synthesis';
+  // Source contains "story-" prefix (e.g. "story-US-001")
+  if (/story-/i.test(source)) return 'synthesis';
+  // Source contains "run-" prefix (e.g. "run-42")
+  if (/^run-\d+$/i.test(source.trim())) return 'synthesis';
+  return 'manual';
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -90,6 +109,7 @@ function todayDate(): string {
  *                       rule: { type: string }
  *                       context: { type: string }
  *                       source: { type: string }
+ *                       sourceType: { type: string, enum: [synthesis, manual, mcp, auto-extracted, import], description: "Inferred from source field" }
  *                 total: { type: integer }
  *                 categories: { type: array, items: { type: string } }
  *       400: { description: "Missing workspaceId" }
@@ -113,8 +133,13 @@ router.get('/', async (req: Request, res: Response) => {
     entries = readMemory(wsPath, ledgerPath);
   }
 
+  const itemsWithSourceType = entries.map(e => ({
+    ...e,
+    sourceType: inferSourceType(e.source),
+  }));
+
   res.json({
-    items: entries,
+    items: itemsWithSourceType,
     total: entries.length,
     categories: MEMORY_CATEGORIES,
   });
@@ -164,7 +189,7 @@ router.get('/', async (req: Request, res: Response) => {
  *       404: { description: "Workspace not found" }
  */
 router.post('/', async (req: Request, res: Response) => {
-  const { workspaceId, category, title, rule, context, source } = req.body;
+  const { workspaceId, category, title, rule, context, source, sourceType } = req.body;
 
   if (!workspaceId || !category || !title || !rule) {
     return res.status(400).json({ error: 'workspaceId, category, title, and rule are required' });
@@ -172,6 +197,12 @@ router.post('/', async (req: Request, res: Response) => {
 
   if (!MEMORY_CATEGORIES.includes(category as MemoryCategory)) {
     return res.status(400).json({ error: `Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}` });
+  }
+
+  // Validate sourceType if provided; default to 'manual'
+  const resolvedSourceType: SourceType = sourceType ?? 'manual';
+  if (!VALID_SOURCE_TYPES.includes(resolvedSourceType as SourceType)) {
+    return res.status(400).json({ error: `Invalid sourceType. Must be one of: ${VALID_SOURCE_TYPES.join(', ')}` });
   }
 
   const wsPath = await getWorkspacePath(workspaceId);
@@ -186,7 +217,33 @@ router.post('/', async (req: Request, res: Response) => {
     source: source ?? '',
   };
 
+  // Write to filesystem MEMORY.md
   const entries = append(wsPath, entry, getLedgerPath(workspaceId));
+
+  // Also insert into memories DB table with source_type
+  let embedding: number[] | null = null;
+  try {
+    const prepared = prepareText('memory', `${title}: ${rule}`);
+    embedding = await embedText(prepared);
+  } catch {
+    // Embedding failure is non-fatal
+  }
+  const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+
+  await queryOne<{ id: string }>(
+    `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+     VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+    [
+      workspaceId,
+      category,
+      `${title}: ${rule}`,
+      'high',
+      '[]',
+      embeddingStr,
+      resolvedSourceType,
+    ],
+  );
+
   invalidateMemory(workspaceId); // PG-013
   res.status(201).json({ entry, total: entries.length });
 });
@@ -342,6 +399,7 @@ router.delete('/entry', async (req: Request, res: Response) => {
  *                       rule: { type: string }
  *                       context: { type: string }
  *                       source: { type: string }
+ *                       sourceType: { type: string, enum: [synthesis], description: "Always synthesis for proposals" }
  *                       status: { type: string }
  *                       proposedAt: { type: string }
  *                       resolvedAt: { type: string, nullable: true }
@@ -396,6 +454,7 @@ router.get('/proposals', async (req: Request, res: Response) => {
     rule: r.rule,
     context: r.context,
     source: r.source_story,
+    sourceType: 'synthesis' as SourceType,
     status: r.status,
     proposedAt: r.proposed_at,
     resolvedAt: r.resolved_at,
@@ -497,6 +556,22 @@ router.post('/proposals', async (req: Request, res: Response) => {
         `UPDATE memory_proposals SET status = $1, resolved_at = NOW() WHERE proposal_id = $2 AND workspace_id = $3`,
         ['approved', p.proposalId, workspaceId]
       );
+
+      // Also insert into memories DB table with source_type='synthesis' (proposals originate from synthesis)
+      let embedding: number[] | null = null;
+      try {
+        const prepared = prepareText('memory', `${entryToAppend.title}: ${entryToAppend.rule}`);
+        embedding = await embedText(prepared);
+      } catch {
+        // Embedding failure is non-fatal
+      }
+      const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+      await queryOne<{ id: string }>(
+        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+         VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+        [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis'],
+      );
+
       results.push({ proposalId: p.proposalId, action: 'approve', success: true });
     } else if (p.action === 'reject') {
       logRejected(wsPath, p.entry, p.proposalId);
@@ -517,6 +592,22 @@ router.post('/proposals', async (req: Request, res: Response) => {
         `UPDATE memory_proposals SET status = 'approved', resolved_at = NOW(), title = $1, rule = $2, context = $3, category = $4 WHERE proposal_id = $5 AND workspace_id = $6`,
         [edited.title, edited.rule, edited.context, edited.category, p.proposalId, workspaceId]
       );
+
+      // Insert into memories DB table with source_type='synthesis' (edited proposals still originate from synthesis)
+      let editEmbedding: number[] | null = null;
+      try {
+        const prepared = prepareText('memory', `${edited.title}: ${edited.rule}`);
+        editEmbedding = await embedText(prepared);
+      } catch {
+        // Embedding failure is non-fatal
+      }
+      const editEmbeddingStr = editEmbedding ? `[${editEmbedding.join(',')}]` : null;
+      await queryOne<{ id: string }>(
+        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+         VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+        [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', editEmbeddingStr, 'synthesis'],
+      );
+
       results.push({ proposalId: p.proposalId, action: 'edit', success: true });
     }
   }
@@ -1093,13 +1184,39 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  *     responses:
  *       200:
  *         description: Memory items list with counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       workspaceId: { type: string }
+ *                       category: { type: string }
+ *                       content: { type: string }
+ *                       sourceStoryId: { type: string, nullable: true }
+ *                       sourceRunId: { type: integer, nullable: true }
+ *                       confidence: { type: string, enum: [high, medium, low] }
+ *                       relatedFiles: { type: array, items: { type: string } }
+ *                       pinned: { type: boolean }
+ *                       sourceType: { type: string, enum: [synthesis, manual, mcp, auto-extracted, import] }
+ *                       createdAt: { type: string, format: date-time }
+ *                 total: { type: integer }
+ *                 pinned: { type: integer }
+ *                 recentRunIds: { type: array, items: { type: integer } }
+ *                 categories: { type: array, items: { type: string } }
+ *       400: { description: "Missing workspaceId" }
  */
 router.get('/items', async (req: Request, res: Response) => {
   const { workspaceId, category, confidence, sourceRunId, search, pinnedOnly } = req.query;
   if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
 
   let sql = `SELECT id, workspace_id, category, content, source_story_id, source_run_id,
-             confidence, related_files, pinned, created_at
+             confidence, related_files, pinned, source_type, created_at
              FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL`;
   const params: (string | number)[] = [workspaceId as string];
   let paramIdx = 2;
@@ -1145,6 +1262,7 @@ router.get('/items', async (req: Request, res: Response) => {
     confidence: string;
     related_files: string;
     pinned: boolean;
+    source_type: string;
     created_at: string;
   }>(sql, params);
 
@@ -1175,6 +1293,7 @@ router.get('/items', async (req: Request, res: Response) => {
     confidence: r.confidence,
     relatedFiles: typeof r.related_files === 'string' ? JSON.parse(r.related_files) : r.related_files,
     pinned: r.pinned,
+    sourceType: r.source_type,
     createdAt: r.created_at,
   }));
 

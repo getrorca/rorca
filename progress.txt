@@ -1,19 +1,14 @@
 # Run State Summary
 
-Spec: Extract the Marketplace view from the Specs panel so that the Specs header becomes just "Board | List", and add Marketplace as a new 6th sidebar nav item with its own route (/marketplace) and dedicated MarketplacePanel.tsx. The panel has three top-level tabs — Skills, Templates, Convention Packs — and below those tabs a full-width search bar with source-selector pills (skills.sh, GitHub Repos, Custom) that filter the left side of a horizontal split view. The left panel shows discovery results from the selected source with skill name, category badge, description preview, and an "Install" button per card; the right panel shows "Your Library (N)" — the user's installed skills with category filter pills (All, Frontend, Backend, Security, DevOps, etc.), remove buttons, and an export action. Installing a skill from the left moves it to the right; removing from the right does the inverse. The search bar auto-focuses on panel mount, searches are client-side filtered when browsing installed skills and API-driven (GET /api/skills/search?q=...&source=skills.sh) when browsing external sources. This layout solves the current problem where the skills.sh search and GitHub install UI are buried at the bottom of a 38-card scrollable list and invisible without scrolling.
+Spec: rorca-memory-source-tracking
+Run ID: 33
+Started: 2026-03-11T08:01:46.608Z
+Last Updated: 2026-03-11T08:18:12.863Z
 
-Run ID: 32
-Started: 2026-03-11T07:32:32.328Z
-Last Updated: 2026-03-11T08:01:31.095Z
-
-## Completed Stories (10)
-- US-001: Add 'marketplace' to PanelId type and update SIDEBAR_ITEMS with Package icon — DONE (claude, 180s)
-- US-002: Create MarketplacePanel.tsx with three-tab layout structure — DONE (claude, 170s)
-- US-003: Add /marketplace route to App.tsx with lazy-loaded MarketplacePanel — DONE (claude, 59s)
-- US-004: Remove 'marketplace' from SpecsPanel ViewMode type and extract MarketplaceView component — DONE (claude, 199s)
-- US-005: Build horizontal split view layout with search bar and source pills in MarketplacePanel — DONE (claude, 130s)
-- US-006: Implement discovery results left panel with skill cards and Install buttons — DONE (claude, 170s)
-- US-007: Implement Your Library right panel with installed skills and category filters — DONE (claude, 13s)
-- US-008: Add real-time sync between left and right panels on install/remove actions — DONE (claude, 265s)
-- US-009: Add Templates and Convention Packs tab implementations with placeholder UIs — DONE (claude, 188s)
-- US-010: Add Export action to Your Library panel with JSON download — DONE (claude, 158s)
+## Completed Stories (6)
+- MST-001: Add source_type column to memories table — DONE (claude, 135s)
+- MST-002: Set source_type on all memory creation paths — DONE (claude, 300s)
+- MST-003: Return source_type in all memory API responses — DONE (claude, 189s)
+- MST-004: Display source type badges on Memory tab cards — DONE (claude, 10s)
+- MST-005: Add source type filter to Memory tab — DONE (claude, 202s)
+- MST-006: Backfill source_type for existing memories — DONE (claude, 37s)
