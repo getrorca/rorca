@@ -91,7 +91,8 @@
         "No imports added. Remove any imports that become unused after this change (e.g. if `Store` or similar icons were only used in `SkillsList`)."
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }
