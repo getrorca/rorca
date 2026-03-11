@@ -158,8 +158,8 @@ export async function autoSynthesizeMemory(
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
       const memRow = await queryOne<{ id: string }>(
-        `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector) RETURNING id`,
+        `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding, source_type)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9) RETURNING id`,
         [
           workspaceId,
           entry.category,
@@ -169,6 +169,7 @@ export async function autoSynthesizeMemory(
           entry.confidence,
           JSON.stringify(entry.relatedFiles),
           embeddingStr,
+          'synthesis',
         ],
       );
 
@@ -346,8 +347,8 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
       const memRow = await queryOne<{ id: string }>(
-        `INSERT INTO memories (workspace_id, category, content, source_spec_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::vector) RETURNING id`,
+        `INSERT INTO memories (workspace_id, category, content, source_spec_id, confidence, related_files, embedding, source_type)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8) RETURNING id`,
         [
           workspaceId,
           entry.category,
@@ -356,6 +357,7 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
           entry.confidence,
           JSON.stringify(entry.relatedFiles),
           embeddingStr,
+          'synthesis',
         ],
       );
 
@@ -586,8 +588,8 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
 
       // Run memories: source_story_id is NULL, category is 'Run Synthesis'
       const memRow = await queryOne<{ id: string }>(
-        `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::vector) RETURNING id`,
+        `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding, source_type)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::vector, $8) RETURNING id`,
         [
           workspaceId,
           'Run Synthesis',
@@ -596,6 +598,7 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
           'high',
           JSON.stringify(entry.relatedFiles),
           embeddingStr,
+          'synthesis',
         ],
       );
 
