@@ -45,6 +45,7 @@ const SettingsPanel = lazy(() => import('./panels/SettingsPanel'));
 // GitHubSettingsPanel — now part of Settings > Integrations (loaded within SettingsPanel)
 const RunViewPanel = lazy(() => import('./panels/RunViewPanel'));
 const SpecReviewPanel = lazy(() => import('./panels/SpecReviewPanel'));
+const MarketplacePanel = lazy(() => import('./panels/MarketplacePanel'));
 
 // SettingsTab type — imported from SettingsPanel module
 type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
@@ -242,7 +243,7 @@ function getPanelSkeleton(panel: PanelId) {
     case 'settings':
       return <SettingsFormSkeleton />;
     case 'marketplace':
-      return <ListSkeleton />;
+      return <BoardSkeleton />;
     default: return <BoardSkeleton />;
   }
 }
@@ -302,7 +303,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
       return <SettingsPanel />;
 
     case 'marketplace':
-      return <SpecsPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} initialView="marketplace" />;
+      return <MarketplacePanel onNavigate={onNavigate} />;
 
     default: return null;
   }
