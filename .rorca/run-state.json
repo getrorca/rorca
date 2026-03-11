@@ -2,7 +2,7 @@
   "specId": "rorca-semantic-engine",
   "runId": 30,
   "startedAt": "2026-03-11T04:35:11.672Z",
-  "lastUpdatedAt": "2026-03-11T04:37:23.336Z",
+  "lastUpdatedAt": "2026-03-11T04:39:02.966Z",
   "completedStories": [
     {
       "storyId": "SE-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-11T04:37:23.336Z",
       "agentType": "claude",
       "elapsedMs": 129022
+    },
+    {
+      "storyId": "SE-002",
+      "title": "Backfill Embeddings from memories Table",
+      "status": "passed",
+      "startedAt": "2026-03-11T04:37:40.778Z",
+      "finishedAt": "2026-03-11T04:39:02.965Z",
+      "agentType": "claude",
+      "elapsedMs": 82187
     }
   ],
   "failedStories": [],
