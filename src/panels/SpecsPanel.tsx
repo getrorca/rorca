@@ -9,7 +9,7 @@ import {
   FileText, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
-  Store, Sparkles,
+  Sparkles,
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -34,12 +34,11 @@ import type { GeneratedSpec } from './SpecForgeOutput';
 import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
-import MarketplaceView from '../components/MarketplaceView';
 import ContextSummaryCard from '../components/ContextSummaryCard';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
-type ViewMode = 'board' | 'list' | 'marketplace';
+type ViewMode = 'board' | 'list';
 type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
 type StatusFilter = 'all' | SpecStatus;
 
@@ -342,7 +341,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         }
         actions={
           <div className="flex items-center gap-2">
-            {/* View mode toggle: Board | List | Marketplace */}
+            {/* View mode toggle: Board | List */}
             <div className="flex bg-panel rounded-lg border border-border p-0.5">
               <button
                 onClick={() => setViewMode('board')}
@@ -361,15 +360,6 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
               >
                 <List size={13} />
                 <span className="hidden sm:inline">List</span>
-              </button>
-              <button
-                onClick={() => setViewMode('marketplace')}
-                aria-current={viewMode === 'marketplace' ? 'page' : undefined}
-                title="Marketplace"
-                className={`flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${viewMode === 'marketplace' ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-[var(--text)]'}`}
-              >
-                <Store size={13} />
-                <span className="hidden sm:inline">Marketplace</span>
               </button>
             </div>
 
@@ -394,15 +384,13 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
             onNavigate={onNavigate}
             onNewSpec={() => setShowNewSpec(true)}
           />
-        ) : viewMode === 'list' ? (
+        ) : (
           <ListView
             workspaceId={workspaceId}
             onSpecClick={handleSpecClick}
             onNavigate={onNavigate}
             onNewSpec={() => setShowNewSpec(true)}
           />
-        ) : (
-          <MarketplaceView activeSpecId={detailSpecId ?? undefined} />
         )}
       </div>
 
