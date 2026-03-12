@@ -4,7 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { query, queryOne, execute } from '../../db/index';
+import { execute } from '../../db/index';
 
 let app: Express;
 let tmpDir: string;
