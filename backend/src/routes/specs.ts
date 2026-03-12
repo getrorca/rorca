@@ -3481,7 +3481,7 @@ router.get('/archive', async (req: Request, res: Response) => {
         if (allSpecs.some(s => s.id === evt.spec_id)) continue;
         if (matchingSlugs && !matchingSlugs.has(evt.spec_id)) continue;
 
-        const payload = JSON.parse(evt.payload);
+        const payload = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : (evt.payload ?? {});
         allSpecs.push({
           id: evt.spec_id,
           specName: evt.spec_id,
