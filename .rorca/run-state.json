@@ -2,7 +2,7 @@
   "specId": "providers-models-page-redesign",
   "runId": 66,
   "startedAt": "2026-03-12T20:08:56.201Z",
-  "lastUpdatedAt": "2026-03-12T20:13:20.643Z",
+  "lastUpdatedAt": "2026-03-12T20:16:40.952Z",
   "completedStories": [
     {
       "storyId": "PM-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 263697
+    },
+    {
+      "storyId": "PM-002",
+      "title": "Status bar header with live agent/model/embedding summary",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:13:35.235Z",
+      "finishedAt": "2026-03-12T20:16:40.952Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 185717
     }
   ],
   "failedStories": [],

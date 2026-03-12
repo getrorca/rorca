@@ -173,6 +173,140 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
   );
 }
 
+// ─── Status Bar ──────────────────────────────────────────────────────────────
+
+interface StatusBarData {
+  agentType: 'claude' | 'opencode' | 'codex' | null;
+  agentModel: string | null;
+  defaultModel: string | null;
+  embeddingProvider: string | null;
+  vectorCount: number | null;
+  keyCount: number | null;
+}
+
+function StatusBar() {
+  const toast = useGlobalToast();
+  const [data, setData] = useState<StatusBarData>({
+    agentType: null, agentModel: null, defaultModel: null,
+    embeddingProvider: null, vectorCount: null, keyCount: null,
+  });
+  const [loading, setLoading] = useState(true);
+  const [rebuilding, setRebuilding] = useState(false);
+
+  useEffect(() => {
+    Promise.allSettled([
+      apiFetch<AgentConfig>('/api/config'),
+      apiFetch<DisplaySettings>('/api/settings/display'),
+      apiFetch<EmbeddingProviderStatus>('/api/config/embedding-provider'),
+      apiFetch<EmbedAllStatus>('/api/admin/embed-all/status'),
+      apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+    ]).then(([agentRes, displayRes, embedProvRes, embedStatusRes, keysRes]) => {
+      setData({
+        agentType: agentRes.status === 'fulfilled' ? agentRes.value.agentType : null,
+        agentModel: agentRes.status === 'fulfilled' ? agentRes.value.agentModel : null,
+        defaultModel: displayRes.status === 'fulfilled' ? displayRes.value.defaultModel : null,
+        embeddingProvider: embedProvRes.status === 'fulfilled' ? embedProvRes.value.provider : null,
+        vectorCount: embedStatusRes.status === 'fulfilled' ? (embedStatusRes.value.embeddings ?? null) : null,
+        keyCount: keysRes.status === 'fulfilled' ? keysRes.value.keys.length : null,
+      });
+    }).finally(() => setLoading(false));
+  }, []);
+
+  const handleRebuild = async () => {
+    setRebuilding(true);
+    try {
+      const result = await apiFetch<{ queued: number }>('/api/admin/embed-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true }),
+      });
+      toast.show(`Rebuild started — ${result.queued} items queued`, 'success');
+    } catch (err: any) {
+      toast.show(err.message || 'Failed to start rebuild', 'error');
+    } finally {
+      setRebuilding(false);
+    }
+  };
+
+  const agentDotColor = data.agentType === 'claude'
+    ? 'bg-green-500'
+    : data.agentType === 'opencode'
+    ? 'bg-orange-400'
+    : data.agentType === 'codex'
+    ? 'bg-blue-400'
+    : 'bg-zinc-500';
+
+  const agentLabel = data.agentType === 'claude'
+    ? 'Claude'
+    : data.agentType === 'opencode'
+    ? 'OpenCode'
+    : data.agentType === 'codex'
+    ? 'Codex'
+    : '—';
+
+  const pillClass = 'flex items-center gap-1.5 text-xs text-muted bg-panel border border-border rounded-full px-2.5 py-1';
+  const skeletonClass = 'animate-pulse bg-border rounded-full w-24 h-5';
+
+  return (
+    <div className="flex items-center justify-between gap-4 px-1 py-3 mb-2">
+      <div className="flex items-center gap-3 flex-wrap">
+        {loading ? (
+          <>
+            <div className={skeletonClass} />
+            <div className={skeletonClass} />
+            <div className={skeletonClass} />
+            <div className={skeletonClass} />
+          </>
+        ) : (
+          <>
+            {/* Agent pill */}
+            <span className={pillClass}>
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${agentDotColor}`} />
+              {agentLabel}
+            </span>
+
+            {/* Model pill */}
+            {data.defaultModel && (
+              <span className={pillClass}>
+                <Cpu size={12} className="flex-shrink-0" />
+                {data.defaultModel}
+              </span>
+            )}
+
+            {/* Embeddings pill */}
+            {data.embeddingProvider && (
+              <span className={pillClass}>
+                <Database size={12} className="flex-shrink-0" />
+                {data.vectorCount !== null
+                  ? `${data.embeddingProvider} · ${data.vectorCount} vectors`
+                  : data.embeddingProvider}
+              </span>
+            )}
+
+            {/* API keys pill */}
+            {data.keyCount !== null && (
+              <span className={pillClass}>
+                <Key size={12} className="flex-shrink-0" />
+                {data.keyCount} {data.keyCount === 1 ? 'key' : 'keys'}
+              </span>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Rebuild Embeddings */}
+      <button
+        onClick={handleRebuild}
+        disabled={rebuilding}
+        className="text-xs text-muted hover:text-[var(--text)] flex items-center gap-1.5 transition-colors disabled:opacity-50 flex-shrink-0"
+      >
+        <RefreshCw size={12} className={rebuilding ? 'animate-spin' : ''} />
+        Rebuild Embeddings
+      </button>
+    </div>
+  );
+}
+
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
 const PROVIDER_TABS = [
@@ -230,6 +364,9 @@ export function ProviderSettingsTab() {
 
   return (
     <div className="w-full">
+      {/* Status bar */}
+      <StatusBar />
+
       {/* Sticky tab nav */}
       <div
         className="sticky top-0 z-10 border-b border-border overflow-x-auto scrollbar-none"
