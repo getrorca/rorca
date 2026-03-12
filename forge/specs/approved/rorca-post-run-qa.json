@@ -126,9 +126,7 @@
         "backend",
         "assumption-buster"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story QA-004"
+      "passes": false
     },
     {
       "id": "QA-005",
