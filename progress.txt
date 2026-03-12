@@ -3,7 +3,8 @@
 Spec: Rorca Context Usage Visibility — Spec Generation & Run View
 Run ID: 67
 Started: 2026-03-12T20:18:32.740Z
-Last Updated: 2026-03-12T20:20:34.045Z
+Last Updated: 2026-03-12T20:22:55.718Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - CU-001: Elevate ContextSummaryCard in Context tab — always visible, above the fold — DONE (claude, claude-sonnet-4-6, 121s)
+- CU-002: Direction layer titles and token contribution in ContextSummaryCard — DONE (claude, claude-sonnet-4-6, 127s)
