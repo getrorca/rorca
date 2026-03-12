@@ -2,7 +2,7 @@
   "specId": "rorca-spec-validator",
   "runId": 41,
   "startedAt": "2026-03-12T05:48:49.923Z",
-  "lastUpdatedAt": "2026-03-12T06:19:26.974Z",
+  "lastUpdatedAt": "2026-03-12T06:24:35.554Z",
   "completedStories": [
     {
       "storyId": "SV-001",
@@ -43,6 +43,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 737591
+    },
+    {
+      "storyId": "SV-005",
+      "title": "Implement rorca_fix_spec structural auto-fixer",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:19:45.087Z",
+      "finishedAt": "2026-03-12T06:24:35.553Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 290466
     }
   ],
   "failedStories": [],

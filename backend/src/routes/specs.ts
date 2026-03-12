@@ -9462,4 +9462,164 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/fix:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Apply automated structural fixes to a spec
+ *     operationId: fixSpec
+ *     description: >
+ *       Reindexes story IDs to sequential US-001..US-N (updating dependsOn references),
+ *       adds passes:false to stories missing the field, normalizes dependsOn to array,
+ *       and removes duplicate story IDs (keeping first occurrence). Never modifies
+ *       title, description, or acceptanceCriteria text.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug (filename without .json)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Fix result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 fixed:
+ *                   type: boolean
+ *                 changes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       type:
+ *                         type: string
+ *                         enum: [reindex, add_passes, normalize_depends, remove_duplicate]
+ *                       storyId:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *       400:
+ *         description: Missing workspaceId
+ *       404:
+ *         description: Workspace or spec not found
+ */
+router.post('/:specId/fix', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required body param: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFile: string;
+    let content: any;
+    if (fs.existsSync(pendingFile)) {
+      specFile = pendingFile;
+      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      specFile = approvedFile;
+      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories: any[] = content.userStories ?? [];
+    const changes: Array<{ type: 'reindex' | 'add_passes' | 'normalize_depends' | 'remove_duplicate'; storyId: string; description: string }> = [];
+
+    // Fix 4: Remove duplicate IDs (keep first occurrence)
+    const seenIds = new Set<string>();
+    const deduped: any[] = [];
+    for (const story of stories) {
+      const sid = story.id as string;
+      if (seenIds.has(sid)) {
+        changes.push({ type: 'remove_duplicate', storyId: sid, description: `Duplicate story ID "${sid}" removed (keeping first occurrence)` });
+        logger.warn(`[Specs] fix: duplicate story ID "${sid}" in spec ${specId}`);
+      } else {
+        seenIds.add(sid);
+        deduped.push(story);
+      }
+    }
+
+    // Fix 3: Normalize dependsOn to array before reindex
+    for (const story of deduped) {
+      if (story.dependsOn === undefined || story.dependsOn === null) {
+        changes.push({ type: 'normalize_depends', storyId: story.id, description: `dependsOn was undefined/null, set to []` });
+        story.dependsOn = [];
+      } else if (typeof story.dependsOn === 'string') {
+        const orig = story.dependsOn;
+        story.dependsOn = orig === '' ? [] : [orig];
+        changes.push({ type: 'normalize_depends', storyId: story.id, description: `dependsOn was string "${orig}", normalized to array` });
+      }
+    }
+
+    // Fix 1: Reindex story IDs to US-001..US-N and update dependsOn references
+    const idMap = new Map<string, string>();
+    deduped.forEach((story, idx) => {
+      const newId = `US-${String(idx + 1).padStart(3, '0')}`;
+      if (story.id !== newId) {
+        idMap.set(story.id, newId);
+        changes.push({ type: 'reindex', storyId: story.id, description: `Story "${story.id}" reindexed to "${newId}"` });
+        story.id = newId;
+      }
+    });
+
+    if (idMap.size > 0) {
+      // Update dependsOn references to use new IDs
+      for (const story of deduped) {
+        story.dependsOn = (story.dependsOn as string[]).map((dep: string) => idMap.get(dep) ?? dep);
+      }
+    }
+
+    // Fix 2: Add passes:false to stories missing the field
+    for (const story of deduped) {
+      if (!Object.prototype.hasOwnProperty.call(story, 'passes')) {
+        changes.push({ type: 'add_passes', storyId: story.id, description: `Missing passes field added as false` });
+        story.passes = false;
+      }
+    }
+
+    const fixed = changes.length > 0;
+    if (fixed) {
+      content.userStories = deduped;
+      const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
+      fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
+      await snapshotVersion(specId, JSON.stringify(content), specStatus);
+    }
+
+    res.json({ fixed, changes });
+  } catch (error: any) {
+    logger.error('[Specs] fix error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
