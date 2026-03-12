@@ -19,10 +19,11 @@ Increase the acceptance criteria limit from 5 to 8 to match the richer context n
 The LLM call itself (chatComplete) stays unchanged — only the prompt content changes. The spec JSON schema and pipeline trigger logic are untouched.
 Run ID: 43
 Started: 2026-03-12T05:48:53.196Z
-Last Updated: 2026-03-12T05:58:50.999Z
+Last Updated: 2026-03-12T06:00:32.867Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - US-001: Read and integrate direction stack into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 201s)
 - US-002: Read MEMORY.md and inject into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 100s)
 - US-003: Query installed skills from DB and inject into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 119s)
 - US-004: Assemble context blocks and update quickRunPrompt construction — DONE (claude, claude-sonnet-4-6, 126s)
+- US-005: Increase Quick Run acceptance criteria limit from 5 to 8 — DONE (claude, claude-sonnet-4-6, 84s)
