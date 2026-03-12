@@ -2,7 +2,7 @@
   "specId": "rorca-post-run-qa",
   "runId": 57,
   "startedAt": "2026-03-12T08:22:15.934Z",
-  "lastUpdatedAt": "2026-03-12T09:36:45.803Z",
+  "lastUpdatedAt": "2026-03-12T10:29:13.400Z",
   "completedStories": [
     {
       "storyId": "QA-003",
@@ -43,9 +43,31 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 844986
+    },
+    {
+      "storyId": "QA-005",
+      "title": "Spec validator endpoint smoke test script",
+      "status": "passed",
+      "startedAt": "2026-03-12T10:27:26.709Z",
+      "finishedAt": "2026-03-12T10:29:13.225Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 106496
     }
   ],
-  "failedStories": [],
+  "failedStories": [
+    {
+      "storyId": "QA-004",
+      "title": "Backend Jest test suite validation and new test coverage",
+      "status": "failed",
+      "startedAt": "2026-03-12T09:37:03.339Z",
+      "finishedAt": "2026-03-12T10:22:07.240Z",
+      "agentType": "claude",
+      "failReason": "max_retries",
+      "retries": 3,
+      "elapsedMs": 2703901
+    }
+  ],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
