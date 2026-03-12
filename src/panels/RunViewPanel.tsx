@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight } from 'lucide-react';
+import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -519,6 +519,93 @@ function KillConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onC
   );
 }
 
+// ─── Context Summary Bar ─────────────────────────────────────────────────────
+
+function ContextSummaryBar({
+  dbStories,
+  contextComparison,
+  storyTokenBreakdown,
+  onSkillsClick,
+}: {
+  dbStories: StoryResultSeed[];
+  contextComparison: ContextComparisonData | null;
+  storyTokenBreakdown: StoryTokenEntry[];
+  onSkillsClick: () => void;
+}) {
+  const { skillCount, fileCount, avgTokens } = useMemo(() => {
+    // Unique skills across all story_results.active_skills
+    const allSkills = new Set<string>();
+    for (const s of dbStories) {
+      if (s.active_skills) {
+        try {
+          const parsed = JSON.parse(s.active_skills);
+          if (Array.isArray(parsed)) parsed.forEach((sk: string) => allSkills.add(sk));
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Unique context file paths across contextComparison.actual
+    const allFiles = new Set<string>();
+    if (contextComparison?.actual) {
+      for (const entry of Object.values(contextComparison.actual)) {
+        if (Array.isArray(entry.contextFiles)) {
+          entry.contextFiles.forEach(f => allFiles.add(f));
+        }
+      }
+    }
+
+    // Avg input tokens for stories that actually ran (inputTokens > 0)
+    const tokenEntries = storyTokenBreakdown.filter(t => t.inputTokens > 0);
+    const avg = tokenEntries.length > 0
+      ? tokenEntries.reduce((sum, t) => sum + t.inputTokens, 0) / tokenEntries.length
+      : 0;
+
+    return { skillCount: allSkills.size, fileCount: allFiles.size, avgTokens: avg };
+  }, [dbStories, contextComparison, storyTokenBreakdown]);
+
+  if (skillCount === 0 && fileCount === 0 && avgTokens === 0) return null;
+
+  const formatTokens = (n: number): string => {
+    if (n >= 1000) return `~${(n / 1000).toFixed(1)}K`;
+    return `~${Math.round(n)}`;
+  };
+
+  return (
+    <div className="shrink-0 px-4 py-1.5 border-b border-border bg-panel flex items-center gap-3 text-xs text-muted">
+      {skillCount > 0 && (
+        <span className="flex items-center gap-1">
+          <Sparkles size={11} className="text-purple-400 shrink-0" />
+          <span>{skillCount} {skillCount === 1 ? 'skill' : 'skills'}</span>
+        </span>
+      )}
+      {fileCount > 0 && (
+        <>
+          {skillCount > 0 && <span className="text-border">·</span>}
+          <span className="flex items-center gap-1">
+            <Files size={11} className="text-blue-400 shrink-0" />
+            <span>{fileCount} {fileCount === 1 ? 'file' : 'files'}</span>
+          </span>
+        </>
+      )}
+      {avgTokens > 0 && (
+        <>
+          {(skillCount > 0 || fileCount > 0) && <span className="text-border">·</span>}
+          <span className="flex items-center gap-1">
+            <Cpu size={11} className="text-emerald-400 shrink-0" />
+            <span>{formatTokens(avgTokens)} tokens/story</span>
+          </span>
+        </>
+      )}
+      <button
+        onClick={onSkillsClick}
+        className="ml-auto text-[10px] text-accent hover:underline shrink-0"
+      >
+        Context →
+      </button>
+    </div>
+  );
+}
+
 // ─── RunViewPanel ───────────────────────────────────────────────────────────
 
 interface RunViewPanelProps {
@@ -986,6 +1073,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           onCancel={() => setShowKillConfirm(false)}
         />
       )}
+
+      {/* Context usage summary bar */}
+      <ContextSummaryBar
+        dbStories={dbStories}
+        contextComparison={contextComparison}
+        storyTokenBreakdown={storyTokenBreakdown}
+        onSkillsClick={() => handleTabChange('skills')}
+      />
 
       {/* Tab bar — scrollable horizontal strip on mobile */}
       <div className="shrink-0 px-2 md:px-4 border-b border-border bg-panel flex items-center gap-0.5 overflow-x-auto scrollbar-none [-webkit-overflow-scrolling:touch]">
