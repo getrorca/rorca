@@ -2105,6 +2105,21 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     if (memoryContent.trim()) {
       quickRunPromptParts.push('=== MEMORY.md ===', memoryContent.trim(), '');
     }
+
+    // Fetch installed skills for this workspace (best-effort, silent on error)
+    try {
+      const skillRows = await query<{ name: string; description: string }>(
+        `SELECT name, description FROM installed_skills ORDER BY name`,
+        [],
+      );
+      if (skillRows.length > 0) {
+        const skillLines = skillRows.map(s => `- ${s.name}: ${s.description ?? ''}`).join('\n');
+        quickRunPromptParts.push('=== INSTALLED SKILLS ===', skillLines, '');
+      }
+    } catch {
+      // DB error — silently skip
+    }
+
     quickRunPromptParts.push(
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
