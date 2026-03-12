@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync, readdirSync, renameSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync, fork, spawn } from 'child_process';
@@ -349,19 +349,27 @@ function downloadFile(url: string, dest: string): Promise<void> {
   });
 }
 
+/** Required binaries that must exist after extraction */
+const REQUIRED_BINARIES = ['postgres', 'initdb', 'pg_ctl', 'createuser'];
+
 /**
  * Ensure Postgres binaries are installed at ~/.rorca/postgres/.
  * Downloads from Maven Central if not already present at the correct version.
+ * After extraction, verifies binaries and runs initdb if data dir is missing.
  */
 async function ensurePostgres(): Promise<string> {
   const pgDir = join(homedir(), '.rorca', 'postgres');
+  const binDir = join(pgDir, 'bin');
+  const dataDir = join(pgDir, 'data');
   const versionFile = join(pgDir, '.version');
 
-  // Skip if already installed at correct version
+  // Skip download if already installed at correct version
   if (existsSync(versionFile)) {
     const installed = readFileSync(versionFile, 'utf8').trim();
     if (installed === PG_VERSION) {
       console.log(`Postgres ${PG_VERSION} already installed`);
+      // Still ensure data directory is initialized (idempotent)
+      await initDataDir(binDir, dataDir);
       return pgDir;
     }
   }
@@ -388,7 +396,7 @@ async function ensurePostgres(): Promise<string> {
     mkdirSync(extractDir, { recursive: true });
 
     // Extract the .txz from the jar (jar is a zip)
-    console.log('  Extracting archive...');
+    console.log('  Extracting jar archive...');
     if (platform() === 'win32') {
       execSync(`tar -xf "${jarPath}" -C "${extractDir}"`, { stdio: 'pipe' });
     } else {
@@ -396,25 +404,156 @@ async function ensurePostgres(): Promise<string> {
     }
 
     // Find the .txz inside
-    const extractedFiles = execSync(`ls "${extractDir}"`, { encoding: 'utf8' }).trim().split('\n');
+    const extractedFiles = readdirSync(extractDir);
     const txzFile = extractedFiles.find(f => f.endsWith('.txz'));
     if (!txzFile) {
       throw new Error('No .txz archive found inside downloaded jar');
     }
 
-    // Extract the .txz into the postgres directory
+    // Extract the .txz to a staging area first
+    const stageDir = join(pgDir, '_stage');
+    if (existsSync(stageDir)) {
+      rmSync(stageDir, { recursive: true });
+    }
+    mkdirSync(stageDir, { recursive: true });
+
     const txzPath = join(extractDir, txzFile);
-    execSync(`tar xJf "${txzPath}" -C "${pgDir}"`, { stdio: 'pipe' });
+    console.log('  Extracting Postgres binaries...');
+    if (platform() === 'win32') {
+      // Windows 10+ tar supports xz via auto-detect when -a is not specified
+      // Use -xf (auto-detect compression) which works for both .txz and .tar.gz
+      execSync(`tar -xf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
+    } else {
+      // Unix: explicit xz decompression flag
+      execSync(`tar xJf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
+    }
+
+    // Locate the bin/ directory — may be at stage root or nested (e.g., pgsql/bin/)
+    relocateBinaries(stageDir, pgDir);
+
+    // Clean staging area
+    try { rmSync(stageDir, { recursive: true }); } catch { /* ignore */ }
+
+    // Verify required binaries exist
+    verifyBinaries(binDir);
 
     // Write version marker
     writeFileSync(versionFile, PG_VERSION);
     console.log(`  Postgres ${PG_VERSION} installed to ${pgDir}`);
+
+    // Initialize data directory
+    await initDataDir(binDir, dataDir);
 
     return pgDir;
   } finally {
     // Cleanup temp files
     try { unlinkSync(jarPath); } catch { /* ignore */ }
     try { rmSync(extractDir, { recursive: true }); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Relocate extracted Postgres files to pgDir.
+ * The .txz may extract with bin/ at the top level, or nested under a subdirectory
+ * (e.g., pgsql/). This function finds the bin/ directory and moves everything
+ * to the correct location.
+ */
+function relocateBinaries(stageDir: string, pgDir: string): void {
+  const stageBin = join(stageDir, 'bin');
+
+  if (existsSync(stageBin) && statSync(stageBin).isDirectory()) {
+    // bin/ is at stage root — move all top-level dirs (bin, lib, share, etc.)
+    moveContents(stageDir, pgDir);
+    return;
+  }
+
+  // Search one level deep for a directory containing bin/
+  const entries = readdirSync(stageDir);
+  for (const entry of entries) {
+    const nestedPath = join(stageDir, entry);
+    if (statSync(nestedPath).isDirectory()) {
+      const nestedBin = join(nestedPath, 'bin');
+      if (existsSync(nestedBin) && statSync(nestedBin).isDirectory()) {
+        moveContents(nestedPath, pgDir);
+        return;
+      }
+    }
+  }
+
+  throw new Error(
+    `Could not locate bin/ directory in extracted archive. Contents: ${entries.join(', ')}`
+  );
+}
+
+/**
+ * Move all items from srcDir into destDir, overwriting existing.
+ */
+function moveContents(srcDir: string, destDir: string): void {
+  const items = readdirSync(srcDir);
+  for (const item of items) {
+    const src = join(srcDir, item);
+    const dest = join(destDir, item);
+    // Remove existing destination to allow overwrite
+    if (existsSync(dest)) {
+      rmSync(dest, { recursive: true });
+    }
+    renameSync(src, dest);
+  }
+}
+
+/**
+ * Verify that all required Postgres binaries exist at binDir.
+ * Throws with a clear message listing missing binaries.
+ */
+function verifyBinaries(binDir: string): void {
+  const ext = platform() === 'win32' ? '.exe' : '';
+  const missing: string[] = [];
+
+  for (const name of REQUIRED_BINARIES) {
+    const binPath = join(binDir, `${name}${ext}`);
+    if (!existsSync(binPath)) {
+      missing.push(binPath);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Postgres extraction incomplete — missing binaries:\n  ${missing.join('\n  ')}`
+    );
+  }
+
+  console.log(`  Verified ${REQUIRED_BINARIES.length} binaries in ${binDir}`);
+}
+
+/**
+ * Initialize a Postgres data directory using initdb.
+ * Only runs if the data directory does not already exist (idempotent).
+ * Uses --no-locale --encoding=UTF8 --username=rorca.
+ */
+async function initDataDir(binDir: string, dataDir: string): Promise<void> {
+  if (existsSync(dataDir)) {
+    console.log(`  Data directory already exists: ${dataDir}`);
+    return;
+  }
+
+  const ext = platform() === 'win32' ? '.exe' : '';
+  const initdbBin = join(binDir, `initdb${ext}`);
+
+  if (!existsSync(initdbBin)) {
+    throw new Error(`initdb not found at ${initdbBin}`);
+  }
+
+  console.log('  Initializing Postgres data directory...');
+
+  try {
+    execSync(
+      `"${initdbBin}" --no-locale --encoding=UTF8 --username=rorca -D "${dataDir}"`,
+      { stdio: 'pipe', encoding: 'utf8' }
+    );
+    console.log(`  Data directory initialized: ${dataDir}`);
+  } catch (err: unknown) {
+    const stderr = (err as { stderr?: string }).stderr || (err instanceof Error ? err.message : String(err));
+    throw new Error(`initdb failed:\n${stderr}`);
   }
 }
 
