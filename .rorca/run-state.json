@@ -2,7 +2,7 @@
   "specId": "rorca-model-catalog-ux",
   "runId": 42,
   "startedAt": "2026-03-12T05:48:51.132Z",
-  "lastUpdatedAt": "2026-03-12T05:56:49.200Z",
+  "lastUpdatedAt": "2026-03-12T06:00:23.158Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 158270
+    },
+    {
+      "storyId": "US-004",
+      "title": "Add search bar and provider filter chips to Available Models catalog",
+      "status": "passed",
+      "startedAt": "2026-03-12T05:57:13.389Z",
+      "finishedAt": "2026-03-12T06:00:23.157Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 189768
     }
   ],
   "failedStories": [],
