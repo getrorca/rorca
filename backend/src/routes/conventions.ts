@@ -2,6 +2,7 @@
  * CA-005: Convention Discovery Routes
  *
  * POST /api/conventions/discover       — Spawn analysis agent against workspace
+ * GET  /api/conventions/drift/:workspaceId — Get latest drift report (stub — not yet implemented)
  * GET  /api/conventions/proposals/:workspaceId — List proposals for workspace
  * GET  /api/conventions/proposals/:workspaceId/:id — Single proposal detail
  * POST /api/conventions/proposals/:id/approve — Apply proposal artifacts
@@ -10,7 +11,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { discoverConventions } from '../lib/convention-agent';
 import type { ConventionProposal } from '../lib/convention-agent';
 
@@ -33,6 +34,30 @@ interface ProposalRow {
   created_at: string;
   resolved_at: string | null;
 }
+
+// ─── GET /drift/:workspaceId — Stub (convention drift not yet implemented) ──
+
+/**
+ * @swagger
+ * /api/conventions/drift/{workspaceId}:
+ *   get:
+ *     tags: [Conventions]
+ *     summary: Get latest convention drift report
+ *     description: Returns the most recent drift report for this workspace. Currently a stub — convention drift detection is not yet implemented.
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Drift report (null if not yet available)
+ */
+router.get('/drift/:workspaceId', (_req: Request, res: Response) => {
+  // Stub: convention drift detection is not yet implemented.
+  // Frontend (HealthDashboardPanel, TriggerPopover) expects { report: null } when no report exists.
+  res.json({ report: null });
+});
 
 // ─── POST /discover ─────────────────────────────────────────────────────────
 
@@ -70,8 +95,10 @@ router.post('/discover', async (req: Request, res: Response) => {
     return;
   }
 
-  const workspace = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?')
-    .get(workspaceId) as WorkspaceRow | undefined;
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT id, label, path FROM workspaces WHERE id = $1',
+    [workspaceId],
+  );
 
   if (!workspace) {
     res.status(404).json({ error: `Workspace '${workspaceId}' not found` });
@@ -87,26 +114,29 @@ router.post('/discover', async (req: Request, res: Response) => {
     const proposal = await discoverConventions(workspace.path);
 
     // Store as proposal (NOT auto-applied)
-    const result = db.prepare(
+    const result = await queryOne<{ id: number }>(
       `INSERT INTO convention_proposals (workspace_id, proposal_json, status, created_at)
-       VALUES (?, ?, 'pending', datetime('now'))`
-    ).run(workspaceId, JSON.stringify(proposal));
+       VALUES ($1, $2, 'pending', NOW())
+       RETURNING id`,
+      [workspaceId, JSON.stringify(proposal)],
+    );
 
-    const proposalId = result.lastInsertRowid;
+    const proposalId = result!.id;
 
     // WAL event
-    db.prepare(
-      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_discovered', ?, ?)`
-    ).run(workspaceId, JSON.stringify({
-      proposalId: Number(proposalId),
-      stackCount: proposal.stack.length,
-      conventionCount: proposal.conventions.length,
-      skillCount: proposal.skills.length,
-      architecture: proposal.architecture.pattern,
-    }));
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_discovered', $1, $2)`,
+      [workspaceId, JSON.stringify({
+        proposalId,
+        stackCount: proposal.stack.length,
+        conventionCount: proposal.conventions.length,
+        skillCount: proposal.skills.length,
+        architecture: proposal.architecture.pattern,
+      })],
+    );
 
     res.status(201).json({
-      id: Number(proposalId),
+      id: proposalId,
       workspaceId,
       proposal,
       status: 'pending',
@@ -137,19 +167,21 @@ router.post('/discover', async (req: Request, res: Response) => {
  *       200:
  *         description: List of proposals
  */
-router.get('/proposals/:workspaceId', (req: Request, res: Response) => {
+router.get('/proposals/:workspaceId', async (req: Request, res: Response) => {
   const { workspaceId } = req.params;
   const status = (req.query.status as string) || 'all';
 
   let rows: ProposalRow[];
   if (status === 'all') {
-    rows = db.prepare(
-      'SELECT * FROM convention_proposals WHERE workspace_id = ? ORDER BY created_at DESC'
-    ).all(workspaceId) as ProposalRow[];
+    rows = await query<ProposalRow>(
+      'SELECT * FROM convention_proposals WHERE workspace_id = $1 ORDER BY created_at DESC',
+      [workspaceId],
+    );
   } else {
-    rows = db.prepare(
-      'SELECT * FROM convention_proposals WHERE workspace_id = ? AND status = ? ORDER BY created_at DESC'
-    ).all(workspaceId, status) as ProposalRow[];
+    rows = await query<ProposalRow>(
+      'SELECT * FROM convention_proposals WHERE workspace_id = $1 AND status = $2 ORDER BY created_at DESC',
+      [workspaceId, status],
+    );
   }
 
   const items = rows.map(row => ({
@@ -188,12 +220,13 @@ router.get('/proposals/:workspaceId', (req: Request, res: Response) => {
  *       404:
  *         description: Proposal not found
  */
-router.get('/proposals/:workspaceId/:id', (req: Request, res: Response) => {
+router.get('/proposals/:workspaceId/:id', async (req: Request, res: Response) => {
   const { workspaceId, id } = req.params;
 
-  const row = db.prepare(
-    'SELECT * FROM convention_proposals WHERE id = ? AND workspace_id = ?'
-  ).get(Number(id), workspaceId) as ProposalRow | undefined;
+  const row = await queryOne<ProposalRow>(
+    'SELECT * FROM convention_proposals WHERE id = $1 AND workspace_id = $2',
+    [Number(id), workspaceId],
+  );
 
   if (!row) {
     res.status(404).json({ error: 'Proposal not found' });
@@ -233,12 +266,13 @@ router.get('/proposals/:workspaceId/:id', (req: Request, res: Response) => {
  *       409:
  *         description: Proposal already resolved
  */
-router.post('/proposals/:id/approve', (req: Request, res: Response) => {
+router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  const row = db.prepare(
-    'SELECT * FROM convention_proposals WHERE id = ?'
-  ).get(Number(id)) as ProposalRow | undefined;
+  const row = await queryOne<ProposalRow>(
+    'SELECT * FROM convention_proposals WHERE id = $1',
+    [Number(id)],
+  );
 
   if (!row) {
     res.status(404).json({ error: 'Proposal not found' });
@@ -251,8 +285,10 @@ router.post('/proposals/:id/approve', (req: Request, res: Response) => {
   }
 
   const proposal = JSON.parse(row.proposal_json) as ConventionProposal;
-  const workspace = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?')
-    .get(row.workspace_id) as WorkspaceRow | undefined;
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT id, label, path FROM workspaces WHERE id = $1',
+    [row.workspace_id],
+  );
 
   if (!workspace) {
     res.status(404).json({ error: 'Workspace not found' });
@@ -263,12 +299,13 @@ router.post('/proposals/:id/approve', (req: Request, res: Response) => {
   const applied: string[] = [];
 
   // 1. Upsert L3 direction layer
-  db.prepare(`
-    INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, updated_at)
-    VALUES (3, ?, NULL, ?, datetime('now'))
-    ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
-    DO UPDATE SET content_yaml = excluded.content_yaml, updated_at = datetime('now')
-  `).run(row.workspace_id, proposal.directionL3);
+  await execute(
+    `INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, updated_at)
+     VALUES (3, $1, NULL, $2, NOW())
+     ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
+     DO UPDATE SET content_yaml = EXCLUDED.content_yaml, updated_at = NOW()`,
+    [row.workspace_id, proposal.directionL3],
+  );
   applied.push('Direction Stack L3');
 
   // 2. Write AGENTS.md (if workspace path exists)
@@ -277,7 +314,6 @@ router.post('/proposals/:id/approve', (req: Request, res: Response) => {
     fs.writeFileSync(agentsPath, proposal.agentsMd, 'utf-8');
     applied.push('AGENTS.md');
   } catch (err: any) {
-    // Log but don't fail the whole operation
     console.error(`Failed to write AGENTS.md: ${err.message}`);
   }
 
@@ -310,17 +346,16 @@ router.post('/proposals/:id/approve', (req: Request, res: Response) => {
   }
 
   // Mark approved
-  db.prepare(
-    `UPDATE convention_proposals SET status = 'approved', resolved_at = datetime('now') WHERE id = ?`
-  ).run(Number(id));
+  await execute(
+    `UPDATE convention_proposals SET status = 'approved', resolved_at = NOW() WHERE id = $1`,
+    [Number(id)],
+  );
 
   // WAL event
-  db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_approved', ?, ?)`
-  ).run(row.workspace_id, JSON.stringify({
-    proposalId: row.id,
-    applied,
-  }));
+  await execute(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_approved', $1, $2)`,
+    [row.workspace_id, JSON.stringify({ proposalId: row.id, applied })],
+  );
 
   res.json({ ok: true, applied });
 });
@@ -355,13 +390,14 @@ router.post('/proposals/:id/approve', (req: Request, res: Response) => {
  *       409:
  *         description: Proposal already resolved
  */
-router.post('/proposals/:id/reject', (req: Request, res: Response) => {
+router.post('/proposals/:id/reject', async (req: Request, res: Response) => {
   const { id } = req.params;
   const { reason } = req.body || {};
 
-  const row = db.prepare(
-    'SELECT * FROM convention_proposals WHERE id = ?'
-  ).get(Number(id)) as ProposalRow | undefined;
+  const row = await queryOne<ProposalRow>(
+    'SELECT * FROM convention_proposals WHERE id = $1',
+    [Number(id)],
+  );
 
   if (!row) {
     res.status(404).json({ error: 'Proposal not found' });
@@ -373,17 +409,16 @@ router.post('/proposals/:id/reject', (req: Request, res: Response) => {
     return;
   }
 
-  db.prepare(
-    `UPDATE convention_proposals SET status = 'rejected', reject_reason = ?, resolved_at = datetime('now') WHERE id = ?`
-  ).run(reason || null, Number(id));
+  await execute(
+    `UPDATE convention_proposals SET status = 'rejected', reject_reason = $1, resolved_at = NOW() WHERE id = $2`,
+    [reason || null, Number(id)],
+  );
 
   // WAL event
-  db.prepare(
-    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_rejected', ?, ?)`
-  ).run(row.workspace_id, JSON.stringify({
-    proposalId: row.id,
-    reason: reason || null,
-  }));
+  await execute(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_rejected', $1, $2)`,
+    [row.workspace_id, JSON.stringify({ proposalId: row.id, reason: reason || null })],
+  );
 
   res.json({ ok: true });
 });
