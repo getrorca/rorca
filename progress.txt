@@ -1,10 +1,11 @@
 # Run State Summary
 
-Spec: fix-archive-500-jsonb-parse
-Run ID: 52
-Started: 2026-03-12T08:12:07.494Z
-Last Updated: 2026-03-12T08:15:20.322Z
+Spec: collapsible-left-nav-drag-to-close
+Run ID: 54
+Started: 2026-03-12T08:12:11.075Z
+Last Updated: 2026-03-12T08:19:39.250Z
 
-## Completed Stories (2)
-- US-001: Fix JSONB payload parsing in GET /api/specs/archive — DONE (claude, claude-sonnet-4-6, 103s)
-- US-002: Audit all JSONB payload parsing in specs.ts — DONE (claude, claude-sonnet-4-6, 74s)
+## Completed Stories (3)
+- US-001: Implement drag-to-collapse threshold and snap behavior — DONE (claude, claude-sonnet-4-6, 138s)
+- US-002: Add double-click toggle on drag handle — DONE (claude, claude-sonnet-4-6, 88s)
+- US-003: Render icon-only sidebar in collapsed state — DONE (claude, claude-sonnet-4-6, 130s)
