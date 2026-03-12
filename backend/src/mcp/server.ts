@@ -453,6 +453,141 @@ server.registerTool(
   }
 );
 
+// ─── MC-002: rorca_cancel_run ─────────────────────────────────────────────────
+
+server.registerTool(
+  'rorca_cancel_run',
+  {
+    description: 'Cancel an active pipeline run. Sends SIGTERM to the process, waits 5s, then SIGKILL. Marks run as cancelled in database. Safe to call even if process already exited — idempotent cancel.',
+    inputSchema: {
+      run_id: z.number().int().positive().describe('Pipeline run ID to cancel — use rorca_list_runs to find active run IDs. To find active run IDs: use rorca_list_runs and look for status: running. To cancel the run started by rorca_forge_and_run, use the run_id from its response.'),
+    },
+  },
+  async ({ run_id }) => {
+    // Helper: fetch story counts for this run
+    const fetchStoryCounts = async (): Promise<{ stories_completed: number; stories_remaining: number }> => {
+      try {
+        const r = await fetch(`${RORCA_API}/api/pipeline/runs/${run_id}`);
+        if (!r.ok) return { stories_completed: 0, stories_remaining: 0 };
+        const d = await r.json() as {
+          run?: { status?: string };
+          stories?: Array<{ status: string }>;
+          specStories?: Array<unknown>;
+        };
+        const stories = d.stories ?? [];
+        const specTotal = d.specStories?.length ?? stories.length;
+        const completed = stories.filter(s => s.status === 'pass' || s.status === 'skip').length;
+        return {
+          stories_completed: completed,
+          stories_remaining: Math.max(0, specTotal - completed),
+        };
+      } catch {
+        return { stories_completed: 0, stories_remaining: 0 };
+      }
+    };
+
+    // Helper: poll until status is 'cancelled' or 2s elapsed
+    const waitForCancelled = async (): Promise<void> => {
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        try {
+          const r = await fetch(`${RORCA_API}/api/pipeline/runs/${run_id}`);
+          if (r.ok) {
+            const d = await r.json() as { run?: { status?: string } };
+            if (d.run?.status === 'cancelled') return;
+          }
+        } catch { /* ignore */ }
+        await new Promise(res => setTimeout(res, 200));
+      }
+    };
+
+    let cancelRes: Response;
+    try {
+      cancelRes = await fetch(`${RORCA_API}/api/pipeline/runs/${run_id}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (fetchErr: unknown) {
+      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: 'Cannot connect to Rorca server', suggestion: 'Run: rorca start' }, null, 2) }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: `Network error: ${msg}` }, null, 2) }],
+        isError: true,
+      };
+    }
+
+    if (cancelRes.status === 404) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: `Run #${run_id} not found`, suggestion: 'Use rorca_list_runs to see recent run IDs' }, null, 2) }],
+        isError: true,
+      };
+    }
+
+    if (cancelRes.status === 409) {
+      // Run is already in terminal state — not an error, just informational
+      let bodyText = '';
+      try { bodyText = await cancelRes.text(); } catch { /* ignore */ }
+      // Parse existing status from error message (e.g. "Cannot cancel run with status 'completed'")
+      const statusMatch = bodyText.match(/status '([^']+)'/);
+      const existingStatus = statusMatch?.[1] ?? 'terminal';
+
+      // Special case: already-cancelled is idempotent OK
+      if (existingStatus === 'cancelled') {
+        const counts = await fetchStoryCounts();
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            ok: true,
+            already_cancelled: true,
+            run_id,
+            message: `Run #${run_id} was already cancelled`,
+            ...counts,
+          }, null, 2) }],
+        };
+      }
+
+      const counts = await fetchStoryCounts();
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          ok: false,
+          already_terminal: true,
+          run_id,
+          status: existingStatus,
+          message: `Run #${run_id} is already ${existingStatus} — no action taken`,
+          ...counts,
+        }, null, 2) }],
+      };
+    }
+
+    if (!cancelRes.ok) {
+      let bodyText = '';
+      try { bodyText = await cancelRes.text(); } catch { /* ignore */ }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: `Cancel request failed: ${cancelRes.status} ${bodyText.slice(0, 200)}` }, null, 2) }],
+        isError: true,
+      };
+    }
+
+    // Cancel succeeded — wait up to 2s for DB to reflect 'cancelled'
+    await waitForCancelled();
+
+    const counts = await fetchStoryCounts();
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify({
+        ok: true,
+        run_id,
+        status: 'cancelled',
+        message: `Run #${run_id} cancelled`,
+        ...counts,
+      }, null, 2) }],
+    };
+  }
+);
+
 // ─── V2-067: Extended Spec Lifecycle MCP Tools ────────────────────────────────
 
 server.registerTool(
@@ -1558,6 +1693,57 @@ server.registerPrompt(
     const data = await res.json() as { runId: number; retriedStories: Array<{ storyId: string; attempt: number }> };
     const list = data.retriedStories.map(s => `  • ${s.storyId} (attempt #${s.attempt})`).join('\n');
     return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `🔄 Retry started for run #${data.runId}:\n\n${list}\n\nTrack progress with: /mcp__rorca__run_status ${data.runId}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'cancel_run',
+  {
+    title: 'Cancel Run',
+    description: 'Cancel an active pipeline run by ID. Safe to call even if process already exited.',
+    argsSchema: {
+      runId: z.string().describe('Pipeline run ID (e.g. 42)'),
+    },
+  },
+  async ({ runId }) => {
+    const id = parseInt(runId, 10);
+    if (isNaN(id)) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Invalid run ID: "${runId}". Must be a number.` } }] };
+    }
+
+    let cancelRes: Response;
+    try {
+      cancelRes = await fetch(`${RORCA_API}/api/pipeline/runs/${id}/cancel`, { method: 'POST' });
+    } catch (fetchErr: unknown) {
+      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
+        return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Cannot connect to Rorca server. Run: rorca start` } }] };
+      }
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Network error: ${msg}` } }] };
+    }
+
+    if (cancelRes.status === 404) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Run #${id} not found. Use /mcp__rorca__list_runs to see recent run IDs.` } }] };
+    }
+
+    if (cancelRes.status === 409) {
+      let bodyText = '';
+      try { bodyText = await cancelRes.text(); } catch { /* ignore */ }
+      const statusMatch = bodyText.match(/status '([^']+)'/);
+      const existingStatus = statusMatch?.[1] ?? 'terminal';
+      if (existingStatus === 'cancelled') {
+        return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Run #${id} was already cancelled.` } }] };
+      }
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Run #${id} is already ${existingStatus} — no action taken.` } }] };
+    }
+
+    if (!cancelRes.ok) {
+      let bodyText = '';
+      try { bodyText = await cancelRes.text(); } catch { /* ignore */ }
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Cancel failed (${cancelRes.status}): ${bodyText.slice(0, 200)}` } }] };
+    }
+
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `🛑 Run #${id} cancelled.\n\nCheck status with: /mcp__rorca__run_status ${id}` } }] };
   }
 );
 
