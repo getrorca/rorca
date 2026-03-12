@@ -1,18 +1,18 @@
 {
-  "specId": "fix-kanban-progress-bar-multi-run",
-  "runId": 53,
-  "startedAt": "2026-03-12T08:12:10.359Z",
-  "lastUpdatedAt": "2026-03-12T08:14:04.468Z",
+  "specId": "context-tab-rich-generation-summary",
+  "runId": 55,
+  "startedAt": "2026-03-12T08:22:11.656Z",
+  "lastUpdatedAt": "2026-03-12T08:28:05.799Z",
   "completedStories": [
     {
       "storyId": "US-001",
-      "title": "Fix kanban progress calculation to use spec JSON passes field",
+      "title": "Add context summary API endpoint and TypeScript interface",
       "status": "passed",
-      "startedAt": "2026-03-12T08:12:10.897Z",
-      "finishedAt": "2026-03-12T08:14:04.468Z",
+      "startedAt": "2026-03-12T08:22:12.241Z",
+      "finishedAt": "2026-03-12T08:28:05.799Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 113571
+      "elapsedMs": 353558
     }
   ],
   "failedStories": [],
