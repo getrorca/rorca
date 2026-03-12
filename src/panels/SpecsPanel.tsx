@@ -24,7 +24,7 @@ import AgentBadge from '../components/AgentBadge';
 import { SkeletonColumn } from '../components/skeletons';
 import SlideOver from '../components/SlideOver';
 import SpecDetailSlideOver from '../components/SpecDetailSlideOver';
-import type { SpecSlideOverSummary } from '../components/SpecDetailSlideOver';
+import type { SpecSlideOverSummary, PreviewTab } from '../components/SpecDetailSlideOver';
 import { relativeTime, REVIEW_STATUS_CONFIG } from '../components/SpecReviewInline';
 import type { SpecSummary, ReviewStatus } from '../components/SpecReviewInline';
 import SpecForgeProgress, { type SpecGenerationError } from '../components/SpecForgeProgress';
@@ -107,6 +107,7 @@ interface KanbanSpec {
   queuePosition?: number;
   model?: string;
   attachments?: import('../types').Attachment[];
+  attachmentCount?: number;
 }
 
 interface CustomColumnData {
@@ -299,6 +300,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
   // Spec detail slide-over
   const [detailSpecId, setDetailSpecId] = useState<string | null>(null);
   const [detailSpecSummary, setDetailSpecSummary] = useState<ArchiveSpec | null>(null);
+  const [detailInitialTab, setDetailInitialTab] = useState<PreviewTab | undefined>(undefined);
 
   // Persist view mode
   useEffect(() => {
@@ -313,14 +315,16 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
     }
   }, [initialBrief, onBriefConsumed]);
 
-  const handleSpecClick = useCallback((specId: string, summary?: ArchiveSpec) => {
+  const handleSpecClick = useCallback((specId: string, summary?: ArchiveSpec, initialTab?: PreviewTab) => {
     setDetailSpecId(specId);
     setDetailSpecSummary(summary ?? null);
+    setDetailInitialTab(initialTab);
   }, []);
 
   const handleDetailClose = useCallback(() => {
     setDetailSpecId(null);
     setDetailSpecSummary(null);
+    setDetailInitialTab(undefined);
   }, []);
 
   if (!workspaceId) {
@@ -411,6 +415,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         isOpen={detailSpecId !== null}
         specId={detailSpecId}
         initialSummary={detailSpecSummary as SpecSlideOverSummary | null}
+        initialTab={detailInitialTab}
         onClose={handleDetailClose}
         onNavigate={onNavigate}
         onNavigateToRun={onNavigateToRun}
@@ -568,7 +573,7 @@ function DeleteColumnDialog({ columnName, specCount, onConfirm, onCancel }: {
 
 function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   workspaceId: string;
-  onSpecClick: (specId: string, summary?: ArchiveSpec) => void;
+  onSpecClick: (specId: string, summary?: ArchiveSpec, initialTab?: PreviewTab) => void;
   onNavigate: (panel: PanelId) => void;
   onNewSpec?: () => void;
 }) {
@@ -1145,7 +1150,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   }, [workspaceId, executeMove]);
 
   // Helper: find kanban spec by ID and build summary for the slide-over
-  const findAndOpenSpec = useCallback((specId: string, columnKey?: string) => {
+  const findAndOpenSpec = useCallback((specId: string, columnKey?: string, initialTab?: PreviewTab) => {
     // Determine status from column key
     const colKey = columnKey || (() => {
       if (effectiveKanban.draft.some(s => s.id === specId)) return 'draft';
@@ -1168,9 +1173,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
         tags: spec.tags || [],
         storyTitles: spec.storyTitles || [],
         reviewStatus: spec.reviewStatus as ArchiveSpec['reviewStatus'],
-      });
+      }, initialTab);
     } else {
-      onSpecClick(specId);
+      onSpecClick(specId, undefined, initialTab);
     }
   }, [effectiveKanban, onSpecClick]);
 
@@ -1491,7 +1496,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
             </div>
           )}
 
-          {/* Row 3: Model badge + time-ago + tag pills */}
+          {/* Row 3: Model badge + time-ago + tag pills + attachment badge */}
           <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
             {modelName && (
               <span className={`shrink-0 inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border ${modelColorClass(spec.model)}`}>
@@ -1520,6 +1525,19 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); setTagPopoverSpecId(tagPopoverSpecId === spec.id ? null : spec.id); } }}
               >
                 +{overflowCount}
+              </span>
+            )}
+            {(spec.attachmentCount ?? 0) > 0 && (
+              <span
+                role="button"
+                tabIndex={0}
+                title={`${spec.attachmentCount} attachment${spec.attachmentCount === 1 ? '' : 's'}`}
+                className="shrink-0 inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-surface-100 text-muted border border-border cursor-pointer hover:text-[var(--text)] transition-colors"
+                onClick={(e) => { e.stopPropagation(); findAndOpenSpec(spec.id, colKey, 'attachments'); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); findAndOpenSpec(spec.id, colKey, 'attachments'); } }}
+              >
+                <Paperclip size={8} />
+                {spec.attachmentCount}
               </span>
             )}
           </div>
