@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef, useCallback, Suspense } from 'react';
-import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { HelpTipsProvider } from './contexts/HelpTipsContext';
@@ -46,7 +46,6 @@ import HubPanel from './panels/HubPanel';
 import RunViewPanel from './panels/RunViewPanel';
 import SpecReviewPanel from './panels/SpecReviewPanel';
 import MemoryPanel from './panels/MemoryPanel';
-import ConventionsPanel from './panels/ConventionsPanel';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
 
@@ -175,7 +174,6 @@ const PANEL_LABELS: Record<PanelId, string> = {
   settings: 'Settings',
   'spec-review': 'Spec Review',
   memory: 'Memory Ledger',
-  conventions: 'Convention Proposals',
 };
 
 /** Top-level route config — Shell layout wraps all panel routes */
@@ -210,7 +208,6 @@ function AppRoutes() {
         <Route path="direction" element={<PanelRoute panel="stack" />} />
         <Route path="team-direction" element={<PanelRoute panel="team-direction" />} />
         <Route path="memory" element={<PanelRoute panel="memory" />} />
-        <Route path="conventions" element={<PanelRoute panel="conventions" />} />
         {/* Analytics */}
         <Route path="usage" element={<PanelRoute panel="usage" />} />
         <Route path="costs" element={<PanelRoute panel="costs" />} />
@@ -225,12 +222,7 @@ function AppRoutes() {
         <Route path="activity" element={<PanelRoute panel="activity" />} />
         <Route path="github" element={<PanelRoute panel="github" />} />
         <Route path="workspace-settings" element={<PanelRoute panel="workspace-settings" />} />
-        {/* FR-004: Settings with nested sub-tab routes */}
-        <Route path="settings" element={<Navigate to="/settings/direction" replace />} />
-        <Route path="settings/:tab" element={<PanelRoute panel="settings" />} />
-        {/* Slide-over nested routes — render Hub underneath, SlideOver opens on top */}
-        <Route path="runs/:runId" element={<PanelRoute panel="hub" />} />
-        <Route path="specs/:specId/review" element={<PanelRoute panel="hub" />} />
+        <Route path="settings" element={<PanelRoute panel="settings" />} />
         {/* Catch-all — redirect to hub */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
@@ -241,7 +233,7 @@ function AppRoutes() {
 /** Renders the correct panel component based on the panel prop */
 function PanelRoute({ panel }: { panel: PanelId }) {
   const navigate = useAppNavigate();
-  const { navigateToRun, reviewSpecId, navigateToSpecReview, forgeBrief, handleForgeBriefConsumed } = useAppContentContext();
+  const { navigateToRun, reviewSpecId, navigateToSpecReview, forgeBrief, handleForgeBriefConsumed, settingsTab } = useAppContentContext();
 
   return (
     <ErrorBoundary key={panel} label={PANEL_LABELS[panel] || 'Panel'}>
@@ -253,6 +245,7 @@ function PanelRoute({ panel }: { panel: PanelId }) {
         onNavigateToSpecReview={navigateToSpecReview}
         forgeBrief={forgeBrief}
         onForgeBriefConsumed={handleForgeBriefConsumed}
+        settingsTab={settingsTab}
       />
     </ErrorBoundary>
   );
@@ -266,16 +259,16 @@ interface ActivePanelProps {
   onNavigateToSpecReview: (specId: string) => void;
   forgeBrief: string | null;
   onForgeBriefConsumed: () => void;
+  settingsTab: SettingsTab | undefined;
 }
 
-function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed }: ActivePanelProps) {
+function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed, settingsTab }: ActivePanelProps) {
   switch (id) {
     case 'hub': return <HubPanel onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} onNavigateToSpecReview={onNavigateToSpecReview} />;
     case 'forge': return <SpecForgePanelPage onNavigate={onNavigate} onNavigateToRun={onNavigateToRun} {...(forgeBrief != null ? { initialBrief: forgeBrief, onBriefConsumed: onForgeBriefConsumed } : {})} />;
-    case 'stack': return <SettingsPanel />;
+    case 'stack': return <SettingsPanel initialTab={settingsTab} />;
     case 'team-direction': return <TeamDirectionPanel />;
     case 'memory': return <MemoryPanel />;
-    case 'conventions': return <ConventionsPanel />;
     case 'queue': return <ReviewQueuePanel />;
     case 'pipeline': return <PipelineMonitorPanel />;
     case 'worktrees': return <WorktreesPanel />;
@@ -294,7 +287,7 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'activity': return <ActivityFeedPanel />;
     case 'github': return <GitHubSettingsPanel />;
     case 'workspace-settings': return <WorkspaceSettingsPanel />;
-    case 'settings': return <SettingsPanel />;
+    case 'settings': return <SettingsPanel initialTab={settingsTab} />;
     default: return null;
   }
 }
@@ -312,6 +305,7 @@ interface AppContentContextValue {
   forgeBrief: string | null;
   handleSendToForge: (brief: string) => void;
   handleForgeBriefConsumed: () => void;
+  settingsTab: SettingsTab | undefined;
   navigateToSettingsTab: (tab: SettingsTab) => void;
 }
 
@@ -327,21 +321,14 @@ function useAppContentContext(): AppContentContextValue {
 function AppLayout() {
   const activePanel = useActivePanel();
   const navigate = useAppNavigate();
-  const routerNavigate = useRouterNavigate();
-  const location = useLocation();
+  const [activeRunId, setActiveRunId] = useState<number | null>(null);
+  const [reviewSpecId, setReviewSpecId] = useState<string | null>(null);
   const { workspaceId } = useWorkspace();
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>(undefined);
   const [queueCount, setQueueCount] = useState(0);
-
-  // Derive activeRunId from URL path /runs/:runId
-  const runMatch = location.pathname.match(/^\/runs\/(\d+)/);
-  const activeRunId = runMatch ? Number(runMatch[1]) : null;
-
-  // Derive reviewSpecId from URL path /specs/:specId/review
-  const specMatch = location.pathname.match(/^\/specs\/([^/]+)\/review/);
-  const reviewSpecId = specMatch ? specMatch[1] : null;
 
   // CIE-009: Toast on external context file changes
   useFileWatchSSE();
@@ -359,17 +346,36 @@ function AppLayout() {
     return () => clearInterval(interval);
   }, [workspaceId]);
 
+  // Parse run ID from URL hash on mount (e.g. #/run/42)
+  useEffect(() => {
+    const parseHash = () => {
+      const match = window.location.hash.match(/^#\/run\/(\d+)$/);
+      if (match) {
+        setActiveRunId(Number(match[1]));
+      }
+    };
+    parseHash();
+    window.addEventListener('hashchange', parseHash);
+    return () => window.removeEventListener('hashchange', parseHash);
+  }, []);
+
   const navigateToRun = useCallback((runId: number) => {
-    routerNavigate(`/runs/${runId}`);
-  }, [routerNavigate]);
+    setActiveRunId(runId);
+    window.location.hash = `/run/${runId}`;
+  }, []);
 
   const navigateBackFromRun = useCallback(() => {
-    routerNavigate(-1);
-  }, [routerNavigate]);
+    setActiveRunId(null);
+    window.location.hash = '';
+  }, []);
 
   const navigateToSpecReview = useCallback((specId: string) => {
-    routerNavigate(`/specs/${specId}/review`);
-  }, [routerNavigate]);
+    setReviewSpecId(specId);
+    if (activeRunId !== null) {
+      setActiveRunId(null);
+      window.location.hash = '';
+    }
+  }, [activeRunId]);
 
   const handleSendToForge = useCallback((brief: string) => {
     setForgeBrief(brief);
@@ -379,15 +385,20 @@ function AppLayout() {
     setForgeBrief(null);
   }, []);
 
-  // Navigate to a panel — uses router
+  // Override navigate to clear run view and settings tab
   const handleNavigate = useCallback((panel: PanelId) => {
     navigate(panel);
-  }, [navigate]);
+    if (panel !== 'settings') setSettingsTab(undefined);
+    if (activeRunId !== null) {
+      setActiveRunId(null);
+      window.location.hash = '';
+    }
+  }, [navigate, activeRunId]);
 
-  // FR-004: Navigate to a specific settings sub-tab via URL
   const navigateToSettingsTab = useCallback((tab: SettingsTab) => {
-    routerNavigate(`/settings/${tab}`);
-  }, [routerNavigate]);
+    setSettingsTab(tab);
+    handleNavigate('settings');
+  }, [handleNavigate]);
 
   // Global keyboard shortcuts
   const hotkeys = useMemo<HotkeyBinding[]>(() => [
@@ -419,8 +430,9 @@ function AppLayout() {
     forgeBrief,
     handleSendToForge,
     handleForgeBriefConsumed,
+    settingsTab,
     navigateToSettingsTab,
-  }), [navigateToRun, navigateBackFromRun, activeRunId, reviewSpecId, navigateToSpecReview, forgeBrief, handleSendToForge, handleForgeBriefConsumed, navigateToSettingsTab]);
+  }), [navigateToRun, navigateBackFromRun, activeRunId, reviewSpecId, navigateToSpecReview, forgeBrief, handleSendToForge, handleForgeBriefConsumed, settingsTab, navigateToSettingsTab]);
 
   return (
     <AppContentContext.Provider value={contextValue}>
@@ -429,10 +441,14 @@ function AppLayout() {
           <ResizableSidebar>
             {isSettingsContext ? (
               <SettingsSidebar
+                activePanel={activePanel}
+                activeSettingsTab={settingsTab}
                 onNavigate={handleNavigate}
+                onNavigateSettings={navigateToSettingsTab}
               />
             ) : (
               <Sidebar
+                activePanel={activePanel}
                 onNavigate={handleNavigate}
                 mobileOpen={mobileNavOpen}
                 onMobileClose={() => setMobileNavOpen(false)}
@@ -462,9 +478,9 @@ function AppLayout() {
           )}
         </SlideOver>
 
-        <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromRun} hideHeader={true}>
+        <SlideOver isOpen={reviewSpecId !== null} onClose={() => setReviewSpecId(null)} hideHeader={true}>
           {reviewSpecId !== null && (
-            <SpecReviewPanel specId={reviewSpecId} onBack={navigateBackFromRun} onNavigate={handleNavigate} />
+            <SpecReviewPanel specId={reviewSpecId} onBack={() => setReviewSpecId(null)} onNavigate={handleNavigate} />
           )}
         </SlideOver>
 

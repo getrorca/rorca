@@ -507,24 +507,6 @@ export function runMigrations() {
     `);
     db.pragma('foreign_keys = ON');
   }
-
-  // CA-001: convention_packs table for installed convention pack metadata
-  const conventionPacksExists = db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='convention_packs'`
-  ).get();
-  if (!conventionPacksExists) {
-    db.exec(`
-      CREATE TABLE convention_packs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        workspace_id TEXT NOT NULL,
-        pack_name TEXT NOT NULL,
-        pack_version TEXT NOT NULL,
-        installed_at TEXT NOT NULL DEFAULT (datetime('now')),
-        pack_path TEXT NOT NULL,
-        UNIQUE(workspace_id, pack_name)
-      )
-    `);
-  }
 }
 
 runMigrations();
