@@ -12,7 +12,8 @@
         "npm run lint passes"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-002",
@@ -29,7 +30,9 @@
         "npx tsc --noEmit passes, npm run lint passes",
         "Settings > Display tab loads and the Default Model dropdown opens, searches, and selects correctly in the browser"
       ],
-      "dependsOn": ["US-001"],
+      "dependsOn": [
+        "US-001"
+      ],
       "passes": false
     },
     {
@@ -46,7 +49,9 @@
         "npx tsc --noEmit passes, npm run lint passes",
         "Workspace Override dropdown opens, searches, selects, and saves correctly in the browser"
       ],
-      "dependsOn": ["US-002"],
+      "dependsOn": [
+        "US-002"
+      ],
       "passes": false
     },
     {
@@ -66,7 +71,9 @@
         "npx tsc --noEmit passes, npm run lint passes",
         "Verify in browser: typing 'gpt' with All provider shows only GPT models; selecting Anthropic chip hides all non-Anthropic cards"
       ],
-      "dependsOn": ["US-001"],
+      "dependsOn": [
+        "US-001"
+      ],
       "passes": false
     },
     {
@@ -83,7 +90,9 @@
         "npx tsc --noEmit passes, npm run lint passes",
         "Verify in browser: selecting Free + Fast pills shows only free fast models; Clear filters restores full list"
       ],
-      "dependsOn": ["US-004"],
+      "dependsOn": [
+        "US-004"
+      ],
       "passes": false
     },
     {
@@ -102,7 +111,9 @@
         "npx tsc --noEmit passes, npm run lint passes",
         "Verify in browser: page loads with OpenRouter collapsed; clicking header expands it; searching 'gpt-5' auto-expands OpenRouter"
       ],
-      "dependsOn": ["US-004"],
+      "dependsOn": [
+        "US-004"
+      ],
       "passes": false
     },
     {
@@ -119,7 +130,9 @@
         "npx tsc --noEmit passes, npm run lint passes",
         "Verify in browser: expand OpenRouter, see 30 cards + 'Show more (N remaining)' button; click it to reveal all; collapse and re-expand resets to 30"
       ],
-      "dependsOn": ["US-006"],
+      "dependsOn": [
+        "US-006"
+      ],
       "passes": false
     }
   ],
