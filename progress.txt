@@ -1,15 +1,13 @@
 # Run State Summary
 
-Spec: rorca-semantic-gaps
-Run ID: 29
-Started: 2026-03-11T01:30:14.478Z
-Last Updated: 2026-03-11T01:46:38.989Z
+Spec: rorca-mcp-cli
+Run ID: 47
+Started: 2026-03-12T06:04:08.654Z
+Last Updated: 2026-03-12T06:44:39.969Z
 
-## Completed Stories (7)
-- SG-001: Emit memory_created WAL Events from Auto-Memory — DONE (claude, 203s)
-- SG-002: Backfill Embeddings from memories Table (Not Just MEMORY.md) — DONE (claude, 207s)
-- SG-003: Fix context-cache getRecentMemory to Read from memories Table — DONE (claude, 53s)
-- SG-004: Fix AGE Cypher Execution — Per-Connection Session Setup — DONE (claude, 145s)
-- SG-005: Add Graph Backfill Endpoint — Populate from Existing Runs and Specs — DONE (claude, 99s)
-- SG-006: Fix search.ts Keyword Search to Query memories Table — DONE (claude, 79s)
-- SG-007: Add Memory Count to Context Injection Summary — DONE (claude, 86s)
+## Completed Stories (5)
+- MC-004: MCP Tools Tree View in rorca VS Code Extension — DONE (claude, claude-sonnet-4-6, 472s)
+- MC-006: VS Code Extension Settings Contribution Point Schema — DONE (claude, claude-sonnet-4-6, 421s)
+- MC-007: MCP Tool Error Recovery and Offline Graceful Degradation — DONE (claude, claude-sonnet-4-6, 964s)
+- MC-009: rorca-vscode Extension Package Scaffold — DONE (claude, claude-sonnet-4-6, 279s)
+- MC-010: Spec Tree View Provider — V2-060 Feature Properly Built — DONE (claude, claude-sonnet-4-6, 207s)

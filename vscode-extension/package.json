@@ -1,15 +1,21 @@
 {
-  "name": "rorca-vscode",
-  "displayName": "Rorca — Spec-Driven Development",
-  "description": "Rorca MCP tools browser and pipeline control for VS Code",
+  "name": "rorca",
+  "displayName": "Rorca",
+  "description": "AI spec orchestration and pipeline management for autonomous software development",
   "version": "0.1.0",
   "publisher": "rorca",
   "engines": {
     "vscode": "^1.74.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
-    "onView:rorcaMcpTools"
+    "onView:rorcaMcpTools",
+    "onCommand:rorca.refreshMcpTools",
+    "onCommand:rorca.startServer",
+    "onCommand:rorca.testConnection",
+    "onCommand:rorca.forgeFromSelection"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -52,7 +58,7 @@
       }
     },
     "viewsContainers": {
-      "explorer": [
+      "activitybar": [
         {
           "id": "rorca",
           "title": "Rorca",
@@ -61,35 +67,21 @@
       ]
     },
     "views": {
-      "rorca": [
+      "explorer": [
         {
           "id": "rorcaMcpTools",
           "name": "MCP Tools",
           "contextualTitle": "Rorca MCP Tools",
-          "when": "true",
-          "initialSize": 1
+          "when": "true"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "rorcaMcpTools",
-        "contents": "Connect to Rorca\nStart the Rorca server then click Refresh.\n[Start Server](command:rorca.startServer)\n[Refresh](command:rorca.refreshMcpTools)",
-        "when": "!rorca.toolsLoaded"
-      }
-    ],
     "commands": [
       {
         "command": "rorca.refreshMcpTools",
         "title": "Refresh MCP Tools",
         "category": "Rorca",
         "icon": "$(refresh)"
-      },
-      {
-        "command": "rorca.startServer",
-        "title": "Start Server",
-        "category": "Rorca",
-        "icon": "$(play)"
       },
       {
         "command": "rorca.copyToolName",
@@ -106,32 +98,27 @@
       {
         "command": "rorca.copyAsMcpCall",
         "title": "Copy as MCP Call",
-        "category": "Rorca",
-        "icon": "$(json)"
+        "category": "Rorca"
       },
       {
         "command": "rorca.viewDocumentation",
         "title": "View Documentation",
-        "category": "Rorca",
-        "icon": "$(book)"
+        "category": "Rorca"
+      },
+      {
+        "command": "rorca.startServer",
+        "title": "Start Server",
+        "category": "Rorca"
       },
       {
         "command": "rorca.testConnection",
         "title": "Test Connection",
-        "category": "Rorca",
-        "icon": "$(plug)"
+        "category": "Rorca"
       },
       {
         "command": "rorca.forgeFromSelection",
         "title": "Forge from Selection",
-        "category": "Rorca",
-        "icon": "$(wand)"
-      },
-      {
-        "command": "rorca.runSpec",
-        "title": "Run Spec",
-        "category": "Rorca",
-        "icon": "$(play)"
+        "category": "Rorca"
       }
     ],
     "keybindings": [
@@ -143,13 +130,6 @@
       }
     ],
     "menus": {
-      "view/title": [
-        {
-          "command": "rorca.refreshMcpTools",
-          "when": "view == rorcaMcpTools",
-          "group": "navigation"
-        }
-      ],
       "view/item/context": [
         {
           "command": "rorca.copyToolName",
@@ -164,22 +144,22 @@
         {
           "command": "rorca.copyToolName",
           "when": "viewItem == rorcaMcpTool && view == rorcaMcpTools",
-          "group": "1_copy@1"
+          "group": "rorca@1"
         },
         {
           "command": "rorca.insertAtCursor",
           "when": "viewItem == rorcaMcpTool && view == rorcaMcpTools",
-          "group": "1_copy@2"
+          "group": "rorca@2"
         },
         {
           "command": "rorca.copyAsMcpCall",
           "when": "viewItem == rorcaMcpTool && view == rorcaMcpTools",
-          "group": "1_copy@3"
+          "group": "rorca@3"
         },
         {
           "command": "rorca.viewDocumentation",
           "when": "viewItem == rorcaMcpTool && view == rorcaMcpTools",
-          "group": "2_docs@1"
+          "group": "rorca@4"
         },
         {
           "command": "rorca.startServer",
@@ -187,30 +167,44 @@
           "group": "inline@1"
         }
       ],
+      "view/title": [
+        {
+          "command": "rorca.refreshMcpTools",
+          "when": "view == rorcaMcpTools",
+          "group": "navigation"
+        }
+      ],
       "editor/context": [
         {
           "command": "rorca.forgeFromSelection",
-          "when": "editorHasSelection && rorca.serverOnline",
+          "when": "rorca.serverOnline",
           "group": "rorca@1"
         }
       ],
       "explorer/context": [
         {
-          "command": "rorca.runSpec",
-          "when": "resourceExtname == .json && rorca.serverOnline",
+          "command": "rorca.forgeFromSelection",
+          "when": "resourceExtname == .json && resourceFilename =~ /^forge\\/specs\\/(approved|pending)\\// && rorca.serverOnline",
           "group": "rorca@1"
         }
       ]
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "rorcaMcpTools",
+        "contents": "Connect to Rorca\nStart the Rorca server then click Refresh.\n[Start Server](command:rorca.startServer)\n[Refresh](command:rorca.refreshMcpTools)"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
     "@types/vscode": "^1.74.0",
+    "@types/node": "^20.0.0",
     "typescript": "^5.3.0"
   }
 }

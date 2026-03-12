@@ -1,7 +1,7 @@
 {
   "name": "rorca-vscode",
   "displayName": "Rorca",
-  "description": "Rorca spec-driven development — Specs tree, MCP Tools tree, and pipeline control for VS Code",
+  "description": "AI spec orchestration and pipeline management for autonomous software development",
   "version": "0.0.1",
   "publisher": "rorca",
   "engines": {
@@ -93,18 +93,6 @@
       }
     ],
     "menus": {
-      "view/title": [
-        {
-          "command": "rorca.refreshSpecs",
-          "when": "view == rorcaSpecs",
-          "group": "navigation"
-        },
-        {
-          "command": "rorca.forgeFromSelection",
-          "when": "view == rorcaSpecs",
-          "group": "navigation"
-        }
-      ],
       "view/item/context": [
         {
           "command": "rorca.approveSpec",
@@ -125,6 +113,18 @@
           "command": "rorca.copySpecJson",
           "when": "view == rorcaSpecs && viewItem == rorcaSpec",
           "group": "1_actions"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "rorca.refreshSpecs",
+          "when": "view == rorcaSpecs",
+          "group": "navigation"
+        },
+        {
+          "command": "rorca.forgeFromSelection",
+          "when": "view == rorcaSpecs && rorca.serverOnline",
+          "group": "navigation"
         }
       ]
     },
@@ -148,7 +148,7 @@
           "default": 60,
           "minimum": 0,
           "maximum": 3600,
-          "description": "Seconds between automatic refreshes (0 to disable)",
+          "description": "Seconds between automatic refresh (0 to disable)",
           "scope": "window"
         },
         "rorca.showStatusBarItem": {
@@ -159,13 +159,9 @@
         },
         "rorca.insertSyntax": {
           "type": "string",
-          "enum": [
-            "name-only",
-            "json-call",
-            "slash-command"
-          ],
+          "enum": ["name-only", "json-call", "slash-command"],
           "default": "name-only",
-          "description": "What to insert when using Insert at Cursor: name-only, json-call, or slash-command",
+          "description": "Format to insert when using Insert at Cursor: name-only, json-call, or slash-command",
           "scope": "window"
         }
       }
@@ -178,17 +174,13 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "vscode:prepublish": "npm run package",
-    "package": "npm run check-types && node esbuild.js --production",
-    "package:vsix": "vsce package",
-    "publish": "vsce publish",
-    "publish:pre": "vsce publish --pre-release"
+    "package": "npm run check-types && node esbuild.js --production"
   },
   "devDependencies": {
-    "@types/node": "^20.19.37",
     "@types/vscode": "^1.100.0",
-    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.9.0",
     "esbuild": "^0.25.0",
     "npm-run-all": "^4.1.5",
-    "typescript": "^5.9.0"
+    "@vscode/vsce": "^3.0.0"
   }
 }
