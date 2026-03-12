@@ -123,14 +123,15 @@ async function keywordSearch(
     }
   }
 
-  // Search memory entries via memories table using tsvector full-text search
+  // Search memory entries directly from the memories table using tsvector
   if (sourceTypes.includes('memory')) {
+    const memParams: unknown[] = [queryText];
+    let memParamIdx = 2;
+
     const memConditions: string[] = [
       'deleted_at IS NULL',
       `tsv @@ plainto_tsquery('english', $1)`,
     ];
-    const memParams: unknown[] = [queryText];
-    let memParamIdx = 2;
 
     if (workspaceId) {
       memConditions.push(`workspace_id = $${memParamIdx}`);
@@ -144,23 +145,29 @@ async function keywordSearch(
       snippet: string;
       rank: number;
     }>(
-      `SELECT id::text AS source_id, category AS title, content AS snippet,
-              ts_rank_cd(tsv, plainto_tsquery('english', $1)) AS rank
-       FROM memories
-       WHERE ${memConditions.join(' AND ')}
-       ORDER BY rank DESC
-       LIMIT ${KEYWORD_CANDIDATE_LIMIT}`,
+      `SELECT
+        id::text AS source_id,
+        category AS title,
+        ts_headline('english', content, plainto_tsquery('english', $1),
+          'StartSel=<mark>, StopSel=</mark>, MaxWords=35, MinWords=15'
+        ) AS snippet,
+        ts_rank_cd(tsv, plainto_tsquery('english', $1)) AS rank
+      FROM memories
+      WHERE ${memConditions.join(' AND ')}
+      ORDER BY rank DESC
+      LIMIT ${KEYWORD_CANDIDATE_LIMIT}`,
       memParams,
     );
 
     for (const row of memRows) {
+      const highlights = extractHighlights(row.snippet);
       hits.push({
         sourceType: 'memory',
         sourceId: row.source_id,
         title: row.title || 'Memory Entry',
-        snippet: generateMemorySnippet(row.snippet, queryText),
+        snippet: row.snippet,
         rank: row.rank,
-        highlights: [],
+        highlights,
       });
     }
   }
@@ -195,7 +202,6 @@ async function semanticSearch(
 
   // Embed the query text
   let queryEmbedding: number[];
-  const provider = getProvider();
   try {
     const prepared = prepareText('query', queryText);
     queryEmbedding = await embedText(prepared);
@@ -210,13 +216,6 @@ async function semanticSearch(
   const conditions: string[] = [];
   const params: unknown[] = [vectorStr];
   let paramIdx = 2;
-
-  // Filter by matching dimensions to avoid cross-provider cosine comparison.
-  // Different providers produce different-dimension embeddings (e.g. OpenAI 1536, Google 768).
-  // Comparing across dimensions gives mathematically invalid cosine similarity results.
-  conditions.push(`dimensions = $${paramIdx}`);
-  params.push(provider.dimension);
-  paramIdx++;
 
   if (sourceTypes.length > 0) {
     const placeholders = sourceTypes.map((_, i) => `$${paramIdx + i}`);

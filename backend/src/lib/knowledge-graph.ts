@@ -26,53 +26,60 @@ import type { PoolClient } from 'pg';
 
 /**
  * PG-019: Track whether Apache AGE is available on this Postgres instance.
- * Checked on first graph operation, then cached with TTL.
+ * Checked once on first graph operation, then cached.
  *   - `null` = not yet checked
- *   - `true` = AGE available (cached indefinitely)
- *   - `false` = AGE unavailable — re-checked every 60s so recovery is automatic
+ *   - `true` = AGE available
+ *   - `false` = AGE unavailable (managed service without AGE)
  */
 let _graphAvailable: boolean | null = null;
-let _graphAvailableCheckedAt = 0;
-const GRAPH_AVAILABLE_NEGATIVE_TTL_MS = 60_000; // re-check every 60s on negative result
 
 /**
  * Check if Apache AGE is available on the current Postgres instance.
- * Positive results are cached indefinitely. Negative results expire after 60s
- * so the system auto-recovers if AGE becomes available after startup.
+ * Result is cached after first successful check.
+ *
+ * SG-004: Uses a dedicated client with LOAD 'age' + search_path setup
+ * to verify AGE is fully functional (not just installed). A bare pool.query
+ * against pg_extension only checks installation, not whether LOAD 'age'
+ * and Cypher queries actually work on this connection.
  */
 export async function isGraphAvailable(): Promise<boolean> {
-  if (_graphAvailable === true) return true;
+  if (_graphAvailable !== null) return _graphAvailable;
 
-  // Negative result with TTL — re-check after expiry
-  if (_graphAvailable === false) {
-    const elapsed = Date.now() - _graphAvailableCheckedAt;
-    if (elapsed < GRAPH_AVAILABLE_NEGATIVE_TTL_MS) return false;
-    // TTL expired, re-check below
-    _graphAvailable = null;
-  }
-
+  const client = await pool.connect();
   try {
-    const result = await pool.query<{ extname: string }>(
+    // Step 1: Check extension exists
+    const extResult = await client.query<{ extname: string }>(
       "SELECT extname FROM pg_extension WHERE extname = 'age'"
     );
-    _graphAvailable = result.rows.length > 0;
-    _graphAvailableCheckedAt = Date.now();
-
-    if (_graphAvailable) {
-      logger.info('[knowledge-graph] isGraphAvailable=true — AGE extension found');
-    } else {
-      logger.info(
-        '[knowledge-graph] isGraphAvailable=false — AGE extension not found in pg_extension. ' +
-        'Will re-check in 60s. Use self-hosted Postgres for full graph support.'
+    if (extResult.rows.length === 0) {
+      _graphAvailable = false;
+      logger.warn(
+        '[knowledge-graph] Apache AGE not available — graph features disabled. ' +
+        'Use self-hosted Postgres for full graph support.'
       );
+      return _graphAvailable;
     }
+
+    // Step 2: Verify LOAD 'age' + search_path work on this connection
+    await setupAgeSession(client);
+
+    // Step 3: Verify the 'rorca' graph exists (created by migration 041)
+    const graphResult = await client.query<{ name: string }>(
+      "SELECT name FROM ag_catalog.ag_graph WHERE name = 'rorca'"
+    );
+    if (graphResult.rows.length === 0) {
+      _graphAvailable = false;
+      logger.warn('[knowledge-graph] AGE extension loaded but "rorca" graph not found — run migrations');
+      return _graphAvailable;
+    }
+
+    _graphAvailable = true;
+    logger.info('[knowledge-graph] Apache AGE available — graph features enabled');
   } catch (err) {
     _graphAvailable = false;
-    _graphAvailableCheckedAt = Date.now();
-    logger.info(
-      { err },
-      '[knowledge-graph] isGraphAvailable=false — query error checking AGE extension. Will re-check in 60s.'
-    );
+    logger.warn({ err }, '[knowledge-graph] Could not verify AGE availability — graph features disabled');
+  } finally {
+    client.release();
   }
 
   return _graphAvailable;
@@ -84,7 +91,6 @@ export async function isGraphAvailable(): Promise<boolean> {
  */
 export function resetGraphAvailability(): void {
   _graphAvailable = null;
-  _graphAvailableCheckedAt = 0;
 }
 
 // ── agtype Parsing ──────────────────────────────────────────────────────────
@@ -141,7 +147,6 @@ function parseAgtypeRow<T>(row: Record<string, unknown>): T {
  * This must be called before any Cypher query on a given client.
  */
 async function setupAgeSession(client: PoolClient): Promise<void> {
-  logger.debug('[knowledge-graph] setupAgeSession: running LOAD age + SET search_path');
   await client.query("LOAD 'age'");
   await client.query("SET search_path = ag_catalog, \"$user\", public");
 }
@@ -176,16 +181,18 @@ async function cypherQuery<T = Record<string, unknown>>(
   const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (${columnDef})`;
 
   const p = pool;
-  logger.debug('[knowledge-graph] cypherQuery: acquiring pool client');
   const client = await p.connect();
+  logger.debug('[knowledge-graph] Graph client acquired for cypherQuery');
   try {
     await setupAgeSession(client);
     const result = await client.query(sql);
-    logger.debug({ rowCount: result.rowCount }, '[knowledge-graph] cypherQuery: query complete');
     return result.rows.map(row => parseAgtypeRow<T>(row));
+  } catch (err) {
+    logger.error({ err, cypher: cypher.trim() }, '[knowledge-graph] cypherQuery failed');
+    throw err;
   } finally {
     client.release();
-    logger.debug('[knowledge-graph] cypherQuery: pool client released');
+    logger.debug('[knowledge-graph] Graph client released from cypherQuery');
   }
 }
 
@@ -196,21 +203,17 @@ async function cypherMutate(cypher: string): Promise<void> {
   const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (v agtype)`;
 
   const p = pool;
-  logger.debug('[knowledge-graph] cypherMutate: acquiring pool client');
   const client = await p.connect();
+  logger.debug('[knowledge-graph] Graph client acquired for cypherMutate');
   try {
     await setupAgeSession(client);
     await client.query(sql);
-    logger.debug('[knowledge-graph] cypherMutate: mutation complete');
   } catch (err) {
-    logger.error(
-      { err, cypher: cypher.trim().substring(0, 500) },
-      '[knowledge-graph] cypherMutate failed — Cypher query text included',
-    );
+    logger.error({ err, cypher: cypher.trim() }, '[knowledge-graph] cypherMutate failed');
     throw err;
   } finally {
     client.release();
-    logger.debug('[knowledge-graph] cypherMutate: pool client released');
+    logger.debug('[knowledge-graph] Graph client released from cypherMutate');
   }
 }
 
@@ -812,112 +815,6 @@ export interface GraphStats {
  * Check if the AGE graph is available and return basic stats.
  * PG-019: Returns available: false immediately if AGE extension is not installed.
  */
-// ── Skill Effectiveness Queries ──────────────────────────────────────────────
-
-export interface SkillEffectivenessRow {
-  skill: string;
-  passCount: number;
-  totalCount: number;
-}
-
-/**
- * Query Skill-USED_IN->Story edges to compute per-skill pass rates.
- * Returns skills ordered by pass count descending.
- * PG-019: Returns empty array if AGE is unavailable.
- */
-export async function querySkillEffectiveness(): Promise<SkillEffectivenessRow[]> {
-  if (!(await isGraphAvailable())) return [];
-
-  try {
-    // Total uses per skill
-    const totalRows = await cypherQuery<{ skill: unknown; cnt: unknown }>(
-      `MATCH (sk:Skill)-[:USED_IN]->(st:Story)
-       RETURN sk.name, count(st)`,
-      [
-        { name: 'skill', type: 'agtype' },
-        { name: 'cnt', type: 'agtype' },
-      ],
-    );
-
-    // Passed uses per skill
-    const passRows = await cypherQuery<{ skill: unknown; cnt: unknown }>(
-      `MATCH (sk:Skill)-[:USED_IN]->(st:Story)
-       WHERE st.status = 'pass'
-       RETURN sk.name, count(st)`,
-      [
-        { name: 'skill', type: 'agtype' },
-        { name: 'cnt', type: 'agtype' },
-      ],
-    );
-
-    const passMap = new Map<string, number>();
-    for (const row of passRows) {
-      const name = String(parseAgtype(row.skill) ?? '');
-      const cnt = Number(parseAgtype(row.cnt) ?? 0);
-      if (name) passMap.set(name, cnt);
-    }
-
-    const results: SkillEffectivenessRow[] = [];
-    for (const row of totalRows) {
-      const name = String(parseAgtype(row.skill) ?? '');
-      const total = Number(parseAgtype(row.cnt) ?? 0);
-      if (name && total > 0) {
-        results.push({
-          skill: name,
-          passCount: passMap.get(name) ?? 0,
-          totalCount: total,
-        });
-      }
-    }
-
-    results.sort((a, b) => b.passCount - a.passCount);
-    logger.debug({ count: results.length }, '[knowledge-graph] querySkillEffectiveness complete');
-    return results;
-  } catch (err) {
-    logger.warn({ err }, '[knowledge-graph] querySkillEffectiveness failed');
-    return [];
-  }
-}
-
-export interface SkillPathAffinityRow {
-  skill: string;
-  filePath: string;
-  storyCount: number;
-}
-
-/**
- * Query which skills were active on stories that touched specific file patterns.
- * Returns skill-to-file-path associations ordered by frequency.
- * PG-019: Returns empty array if AGE is unavailable.
- */
-export async function querySkillPathAffinity(limit: number = 50): Promise<SkillPathAffinityRow[]> {
-  if (!(await isGraphAvailable())) return [];
-
-  try {
-    const rows = await cypherQuery<{ skill: unknown; fpath: unknown; cnt: unknown }>(
-      `MATCH (sk:Skill)-[:USED_IN]->(st:Story)-[:TOUCHES]->(f:File)
-       WHERE st.status = 'pass'
-       RETURN sk.name, f.path, count(st)
-       ORDER BY count(st) DESC
-       LIMIT ${limit}`,
-      [
-        { name: 'skill', type: 'agtype' },
-        { name: 'fpath', type: 'agtype' },
-        { name: 'cnt', type: 'agtype' },
-      ],
-    );
-
-    return rows.map(row => ({
-      skill: String(parseAgtype(row.skill) ?? ''),
-      filePath: String(parseAgtype(row.fpath) ?? ''),
-      storyCount: Number(parseAgtype(row.cnt) ?? 0),
-    })).filter(r => r.skill && r.filePath);
-  } catch (err) {
-    logger.warn({ err }, '[knowledge-graph] querySkillPathAffinity failed');
-    return [];
-  }
-}
-
 export async function graphStats(): Promise<GraphStats> {
   if (!(await isGraphAvailable())) {
     return { available: false, vertexCount: 0, edgeCount: 0, labels: [] };
