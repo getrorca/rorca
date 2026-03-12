@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { query, queryOne, execute } from '../db';
+import { queryOne, execute } from '../db';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { authRequired, type AuthUser } from './auth';
 import { logger } from '../lib/logger';

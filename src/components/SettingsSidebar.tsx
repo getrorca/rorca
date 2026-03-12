@@ -3,7 +3,7 @@ import { Link, NavLink } from 'react-router-dom';
 import {
   Settings2, Layers, Route, Zap, Github, Variable, Play, Webhook, Users,
   User, CreditCard, Keyboard, ArrowLeft, ChevronRight,
-  Cpu, Key, Code2, Bell, Plug, Rss,
+  Key, Code2, Bell, Plug, Rss,
 } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';

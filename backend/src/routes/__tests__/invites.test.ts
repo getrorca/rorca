@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { query, queryOne, execute } from '../../db/index';
+import { queryOne, execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -25,7 +25,7 @@ function hashToken(raw: string): string {
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
-async function createTestUser(email: string, password: string = 'password123') {
+async function _createTestUser(email: string, password: string = 'password123') {
   const bcrypt = require('bcryptjs');
   const id = crypto.randomUUID();
   const hash = bcrypt.hashSync(password, 4);
@@ -64,7 +64,7 @@ beforeEach(async () => {
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-invites-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');

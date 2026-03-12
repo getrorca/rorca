@@ -44,7 +44,7 @@ async function getWorkspacePath(workspaceId: string): Promise<string | null> {
   return ws?.path ?? null;
 }
 
-function getLedgerPath(workspaceId: string): string | undefined {
+function getLedgerPath(_workspaceId: string): string | undefined {
   // Could read from .rorca/config.json in the future, but for now use default
   return undefined;
 }

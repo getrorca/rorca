@@ -11,7 +11,7 @@ import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import { subscribe, type WalEvent } from './sse-hub';
 import { logger } from './logger';
-import { loadRorcaConfig, type EmbeddingConfig } from './rorca-config';
+import { loadRorcaConfig } from './rorca-config';
 
 // ─── Provider Interface ─────────────────────────────────────────────────────
 

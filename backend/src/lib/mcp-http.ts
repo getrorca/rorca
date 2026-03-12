@@ -139,12 +139,6 @@ function openApiTypeToZod(prop: OpenAPIPropertySchema, required: boolean): z.Zod
   return schema;
 }
 
-interface ToolParamInfo {
-  name: string;
-  source: 'path' | 'query' | 'body';
-  zodSchema: z.ZodType;
-}
-
 function buildZodInputShape(
   operation: OpenAPIOperation,
 ): Record<string, z.ZodType> {
