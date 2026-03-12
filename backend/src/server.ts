@@ -76,6 +76,7 @@ import pinoHttp from 'pino-http';
 import { startGraphPopulator } from './lib/graph-populator';
 import workspaceDriftRouter from './routes/workspace-drift';
 import { startDriftSubscriber } from './lib/drift-subscriber';
+import mcpToolsRouter from './routes/mcp-tools';
 
 dotenv.config();
 
@@ -189,6 +190,9 @@ const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
 app.post('/mcp', mcpHandlers.handlePost);
 app.get('/mcp', mcpHandlers.handleGet);
 app.delete('/mcp', mcpHandlers.handleDelete);
+
+// MC-004: MCP tools discovery endpoint — used by VS Code extension tree view
+app.use('/api/mcp/tools', mcpToolsRouter);
 
 // ─── Auth middleware (all routes below require authentication) ───
 // PR-009: Conditional auth — AUTH_REQUIRED=true enforces JWT on all protected routes.
