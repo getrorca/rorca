@@ -1110,6 +1110,54 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  'rorca_score_spec',
+  {
+    description: 'Score a spec\'s acceptance criteria quality on a 0-100 scale. Scores each story based on AC count (base score), specificity (penalty for vague phrases like "properly", "correctly", "as expected"), and state coverage (bonus for mentioning error, empty, and loading states). Returns per-story scores and aggregate spec score.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces)'),
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/score?workspaceId=${encodeURIComponent(workspaceId)}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Spec score failed (${res.status}): ${err}`);
+    }
+    const data = await res.json() as {
+      specScore: number;
+      stories: Array<{
+        id: string;
+        score: number;
+        acCount: number;
+        vaguePhrasesFound: string[];
+        stateCoverage: { error: boolean; empty: boolean; loading: boolean };
+      }>;
+    };
+
+    const lines: string[] = [];
+    lines.push(`Spec: ${specId}`);
+    lines.push(`Overall score: ${data.specScore}/100`);
+    lines.push(`Stories scored: ${data.stories.length}`);
+    lines.push('');
+
+    for (const s of data.stories) {
+      const coverage = [
+        s.stateCoverage.error ? 'error' : '',
+        s.stateCoverage.empty ? 'empty' : '',
+        s.stateCoverage.loading ? 'loading' : '',
+      ].filter(Boolean).join(', ') || 'none';
+      lines.push(`[${s.id}] score=${s.score}/100 ac=${s.acCount} coverage=${coverage}`);
+      if (s.vaguePhrasesFound.length > 0) {
+        lines.push(`  ⚠️  Vague: ${s.vaguePhrasesFound.join(', ')}`);
+      }
+    }
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
 // ─── Slash-command Prompts (/mcp__rorca__<name>) ──────────────────────────────
 // These are user-invocable via /mcp__rorca__<name> [args] in Claude Code.
 // Each prompt calls the backend directly and injects formatted results into
@@ -1829,6 +1877,55 @@ server.registerPrompt(
 
     if (data.errors.length === 0 && data.warnings.length === 0) {
       lines.push('\nNo issues found.');
+    }
+
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  }
+);
+
+server.registerPrompt(
+  'score_spec',
+  {
+    title: 'Score Spec',
+    description: 'Score a spec\'s acceptance criteria quality (0-100). Checks AC count, specificity (penalizes vague phrases like "properly", "correctly"), and state coverage (error/empty/loading states).',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/score?workspaceId=${encodeURIComponent(ws)}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec score failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      specScore: number;
+      stories: Array<{
+        id: string;
+        score: number;
+        acCount: number;
+        vaguePhrasesFound: string[];
+        stateCoverage: { error: boolean; empty: boolean; loading: boolean };
+      }>;
+    };
+
+    const lines: string[] = [];
+    lines.push(`Spec: ${specId}`);
+    lines.push(`Overall score: ${data.specScore}/100`);
+    lines.push(`Stories scored: ${data.stories.length}`);
+    lines.push('');
+
+    for (const s of data.stories) {
+      const coverage = [
+        s.stateCoverage.error ? 'error' : '',
+        s.stateCoverage.empty ? 'empty' : '',
+        s.stateCoverage.loading ? 'loading' : '',
+      ].filter(Boolean).join(', ') || 'none';
+      lines.push(`[${s.id}] score=${s.score}/100 ac=${s.acCount} coverage=${coverage}`);
+      if (s.vaguePhrasesFound.length > 0) {
+        lines.push(`  ⚠️  Vague: ${s.vaguePhrasesFound.join(', ')}`);
+      }
     }
 
     return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
