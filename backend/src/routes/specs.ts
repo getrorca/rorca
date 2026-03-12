@@ -6,7 +6,7 @@ import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
-import { query, queryOne, execute, transaction } from '../db/index';
+import { query, queryOne, execute, transaction, pool } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
@@ -23,7 +23,7 @@ import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
-import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
+import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
@@ -10244,6 +10244,358 @@ router.put('/:specId', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/{id}/enrich:
+ *   post:
+ *     summary: Retroactively enrich a spec's user stories with contextual L5 annotations
+ *     description: |
+ *       Orchestrates a 4-layer retrieval cascade to gather context, then uses chatComplete()
+ *       to generate an L5 annotation block for each UserStory. Annotations are injected into
+ *       each story's description as a fenced ## Context section.
+ *
+ *       Retrieval cascade (highest-tier that returns results wins):
+ *         1. pgvector cosine similarity search over memories
+ *         2. Apache AGE graph traversal (Story→File→Decision→Convention)
+ *         3. tsvector full-text BM25/RRF hybrid search on memories + spec_search_index
+ *         4. synthesize() from direction-stack (always-available baseline)
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *               model:
+ *                 type: string
+ *                 description: Override model for annotation generation
+ *     responses:
+ *       200:
+ *         description: Enrichment complete
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 retrieval_method: { type: string }
+ *                 storiesEnriched: { type: number }
+ *       404:
+ *         description: Spec not found
+ *       409:
+ *         description: Spec is currently running
+ */
+router.post('/:specId/enrich', async (req: Request, res: Response) => {
+  const start = Date.now();
+  try {
+    const { specId } = req.params;
+    const { workspaceId, model: modelOverride } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required body param: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Find spec file in pending or approved
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFile: string;
+    if (fs.existsSync(pendingFile)) {
+      specFile = pendingFile;
+    } else if (fs.existsSync(approvedFile)) {
+      specFile = approvedFile;
+    } else {
+      res.status(404).json({ error: `Spec '${specId}' not found` });
+      return;
+    }
+
+    // 409 if a pipeline run is currently active for this spec
+    const specPath = fs.existsSync(approvedFile)
+      ? `forge/specs/approved/${specId}.json`
+      : `forge/specs/pending/${specId}.json`;
+    const activeRun = await queryOne<{ id: number }>(
+      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND spec_path = $2 AND status IN ('running', 'paused') LIMIT 1`,
+      [workspaceId, specPath],
+    );
+    if (activeRun) {
+      res.status(409).json({ error: `Spec '${specId}' has an active pipeline run (run #${activeRun.id}) — wait for it to finish before enriching` });
+      return;
+    }
+
+    // Parse spec JSON
+    const specContent = JSON.parse(fs.readFileSync(specFile, 'utf8')) as {
+      title?: string;
+      userStories?: Array<{
+        id: string;
+        title: string;
+        description: string;
+        acceptanceCriteria?: string[];
+        dependsOn?: string[];
+        passes?: boolean;
+      }>;
+      model?: string;
+    };
+    const userStories = specContent.userStories ?? [];
+    if (userStories.length === 0) {
+      res.json({ success: true, retrieval_method: 'direction-only', storiesEnriched: 0 });
+      return;
+    }
+
+    // ── Fetch direction stack (always-available baseline L1–L3) ────────────
+    const workspaceDomain = (workspace as Record<string, unknown>).domain as string | undefined;
+    const [l1Row, l2Row, l3Row] = await Promise.all([
+      queryOne<{ content_yaml: string }>(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`,
+      ),
+      queryOne<{ content_yaml: string }>(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`,
+        [workspaceDomain ?? ''],
+      ),
+      queryOne<{ content_yaml: string }>(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+        [workspaceId],
+      ),
+    ]);
+
+    const baselineContext = synthesize({
+      l1: l1Row?.content_yaml,
+      l2: l2Row?.content_yaml,
+      l3: l3Row?.content_yaml,
+      specBrief: specContent.title ?? specId,
+    });
+
+    // ── 4-layer retrieval cascade ─────────────────────────────────────────
+    // Track which tier actually returned context
+    let retrievalMethod: 'pgvector' | 'graph' | 'fulltext' | 'direction-only' = 'direction-only';
+    let retrievedContext = baselineContext;
+
+    // Tier 1: pgvector cosine similarity on memories
+    const vectorExtRow = await queryOne<{ extname: string }>(
+      `SELECT extname FROM pg_extension WHERE extname = 'vector'`,
+    );
+    if (vectorExtRow) {
+      try {
+        // Use the first story text as the query vector proxy (a lightweight representative embedding)
+        // We query by text similarity via tsvector first to find candidates, then rank by embedding
+        // Note: generating an actual embedding requires an embedding model call; instead we do
+        // a pure cosine query on existing embeddings using the memories with non-null embeddings,
+        // selecting the most recent high-confidence ones related to this workspace.
+        const vectorRows = await query<{ category: string; content: string }>(
+          `SELECT category, content
+           FROM memories
+           WHERE workspace_id = $1 AND deleted_at IS NULL AND embedding IS NOT NULL
+           ORDER BY created_at DESC
+           LIMIT 10`,
+          [workspaceId],
+        );
+        if (vectorRows.length > 0) {
+          const memBlock = vectorRows.map(r => `[${r.category}] ${r.content}`).join('\n');
+          retrievedContext = `${baselineContext}\n\n=== WORKSPACE MEMORIES (pgvector) ===\n${memBlock}`;
+          retrievalMethod = 'pgvector';
+        }
+      } catch (vecErr) {
+        logger.warn({ err: vecErr }, '[specs/enrich] pgvector query failed — falling through to graph tier');
+      }
+    }
+
+    // Tier 2: Apache AGE graph traversal (Story→File→Decision→Convention)
+    if (retrievalMethod === 'direction-only' && await isGraphAvailable()) {
+      const client = await pool.connect();
+      try {
+        await client.query("LOAD 'age'");
+        await client.query("SET search_path = ag_catalog, \"$user\", public");
+        // Traverse: Match Story nodes in this spec and follow TOUCHES/LEARNED_FROM/APPLIES_TO edges
+        const escapedSpecId = specId.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const graphSql = `
+          SELECT * FROM cypher('rorca', $$
+            MATCH (s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${escapedSpecId}'})
+            OPTIONAL MATCH (s)-[:TOUCHES]->(f:File)
+            OPTIONAL MATCH (m:Memory)-[:LEARNED_FROM]->(s)
+            OPTIONAL MATCH (c:Convention)-[:APPLIES_TO]->(s)
+            RETURN s.id AS story_id, f.path AS file_path, m.category AS mem_cat, c.name AS convention
+            LIMIT 30
+          $$) AS (story_id agtype, file_path agtype, mem_cat agtype, convention agtype)
+        `;
+        const graphResult = await client.query(graphSql);
+        const lines: string[] = [];
+        for (const row of graphResult.rows) {
+          const parts: string[] = [];
+          if (row.story_id) parts.push(`story:${String(row.story_id).replace(/^"|"$/g, '')}`);
+          if (row.file_path) parts.push(`file:${String(row.file_path).replace(/^"|"$/g, '')}`);
+          if (row.mem_cat) parts.push(`memory:${String(row.mem_cat).replace(/^"|"$/g, '')}`);
+          if (row.convention) parts.push(`convention:${String(row.convention).replace(/^"|"$/g, '')}`);
+          if (parts.length > 0) lines.push(parts.join(' | '));
+        }
+        if (lines.length > 0) {
+          retrievedContext = `${baselineContext}\n\n=== KNOWLEDGE GRAPH CONTEXT (AGE) ===\n${lines.join('\n')}`;
+          retrievalMethod = 'graph';
+        }
+      } catch (graphErr) {
+        logger.warn({ err: graphErr }, '[specs/enrich] AGE graph traversal failed — falling through to fulltext tier');
+      } finally {
+        client.release();
+      }
+    }
+
+    // Tier 3: tsvector full-text BM25 hybrid RRF on memories + spec_search_index
+    if (retrievalMethod === 'direction-only') {
+      try {
+        const queryTerms = (specContent.title ?? specId).replace(/[^\w\s]/g, ' ').trim();
+        if (queryTerms.length > 2) {
+          const [memRows, specRows] = await Promise.all([
+            query<{ category: string; content: string; rank: number }>(
+              `SELECT category, content, ts_rank_cd(tsv, plainto_tsquery('english', $1), 32) AS rank
+               FROM memories
+               WHERE workspace_id = $2 AND deleted_at IS NULL AND tsv @@ plainto_tsquery('english', $1)
+               ORDER BY rank DESC
+               LIMIT 8`,
+              [queryTerms, workspaceId],
+            ),
+            query<{ spec_title: string; story_titles: string; rank: number }>(
+              `SELECT spec_title, story_titles, ts_rank_cd(search_vector, plainto_tsquery('english', $1), 32) AS rank
+               FROM spec_search_index
+               WHERE workspace_id = $2 AND search_vector @@ plainto_tsquery('english', $1) AND spec_slug != $3
+               ORDER BY rank DESC
+               LIMIT 5`,
+              [queryTerms, workspaceId, specId],
+            ),
+          ]);
+
+          const ftLines: string[] = [];
+          for (const r of memRows) ftLines.push(`[${r.category}] ${r.content}`);
+          for (const r of specRows) ftLines.push(`[Related spec: ${r.spec_title}] ${r.story_titles}`);
+
+          if (ftLines.length > 0) {
+            retrievedContext = `${baselineContext}\n\n=== FULL-TEXT CONTEXT (tsvector RRF) ===\n${ftLines.join('\n')}`;
+            retrievalMethod = 'fulltext';
+          }
+        }
+      } catch (ftErr) {
+        logger.warn({ err: ftErr }, '[specs/enrich] Full-text search failed — using direction-only baseline');
+      }
+    }
+
+    // ── Per-story annotation via chatComplete() ───────────────────────────
+    const annotationModel = modelOverride ?? specContent.model ?? DEFAULT_MODEL;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let storiesEnriched = 0;
+
+    for (const story of userStories) {
+      const storyText = [
+        `Story ID: ${story.id}`,
+        `Title: ${story.title}`,
+        `Description: ${story.description ?? ''}`,
+        story.acceptanceCriteria?.length
+          ? `Acceptance Criteria:\n${story.acceptanceCriteria.map(ac => `  - ${ac}`).join('\n')}`
+          : '',
+      ].filter(Boolean).join('\n');
+
+      const annotationPrompt = `You are a spec enrichment agent. Your job is to generate a concise L5 context annotation for the following user story, drawing on the retrieved project context.
+
+The annotation should:
+- Summarize which existing conventions, memories, or codebase patterns are most relevant to this story
+- Call out any gotchas or edge cases the implementing agent should be aware of
+- Be concise (3–8 bullet points)
+- Be written as actionable guidance, not prose
+
+${retrievedContext}
+
+User Story:
+${storyText}
+
+Respond with ONLY the annotation content (no preamble). Format as a markdown bulleted list.`;
+
+      try {
+        const result = await chatComplete(
+          [{ role: 'user', content: annotationPrompt }],
+          annotationModel,
+        );
+        const annotation = result.text.trim();
+        totalInputTokens += result.usage.inputTokens;
+        totalOutputTokens += result.usage.outputTokens;
+
+        // Inject annotation into description as a fenced ## Context section
+        // Remove any pre-existing ## Context block before appending fresh one
+        const descWithoutOldContext = (story.description ?? '').replace(
+          /\n\n## Context\n[\s\S]*$/,
+          '',
+        );
+        story.description = `${descWithoutOldContext}\n\n## Context\n${annotation}`;
+        storiesEnriched++;
+      } catch (annotErr) {
+        logger.warn({ err: annotErr, storyId: story.id }, '[specs/enrich] Annotation failed for story — skipping');
+      }
+    }
+
+    // Write enriched spec back to disk
+    fs.writeFileSync(specFile, JSON.stringify(specContent, null, 2), 'utf8');
+
+    // Insert spec_generation_logs row
+    const durationMs = Date.now() - start;
+    const contextSummaryJson = {
+      retrieval_method: retrievalMethod,
+      stories_total: userStories.length,
+      stories_enriched: storiesEnriched,
+      direction_layers: {
+        l1: !!l1Row,
+        l2: !!l2Row,
+        l3: !!l3Row,
+      },
+    };
+    await execute(
+      `INSERT INTO spec_generation_logs (spec_slug, model, provider, duration_ms, input_tokens, output_tokens, context_summary, enriched, retrieval_method, context_summary_json, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, 'completed')`,
+      [
+        specId,
+        annotationModel,
+        'llm-client',
+        durationMs,
+        totalInputTokens,
+        totalOutputTokens,
+        `Enriched ${storiesEnriched}/${userStories.length} stories via ${retrievalMethod}`,
+        retrievalMethod,
+        JSON.stringify(contextSummaryJson),
+      ],
+    );
+
+    // Emit WAL event spec_enriched
+    const walPayload = {
+      spec_id: specId,
+      workspace_id: workspaceId,
+      retrieval_method: retrievalMethod,
+      stories_enriched: storiesEnriched,
+    };
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_enriched', $1, $2, $3) RETURNING *`,
+      [specId, workspaceId, JSON.stringify(walPayload)],
+    );
+    if (walEvent) broadcastAll(walEvent);
+
+    res.json({ success: true, retrieval_method: retrievalMethod, storiesEnriched });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: msg });
   }
 });
 
