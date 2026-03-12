@@ -9,7 +9,7 @@ import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
 let tmpDir: string;
-let authToken: string;
+let _authToken: string;
 
 const WEBHOOK_SECRET = 'test-webhook-secret-for-hmac';
 const WORKSPACE_ID = 'ws-webhook-test';
@@ -31,12 +31,12 @@ function makePayload(overrides: Record<string, any> = {}) {
 beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-webhook-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-authToken = await getAuthToken(app);
+_authToken = await getAuthToken(app);
 
   // Clear WAL events from user registration
   await execute(`DELETE FROM wal_events`);

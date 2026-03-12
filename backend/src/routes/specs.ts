@@ -14,7 +14,6 @@ import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, g
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
-import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
@@ -1011,7 +1010,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // Base JSON schema and rules used by multi-pass Pass 1 (simpler format without skill/persona fields)
     const baseJsonSchema = `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`;
 
-    const baseRules = [
+    const _baseRules = [
       storyCount === 0
         ? `- Number stories sequentially starting from ${storyPrefix}-001`
         : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
@@ -6921,7 +6920,7 @@ router.get('/:specId/stories/:storyId/commits', async (req: Request, res: Respon
  */
 router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Response) => {
   try {
-    const specId = req.params.specId as string;
+    const _specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
     const { workspaceId } = req.body;
 
@@ -8107,16 +8106,6 @@ router.get('/:specId/comments/counts', async (req: Request, res: Response) => {
 });
 
 // ─── V2-042: PUT /:specId/assign — Assign spec to a user ──────────────────────
-
-interface AssignmentRow {
-  id: number;
-  spec_id: string;
-  story_id: string;
-  workspace_id: string;
-  assignee_id: string;
-  assigned_at: string;
-  assigned_by: string | null;
-}
 
 /**
  * @swagger

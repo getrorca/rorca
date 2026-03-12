@@ -65,7 +65,7 @@ describe('OpenCodeServer', () => {
     });
 
     it('uses binPath option when provided', () => {
-      const server = new OpenCodeServer({ binPath: '/custom/opencode' });
+      const _server = new OpenCodeServer({ binPath: '/custom/opencode' });
       expect(mockedDetectOpenCode).not.toHaveBeenCalled();
     });
 

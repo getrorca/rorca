@@ -1,18 +1,11 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { query, queryOne } from '../db/index';
-import type { AuthUser } from './auth';
+import { query } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
 
 const router = Router();
-
-interface WorkspaceRow {
-  id: string;
-  label: string;
-  path: string;
-}
 
 interface AssignmentDbRow {
   spec_id: string;

@@ -51,9 +51,9 @@ Object.defineProperty(window, 'matchMedia', {
 // doesn't break the constructor. Recharts calls `new ResizeObserver()` in
 // effects after each test's beforeEach clearAllMocks().
 class MockResizeObserver {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   observe(_el: Element): void { /* no-op */ }
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   unobserve(_el: Element): void { /* no-op */ }
   disconnect(): void { /* no-op */ }
 }
@@ -64,9 +64,9 @@ class MockIntersectionObserver {
   root: Element | null = null;
   rootMargin = '';
   thresholds: ReadonlyArray<number> = [];
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   observe(_el: Element): void { /* no-op */ }
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   unobserve(_el: Element): void { /* no-op */ }
   disconnect(): void { /* no-op */ }
   takeRecords(): IntersectionObserverEntry[] { return []; }

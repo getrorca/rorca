@@ -61,7 +61,6 @@ import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
 import {
   initRunState,
-  readRunState,
   markStoryStarted as rsMarkStoryStarted,
   markStoryCompleted as rsMarkStoryCompleted,
   markStoryFailed as rsMarkStoryFailed,
@@ -71,8 +70,6 @@ import {
   writeProgressTxt,
   migrateProgressTxt,
   getResumeContext,
-  type StoryEntry,
-  type ResumeContext,
 } from './run-state';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1779,7 +1776,7 @@ async function runAdversarialReview(
   logDir: string,
   personaRegistry: PersonaRegistry,
   specId: string,
-  workspaceId: string | null,
+  _workspaceId: string | null,
 ): Promise<ReviewResult[]> {
   const reviewers = story.reviewers ?? [];
   if (reviewers.length === 0) return [];
@@ -2120,7 +2117,6 @@ async function executeStory(
       : undefined;
 
   // Rate limit retry loop
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const result = await runAgent(
       effectiveAgent,
@@ -2773,7 +2769,7 @@ async function main(): Promise<void> {
   // ── Initialize run-state.json (CIE-007) ───────────────────────────────────
   const specId = spec.title ?? path.basename(config.jsonPath, '.json');
   migrateProgressTxt(config.cwd, specId, config.runId);
-  const runState = initRunState(config.cwd, specId, config.runId);
+  initRunState(config.cwd, specId, config.runId);
   const resumeCtx = getResumeContext(config.cwd, specId);
 
   process.on('SIGINT', () => {
@@ -2856,7 +2852,7 @@ async function main(): Promise<void> {
     }
 
     const currentProgress = getProgress(currentStories);
-    const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
+    const _timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
 
     const storyAgent = resolveStoryAgent(story, config.agentType);
     logger.info('------------------------------------------');

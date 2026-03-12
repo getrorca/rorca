@@ -22,14 +22,6 @@ interface UserStory {
   [key: string]: unknown;
 }
 
-interface GithubWebhookRow {
-  workspace_id: string;
-  repo_owner: string;
-  repo_name: string;
-  webhook_id: number | null;
-  encrypted_webhook_secret: string;
-}
-
 interface GitHubConnectionRow {
   encrypted_token: string;
 }

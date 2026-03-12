@@ -5,7 +5,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { z } from 'zod';
 
 // ─── DB Mock ────────────────────────────────────────────────────────────────
 
@@ -32,7 +31,7 @@ jest.mock('../../db/index', () => ({
 
 // ─── Imports (after mocks) ──────────────────────────────────────────────────
 
-import { PackJsonSchema, PackRegistry, type PackJson, type ValidationResult } from '../pack-registry';
+import { PackJsonSchema, PackRegistry, type PackJson } from '../pack-registry';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

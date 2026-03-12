@@ -479,7 +479,7 @@ function ExecutionEngineSection() {
   const toast = useGlobalToast();
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [models, setModels] = useState<OpenCodeModelEntry[]>([]);
-  const [grouped, setGrouped] = useState<Record<string, OpenCodeModelEntry[]>>({});
+  const [_grouped, setGrouped] = useState<Record<string, OpenCodeModelEntry[]>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -500,7 +500,7 @@ function ExecutionEngineSection() {
   const [openRouterModels, setOpenRouterModels] = useState<Array<{
     id: string; name: string; provider: string; contextWindow: number; free: boolean;
   }>>([]);
-  const [openRouterGrouped, setOpenRouterGrouped] = useState<Record<string, Array<{
+  const [_openRouterGrouped, setOpenRouterGrouped] = useState<Record<string, Array<{
     id: string; name: string; provider: string; contextWindow: number; free: boolean;
   }>>>({});
 
@@ -1121,7 +1121,7 @@ function SemanticEngineSection() {
   }
 
   // Determine if selected provider has a key configured
-  const providerHasKey = status && (
+  const _providerHasKey = status && (
     status.source !== 'local' ||
     selectedProvider === 'auto' ||
     selectedProvider === 'local'
@@ -1880,7 +1880,7 @@ function DisplaySection() {
   const effectiveModel = workspaceModel ?? defaultModel;
 
   // Group models by provider
-  const modelsByProvider = models.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
+  const _modelsByProvider = models.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
     (acc[m.provider] ??= []).push(m);
     return acc;
   }, {});

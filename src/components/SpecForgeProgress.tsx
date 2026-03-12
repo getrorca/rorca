@@ -347,7 +347,7 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
   const [totalElapsed, setTotalElapsed] = useState(0);
   const startTimeRef = useRef(Date.now());
   const timerRef = useRef<ReturnType<typeof setInterval>>();
-  const sseRef = useRef<EventSource | null>(null);
+  const _sseRef = useRef<EventSource | null>(null);
 
   // Attachment processing steps (populated via SSE)
   const [attachmentSteps, setAttachmentSteps] = useState<AttachmentStep[]>([]);

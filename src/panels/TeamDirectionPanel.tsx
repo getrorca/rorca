@@ -28,7 +28,7 @@ export default function TeamDirectionPanel() {
   const [savedL1, setSavedL1] = useState('');
   const [savedL2, setSavedL2] = useState('');
   const [isSaving, setIsSaving] = useState(false);
-  const [isDirty, setIsDirty] = useState(false);
+  const [_isDirty, setIsDirty] = useState(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Preview
@@ -48,7 +48,7 @@ export default function TeamDirectionPanel() {
         }
       })
       .catch(console.error);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load team direction layers when team changes
   useEffect(() => {

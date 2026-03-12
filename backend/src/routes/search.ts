@@ -6,7 +6,7 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { hybridSearch, type SearchOptions, type SourceType, type MatchType } from '../lib/search';
+import { hybridSearch, type SearchOptions, type SourceType } from '../lib/search';
 import { logger } from '../lib/logger';
 
 const router = Router();

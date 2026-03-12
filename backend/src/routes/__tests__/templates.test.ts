@@ -4,7 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { query, queryOne, execute } from '../../db/index';
+import { queryOne, execute } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -57,7 +57,7 @@ beforeEach(async () => {
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-templates-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
@@ -281,7 +281,7 @@ describe('GET /api/templates', () => {
 
   test('featured templates (rating >= 4.0) appear first', async () => {
     // Create two templates
-    const res1 = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
+    const _res1 = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({
       name: 'Low Rated', sourceSpecId: 'spec-low', brief: 'low', storyStructure: sampleStoryStructure,
     });
     const res2 = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({

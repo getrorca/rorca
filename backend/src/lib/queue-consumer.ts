@@ -103,7 +103,7 @@ async function triggerQueueEntry(entry: RunQueueEntry): Promise<void> {
             await markEntryFailed(entry, errorMsg);
             setTimeout(() => retryNextEntry(entry.workspace_id), RETRY_DELAY_MS);
           }
-        } catch (parseErr) {
+        } catch (_parseErr) {
           await markEntryFailed(entry, `Response parse error: ${body.slice(0, 200)}`);
           setTimeout(() => retryNextEntry(entry.workspace_id), RETRY_DELAY_MS);
         }

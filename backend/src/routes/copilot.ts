@@ -9,7 +9,7 @@
  */
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { query, queryOne, execute } from '../db';
+import { queryOne, execute } from '../db';
 import { encryptToken, decryptToken } from './auth';
 import type { AuthUser } from './auth';
 

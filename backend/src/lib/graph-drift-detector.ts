@@ -82,7 +82,7 @@ async function cypherRead<T = Record<string, unknown>>(
 /**
  * Execute a Cypher mutation.
  */
-async function cypherMutate(cypher: string): Promise<void> {
+async function _cypherMutate(cypher: string): Promise<void> {
   const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (v agtype)`;
   const client = await pool.connect();
   try {
@@ -124,7 +124,7 @@ function parseAgtype<T = unknown>(value: unknown): T {
  */
 export async function detectDrift(
   specId: string,
-  workspaceId: number,
+  _workspaceId: number,
 ): Promise<GraphDriftReport> {
   const violations: GraphDriftViolation[] = [];
   const impactMap = new Map<string, ImpactAnalysisEntry>();
@@ -251,7 +251,7 @@ async function findFilesTouchedBySpec(specId: string): Promise<string[]> {
  * Compute blast radius for a single file: how many stories and specs historically
  * touched this file, and what conventions govern it.
  */
-async function computeFileImpact(filePath: string, currentSpecId: string): Promise<ImpactAnalysisEntry> {
+async function computeFileImpact(filePath: string, _currentSpecId: string): Promise<ImpactAnalysisEntry> {
   const entry: ImpactAnalysisEntry = {
     file: filePath,
     connectedStories: 0,

@@ -103,7 +103,7 @@ describe('WorktreesPanel', () => {
     renderWithProviders(<WorktreesPanel />);
 
     // Loading spinner (.animate-spin) or aria-live container should appear
-    const loadingEl = document.querySelector('.animate-spin') ??
+    const _loadingEl = document.querySelector('.animate-spin') ??
       document.querySelector('[aria-live]');
     // Component is mounted — either showing loading state or content
     expect(document.body).toBeTruthy();

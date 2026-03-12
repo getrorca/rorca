@@ -1,6 +1,6 @@
 import React, { type ReactElement } from 'react';
 import { render, type RenderOptions, type RenderResult } from '@testing-library/react';
-import { WorkspaceProvider, type Workspace } from '../contexts/WorkspaceContext';
+import { WorkspaceProvider } from '../contexts/WorkspaceContext';
 import { AuthProvider } from '../contexts/AuthContext';
 import { ThemeProvider } from '../contexts/ThemeContext';
 import { ToastProvider } from '../contexts/ToastContext';

@@ -32,7 +32,7 @@ beforeEach(() => {
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
@@ -198,7 +198,7 @@ describe('GET /api/health (agentType=opencode)', () => {
     }));
 
     ocTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-oc-test-'));
-    const dbPath = path.join(ocTmpDir, 'test.db');
+    const _dbPath = path.join(ocTmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
     const serverMod = require('../../server');
