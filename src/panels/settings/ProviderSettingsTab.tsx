@@ -2833,7 +2833,7 @@ function DisplaySection() {
     return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading model settings...</div>;
   }
 
-  const hasChanges = settings && (defaultModel !== settings.defaultModel || itemsPerPage !== settings.itemsPerPage);
+  const hasChanges = settings !== null && defaultModel !== settings.defaultModel;
   const effectiveModel = workspaceModel ?? defaultModel;
 
   // Group models by provider
@@ -2843,76 +2843,98 @@ function DisplaySection() {
   }, {});
 
   return (
-    <div className="space-y-6">
-      {/* Theme */}
-      <div>
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Theme</h2>
-        <div className="flex gap-2">
-          {(['light', 'dark', 'system'] as ThemeMode[]).map(m => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className={`px-4 py-2 text-sm rounded border transition-colors capitalize ${mode === m
-                  ? 'bg-accent/10 border-accent text-accent'
-                  : 'border-border text-muted hover:text-[var(--text)] hover:border-accent/50'
-                }`}
-            >
-              {m}
-            </button>
-          ))}
+    <>
+      {/* Display card */}
+      <div className="rounded-xl border border-border bg-panel p-5 mt-4">
+        {/* Card header */}
+        <div className="flex items-center gap-2 mb-4">
+          <SlidersHorizontal size={15} className="text-accent" />
+          <span className="text-sm font-semibold text-[var(--text)]">Display</span>
         </div>
-      </div>
 
-      {/* Default Model (global) */}
-      <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-1">Default Model</h2>
-        <p className="text-xs text-muted mb-3">Global default when no workspace override is set</p>
-        <ModelSearchSelect
-          models={models}
-          value={defaultModel}
-          defaultModelId={null}
-          onChange={setDefaultModel}
-        />
-      </div>
-
-      {/* Per-workspace preferred model override */}
-      {workspaceId && (
-        <div className="border-t border-border pt-6">
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="text-sm font-semibold text-[var(--text)]">Workspace Model Override</h2>
-            {savedWorkspace && (
-              <span className="flex items-center gap-1 text-xs text-green-500"><Check size={12} /> Saved</span>
-            )}
-          </div>
-          <p className="text-xs text-muted mb-3">
-            Override the global default for this workspace. Persists to the Project direction layer.
-          </p>
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <ModelSearchSelect
-                models={[
-                  { id: '', label: `Use global default (${models.find(m => m.id === defaultModel)?.label ?? defaultModel})`, provider: '', costPer1kInput: 0, costPer1kOutput: 0, recommended: false },
-                  ...models,
-                ]}
-                value={workspaceModel ?? ''}
-                defaultModelId={null}
-                onChange={modelId => setWorkspaceModel(modelId || null)}
-                disabled={savingWorkspace}
-              />
+        {/* Two-column grid: Theme | Default Model */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+          {/* Theme */}
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Theme</p>
+            <div className="flex rounded-lg border border-border overflow-hidden">
+              {(['light', 'dark', 'system'] as ThemeMode[]).map((m, i) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={`flex-1 px-3 py-1.5 text-xs capitalize transition-colors ${i > 0 ? 'border-l border-border' : ''} ${mode === m
+                      ? 'bg-accent text-white'
+                      : 'bg-bg text-muted hover:text-[var(--text)]'
+                    }`}
+                >
+                  {m}
+                </button>
+              ))}
             </div>
-            <button
-              onClick={() => saveWorkspaceModel(workspaceModel)}
-              disabled={savingWorkspace || workspaceModel === workspaceModelInitial}
-              className="flex items-center gap-1.5 px-3 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
-            >
-              {savingWorkspace ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-              Save
-            </button>
+          </div>
+
+          {/* Default Model */}
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Default Model</p>
+            <div className="flex gap-2 items-center">
+              <div className="flex-1 min-w-0">
+                <ModelSearchSelect
+                  models={models}
+                  value={defaultModel}
+                  defaultModelId={null}
+                  onChange={setDefaultModel}
+                />
+              </div>
+              {hasChanges && (
+                <button
+                  onClick={saveDisplay}
+                  disabled={saving}
+                  className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
+                >
+                  {saving ? <Loader2 size={12} className="animate-spin inline" /> : saved ? <Check size={12} className="inline" /> : 'Save'}
+                </button>
+              )}
+            </div>
           </div>
         </div>
-      )}
 
-      {/* Model Browser — full-width card */}
+        {/* Workspace Model Override — full-width row below grid */}
+        {workspaceId && (
+          <div className="mt-6 pt-5 border-t border-border">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-muted uppercase tracking-wider">Workspace Model Override</p>
+              {savedWorkspace && (
+                <span className="flex items-center gap-1 text-xs text-green-500"><Check size={12} /> Saved</span>
+              )}
+            </div>
+            <div className="flex gap-2 items-center">
+              <div className="flex-1 min-w-0">
+                <ModelSearchSelect
+                  models={[
+                    { id: '', label: `Use global default (${models.find(m => m.id === defaultModel)?.label ?? defaultModel})`, provider: '', costPer1kInput: 0, costPer1kOutput: 0, recommended: false },
+                    ...models,
+                  ]}
+                  value={workspaceModel ?? ''}
+                  defaultModelId={null}
+                  onChange={modelId => setWorkspaceModel(modelId || null)}
+                  disabled={savingWorkspace}
+                />
+              </div>
+              <button
+                onClick={() => saveWorkspaceModel(workspaceModel)}
+                disabled={savingWorkspace || workspaceModel === workspaceModelInitial}
+                className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
+              >
+                {savingWorkspace ? <Loader2 size={12} className="animate-spin inline" /> : 'Save'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* itemsPerPage deprecated */}
+      </div>
+
+      {/* Model Browser — full-width card (rendered outside the Display card) */}
       <ModelBrowserSection
         models={models}
         effectiveModel={effectiveModel}
@@ -2938,32 +2960,7 @@ function DisplaySection() {
         }}
         onTestModel={(id) => testModel(id)}
       />
-
-      {/* Items per page */}
-      <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Items Per Page</h2>
-        <select
-          value={itemsPerPage}
-          onChange={e => setItemsPerPage(Number(e.target.value))}
-          className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-        >
-          {[10, 20, 30, 50, 100].map(n => (
-            <option key={n} value={n}>{n} items</option>
-          ))}
-        </select>
-        <p className="text-xs text-muted mt-1">Number of items shown per page in lists and archives</p>
-      </div>
-
-      {/* Save display settings button */}
-      <button
-        onClick={saveDisplay}
-        disabled={saving || !hasChanges}
-        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
-      >
-        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
-        {saved ? 'Saved' : 'Save Display Settings'}
-      </button>
-    </div>
+    </>
   );
 }
 
