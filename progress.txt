@@ -3,7 +3,8 @@
 Spec: rorca-pg-boss-job-queue
 Run ID: 78
 Started: 2026-03-12T23:19:11.696Z
-Last Updated: 2026-03-12T23:21:30.431Z
+Last Updated: 2026-03-12T23:24:04.334Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - PG-002: Install pg-boss and scaffold worker process (backend/src/worker.ts) — DONE (claude, claude-sonnet-4-6, 138s)
+- PG-003: pg-boss schema migration 050 and initBoss() integration — DONE (claude, claude-sonnet-4-6, 140s)
