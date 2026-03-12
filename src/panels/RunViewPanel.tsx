@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench } from 'lucide-react';
+import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -45,6 +45,16 @@ interface StoryResultSeed {
   started_at: string | null;
   finished_at: string | null;
   elapsed_seconds: number | null;
+  active_skills?: string | null; // JSON array string from story_results.active_skills
+}
+
+interface StoryTokenEntry {
+  storyId: string;
+  status: string;
+  inputTokens: number;
+  outputTokens: number;
+  modelUsed: string | null;
+  costUsd: number;
 }
 
 interface ContextComparisonData {
@@ -55,12 +65,13 @@ interface ContextComparisonData {
 interface RunApiResponse {
   run: PipelineRun;
   stories: StoryResultSeed[];
-  specStories: { id: string; title: string }[];
+  specStories: { id: string; title: string; suggestedSkills?: Array<{ name: string; relevance: number; reason: string }> }[];
   specModel?: string | null;
   agentType?: string;
   agentModel?: string | null;
   tokenSummary?: { inputTokens: number; outputTokens: number };
   contextComparison?: ContextComparisonData | null;
+  storyTokenBreakdown?: StoryTokenEntry[];
 }
 
 interface CommitEntry {
@@ -147,17 +158,41 @@ function extractStoryId(message: string): string | null {
 
 // ─── Stories List Tab ───────────────────────────────────────────────────────
 
-function StoriesListTab({ dbStories, specStories, liveStatuses }: {
+function StoriesListTab({ dbStories, specStories, liveStatuses, contextComparison, storyTokenBreakdown }: {
   dbStories: StoryResultSeed[];
-  specStories: { id: string; title: string }[];
+  specStories: { id: string; title: string; suggestedSkills?: Array<{ name: string; relevance: number; reason: string }> }[];
   liveStatuses: Map<string, DerivedStatus>;
+  contextComparison?: ContextComparisonData | null;
+  storyTokenBreakdown?: StoryTokenEntry[];
 }) {
+  const [expandedStoryId, setExpandedStoryId] = useState<string | null>(null);
+
   // Merge spec story titles with db results and live statuses
   const titleMap = useMemo(() => {
     const m = new Map<string, string>();
     for (const s of specStories) m.set(s.id, s.title);
     return m;
   }, [specStories]);
+
+  // Build suggestedSkills lookup: storyId -> Map<name, { relevance, reason }>
+  const suggestedSkillsMap = useMemo(() => {
+    const m = new Map<string, Map<string, { relevance: number; reason: string }>>();
+    for (const s of specStories) {
+      if (Array.isArray(s.suggestedSkills) && s.suggestedSkills.length > 0) {
+        const skillMap = new Map<string, { relevance: number; reason: string }>();
+        for (const sk of s.suggestedSkills) skillMap.set(sk.name, { relevance: sk.relevance, reason: sk.reason });
+        m.set(s.id, skillMap);
+      }
+    }
+    return m;
+  }, [specStories]);
+
+  // Build token lookup by storyId
+  const tokenMap = useMemo(() => {
+    const m = new Map<string, StoryTokenEntry>();
+    for (const t of (storyTokenBreakdown ?? [])) m.set(t.storyId, t);
+    return m;
+  }, [storyTokenBreakdown]);
 
   const rows = useMemo(() => {
     // Start from spec stories order if available, else db order
@@ -169,7 +204,12 @@ function StoriesListTab({ dbStories, specStories, liveStatuses }: {
       const live = liveStatuses.get(id);
       const status = live?.status ?? (db ? (db.status === 'pass' ? 'passed' : db.status === 'fail' ? 'failed' : db.status) : 'pending');
       const elapsed = live?.elapsed ?? (db?.elapsed_seconds != null ? `${db.elapsed_seconds}s` : null);
-      return { id, title: titleMap.get(id) ?? id, status, elapsed };
+      // Parse active_skills from db story (JSON string)
+      let activeSkills: string[] = [];
+      if (db?.active_skills) {
+        try { activeSkills = JSON.parse(db.active_skills); } catch { /* ignore */ }
+      }
+      return { id, title: titleMap.get(id) ?? id, status, elapsed, activeSkills };
     });
   }, [specStories, dbStories, liveStatuses, titleMap]);
 
@@ -205,15 +245,112 @@ function StoriesListTab({ dbStories, specStories, liveStatuses }: {
       <div className="flex-1 overflow-y-auto">
         {rows.map((row, i) => {
           const style = STATUS_STYLES[row.status] ?? STATUS_STYLES.pending;
+          const isExpanded = expandedStoryId === row.id;
+
+          // Accordion data
+          const contextFiles = contextComparison?.actual?.[row.id]?.contextFiles ?? [];
+          const tokenEntry = tokenMap.get(row.id);
+          const skillSuggestions = suggestedSkillsMap.get(row.id);
+          const activeSkillsWithRelevance = row.activeSkills.map(name => ({
+            name,
+            relevance: skillSuggestions?.get(name)?.relevance ?? null,
+            reason: skillSuggestions?.get(name)?.reason ?? null,
+          }));
+
+          const hasSkills = activeSkillsWithRelevance.length > 0;
+          const hasContextFiles = contextFiles.length > 0;
+          const hasTokens = tokenEntry != null && (tokenEntry.inputTokens > 0 || tokenEntry.outputTokens > 0);
+          const hasAnyData = hasSkills || hasContextFiles || hasTokens;
+
           return (
-            <div key={row.id} className={`flex items-center gap-3 px-4 py-2.5 text-sm ${i % 2 === 0 ? 'bg-transparent' : 'bg-panel/30'}`}>
-              <span className={`shrink-0 w-2 h-2 rounded-full ${style.dot}`} />
-              <span className="font-mono text-xs text-muted shrink-0 w-[72px]">{row.id}</span>
-              <span className="flex-1 truncate min-w-0">{row.title}</span>
-              {row.elapsed && <span className="text-xs text-muted shrink-0">{row.elapsed}</span>}
-              <span className={`text-xs shrink-0 ${row.status === 'passed' || row.status === 'pass' ? 'text-emerald-500' : row.status === 'failed' || row.status === 'fail' ? 'text-red-500' : row.status === 'running' ? 'text-blue-500' : 'text-muted'}`}>
-                {style.label}
-              </span>
+            <div key={row.id} className={i % 2 === 0 ? 'bg-transparent' : 'bg-panel/30'}>
+              {/* Story row */}
+              <div className="flex items-center gap-3 px-4 py-2.5 text-sm">
+                <span className={`shrink-0 w-2 h-2 rounded-full ${style.dot}`} />
+                <span className="font-mono text-xs text-muted shrink-0 w-[72px]">{row.id}</span>
+                <span className="flex-1 truncate min-w-0">{row.title}</span>
+                {row.elapsed && <span className="text-xs text-muted shrink-0">{row.elapsed}</span>}
+                <span className={`text-xs shrink-0 ${row.status === 'passed' || row.status === 'pass' ? 'text-emerald-500' : row.status === 'failed' || row.status === 'fail' ? 'text-red-500' : row.status === 'running' ? 'text-blue-500' : 'text-muted'}`}>
+                  {style.label}
+                </span>
+                {/* Context chevron */}
+                <button
+                  onClick={() => setExpandedStoryId(isExpanded ? null : row.id)}
+                  className={`shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                    isExpanded
+                      ? 'text-accent bg-accent/10'
+                      : 'text-muted hover:text-[var(--text)] hover:bg-panel'
+                  }`}
+                  title={isExpanded ? 'Collapse context' : 'Expand context'}
+                  aria-label={isExpanded ? 'Collapse context' : 'Expand context'}
+                  aria-expanded={isExpanded}
+                >
+                  <ChevronRight
+                    size={12}
+                    className={`transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`}
+                  />
+                  Context
+                </button>
+              </div>
+
+              {/* Accordion drawer */}
+              {isExpanded && (
+                <div className="px-4 pb-3 pt-1 border-t border-border/50 bg-bg/40">
+                  {!hasAnyData ? (
+                    <p className="text-xs text-muted italic">No context data recorded for this story.</p>
+                  ) : (
+                    <div className="flex flex-col gap-3">
+                      {/* Skills */}
+                      {hasSkills && (
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1.5">Skills</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {activeSkillsWithRelevance.map(sk => (
+                              <span key={sk.name} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-400 text-[11px] font-medium" title={sk.reason ?? undefined}>
+                                {sk.name}
+                                {sk.relevance != null && (
+                                  <span className={`text-[10px] font-semibold ${sk.relevance >= 7 ? 'text-purple-300' : 'text-purple-500/70'}`}>
+                                    {sk.relevance}/10
+                                  </span>
+                                )}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Context Files */}
+                      {hasContextFiles && (
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1.5">Context Files</p>
+                          <div className="flex flex-wrap gap-1">
+                            {contextFiles.map(f => (
+                              <code key={f} className="px-1.5 py-0.5 rounded bg-panel text-[11px] font-mono text-accent/80 border border-border/60">
+                                {f}
+                              </code>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Tokens */}
+                      {hasTokens && tokenEntry && (
+                        <div>
+                          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1.5">Tokens</p>
+                          <div className="flex items-center gap-4 text-xs">
+                            <span className="text-muted">
+                              In: <span className="text-[var(--text)] font-mono">{tokenEntry.inputTokens.toLocaleString()}</span>
+                            </span>
+                            <span className="text-muted">
+                              Out: <span className="text-[var(--text)] font-mono">{tokenEntry.outputTokens.toLocaleString()}</span>
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
@@ -409,7 +546,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const [contextComparison, setContextComparison] = useState<ContextComparisonData | null>(null);
   const [totalStories, setTotalStories] = useState(0);
   const [dbStories, setDbStories] = useState<StoryResultSeed[]>([]);
-  const [specStories, setSpecStories] = useState<{ id: string; title: string }[]>([]);
+  const [specStories, setSpecStories] = useState<{ id: string; title: string; suggestedSkills?: Array<{ name: string; relevance: number; reason: string }> }[]>([]);
+  const [storyTokenBreakdown, setStoryTokenBreakdown] = useState<StoryTokenEntry[]>([]);
   // Seed from story_results on initial load so graph colors are correct for in-progress/historical runs
   const [seedStatuses, setSeedStatuses] = useState<Map<string, DerivedStatus>>(new Map());
 
@@ -484,6 +622,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
       if (data.specStories) { setTotalStories(data.specStories.length); setSpecStories(data.specStories); }
       if (data.stories) setDbStories(data.stories);
+      if (data.storyTokenBreakdown) setStoryTokenBreakdown(data.storyTokenBreakdown);
       // Seed graph colors from DB story results so nodes aren't all grey on load
       if (data.stories?.length) {
         const seed = new Map<string, DerivedStatus>();
@@ -719,7 +858,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           />
         );
       case 'stories':
-        return <StoriesListTab dbStories={dbStories} specStories={specStories} liveStatuses={liveStatuses} />;
+        return <StoriesListTab dbStories={dbStories} specStories={specStories} liveStatuses={liveStatuses} contextComparison={contextComparison} storyTokenBreakdown={storyTokenBreakdown} />;
       case 'graph':
         if (isMobile) {
           return (
