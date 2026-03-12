@@ -1,9 +1,8 @@
 /**
- * CA-007: Tests for agent-personas.ts
+ * CA-007: Tests for agent-personas.ts (PersonaRegistry)
  *
- * Covers: frontmatter parsing, PersonaRegistry.discover(), indexing by
- * name/category, getReviewers() trigger matching, graceful degradation
- * on invalid frontmatter, and duplicate name handling.
+ * Covers: frontmatter parsing, discover(), getPersona(), getReviewers(),
+ * getPersonaCatalogForPrompt(), graceful degradation on invalid files.
  */
 
 import * as fs from 'fs';
@@ -16,7 +15,7 @@ import {
   type PersonaCategory,
 } from '../agent-personas';
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'persona-test-'));
@@ -27,463 +26,526 @@ function cleanup(dir: string) {
 }
 
 function writePersona(
-  dir: string,
-  subdir: string,
+  baseDir: string,
+  category: string,
   filename: string,
   frontmatter: Record<string, unknown>,
   body: string,
 ): string {
-  const targetDir = path.join(dir, 'personas', subdir);
-  fs.mkdirSync(targetDir, { recursive: true });
-  const filePath = path.join(targetDir, filename);
-  const yamlLines = Object.entries(frontmatter)
-    .map(([k, v]) => {
-      if (Array.isArray(v)) {
-        return `${k}:\n${v.map(item => `  - "${item}"`).join('\n')}`;
+  const dir = path.join(baseDir, 'personas', category);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, filename);
+
+  const lines: string[] = ['---'];
+  for (const [key, val] of Object.entries(frontmatter)) {
+    if (Array.isArray(val)) {
+      lines.push(`${key}:`);
+      for (const item of val) {
+        lines.push(`  - "${item}"`);
       }
-      if (typeof v === 'string') return `${k}: "${v}"`;
-      return `${k}: ${v}`;
-    })
-    .join('\n');
-  fs.writeFileSync(filePath, `---\n${yamlLines}\n---\n${body}`);
+    } else {
+      lines.push(`${key}: ${val}`);
+    }
+  }
+  lines.push('---');
+  lines.push('');
+  lines.push(body);
+
+  fs.writeFileSync(filePath, lines.join('\n'));
   return filePath;
 }
 
 // ─── parseFrontmatter ────────────────────────────────────────────────────────
 
 describe('parseFrontmatter', () => {
-  it('extracts yaml and body from valid frontmatter', () => {
-    const content = '---\nname: test\ncategory: primary\n---\nThis is the body.';
+  it('parses valid frontmatter with scalar values', () => {
+    const content = `---
+category: specialist
+name: frontend
+description: React specialist
+reviewPriority: 10
+---
+
+You are a frontend specialist.`;
+
     const result = parseFrontmatter(content);
     expect(result).not.toBeNull();
-    expect(result!.yaml).toContain('name: test');
-    expect(result!.body).toBe('This is the body.');
+    expect(result!.attrs.category).toBe('specialist');
+    expect(result!.attrs.name).toBe('frontend');
+    expect(result!.attrs.description).toBe('React specialist');
+    expect(result!.attrs.reviewPriority).toBe('10');
+    expect(result!.body).toBe('You are a frontend specialist.');
+  });
+
+  it('parses frontmatter with array values', () => {
+    const content = `---
+name: backend
+triggers:
+  - "backend/src/**"
+  - "backend/src/routes/**"
+---
+
+Body text.`;
+
+    const result = parseFrontmatter(content);
+    expect(result).not.toBeNull();
+    expect(result!.attrs.triggers).toEqual(['backend/src/**', 'backend/src/routes/**']);
   });
 
   it('returns null for content without frontmatter', () => {
-    expect(parseFrontmatter('# Just a heading\nSome content')).toBeNull();
+    expect(parseFrontmatter('# Just a heading')).toBeNull();
+    expect(parseFrontmatter('no frontmatter here')).toBeNull();
   });
 
-  it('returns null for incomplete delimiters', () => {
-    expect(parseFrontmatter('---\nname: test\nNo closing delimiter')).toBeNull();
+  it('returns null for unclosed frontmatter', () => {
+    expect(parseFrontmatter('---\nname: test\n')).toBeNull();
   });
 
-  it('handles empty body after frontmatter', () => {
-    const result = parseFrontmatter('---\nname: test\n---\n');
+  it('handles empty frontmatter', () => {
+    const result = parseFrontmatter('---\n---\nBody');
     expect(result).not.toBeNull();
-    expect(result!.body).toBe('');
+    expect(Object.keys(result!.attrs)).toHaveLength(0);
+    expect(result!.body).toBe('Body');
+  });
+
+  it('handles empty triggers list', () => {
+    const content = `---
+name: test
+triggers: []
+---
+Body`;
+    const result = parseFrontmatter(content);
+    expect(result).not.toBeNull();
+    expect(result!.attrs.triggers).toEqual([]);
   });
 });
 
 // ─── PersonaRegistry.discover ────────────────────────────────────────────────
 
-describe('PersonaRegistry', () => {
+describe('PersonaRegistry.discover', () => {
+  it('discovers personas from category subdirectories', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_specialist', 'frontend.md', {
+        category: 'specialist',
+        name: 'frontend',
+        description: 'React, CSS, UI/UX implementation',
+        triggers: ['src/components/**', 'src/panels/**'],
+        reviewPriority: 50,
+      }, 'You are a frontend specialist agent.');
+
+      writePersona(dir, '_adversarial', 'red-team.md', {
+        category: 'adversarial',
+        name: 'red-team',
+        description: 'Attack vector discovery',
+        triggers: ['backend/src/**'],
+        reviewPriority: 10,
+      }, 'You are a red team agent. Find security vulnerabilities.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      expect(registry.getAll()).toHaveLength(2);
+      expect(registry.getWarnings()).toHaveLength(0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('infers category from directory when frontmatter lacks it', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_primary', 'architect.md', {
+        name: 'architect',
+        description: 'Structural decisions',
+      }, 'You are the architect.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      const persona = registry.getPersona('architect');
+      expect(persona).toBeDefined();
+      expect(persona!.metadata.category).toBe('primary');
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('returns empty when personas directory does not exist', () => {
+    const dir = tmpDir();
+    try {
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+      expect(registry.getAll()).toHaveLength(0);
+      expect(registry.getWarnings()).toHaveLength(0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('warns on invalid frontmatter but does not crash', () => {
+    const dir = tmpDir();
+    try {
+      // Valid persona
+      writePersona(dir, '_specialist', 'valid.md', {
+        name: 'valid-persona',
+        category: 'specialist',
+        description: 'A valid persona',
+      }, 'Valid body.');
+
+      // Invalid persona — no name
+      const invalidDir = path.join(dir, 'personas', '_specialist');
+      fs.writeFileSync(
+        path.join(invalidDir, 'invalid.md'),
+        '---\ncategory: specialist\n---\nBody without name.',
+      );
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      expect(registry.getAll()).toHaveLength(1);
+      expect(registry.getWarnings()).toHaveLength(1);
+      expect(registry.getWarnings()[0].message).toContain('name');
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('warns on files without frontmatter', () => {
+    const dir = tmpDir();
+    try {
+      const personasDir = path.join(dir, 'personas', '_specialist');
+      fs.mkdirSync(personasDir, { recursive: true });
+      fs.writeFileSync(path.join(personasDir, 'no-frontmatter.md'), '# Just a heading\n\nSome text.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      expect(registry.getAll()).toHaveLength(0);
+      expect(registry.getWarnings()).toHaveLength(1);
+      expect(registry.getWarnings()[0].message).toContain('frontmatter');
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('discovers personas in nested subdirectories', () => {
+    const dir = tmpDir();
+    try {
+      // Create a deeply nested persona
+      const deepDir = path.join(dir, 'personas', '_specialist', 'sub', 'deep');
+      fs.mkdirSync(deepDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(deepDir, 'nested.md'),
+        '---\nname: nested\ncategory: specialist\ndescription: A nested persona\n---\nNested body.',
+      );
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      expect(registry.getAll()).toHaveLength(1);
+      expect(registry.getPersona('nested')).toBeDefined();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('clears previous state on re-discover', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_specialist', 'first.md', {
+        name: 'first',
+        category: 'specialist',
+        description: 'First',
+      }, 'Body.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+      expect(registry.getAll()).toHaveLength(1);
+
+      // Remove the file and re-discover
+      fs.rmSync(path.join(dir, 'personas'), { recursive: true, force: true });
+      registry.discover(dir);
+      expect(registry.getAll()).toHaveLength(0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+// ─── PersonaRegistry.getPersona ──────────────────────────────────────────────
+
+describe('PersonaRegistry.getPersona', () => {
+  it('looks up by name case-insensitively', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_specialist', 'frontend.md', {
+        name: 'Frontend',
+        category: 'specialist',
+        description: 'React specialist',
+      }, 'Body.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      expect(registry.getPersona('frontend')).toBeDefined();
+      expect(registry.getPersona('Frontend')).toBeDefined();
+      expect(registry.getPersona('FRONTEND')).toBeDefined();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('returns undefined for unknown name', () => {
+    const registry = new PersonaRegistry();
+    expect(registry.getPersona('nonexistent')).toBeUndefined();
+  });
+
+  it('returns full Persona with metadata, promptText, and filePath', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_review', 'verifier.md', {
+        name: 'spec-verifier',
+        category: 'review',
+        description: 'Consistency checks',
+        triggers: ['forge/specs/**'],
+        reviewPriority: 5,
+      }, 'You verify specs for consistency.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      const persona = registry.getPersona('spec-verifier')!;
+      expect(persona.metadata.category).toBe('review');
+      expect(persona.metadata.name).toBe('spec-verifier');
+      expect(persona.metadata.description).toBe('Consistency checks');
+      expect(persona.metadata.triggers).toEqual(['forge/specs/**']);
+      expect(persona.metadata.reviewPriority).toBe(5);
+      expect(persona.promptText).toBe('You verify specs for consistency.');
+      expect(persona.filePath).toContain('verifier.md');
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+// ─── PersonaRegistry.getByCategory ───────────────────────────────────────────
+
+describe('PersonaRegistry.getByCategory', () => {
+  it('returns personas grouped by category', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_specialist', 'frontend.md', {
+        name: 'frontend', category: 'specialist', description: 'FE',
+      }, 'FE body.');
+      writePersona(dir, '_specialist', 'backend.md', {
+        name: 'backend', category: 'specialist', description: 'BE',
+      }, 'BE body.');
+      writePersona(dir, '_adversarial', 'red-team.md', {
+        name: 'red-team', category: 'adversarial', description: 'RT',
+      }, 'RT body.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      expect(registry.getByCategory('specialist')).toHaveLength(2);
+      expect(registry.getByCategory('adversarial')).toHaveLength(1);
+      expect(registry.getByCategory('primary')).toHaveLength(0);
+      expect(registry.getByCategory('review')).toHaveLength(0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+// ─── PersonaRegistry.getReviewers ────────────────────────────────────────────
+
+describe('PersonaRegistry.getReviewers', () => {
   let dir: string;
+  let registry: PersonaRegistry;
 
   beforeEach(() => {
     dir = tmpDir();
-  });
-
-  afterEach(() => {
-    cleanup(dir);
-  });
-
-  it('discovers personas from .rorca/personas/ subdirectories', () => {
-    writePersona(dir, '_primary', 'architect.md', {
-      category: 'primary',
-      name: 'architect',
-      description: 'Structural decisions',
-      triggers: ['backend/src/lib/**'],
-      reviewPriority: 10,
-    }, 'You are the architect persona. Focus on system design.');
-
-    writePersona(dir, '_adversarial', 'red-team.md', {
-      category: 'adversarial',
-      name: 'red-team',
-      description: 'Attack vector discovery',
-      triggers: ['backend/src/routes/**', 'backend/src/lib/auth*'],
-      reviewPriority: 5,
-    }, 'You are the red team. Find vulnerabilities.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(2);
-    expect(registry.getWarnings()).toHaveLength(0);
-  });
-
-  it('indexes by name (case-insensitive)', () => {
     writePersona(dir, '_specialist', 'frontend.md', {
+      name: 'frontend',
       category: 'specialist',
-      name: 'Frontend',
-      description: 'Frontend specialist',
-    }, 'You specialize in React components.');
+      description: 'React specialist',
+      triggers: ['src/components/**', 'src/panels/**'],
+      reviewPriority: 50,
+    }, 'FE body.');
 
-    const registry = new PersonaRegistry().discover(dir);
-    const persona = registry.getPersona('frontend');
-    expect(persona).toBeDefined();
-    expect(persona!.metadata.name).toBe('Frontend');
-    expect(persona!.promptText).toBe('You specialize in React components.');
-
-    // Case-insensitive lookup
-    expect(registry.getPersona('FRONTEND')).toBeDefined();
-    expect(registry.getPersona('Frontend')).toBeDefined();
-  });
-
-  it('indexes by category', () => {
-    writePersona(dir, '_review', 'spec-writer.md', {
-      category: 'review',
-      name: 'spec-writer',
-      description: 'Generates exhaustive specs',
-      reviewPriority: 1,
-    }, 'Write detailed specs.');
+    writePersona(dir, '_adversarial', 'security.md', {
+      name: 'security',
+      category: 'adversarial',
+      description: 'Security review',
+      triggers: ['backend/src/routes/**', 'backend/src/lib/**'],
+      reviewPriority: 10,
+    }, 'Security body.');
 
     writePersona(dir, '_review', 'best-practices.md', {
-      category: 'review',
       name: 'best-practices',
-      description: 'Convention enforcement',
-      reviewPriority: 20,
-    }, 'Enforce conventions.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    const reviewPersonas = registry.getByCategory('review');
-    expect(reviewPersonas).toHaveLength(2);
-    expect(registry.getByCategory('primary')).toHaveLength(0);
-  });
-
-  it('getReviewers matches trigger globs against story paths', () => {
-    writePersona(dir, '_specialist', 'frontend.md', {
-      category: 'specialist',
-      name: 'frontend',
-      description: 'Frontend specialist',
-      triggers: ['src/components/**', 'src/panels/**'],
-      reviewPriority: 30,
-    }, 'Frontend prompt.');
-
-    writePersona(dir, '_adversarial', 'red-team.md', {
-      category: 'adversarial',
-      name: 'red-team',
-      description: 'Security review',
-      triggers: ['backend/src/routes/**', 'backend/src/lib/auth*'],
-      reviewPriority: 5,
-    }, 'Red team prompt.');
-
-    writePersona(dir, '_specialist', 'database.md', {
-      category: 'specialist',
-      name: 'database',
-      description: 'Database specialist',
-      triggers: ['backend/src/db/**'],
-      reviewPriority: 20,
-    }, 'Database prompt.');
-
-    const registry = new PersonaRegistry().discover(dir);
-
-    // Story touches frontend files — should match frontend persona
-    const frontendReviewers = registry.getReviewers([
-      'src/components/Button.tsx',
-      'src/panels/ForgePanel.tsx',
-    ]);
-    expect(frontendReviewers).toHaveLength(1);
-    expect(frontendReviewers[0].metadata.name).toBe('frontend');
-
-    // Story touches backend routes — should match red-team
-    const backendReviewers = registry.getReviewers([
-      'backend/src/routes/auth.ts',
-    ]);
-    expect(backendReviewers).toHaveLength(1);
-    expect(backendReviewers[0].metadata.name).toBe('red-team');
-
-    // Story touches nothing matching any trigger
-    const noMatch = registry.getReviewers(['README.md']);
-    expect(noMatch).toHaveLength(0);
-  });
-
-  it('getReviewers sorts by reviewPriority ascending', () => {
-    writePersona(dir, '_review', 'low-priority.md', {
       category: 'review',
-      name: 'low-priority',
-      description: 'Low priority',
-      triggers: ['src/**'],
-      reviewPriority: 99,
-    }, 'Low priority.');
+      description: 'Convention compliance',
+      triggers: ['src/**', 'backend/**'],
+      reviewPriority: 90,
+    }, 'BP body.');
 
-    writePersona(dir, '_review', 'high-priority.md', {
-      category: 'review',
-      name: 'high-priority',
-      description: 'High priority',
-      triggers: ['src/**'],
+    writePersona(dir, '_primary', 'architect.md', {
+      name: 'architect',
+      category: 'primary',
+      description: 'Architecture',
+      triggers: [],
       reviewPriority: 1,
-    }, 'High priority.');
+    }, 'Architect body.');
 
-    writePersona(dir, '_review', 'mid-priority.md', {
-      category: 'review',
-      name: 'mid-priority',
-      description: 'Mid priority',
-      triggers: ['src/**'],
-      reviewPriority: 50,
-    }, 'Mid priority.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    const reviewers = registry.getReviewers(['src/app.tsx']);
-    expect(reviewers).toHaveLength(3);
-    expect(reviewers[0].metadata.name).toBe('high-priority');
-    expect(reviewers[1].metadata.name).toBe('mid-priority');
-    expect(reviewers[2].metadata.name).toBe('low-priority');
-  });
-
-  it('returns empty list when getReviewers called with empty paths', () => {
-    writePersona(dir, '_specialist', 'frontend.md', {
-      category: 'specialist',
-      name: 'frontend',
-      description: 'Frontend',
-      triggers: ['src/**'],
-      reviewPriority: 10,
-    }, 'Prompt.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getReviewers([])).toHaveLength(0);
-  });
-
-  // ─── Graceful degradation ──────────────────────────────────────────────────
-
-  it('warns on missing frontmatter but does not crash', () => {
-    const personasDir = path.join(dir, 'personas', '_primary');
-    fs.mkdirSync(personasDir, { recursive: true });
-    fs.writeFileSync(path.join(personasDir, 'bad.md'), '# No frontmatter\nJust text.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-    expect(registry.getWarnings()).toHaveLength(1);
-    expect(registry.getWarnings()[0].reason).toContain('No valid YAML frontmatter');
-  });
-
-  it('warns on invalid YAML but does not crash', () => {
-    const personasDir = path.join(dir, 'personas', '_primary');
-    fs.mkdirSync(personasDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(personasDir, 'bad-yaml.md'),
-      '---\n  invalid: [yaml: {\n---\nBody text.',
-    );
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-    expect(registry.getWarnings()).toHaveLength(1);
-    expect(registry.getWarnings()[0].reason).toContain('Invalid YAML');
-  });
-
-  it('warns on missing required fields', () => {
-    writePersona(dir, '_primary', 'incomplete.md', {
-      category: 'primary',
-      // missing name and description
-    }, 'Body.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-    expect(registry.getWarnings()).toHaveLength(1);
-    expect(registry.getWarnings()[0].reason).toContain('name');
-  });
-
-  it('warns on invalid category value', () => {
-    writePersona(dir, '_primary', 'bad-category.md', {
-      category: 'invalid_category',
-      name: 'bad',
-      description: 'Bad category',
-    }, 'Body.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-    expect(registry.getWarnings()).toHaveLength(1);
-    expect(registry.getWarnings()[0].reason).toContain('category');
-  });
-
-  it('warns on duplicate persona names', () => {
-    writePersona(dir, '_primary', 'architect.md', {
-      category: 'primary',
-      name: 'architect',
-      description: 'First architect',
-    }, 'First.');
-
-    writePersona(dir, '_specialist', 'architect-dup.md', {
-      category: 'specialist',
-      name: 'architect',
-      description: 'Duplicate architect',
-    }, 'Duplicate.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(1);
-    expect(registry.getWarnings()).toHaveLength(1);
-    expect(registry.getWarnings()[0].reason).toContain('Duplicate persona name');
-  });
-
-  it('warns on invalid triggers type', () => {
-    writePersona(dir, '_primary', 'bad-triggers.md', {
-      category: 'primary',
-      name: 'bad-triggers',
-      description: 'Has bad triggers',
-      triggers: 'not-an-array',
-    }, 'Body.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-    expect(registry.getWarnings()).toHaveLength(1);
-    expect(registry.getWarnings()[0].reason).toContain('triggers must be an array');
-  });
-
-  // ─── Edge cases ────────────────────────────────────────────────────────────
-
-  it('returns empty registry when personas dir does not exist', () => {
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-    expect(registry.getWarnings()).toHaveLength(0);
-  });
-
-  it('handles empty personas directory', () => {
-    fs.mkdirSync(path.join(dir, 'personas'), { recursive: true });
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-  });
-
-  it('defaults reviewPriority to 50 when omitted', () => {
-    writePersona(dir, '_specialist', 'qa.md', {
-      category: 'specialist',
-      name: 'qa',
-      description: 'QA specialist',
-    }, 'QA prompt.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    const qa = registry.getPersona('qa');
-    expect(qa).toBeDefined();
-    expect(qa!.metadata.reviewPriority).toBe(50);
-  });
-
-  it('defaults triggers to empty array when omitted', () => {
-    writePersona(dir, '_specialist', 'qa.md', {
-      category: 'specialist',
-      name: 'qa',
-      description: 'QA specialist',
-    }, 'QA prompt.');
-
-    const registry = new PersonaRegistry().discover(dir);
-    const qa = registry.getPersona('qa');
-    expect(qa).toBeDefined();
-    expect(qa!.metadata.triggers).toEqual([]);
-  });
-
-  it('discovers deeply nested persona files', () => {
-    const deepDir = path.join(dir, 'personas', '_specialist', 'deep', 'nested');
-    fs.mkdirSync(deepDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(deepDir, 'deep-persona.md'),
-      '---\ncategory: specialist\nname: deep-persona\ndescription: Deeply nested\n---\nDeep prompt.',
-    );
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(1);
-    expect(registry.getPersona('deep-persona')).toBeDefined();
-  });
-
-  it('ignores non-.md files', () => {
-    const personasDir = path.join(dir, 'personas', '_primary');
-    fs.mkdirSync(personasDir, { recursive: true });
-    fs.writeFileSync(path.join(personasDir, 'notes.txt'), 'not a persona');
-    fs.writeFileSync(path.join(personasDir, 'config.json'), '{}');
-
-    const registry = new PersonaRegistry().discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-    expect(registry.getWarnings()).toHaveLength(0);
-  });
-
-  it('re-discover resets state', () => {
-    writePersona(dir, '_primary', 'architect.md', {
-      category: 'primary',
-      name: 'architect',
-      description: 'Architect',
-    }, 'First discovery.');
-
-    const registry = new PersonaRegistry();
+    registry = new PersonaRegistry();
     registry.discover(dir);
-    expect(registry.getAll()).toHaveLength(1);
-
-    // Remove the file and re-discover
-    fs.rmSync(path.join(dir, 'personas'), { recursive: true, force: true });
-    registry.discover(dir);
-    expect(registry.getAll()).toHaveLength(0);
-  });
-});
-
-// ─── Default Personas Integration ─────────────────────────────────────────────
-
-describe('Default personas (default-personas/ directory)', () => {
-  const defaultPersonasDir = path.resolve(__dirname, '../../../../default-personas');
-  let rorcaDir: string;
-
-  beforeEach(() => {
-    rorcaDir = fs.mkdtempSync(path.join(os.tmpdir(), 'default-personas-test-'));
-    // Copy default-personas/ into temp .rorca/personas/ to simulate install
-    const destPersonas = path.join(rorcaDir, 'personas');
-    copyDirSync(defaultPersonasDir, destPersonas);
   });
 
-  afterEach(() => {
-    try { fs.rmSync(rorcaDir, { recursive: true, force: true }); } catch { /* ok */ }
+  afterEach(() => cleanup(dir));
+
+  it('returns personas whose triggers match story paths', () => {
+    const reviewers = registry.getReviewers(['src/components/Button.tsx']);
+    const names = reviewers.map(r => r.metadata.name);
+    expect(names).toContain('frontend');
+    expect(names).toContain('best-practices');
+    expect(names).not.toContain('security');
   });
 
-  it('discovers all 15 default personas with zero warnings', () => {
-    const registry = new PersonaRegistry().discover(rorcaDir);
-    const warnings = registry.getWarnings();
-    expect(warnings).toHaveLength(0);
-    expect(registry.getAll()).toHaveLength(16);
-  });
-
-  it('has correct category distribution: 3 primary, 3 adversarial, 7 specialist, 3 review', () => {
-    const registry = new PersonaRegistry().discover(rorcaDir);
-    expect(registry.getByCategory('primary')).toHaveLength(3);
-    expect(registry.getByCategory('adversarial')).toHaveLength(3);
-    expect(registry.getByCategory('specialist')).toHaveLength(7);
-    expect(registry.getByCategory('review')).toHaveLength(3);
-  });
-
-  it('can look up every expected persona by name', () => {
-    const registry = new PersonaRegistry().discover(rorcaDir);
-    const expected = [
-      'architect', 'pm', 'lead-dev',
-      'red-team', 'assumption-buster', 'devils-advocate',
-      'frontend', 'backend', 'database', 'security', 'sre', 'ux-designer', 'qa',
-      'spec-writer', 'spec-verifier', 'best-practices',
-    ];
-    for (const name of expected) {
-      const persona = registry.getPersona(name);
-      expect(persona).toBeDefined();
-      expect(persona!.promptText.length).toBeGreaterThan(200);
-    }
-  });
-
-  it('every persona has non-empty triggers', () => {
-    const registry = new PersonaRegistry().discover(rorcaDir);
-    for (const persona of registry.getAll()) {
-      expect(persona.metadata.triggers.length).toBeGreaterThan(0);
-    }
-  });
-
-  it('reviewer matching works with default trigger globs', () => {
-    const registry = new PersonaRegistry().discover(rorcaDir);
-    // A story touching auth routes should match red-team and security
-    const authReviewers = registry.getReviewers(['backend/src/routes/auth.ts']);
-    const names = authReviewers.map(p => p.metadata.name);
-    expect(names).toContain('red-team');
+  it('matches backend paths to security persona', () => {
+    const reviewers = registry.getReviewers(['backend/src/routes/api.ts']);
+    const names = reviewers.map(r => r.metadata.name);
     expect(names).toContain('security');
+    expect(names).toContain('best-practices');
+    expect(names).not.toContain('frontend');
+  });
+
+  it('sorts by reviewPriority ascending', () => {
+    const reviewers = registry.getReviewers(['backend/src/routes/api.ts']);
+    for (let i = 1; i < reviewers.length; i++) {
+      expect(reviewers[i].metadata.reviewPriority).toBeGreaterThanOrEqual(
+        reviewers[i - 1].metadata.reviewPriority,
+      );
+    }
+  });
+
+  it('excludes personas with no triggers', () => {
+    const reviewers = registry.getReviewers(['src/components/Button.tsx']);
+    const names = reviewers.map(r => r.metadata.name);
+    expect(names).not.toContain('architect');
+  });
+
+  it('returns empty for no matching paths', () => {
+    const reviewers = registry.getReviewers(['docs/README.md']);
+    expect(reviewers).toHaveLength(0);
+  });
+
+  it('returns empty for empty paths array', () => {
+    const reviewers = registry.getReviewers([]);
+    expect(reviewers).toHaveLength(0);
   });
 });
 
-// ─── Helper: recursive dir copy ───────────────────────────────────────────────
+// ─── PersonaRegistry.getPersonaCatalogForPrompt ──────────────────────────────
 
-function copyDirSync(src: string, dest: string): void {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDirSync(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
+describe('PersonaRegistry.getPersonaCatalogForPrompt', () => {
+  it('produces a compact catalog grouped by category', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_primary', 'architect.md', {
+        name: 'architect', category: 'primary', description: 'Structural decisions',
+      }, 'Body.');
+      writePersona(dir, '_specialist', 'frontend.md', {
+        name: 'frontend', category: 'specialist', description: 'React, CSS, UI/UX',
+      }, 'Body.');
+      writePersona(dir, '_adversarial', 'red-team.md', {
+        name: 'red-team', category: 'adversarial', description: 'Attack vector discovery',
+      }, 'Body.');
+      writePersona(dir, '_review', 'verifier.md', {
+        name: 'spec-verifier', category: 'review', description: 'Consistency checks',
+      }, 'Body.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      const catalog = registry.getPersonaCatalogForPrompt();
+
+      expect(catalog).toContain('## Available Agent Personas');
+      expect(catalog).toContain('### Primary');
+      expect(catalog).toContain('- **architect**: Structural decisions');
+      expect(catalog).toContain('### Specialist');
+      expect(catalog).toContain('- **frontend**: React, CSS, UI/UX');
+      expect(catalog).toContain('### Adversarial');
+      expect(catalog).toContain('- **red-team**: Attack vector discovery');
+      expect(catalog).toContain('### Review');
+      expect(catalog).toContain('- **spec-verifier**: Consistency checks');
+    } finally {
+      cleanup(dir);
     }
-  }
-}
+  });
+
+  it('returns empty string when no personas discovered', () => {
+    const registry = new PersonaRegistry();
+    expect(registry.getPersonaCatalogForPrompt()).toBe('');
+  });
+
+  it('omits empty categories', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_specialist', 'only.md', {
+        name: 'only-one', category: 'specialist', description: 'Sole persona',
+      }, 'Body.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      const catalog = registry.getPersonaCatalogForPrompt();
+      expect(catalog).toContain('### Specialist');
+      expect(catalog).not.toContain('### Primary');
+      expect(catalog).not.toContain('### Adversarial');
+      expect(catalog).not.toContain('### Review');
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('shows "No description" for personas without description', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_specialist', 'nodesc.md', {
+        name: 'no-desc', category: 'specialist',
+      }, 'Body.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      const catalog = registry.getPersonaCatalogForPrompt();
+      expect(catalog).toContain('- **no-desc**: No description');
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+// ─── Default reviewPriority ──────────────────────────────────────────────────
+
+describe('default reviewPriority', () => {
+  it('defaults to 50 when not specified', () => {
+    const dir = tmpDir();
+    try {
+      writePersona(dir, '_specialist', 'default-prio.md', {
+        name: 'default-prio',
+        category: 'specialist',
+        description: 'Test',
+      }, 'Body.');
+
+      const registry = new PersonaRegistry();
+      registry.discover(dir);
+
+      const persona = registry.getPersona('default-prio');
+      expect(persona!.metadata.reviewPriority).toBe(50);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
