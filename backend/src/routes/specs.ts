@@ -931,11 +931,29 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const modelInfo = getModelInfo(resolvedModel);
     const modelContextWindow = modelInfo?.contextWindow ?? 200000;
 
+    // Extract first non-empty line of a layer's content as its title, truncated to 40 chars
+    function layerTitle(content: string | undefined): string | null {
+      if (!content) return null;
+      const firstLine = content.split('\n').map(l => l.trim()).find(l => l.length > 0) ?? null;
+      if (!firstLine) return null;
+      return firstLine.length > 40 ? firstLine.slice(0, 40) : firstLine;
+    }
+
+    const l1Content = l1Row?.content_yaml;
+    const l2Content = l2Row?.content_yaml;
+    const l3Content = l3Row?.content_yaml;
+
     precomputedContextSummary = {
       directionLayers: {
         l1: synthResult.meta.standards,
         l2: { present: synthResult.meta.conventions, domain: domain || null },
         l3: synthResult.meta.project,
+        l1Title: synthResult.meta.standards ? (layerTitle(l1Content) ?? 'Standards') : null,
+        l2Title: synthResult.meta.conventions ? (layerTitle(l2Content) ?? 'Conventions') : null,
+        l3Title: synthResult.meta.project ? (layerTitle(l3Content) ?? 'Project') : null,
+        l1Tokens: l1Content ? Math.ceil(l1Content.length / 4) : 0,
+        l2Tokens: l2Content ? Math.ceil(l2Content.length / 4) : 0,
+        l3Tokens: l3Content ? Math.ceil(l3Content.length / 4) : 0,
       },
       skills: skillNamesList,
       memoryEntries: memoryEntryCount,
