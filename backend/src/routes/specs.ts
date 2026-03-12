@@ -5267,7 +5267,7 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
     const log = await queryOne(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC LIMIT 1`, [specId]);
 
     if (!log) {
-      res.status(404).json({ error: 'No generation log found' });
+      res.json(null);
       return;
     }
 
