@@ -2,7 +2,7 @@
   "specId": "Rorca Context Usage Visibility — Spec Generation & Run View",
   "runId": 67,
   "startedAt": "2026-03-12T20:18:32.740Z",
-  "lastUpdatedAt": "2026-03-12T20:20:34.045Z",
+  "lastUpdatedAt": "2026-03-12T20:22:55.718Z",
   "completedStories": [
     {
       "storyId": "CU-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 120699
+    },
+    {
+      "storyId": "CU-002",
+      "title": "Direction layer titles and token contribution in ContextSummaryCard",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:20:48.936Z",
+      "finishedAt": "2026-03-12T20:22:55.718Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 126782
     }
   ],
   "failedStories": [],
