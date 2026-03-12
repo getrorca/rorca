@@ -44,6 +44,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
   const [query, setQuery] = useState('');
   const [highlightIdx, setHighlightIdx] = useState(0);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(['OpenRouter']));
+  const [showAllOpenRouter, setShowAllOpenRouter] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -95,6 +96,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
   useEffect(() => {
     if (!open) {
       setCollapsed(new Set(['OpenRouter']));
+      setShowAllOpenRouter(false);
     }
   }, [open]);
 
@@ -105,6 +107,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
         next.delete(label);
       } else {
         next.add(label);
+        if (label === 'OpenRouter') setShowAllOpenRouter(false);
       }
       return next;
     });
@@ -377,61 +380,116 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
                     )}
 
                     {/* Models — hidden when collapsed */}
-                    {!isCollapsed && group.models.map(m => {
-                      if (seenIds.has(m.id)) return null;
-                      seenIds.add(m.id);
-                      flatIdx++;
-                      const idx = flatIdx;
-                      const isSelected = m.id === value;
-                      const isHighlighted = idx === highlightIdx;
+                    {!isCollapsed && (() => {
+                      const OR_PAGE = 30;
+                      const isOpenRouter = group.label === 'OpenRouter';
+                      const activeSearch = query.trim().length > 0;
+
+                      // For OpenRouter without active search: hoist selected model, then paginate
+                      let modelsToRender: ModelOption[];
+                      let hoistedSelected: ModelOption | null = null;
+                      let remainingCount = 0;
+
+                      if (isOpenRouter && !activeSearch) {
+                        const undeduped = group.models.filter(m => !seenIds.has(m.id));
+                        const selectedInGroup = undeduped.find(m => m.id === value) ?? null;
+                        const rest = selectedInGroup
+                          ? undeduped.filter(m => m.id !== value)
+                          : undeduped;
+
+                        if (!showAllOpenRouter) {
+                          // If selected model exists in this group, reserve a slot for it
+                          const slots = selectedInGroup ? OR_PAGE - 1 : OR_PAGE;
+                          const sliced = rest.slice(0, slots);
+                          remainingCount = rest.length - sliced.length;
+                          hoistedSelected = selectedInGroup;
+                          modelsToRender = sliced;
+                        } else {
+                          hoistedSelected = selectedInGroup;
+                          modelsToRender = rest;
+                        }
+                      } else {
+                        modelsToRender = group.models.filter(m => !seenIds.has(m.id));
+                      }
+
+                      const renderModelButton = (m: ModelOption) => {
+                        seenIds.add(m.id);
+                        flatIdx++;
+                        const idx = flatIdx;
+                        const isSelected = m.id === value;
+                        const isHighlighted = idx === highlightIdx;
+                        return (
+                          <button
+                            key={m.id}
+                            data-model-item
+                            type="button"
+                            role="option"
+                            aria-selected={isSelected}
+                            onClick={() => { onChange(m.id); setOpen(false); }}
+                            onMouseEnter={() => setHighlightIdx(idx)}
+                            className={`w-full text-left px-3 py-1.5 text-[13px] transition-colors flex items-center gap-2 ${
+                              isHighlighted
+                                ? 'bg-accent/8 text-[var(--text)]'
+                                : 'text-[var(--text)]/80 hover:bg-[var(--surface-100)]'
+                            }`}
+                          >
+                            <span className="w-3.5 shrink-0">
+                              {isSelected && <Check size={12} className="text-accent" />}
+                            </span>
+                            <div className="flex-1 min-w-0 flex items-center gap-2">
+                              <span className={`truncate ${isSelected ? 'font-medium' : ''}`}>
+                                {m.label}
+                              </span>
+                              {m.id === defaultModelId && (
+                                <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-accent/10 text-accent font-medium">
+                                  Default
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <SpeedIcon tier={m.speedTier} />
+                              {m.contextWindow && (
+                                <span className="text-[10px] font-mono text-muted/40 tabular-nums w-8 text-right">
+                                  {formatContext(m.contextWindow)}
+                                </span>
+                              )}
+                              <span className="text-[10px] font-mono text-muted/60 tabular-nums w-16 text-right">
+                                {formatCost(m.costPer1kInput)}/1K
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      };
 
                       return (
-                        <button
-                          key={m.id}
-                          data-model-item
-                          type="button"
-                          role="option"
-                          aria-selected={isSelected}
-                          onClick={() => { onChange(m.id); setOpen(false); }}
-                          onMouseEnter={() => setHighlightIdx(idx)}
-                          className={`w-full text-left px-3 py-1.5 text-[13px] transition-colors flex items-center gap-2 ${
-                            isHighlighted
-                              ? 'bg-accent/8 text-[var(--text)]'
-                              : 'text-[var(--text)]/80 hover:bg-[var(--surface-100)]'
-                          }`}
-                        >
-                          {/* Selected check */}
-                          <span className="w-3.5 shrink-0">
-                            {isSelected && <Check size={12} className="text-accent" />}
-                          </span>
+                        <>
+                          {/* Hoisted selected model for OpenRouter (no-search mode) */}
+                          {hoistedSelected && !seenIds.has(hoistedSelected.id) && (
+                            <>
+                              {renderModelButton(hoistedSelected)}
+                              <div className="mx-3 my-0.5 border-t border-[var(--surface-200)]" />
+                            </>
+                          )}
 
-                          {/* Model info */}
-                          <div className="flex-1 min-w-0 flex items-center gap-2">
-                            <span className={`truncate ${isSelected ? 'font-medium' : ''}`}>
-                              {m.label}
-                            </span>
-                            {m.id === defaultModelId && (
-                              <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-accent/10 text-accent font-medium">
-                                Default
-                              </span>
-                            )}
-                          </div>
+                          {/* Main model list */}
+                          {modelsToRender.map(m => {
+                            if (seenIds.has(m.id)) return null;
+                            return renderModelButton(m);
+                          })}
 
-                          {/* Meta: speed + context + cost */}
-                          <div className="flex items-center gap-2 shrink-0">
-                            <SpeedIcon tier={m.speedTier} />
-                            {m.contextWindow && (
-                              <span className="text-[10px] font-mono text-muted/40 tabular-nums w-8 text-right">
-                                {formatContext(m.contextWindow)}
-                              </span>
-                            )}
-                            <span className="text-[10px] font-mono text-muted/60 tabular-nums w-16 text-right">
-                              {formatCost(m.costPer1kInput)}/1K
-                            </span>
-                          </div>
-                        </button>
+                          {/* Show more button for OpenRouter */}
+                          {isOpenRouter && !activeSearch && remainingCount > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllOpenRouter(true)}
+                              className="w-full px-3 py-2 text-[11px] text-muted/60 hover:text-muted transition-colors text-left"
+                            >
+                              Show more ({remainingCount} remaining)
+                            </button>
+                          )}
+                        </>
                       );
-                    })}
+                    })()}
                   </div>
                 );
               })
