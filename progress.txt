@@ -3,9 +3,10 @@
 Spec: rorca-spec-validator
 Run ID: 41
 Started: 2026-03-12T05:48:49.923Z
-Last Updated: 2026-03-12T06:06:52.289Z
+Last Updated: 2026-03-12T06:19:26.974Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - SV-001: Implement rorca_check_spec structural validation — DONE (claude, claude-sonnet-4-6, 203s)
 - SV-002: Implement rorca_score_spec quality scoring — DONE (claude, claude-sonnet-4-6, 234s)
 - SV-003: Implement rorca_validate_spec LLM deep review — DONE (claude, claude-sonnet-4-6, 389s)
+- SV-004: Implement rorca_suggest_skills on-demand skill matcher — DONE (claude, claude-sonnet-4-6, 738s)
