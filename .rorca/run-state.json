@@ -2,7 +2,7 @@
   "specId": "rorca-enrich-spec",
   "runId": 77,
   "startedAt": "2026-03-12T23:12:07.557Z",
-  "lastUpdatedAt": "2026-03-12T23:23:00.634Z",
+  "lastUpdatedAt": "2026-03-12T23:25:03.186Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 84417
+    },
+    {
+      "storyId": "US-003",
+      "title": "rorca_enrich_spec MCP tool in backend/src/mcp/server.ts",
+      "status": "passed",
+      "startedAt": "2026-03-12T23:23:14.573Z",
+      "finishedAt": "2026-03-12T23:25:03.186Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 108613
     }
   ],
   "failedStories": [],
