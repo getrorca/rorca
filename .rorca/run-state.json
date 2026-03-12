@@ -1,18 +1,18 @@
 {
-  "specId": "auto-merge-worktree-on-completion",
-  "runId": 76,
-  "startedAt": "2026-03-12T22:29:29.503Z",
-  "lastUpdatedAt": "2026-03-12T22:36:48.863Z",
+  "specId": "rorca-pg-boss-job-queue",
+  "runId": 78,
+  "startedAt": "2026-03-12T23:19:11.696Z",
+  "lastUpdatedAt": "2026-03-12T23:21:30.431Z",
   "completedStories": [
     {
-      "storyId": "AM-001",
-      "title": "Auto-merge worktree branch to main after all stories pass",
+      "storyId": "PG-002",
+      "title": "Install pg-boss and scaffold worker process (backend/src/worker.ts)",
       "status": "passed",
-      "startedAt": "2026-03-12T22:29:30.136Z",
-      "finishedAt": "2026-03-12T22:36:48.862Z",
+      "startedAt": "2026-03-12T23:19:12.184Z",
+      "finishedAt": "2026-03-12T23:21:30.431Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 438726
+      "elapsedMs": 138247
     }
   ],
   "failedStories": [],
