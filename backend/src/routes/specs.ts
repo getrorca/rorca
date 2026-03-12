@@ -5089,6 +5089,209 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
   }
 });
 
+// ─── SV-001: GET /:specId/check — Structural spec validation ─────────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/check:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Validate a spec's structure and story integrity
+ *     operationId: checkSpec
+ *     description: >
+ *       Performs structural validation on a spec JSON file. Checks for missing
+ *       required fields per story (id, title, description, acceptanceCriteria),
+ *       orphaned dependsOn references, duplicate story IDs, and empty
+ *       acceptanceCriteria arrays. Returns categorized errors, warnings, and
+ *       aggregate structural stats.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Validation result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 valid: { type: boolean }
+ *                 errors:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       field: { type: string }
+ *                       message: { type: string }
+ *                 warnings:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       field: { type: string }
+ *                       message: { type: string }
+ *                 stats:
+ *                   type: object
+ *                   properties:
+ *                     totalStories: { type: integer }
+ *                     avgACCount: { type: number }
+ *                     maxDependencyDepth: { type: integer }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ */
+router.get('/:specId/check', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const workspaceId = req.query.workspaceId as string;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let content: any;
+    if (fs.existsSync(pendingFile)) {
+      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories: any[] = content.userStories ?? content.stories ?? [];
+
+    interface ValidationIssue {
+      storyId: string;
+      field: string;
+      message: string;
+    }
+
+    const errors: ValidationIssue[] = [];
+    const warnings: ValidationIssue[] = [];
+
+    // Collect all story IDs for orphan detection
+    const storyIds = new Set<string>();
+    const seenIds = new Set<string>();
+
+    // First pass: collect IDs and detect duplicates
+    for (const story of stories) {
+      const sid = story.id;
+      if (typeof sid !== 'string' || sid.trim() === '') {
+        errors.push({ storyId: '(unknown)', field: 'id', message: 'Story is missing required field: id' });
+        continue;
+      }
+      if (seenIds.has(sid)) {
+        errors.push({ storyId: sid, field: 'id', message: `Duplicate story ID: ${sid}` });
+      } else {
+        seenIds.add(sid);
+        storyIds.add(sid);
+      }
+    }
+
+    // Second pass: validate required fields and dependsOn references
+    let totalACCount = 0;
+
+    for (const story of stories) {
+      const sid = (typeof story.id === 'string' && story.id.trim() !== '') ? story.id : '(unknown)';
+
+      // Required field: title
+      if (typeof story.title !== 'string' || story.title.trim() === '') {
+        errors.push({ storyId: sid, field: 'title', message: 'Story is missing required field: title' });
+      }
+
+      // Required field: description
+      if (typeof story.description !== 'string' || story.description.trim() === '') {
+        errors.push({ storyId: sid, field: 'description', message: 'Story is missing required field: description' });
+      }
+
+      // Required field: acceptanceCriteria (must be array)
+      if (!Array.isArray(story.acceptanceCriteria)) {
+        errors.push({ storyId: sid, field: 'acceptanceCriteria', message: 'Story is missing required field: acceptanceCriteria (must be array)' });
+      } else {
+        totalACCount += story.acceptanceCriteria.length;
+        if (story.acceptanceCriteria.length === 0) {
+          warnings.push({ storyId: sid, field: 'acceptanceCriteria', message: 'Story has empty acceptanceCriteria array' });
+        }
+        // Validate each AC is a string
+        for (let i = 0; i < story.acceptanceCriteria.length; i++) {
+          if (typeof story.acceptanceCriteria[i] !== 'string') {
+            errors.push({ storyId: sid, field: `acceptanceCriteria[${i}]`, message: `Acceptance criteria entry ${i} is not a string` });
+          }
+        }
+      }
+
+      // Orphaned dependsOn references
+      if (Array.isArray(story.dependsOn)) {
+        for (const dep of story.dependsOn) {
+          if (typeof dep !== 'string') {
+            errors.push({ storyId: sid, field: 'dependsOn', message: `dependsOn entry is not a string: ${JSON.stringify(dep)}` });
+          } else if (!storyIds.has(dep)) {
+            errors.push({ storyId: sid, field: 'dependsOn', message: `Orphaned dependsOn reference: "${dep}" does not exist in this spec` });
+          }
+        }
+      }
+    }
+
+    // Compute maxDependencyDepth via BFS/memoization
+    function computeDepth(sid: string, visited: Set<string>): number {
+      if (visited.has(sid)) return 0; // cycle guard
+      const story = stories.find((s: any) => s.id === sid);
+      if (!story || !Array.isArray(story.dependsOn) || story.dependsOn.length === 0) return 0;
+      visited.add(sid);
+      let max = 0;
+      for (const dep of story.dependsOn) {
+        if (typeof dep === 'string' && storyIds.has(dep)) {
+          const d = computeDepth(dep, new Set(visited));
+          if (d > max) max = d;
+        }
+      }
+      return max + 1;
+    }
+
+    let maxDependencyDepth = 0;
+    for (const story of stories) {
+      if (typeof story.id === 'string' && storyIds.has(story.id)) {
+        const depth = computeDepth(story.id, new Set<string>());
+        if (depth > maxDependencyDepth) maxDependencyDepth = depth;
+      }
+    }
+
+    const totalStories = stories.length;
+    const avgACCount = totalStories > 0 ? Math.round((totalACCount / totalStories) * 10) / 10 : 0;
+
+    res.json({
+      valid: errors.length === 0,
+      errors,
+      warnings,
+      stats: { totalStories, avgACCount, maxDependencyDepth },
+    });
+  } catch (error: any) {
+    logger.error('[Specs] Check error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── DELETE /:specId — Hard-delete a spec (any status) ──────────────────────
 
 /**

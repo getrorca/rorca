@@ -1061,6 +1061,55 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  'rorca_check_spec',
+  {
+    description: 'Validate a spec\'s structural integrity. Checks for missing required fields (id, title, description, acceptanceCriteria), duplicate story IDs, orphaned dependsOn references, and empty acceptanceCriteria arrays. Returns categorized errors (blocking), warnings (non-blocking), and aggregate stats.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces)'),
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/check?workspaceId=${encodeURIComponent(workspaceId)}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Spec check failed (${res.status}): ${err}`);
+    }
+    const data = await res.json() as {
+      valid: boolean;
+      errors: Array<{ storyId: string; field: string; message: string }>;
+      warnings: Array<{ storyId: string; field: string; message: string }>;
+      stats: { totalStories: number; avgACCount: number; maxDependencyDepth: number };
+    };
+
+    const lines: string[] = [];
+    lines.push(`Spec: ${specId}`);
+    lines.push(`Valid: ${data.valid ? '✅ yes' : '❌ no'}`);
+    lines.push(`Stories: ${data.stats.totalStories} | Avg AC: ${data.stats.avgACCount} | Max dep depth: ${data.stats.maxDependencyDepth}`);
+
+    if (data.errors.length > 0) {
+      lines.push(`\nErrors (${data.errors.length}):`);
+      for (const e of data.errors) {
+        lines.push(`  ❌ [${e.storyId}] ${e.field}: ${e.message}`);
+      }
+    }
+
+    if (data.warnings.length > 0) {
+      lines.push(`\nWarnings (${data.warnings.length}):`);
+      for (const w of data.warnings) {
+        lines.push(`  ⚠️  [${w.storyId}] ${w.field}: ${w.message}`);
+      }
+    }
+
+    if (data.errors.length === 0 && data.warnings.length === 0) {
+      lines.push('\nNo issues found.');
+    }
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
 // ─── Slash-command Prompts (/mcp__rorca__<name>) ──────────────────────────────
 // These are user-invocable via /mcp__rorca__<name> [args] in Claude Code.
 // Each prompt calls the backend directly and injects formatted results into
@@ -1733,6 +1782,56 @@ server.registerPrompt(
     }
     const data = await res.json() as { entry: { title: string; rule: string }; total: number };
     return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `📝 Decision logged: ${data.entry.title}\n\n${data.entry.rule}\n\nTotal memories: ${data.total}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'check_spec',
+  {
+    title: 'Check Spec',
+    description: 'Validate a spec\'s structural integrity: missing required fields, duplicate IDs, orphaned dependsOn references, empty acceptanceCriteria.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/check?workspaceId=${encodeURIComponent(ws)}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec check failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      valid: boolean;
+      errors: Array<{ storyId: string; field: string; message: string }>;
+      warnings: Array<{ storyId: string; field: string; message: string }>;
+      stats: { totalStories: number; avgACCount: number; maxDependencyDepth: number };
+    };
+
+    const lines: string[] = [];
+    lines.push(`Spec: ${specId}`);
+    lines.push(`Valid: ${data.valid ? '✅ yes' : '❌ no'}`);
+    lines.push(`Stories: ${data.stats.totalStories} | Avg AC: ${data.stats.avgACCount} | Max dep depth: ${data.stats.maxDependencyDepth}`);
+
+    if (data.errors.length > 0) {
+      lines.push(`\nErrors (${data.errors.length}):`);
+      for (const e of data.errors) {
+        lines.push(`  ❌ [${e.storyId}] ${e.field}: ${e.message}`);
+      }
+    }
+
+    if (data.warnings.length > 0) {
+      lines.push(`\nWarnings (${data.warnings.length}):`);
+      for (const w of data.warnings) {
+        lines.push(`  ⚠️  [${w.storyId}] ${w.field}: ${w.message}`);
+      }
+    }
+
+    if (data.errors.length === 0 && data.warnings.length === 0) {
+      lines.push('\nNo issues found.');
+    }
+
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
   }
 );
 
