@@ -1,18 +1,18 @@
 {
-  "specId": "rorca-mcp-cli-spec-enhancement",
-  "runId": 40,
-  "startedAt": "2026-03-12T04:20:33.580Z",
-  "lastUpdatedAt": "2026-03-12T04:29:43.149Z",
+  "specId": "rorca-quick-run-context-injection",
+  "runId": 44,
+  "startedAt": "2026-03-12T05:48:54.321Z",
+  "lastUpdatedAt": "2026-03-12T05:52:02.776Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Research Best Practices and Rewrite rorca-mcp-cli Spec with Exhaustive Acceptance Criteria",
+      "storyId": "QCI-001",
+      "title": "Inject direction stack, MEMORY.md, and installed skills into Quick Run spec generation prompt",
       "status": "passed",
-      "startedAt": "2026-03-12T04:20:41.412Z",
-      "finishedAt": "2026-03-12T04:29:43.149Z",
+      "startedAt": "2026-03-12T05:48:57.144Z",
+      "finishedAt": "2026-03-12T05:52:02.776Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 541737
+      "elapsedMs": 185632
     }
   ],
   "failedStories": [],
