@@ -773,3 +773,92 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body).toHaveProperty('agentModel');
   });
 });
+
+// ─── POST /api/pipeline/queue — smart run trigger ────────────────────────────
+
+describe('POST /api/pipeline/queue', () => {
+  /** Seed a spec in forge/specs/approved/ (the path queue endpoint expects) */
+  function seedForgeSpec(slug: string) {
+    const dir = path.join(wsDir, 'forge', 'specs', 'approved');
+    fs.mkdirSync(dir, { recursive: true });
+    const spec = {
+      title: slug.replace(/-/g, ' '),
+      userStories: [
+        { id: 'US-001', title: 'Story one', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [], passes: false },
+      ],
+      generatedAt: '2026-02-20T12:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify(spec, null, 2), 'utf8');
+    return spec;
+  }
+
+  test('POST /api/pipeline/queue returns {queued: false} when no active run exists', async () => {
+    seedForgeSpec('queue-no-active');
+
+    const res = await request(app)
+      .post('/api/pipeline/queue')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-pipe', specId: 'queue-no-active' });
+
+    // Should trigger immediately — no active run
+    expect(res.body.queued).toBe(false);
+    expect(res.body.runId).toBeDefined();
+    expect(res.body.message).toMatch(/started/i);
+  });
+
+  test('POST /api/pipeline/queue returns {queued: true} when an active run exists', async () => {
+    seedForgeSpec('queue-with-active');
+    await seedRun({ status: 'running' });
+
+    const res = await request(app)
+      .post('/api/pipeline/queue')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-pipe', specId: 'queue-with-active' });
+
+    expect(res.status).toBe(202);
+    expect(res.body.queued).toBe(true);
+    expect(res.body.activeRunId).toBeDefined();
+    expect(res.body.queuePosition).toBeDefined();
+    expect(res.body.message).toMatch(/queued/i);
+  });
+
+  test('POST /api/pipeline/queue returns 400 when workspaceId is missing', async () => {
+    const res = await request(app)
+      .post('/api/pipeline/queue')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specId: 'some-spec' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('workspaceId');
+  });
+
+  test('POST /api/pipeline/queue returns 400 when specId is missing', async () => {
+    const res = await request(app)
+      .post('/api/pipeline/queue')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-pipe' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('specId');
+  });
+
+  test('POST /api/pipeline/queue returns 404 for nonexistent workspace', async () => {
+    const res = await request(app)
+      .post('/api/pipeline/queue')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'nonexistent-ws', specId: 'some-spec' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Workspace not found');
+  });
+
+  test('POST /api/pipeline/queue returns 404 when spec file does not exist', async () => {
+    const res = await request(app)
+      .post('/api/pipeline/queue')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-pipe', specId: 'no-such-spec' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('Spec not found');
+  });
+});
