@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 

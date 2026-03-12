@@ -13,7 +13,7 @@ let authToken: string;
 beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-onboarding-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');

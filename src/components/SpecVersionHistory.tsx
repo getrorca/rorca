@@ -566,7 +566,7 @@ function highlightDiff(oldText: string, newText: string, side: 'old' | 'new'): R
 /* ─── Acceptance Criteria Diff ────────────────────────────────────── */
 
 function AcceptanceCriteriaDiff({ delta }: { delta: FieldDelta }) {
-  const oldAc = (delta.old as string[]) ?? [];
+  const _oldAc = (delta.old as string[]) ?? [];
   const newAc = (delta.new as string[]) ?? [];
   const added = delta.added ?? [];
   const removed = delta.removed ?? [];

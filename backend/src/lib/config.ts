@@ -43,9 +43,6 @@ export const agentModel: string | null = agentConfig.agentModel;
 import {
   VALID_ROUTER_MODES,
   VALID_TASK_TYPES,
-  type RouterMode,
-  type TaskType,
-  type OrchestrationConfig,
 } from './complexity-scorer';
 
 export interface OrchestrationValidationError {

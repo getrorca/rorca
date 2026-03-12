@@ -8,7 +8,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Plus, Trash2, Save, Loader2, Check, Wand2, FolderOpen,
+  Plus, Trash2, Save, Loader2, Wand2, FolderOpen,
   ShieldAlert, X, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';

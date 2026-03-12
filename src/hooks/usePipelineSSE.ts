@@ -3,7 +3,7 @@ import { useWalSSE, type WalEvent } from './useWalSSE';
 
 export type { WalEvent };
 
-export function usePipelineSSE(runId: string | null, workspaceId?: string | null) {
+export function usePipelineSSE(runId: string | null, _workspaceId?: string | null) {
   const [events, setEvents] = useState<WalEvent[]>([]);
 
   // Track previous runId so we can reset the event list when it changes.

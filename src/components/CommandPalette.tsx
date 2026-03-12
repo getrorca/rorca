@@ -432,7 +432,6 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
     items.push(...results);
     if (clearHistoryItem) items.push(clearHistoryItem);
     return items;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [results, showForgeFallback, trimmedQuery, showClearHistory]);
 
   // Reset selection when results change
@@ -531,7 +530,6 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       }
     }
     return groups;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayResults, query]);
 
   // Flat index counter for keyboard navigation

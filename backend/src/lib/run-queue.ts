@@ -1,4 +1,4 @@
-import { query, queryOne, execute, transaction } from '../db/index';
+import { query, queryOne, transaction } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 
