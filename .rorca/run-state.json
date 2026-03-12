@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-cli",
   "runId": 46,
   "startedAt": "2026-03-12T05:51:51.758Z",
-  "lastUpdatedAt": "2026-03-12T06:41:44.440Z",
+  "lastUpdatedAt": "2026-03-12T06:45:32.976Z",
   "completedStories": [
     {
       "storyId": "MC-001",
@@ -73,6 +73,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 259199
+    },
+    {
+      "storyId": "MC-011",
+      "title": "JWT Auth and Server Connection Management",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:42:02.824Z",
+      "finishedAt": "2026-03-12T06:45:32.974Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 210150
     }
   ],
   "failedStories": [],
