@@ -1,11 +1,9 @@
 # Run State Summary
 
-Spec: collapsible-left-nav-drag-to-close
-Run ID: 54
-Started: 2026-03-12T08:12:11.075Z
-Last Updated: 2026-03-12T08:19:39.250Z
+Spec: rorca-ensure-postgres
+Run ID: 1
+Started: 2026-03-12T18:19:22.650Z
+Last Updated: 2026-03-12T18:27:23.221Z
 
-## Completed Stories (3)
-- US-001: Implement drag-to-collapse threshold and snap behavior — DONE (claude, claude-sonnet-4-6, 138s)
-- US-002: Add double-click toggle on drag handle — DONE (claude, claude-sonnet-4-6, 88s)
-- US-003: Render icon-only sidebar in collapsed state — DONE (claude, claude-sonnet-4-6, 130s)
+## Completed Stories (1)
+- US-001: Platform detection and Postgres binary download — DONE (claude, 350s)
