@@ -3,10 +3,14 @@
 Spec: rorca-post-run-qa
 Run ID: 57
 Started: 2026-03-12T08:22:15.934Z
-Last Updated: 2026-03-12T09:36:45.803Z
+Last Updated: 2026-03-12T10:29:13.400Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - QA-003: ESLint validation and code quality fixes — DONE (claude, claude-sonnet-4-6, 336s)
 - QA-001: Frontend TypeScript validation and error resolution — DONE (claude, claude-sonnet-4-6, 217s)
 - QA-002: Backend TypeScript validation and error resolution — DONE (claude, claude-sonnet-4-6, 218s)
 - QA-003: ESLint validation and code quality fixes — DONE (claude, claude-sonnet-4-6, 845s)
+- QA-005: Spec validator endpoint smoke test script — DONE (claude, claude-sonnet-4-6, 106s)
+
+## Failed Stories (1)
+- QA-004: Backend Jest test suite validation and new test coverage — FAILED (max_retries)
