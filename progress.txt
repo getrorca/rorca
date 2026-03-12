@@ -3,9 +3,10 @@
 Spec: rorca-enrich-spec
 Run ID: 77
 Started: 2026-03-12T23:12:07.557Z
-Last Updated: 2026-03-12T23:25:03.186Z
+Last Updated: 2026-03-12T23:30:29.821Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - US-001: POST /api/specs/:id/enrich route with 4-layer retrieval cascade — DONE (claude, claude-sonnet-4-6, 554s)
 - US-002: spec_generation_logs migration and enrichment schema support — DONE (claude, claude-sonnet-4-6, 84s)
 - US-003: rorca_enrich_spec MCP tool in backend/src/mcp/server.ts — DONE (claude, claude-sonnet-4-6, 109s)
+- US-004: Enrich with Context button in SpecDetailSlideOver + retrieval method badge in Context tab — DONE (claude, claude-sonnet-4-6, 312s)
