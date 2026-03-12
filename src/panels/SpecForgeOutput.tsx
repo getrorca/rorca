@@ -24,6 +24,13 @@ export interface ContextSummary {
     l1: boolean;
     l2: { present: boolean; domain: string | null };
     l3: boolean;
+    // CU-002: layer titles + token estimates (optional for backward compat with old logs)
+    l1Title?: string | null;
+    l2Title?: string | null;
+    l3Title?: string | null;
+    l1Tokens?: number;
+    l2Tokens?: number;
+    l3Tokens?: number;
   };
   skills: string[];
   memoryEntries: number;
@@ -45,6 +52,8 @@ export interface ContextSummary {
     tier: 'cache' | 'search' | 'hybrid';
     latencyMs: number;
   };
+  /** CU-004: Predicted injected file paths from context-router (up to 30 paths) */
+  predictedFiles?: string[];
 }
 
 export interface GeneratedSpec {
