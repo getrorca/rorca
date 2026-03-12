@@ -1,71 +1,58 @@
 {
-  "specId": "rorca-semantic-gaps",
-  "runId": 29,
-  "startedAt": "2026-03-11T01:30:14.478Z",
-  "lastUpdatedAt": "2026-03-11T01:46:38.989Z",
+  "specId": "rorca-mcp-cli",
+  "runId": 47,
+  "startedAt": "2026-03-12T06:04:08.654Z",
+  "lastUpdatedAt": "2026-03-12T06:44:39.969Z",
   "completedStories": [
     {
-      "storyId": "SG-001",
-      "title": "Emit memory_created WAL Events from Auto-Memory",
+      "storyId": "MC-004",
+      "title": "MCP Tools Tree View in rorca VS Code Extension",
       "status": "passed",
-      "startedAt": "2026-03-11T01:30:17.130Z",
-      "finishedAt": "2026-03-11T01:33:40.260Z",
+      "startedAt": "2026-03-12T06:04:18.671Z",
+      "finishedAt": "2026-03-12T06:12:11.025Z",
       "agentType": "claude",
-      "elapsedMs": 203130
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 472354
     },
     {
-      "storyId": "SG-002",
-      "title": "Backfill Embeddings from memories Table (Not Just MEMORY.md)",
+      "storyId": "MC-006",
+      "title": "VS Code Extension Settings Contribution Point Schema",
       "status": "passed",
-      "startedAt": "2026-03-11T01:33:59.084Z",
-      "finishedAt": "2026-03-11T01:37:26.247Z",
+      "startedAt": "2026-03-12T06:12:33.616Z",
+      "finishedAt": "2026-03-12T06:19:34.590Z",
       "agentType": "claude",
-      "elapsedMs": 207163
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 420974
     },
     {
-      "storyId": "SG-003",
-      "title": "Fix context-cache getRecentMemory to Read from memories Table",
+      "storyId": "MC-007",
+      "title": "MCP Tool Error Recovery and Offline Graceful Degradation",
       "status": "passed",
-      "startedAt": "2026-03-11T01:37:44.059Z",
-      "finishedAt": "2026-03-11T01:38:36.679Z",
+      "startedAt": "2026-03-12T06:19:53.660Z",
+      "finishedAt": "2026-03-12T06:35:57.356Z",
       "agentType": "claude",
-      "elapsedMs": 52620
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 963696
     },
     {
-      "storyId": "SG-004",
-      "title": "Fix AGE Cypher Execution — Per-Connection Session Setup",
+      "storyId": "MC-009",
+      "title": "rorca-vscode Extension Package Scaffold",
       "status": "passed",
-      "startedAt": "2026-03-11T01:38:54.312Z",
-      "finishedAt": "2026-03-11T01:41:19.162Z",
+      "startedAt": "2026-03-12T06:36:15.661Z",
+      "finishedAt": "2026-03-12T06:40:54.393Z",
       "agentType": "claude",
-      "elapsedMs": 144850
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 278732
     },
     {
-      "storyId": "SG-005",
-      "title": "Add Graph Backfill Endpoint — Populate from Existing Runs and Specs",
+      "storyId": "MC-010",
+      "title": "Spec Tree View Provider — V2-060 Feature Properly Built",
       "status": "passed",
-      "startedAt": "2026-03-11T01:41:38.177Z",
-      "finishedAt": "2026-03-11T01:43:17.052Z",
+      "startedAt": "2026-03-12T06:41:13.443Z",
+      "finishedAt": "2026-03-12T06:44:39.969Z",
       "agentType": "claude",
-      "elapsedMs": 98875
-    },
-    {
-      "storyId": "SG-006",
-      "title": "Fix search.ts Keyword Search to Query memories Table",
-      "status": "passed",
-      "startedAt": "2026-03-11T01:43:35.474Z",
-      "finishedAt": "2026-03-11T01:44:54.548Z",
-      "agentType": "claude",
-      "elapsedMs": 79074
-    },
-    {
-      "storyId": "SG-007",
-      "title": "Add Memory Count to Context Injection Summary",
-      "status": "passed",
-      "startedAt": "2026-03-11T01:45:13.265Z",
-      "finishedAt": "2026-03-11T01:46:38.988Z",
-      "agentType": "claude",
-      "elapsedMs": 85723
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 206526
     }
   ],
   "failedStories": [],

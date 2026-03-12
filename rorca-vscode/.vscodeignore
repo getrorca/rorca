@@ -9,4 +9,3 @@ esbuild.js
 .github/
 package-lock.json
 .eslintrc.*
-CHANGELOG.md
