@@ -2,7 +2,7 @@
   "specId": "Rorca Context Usage Visibility — Spec Generation & Run View",
   "runId": 67,
   "startedAt": "2026-03-12T20:18:32.740Z",
-  "lastUpdatedAt": "2026-03-12T20:36:06.445Z",
+  "lastUpdatedAt": "2026-03-12T20:37:49.903Z",
   "completedStories": [
     {
       "storyId": "CU-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 186256
+    },
+    {
+      "storyId": "CU-006",
+      "title": "Context usage summary bar in Run View header",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:36:21.729Z",
+      "finishedAt": "2026-03-12T20:37:49.903Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 88174
     }
   ],
   "failedStories": [],
