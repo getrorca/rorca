@@ -2773,6 +2773,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
                 dependsOn: s.dependsOn,
                 passes: s.passes,
                 agent: storyAgent,
+                suggestedSkills: Array.isArray(s.suggestedSkills) ? s.suggestedSkills : [],
                 ...(reroute ? { reroute: { fromEngine: reroute.fromEngine, toEngine: reroute.toEngine, reason: reroute.reason } } : {}),
               };
             });
