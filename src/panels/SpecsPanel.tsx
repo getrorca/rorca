@@ -1,17 +1,16 @@
 /* @refresh reset */
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
 import { useDebounce } from '../hooks/useDebounce';
 import { useLazyVisible } from '../hooks/useLazyVisible';
 import {
   Search, X, Clock, CheckCircle2, XCircle, AlertCircle,
   Check, ChevronRight, ChevronLeft, Play, GitBranch, GitFork,
-  Loader2, Plus,
-  FileText, File as FileIcon, FileType, Layers, Archive, Inbox,
-  RefreshCw, AlertTriangle, LayoutGrid, List,
-  GripVertical, Trash2, Pencil, AlignJustify,
+  Loader2, Plus, ExternalLink,
+  FileText, File as FileIcon, FileType, Layers, Archive, Inbox, ArrowRight,
+  RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
+  GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
   Paperclip,
-  ZoomIn,
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -19,15 +18,15 @@ import { apiFetch, ApiError, BASE_URL } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWalSSE } from '../hooks/useWalSSE';
 import type { PanelId } from '../components/Sidebar';
-import { TagChipsReadonly } from '../components/TagChips';
+import { TagChipsReadonly, TagChips } from '../components/TagChips';
 import AppHeader from '../components/AppHeader';
 import AgentBadge from '../components/AgentBadge';
 import { SkeletonColumn } from '../components/skeletons';
 import SlideOver from '../components/SlideOver';
 import SpecDetailSlideOver from '../components/SpecDetailSlideOver';
 import type { SpecSlideOverSummary, PreviewTab } from '../components/SpecDetailSlideOver';
-import { relativeTime } from '../components/SpecReviewInline';
-import type { ReviewStatus } from '../components/SpecReviewInline';
+import { relativeTime, REVIEW_STATUS_CONFIG } from '../components/SpecReviewInline';
+import type { SpecSummary, ReviewStatus } from '../components/SpecReviewInline';
 import SpecForgeProgress, { type SpecGenerationError } from '../components/SpecForgeProgress';
 import SpecForgePreview from '../components/SpecForgePreview';
 import TemplatePickerModal from '../components/TemplatePickerModal';
@@ -37,7 +36,6 @@ import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
 import ContextSummaryCard from '../components/ContextSummaryCard';
-import { ImagePreviewModal } from '../components/ImagePreviewModal';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -193,7 +191,7 @@ const SYSTEM_COLUMNS = [
 ];
 
 // Legacy compat reference (used by keyboard nav and some helpers)
-const _BOARD_COLUMNS = SYSTEM_COLUMNS;
+const BOARD_COLUMNS = SYSTEM_COLUMNS;
 
 const COLUMN_COLORS: { name: string; hex: string }[] = [
   { name: 'indigo', hex: '#6366f1' },
@@ -286,9 +284,9 @@ interface SpecsPanelProps {
   initialView?: ViewMode;
 }
 
-export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview: _onNavigateToSpecReview, initialBrief, onBriefConsumed, initialView }: SpecsPanelProps) {
+export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview, initialBrief, onBriefConsumed, initialView }: SpecsPanelProps) {
   const { workspaceId } = useWorkspace();
-  const _toast = useGlobalToast();
+  const toast = useGlobalToast();
 
   // View mode: board or list (persisted in localStorage)
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -421,7 +419,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         onClose={handleDetailClose}
         onNavigate={onNavigate}
         onNavigateToRun={onNavigateToRun}
-        onDeleted={(_id) => { handleDetailClose(); }}
+        onDeleted={(id) => { handleDetailClose(); }}
       />
     </div>
   );
@@ -573,7 +571,7 @@ function DeleteColumnDialog({ columnName, specCount, onConfirm, onCancel }: {
   );
 }
 
-function BoardView({ workspaceId, onSpecClick, onNavigate: _onNavigate, onNewSpec }: {
+function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   workspaceId: string;
   onSpecClick: (specId: string, summary?: ArchiveSpec, initialTab?: PreviewTab) => void;
   onNavigate: (panel: PanelId) => void;
@@ -596,7 +594,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate: _onNavigate, onNewSpe
   const dragOverCardRef = useRef<{ specId: string; position: 'before' | 'after' } | null>(null);
   const dragLeaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const dragGhostRef = useRef<HTMLDivElement | null>(null);
-  const [_dragRenderKey, setDragRenderKey] = useState(0);
+  const [dragRenderKey, setDragRenderKey] = useState(0);
   // Column header drag state
   const dragColumnIdRef = useRef<number | null>(null);
   const dragColumnOverIdRef = useRef<number | null>(null);
@@ -1778,7 +1776,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate: _onNavigate, onNewSpe
    LIST VIEW — Searchable archive table
    ════════════════════════════════════════════════════════════════════ */
 
-function ListView({ workspaceId, onSpecClick, onNavigate: _onNavigate, onNewSpec }: {
+function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   workspaceId: string;
   onSpecClick: (specId: string, summary?: ArchiveSpec) => void;
   onNavigate: (panel: PanelId) => void;
@@ -2027,7 +2025,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   initialBrief?: string | null;
 }) {
   const { workspaceId, workspaces } = useWorkspace();
-  const _workspace = workspaces.find((w) => w.id === workspaceId);
+  const workspace = workspaces.find((w) => w.id === workspaceId);
   const { show: showToast } = useGlobalToast();
 
   // Spec fields
@@ -2046,9 +2044,9 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [activeProvider, setActiveProvider] = useState<string>('claude-cli');
 
   // Agent override
-  const [_wsAgentType, setWsAgentType] = useState<AgentType>('claude');
+  const [wsAgentType, setWsAgentType] = useState<AgentType>('claude');
   const [wsAgentModel, setWsAgentModel] = useState<string | null>(null);
-  const [_wsModelDisplayName, setWsModelDisplayName] = useState<string | null>(null);
+  const [wsModelDisplayName, setWsModelDisplayName] = useState<string | null>(null);
   const [wsAgentBinaries, setWsAgentBinaries] = useState<{ claudeInstalled?: boolean; opencodeInstalled?: boolean; codexInstalled?: boolean }>({});
   const [overrideAgent, setOverrideAgent] = useState(false);
   const [overrideAgentType, setOverrideAgentType] = useState<AgentType>('claude');
@@ -2097,9 +2095,6 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Template picker
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
-  // Image preview lightbox
-  const [previewImage, setPreviewImage] = useState<{ url: string; filename: string } | null>(null);
-
   // Pasted image attachments (uploaded to backend, associated by specId after generation)
   const [pendingAttachments, setPendingAttachments] = useState<Array<{ filename: string; contentType: string; size: number }>>([]);
 
@@ -2108,14 +2103,6 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [savedAttachments, setSavedAttachments] = useState<SavedAttachment[]>([]);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
-  const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
-  const SUPPORTED_FILE_TYPES = new Set([
-    'image/png', 'image/jpeg', 'image/webp',
-    'application/pdf', 'text/markdown', 'text/plain',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  ]);
-  const SUPPORTED_EXTENSIONS = 'PNG, JPEG, WebP, PDF, Markdown, TXT, DOCX';
-
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(e.clipboardData.items);
     const imageItem = items.find((item) => item.type.startsWith('image/'));
@@ -2123,11 +2110,6 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
     const file = imageItem.getAsFile();
     if (!file) return;
-
-    if (!SUPPORTED_IMAGE_TYPES.has(file.type)) {
-      showToast('Unsupported image format. Please use PNG, JPEG, or WebP.', 'error');
-      return;
-    }
 
     const ext = file.type.split('/')[1] ?? 'png';
     const filename = `pasted-image-${Date.now()}.${ext}`;
@@ -2139,13 +2121,12 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       const formData = new FormData();
       formData.append('file', namedFile);
       // Upload to a temporary "forge" slot — spec ID will be wired after generation (US-007)
-      await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
+      await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
       setPendingAttachments((prev) => [...prev, { filename, contentType: file.type, size: file.size }]);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Image upload failed';
-      showToast(msg, 'error');
+    } catch {
+      showToast('Image upload failed', 'error');
     }
-  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showToast]);
 
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -2153,67 +2134,18 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     // Reset so the same file can be re-selected
     e.target.value = '';
     for (const file of files) {
-      if (!SUPPORTED_FILE_TYPES.has(file.type)) {
-        const ext = file.name.includes('.') ? file.name.split('.').pop()?.toUpperCase() ?? 'unknown' : 'unknown';
-        showToast(`Unsupported file type: .${ext.toLowerCase()}. Supported: ${SUPPORTED_EXTENSIONS}.`, 'error');
-        continue;
-      }
       showToast(`Uploading ${file.name}...`, 'info');
       try {
         const formData = new FormData();
         formData.append('file', file);
-        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
+        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
         setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
         showToast(`Uploaded ${file.name}`, 'success');
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : `Upload failed: ${file.name}`;
-        showToast(msg, 'error');
+      } catch {
+        showToast(`Upload failed: ${file.name}`, 'error');
       }
     }
-  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const [isDraggingOver, setIsDraggingOver] = useState(false);
-
-  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingOver(true);
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    // Only clear if leaving the drop zone itself (not entering a child)
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-      setIsDraggingOver(false);
-    }
-  }, []);
-
-  const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingOver(false);
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length === 0) return;
-    for (const file of files) {
-      if (!SUPPORTED_FILE_TYPES.has(file.type)) {
-        const ext = file.name.includes('.') ? file.name.split('.').pop()?.toUpperCase() ?? 'unknown' : 'unknown';
-        showToast(`Unsupported file type: .${ext.toLowerCase()}. Supported: ${SUPPORTED_EXTENSIONS}.`, 'error');
-        continue;
-      }
-      showToast(`Uploading ${file.name}...`, 'info');
-      try {
-        const formData = new FormData();
-        formData.append('file', file);
-        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
-        setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
-        showToast(`Uploaded ${file.name}`, 'success');
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : `Upload failed: ${file.name}`;
-        showToast(msg, 'error');
-      }
-    }
-  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showToast]);
 
   // Model accept handler — PUTs the accepted model to the story on disk
   const handleModelAccepted = useCallback(async (storyId: string, model: string) => {
@@ -2509,17 +2441,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
       {/* Brief textarea */}
       {(!generatedSpec || isGenerating) && (
-        <div
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          className={`relative transition-colors rounded-lg ${isDraggingOver ? 'ring-2 ring-accent border-accent' : ''}`}
-        >
-          {isDraggingOver && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-accent/10 border-2 border-dashed border-accent pointer-events-none">
-              <span className="text-sm font-medium text-accent">Drop files here</span>
-            </div>
-          )}
+        <div>
           <textarea
             ref={briefRef} rows={6} value={specBrief}
             onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
@@ -2574,28 +2496,15 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
             return (
               <div className="mt-2 space-y-1.5">
-                {savedAttachments.map((att) => {
-                  const isImage = att.contentType.startsWith('image/');
-                  const attUrl = `${BASE_URL}/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(att.id)}`;
-                  return (
+                {savedAttachments.map((att) => (
                   <div key={att.id} className="flex items-center gap-2 px-2 py-1.5 bg-panel border border-border rounded-lg group">
-                    {isImage ? (
-                      <button
-                        type="button"
-                        onClick={() => setPreviewImage({ url: attUrl, filename: att.filename })}
-                        title="Preview image"
-                        aria-label={`Preview ${att.filename}`}
-                        className="shrink-0 rounded overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-accent relative group/thumb"
-                      >
-                        <img
-                          src={attUrl}
-                          alt={att.filename}
-                          className="w-10 h-10 object-cover rounded"
-                        />
-                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center rounded">
-                          <ZoomIn size={14} className="text-white" />
-                        </div>
-                      </button>
+                    {att.contentType.startsWith('image/') ? (
+                      <img
+                        src={`${BASE_URL}/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(att.id)}`}
+                        alt={att.filename}
+                        style={{ maxHeight: 80 }}
+                        className="rounded object-contain shrink-0"
+                      />
                     ) : (
                       getFileIcon(att.contentType, att.filename)
                     )}
@@ -2613,8 +2522,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                       {deletingIds.has(att.id) ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
                     </button>
                   </div>
-                  );
-                })}
+                ))}
                 {pendingAttachments.map((att) => (
                   <div key={att.filename} className="flex items-center gap-2 px-2 py-1.5 bg-accent/5 border border-accent/20 rounded-lg">
                     {att.contentType.startsWith('image/') ? (
@@ -2857,13 +2765,6 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
         <TemplatePickerModal onClose={() => setShowTemplatePicker(false)}
           onSelect={(tpl) => { setSpecBrief(tpl.brief); setStoryCount(tpl.storyCount); setShowTemplatePicker(false); setTimeout(() => briefRef.current?.focus(), 50); }} />
       )}
-
-      <ImagePreviewModal
-        isOpen={previewImage !== null}
-        onClose={() => setPreviewImage(null)}
-        imageUrl={previewImage?.url ?? ''}
-        filename={previewImage?.filename ?? ''}
-      />
     </div>
   );
 }
