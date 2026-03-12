@@ -4,7 +4,7 @@
 #        RORCA_VERSION=v0.2.0 curl -fsSL https://get.rorca.app | sh
 set -eu
 
-REPO="sysgazer/rorca"
+REPO="getrorca/rorca"
 VERSION="${RORCA_VERSION:-latest}"
 
 # ── Detect OS & arch ──

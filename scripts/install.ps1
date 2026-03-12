@@ -3,7 +3,7 @@
 #        $env:RORCA_VERSION="v0.2.0"; irm https://get.rorca.app/windows | iex
 $ErrorActionPreference = "Stop"
 
-$Repo = "sysgazer/rorca"
+$Repo = "getrorca/rorca"
 $Version = if ($env:RORCA_VERSION) { $env:RORCA_VERSION } else { "latest" }
 $Binary = "rorca-windows-x64.exe"
 
