@@ -1,24 +1,19 @@
-import { useEffect, useState } from 'react';
-import { useSidebarCollapsed } from './ResizableSidebar';
+import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
+import { useHotkeys, type HotkeyBinding } from '../hooks/useHotkeys';
 import {
-  Wand2, Layers, Settings,
-  Search, PlayCircle, Compass,
-  BarChart3, Package,
+  Wand2, Layers, ListChecks, Activity, GitBranch, Archive, ArrowLeftRight,
+  Github, Rss, Users, LayoutGrid, Coins, DollarSign, Zap, TrendingUp,
+  BarChart3, HeartPulse, ScrollText, Calculator, Settings, Settings2,
+  Plus, X, Search, ChevronDown, BookOpen, FileSearch,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
 import NotificationBell from './NotificationBell';
-import RorcaLogo from './RorcaLogo';
 import { UserMenu } from './Shell';
 import { PANEL_ROUTES } from '../routes';
-import { useBreakpoint } from '../hooks/useBreakpoint';
 
-// ULT-022: 5 primary panels + run-view + spec-review slide-over
-export type PanelId =
-  | 'specs' | 'runs' | 'analytics' | 'direction' | 'settings' | 'marketplace'
-  | 'run-view'
-  | 'spec-review';
+export type PanelId = 'hub' | 'forge' | 'stack' | 'team-direction' | 'queue' | 'pipeline' | 'worktrees' | 'compare' | 'archive' | 'github' | 'activity' | 'audit-log' | 'marketplace' | 'usage' | 'costs' | 'models' | 'velocity' | 'completion' | 'health' | 'roi' | 'finops' | 'settings' | 'workspace-settings' | 'spec-review' | 'memory' | 'conventions';
 
 interface NavItem {
   id: PanelId;
@@ -32,58 +27,59 @@ interface NavSection {
   items: NavItem[];
 }
 
-// ─── ULT-006: 5-item sidebar ────────────────────────────────────────────────
-
-const SIDEBAR_ITEMS: NavItem[] = [
-  { id: 'specs',       label: 'Specs',       icon: Layers },
-  { id: 'runs',        label: 'Runs',        icon: PlayCircle },
-  { id: 'marketplace', label: 'Marketplace', icon: Package },
-  { id: 'analytics',   label: 'Analytics',   icon: BarChart3 },
-  { id: 'direction',   label: 'Direction',   icon: Compass },
-  { id: 'settings',    label: 'Settings',    icon: Settings },
-];
-
-// ULT-022: Flat list matching the 5 sidebar items — CommandPalette uses NAV_ITEMS.
+// Kept for CommandPalette and other consumers that need the full panel list
 export const NAV_SECTIONS: NavSection[] = [
   {
     id: 'specs',
     label: 'Specs',
     items: [
-      { id: 'specs', label: 'Specs', icon: Layers },
+      { id: 'forge', label: 'Forge', icon: Wand2 },
+      { id: 'queue', label: 'Review Queue', icon: ListChecks },
+      { id: 'archive', label: 'Archive', icon: Archive },
+      { id: 'marketplace', label: 'Templates', icon: LayoutGrid },
     ],
   },
   {
-    id: 'runs',
-    label: 'Runs',
+    id: 'pipeline',
+    label: 'Pipeline',
     items: [
-      { id: 'runs', label: 'Runs', icon: PlayCircle },
-    ],
-  },
-  {
-    id: 'analytics',
-    label: 'Analytics',
-    items: [
-      { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+      { id: 'pipeline', label: 'Monitor', icon: Activity },
+      { id: 'worktrees', label: 'Worktrees', icon: GitBranch },
+      { id: 'compare', label: 'Compare Runs', icon: ArrowLeftRight },
     ],
   },
   {
     id: 'direction',
     label: 'Direction',
     items: [
-      { id: 'direction', label: 'Direction', icon: Compass },
+      { id: 'stack', label: 'Direction Stack', icon: Layers },
+      { id: 'team-direction', label: 'Team Direction', icon: Users },
+      { id: 'memory', label: 'Memory Ledger', icon: BookOpen },
+      { id: 'conventions', label: 'Conventions', icon: FileSearch },
     ],
   },
   {
-    id: 'marketplace',
-    label: 'Marketplace',
+    id: 'analytics',
+    label: 'Analytics',
     items: [
-      { id: 'marketplace', label: 'Marketplace', icon: Package },
+      { id: 'usage', label: 'Token Usage', icon: Coins },
+      { id: 'costs', label: 'Cost Breakdown', icon: DollarSign },
+      { id: 'models', label: 'Model Comparison', icon: Zap },
+      { id: 'velocity', label: 'Velocity Chart', icon: TrendingUp },
+      { id: 'completion', label: 'Completion Rates', icon: BarChart3 },
+      { id: 'roi', label: 'ROI Calculator', icon: Calculator },
+      { id: 'finops', label: 'FinOps', icon: DollarSign },
+      { id: 'health', label: 'Health', icon: HeartPulse },
     ],
   },
   {
-    id: 'settings',
-    label: 'Settings',
+    id: 'system',
+    label: 'System',
     items: [
+      { id: 'audit-log', label: 'Audit Log', icon: ScrollText },
+      { id: 'activity', label: 'Activity Feed', icon: Rss },
+      { id: 'github', label: 'GitHub', icon: Github },
+      { id: 'workspace-settings', label: 'Workspace Settings', icon: Settings2 },
       { id: 'settings', label: 'Settings', icon: Settings },
     ],
   },
@@ -92,19 +88,51 @@ export const NAV_SECTIONS: NavSection[] = [
 // Flat list for backward compat (used by CommandPalette, etc.)
 export const NAV_ITEMS: NavItem[] = NAV_SECTIONS.flatMap((s) => s.items);
 
+// ─── Section collapse persistence ────────────────────────────────────────────
+
+const COLLAPSED_KEY = 'rorca:sidebar-collapsed-sections';
+
+function getCollapsedSections(): Set<string> {
+  try {
+    const stored = localStorage.getItem(COLLAPSED_KEY);
+    if (stored) return new Set(JSON.parse(stored));
+  } catch { /* noop */ }
+  return new Set();
+}
+
+function persistCollapsedSections(sections: Set<string>) {
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...sections]));
+  } catch { /* noop */ }
+}
+
+// ─── Minimal 5-icon nav (kept for resolveActiveNav compat) ───────────────────
+
+type MinimalNavId = 'search' | 'hub' | 'forge' | 'pipeline' | 'settings';
+
+/** Maps any PanelId to the MinimalNavId that should be highlighted */
+function resolveActiveNav(panel: PanelId): MinimalNavId {
+  switch (panel) {
+    case 'hub': case 'queue': return 'hub';
+    case 'pipeline': case 'worktrees': case 'compare': return 'pipeline';
+    case 'settings': case 'workspace-settings': case 'github': case 'stack':
+    case 'team-direction': case 'usage': case 'costs': case 'models':
+    case 'velocity': case 'completion': case 'health': case 'roi':
+    case 'audit-log': case 'activity': return 'settings';
+    case 'forge': case 'archive': case 'marketplace': case 'spec-review':
+    default: return 'forge';
+  }
+}
+
 interface SidebarProps {
   onNavigate: (panel: PanelId) => void;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
   queueCount?: number;
-  activeRunCount?: number;
-  healthColor?: 'green' | 'amber' | 'red' | null;
 }
 
-export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0, activeRunCount = 0, healthColor }: SidebarProps) {
-  const breakpoint = useBreakpoint();
-  const [tabletExpanded, setTabletExpanded] = useState(false);
-  const collapsed = useSidebarCollapsed();
+export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0 }: SidebarProps) {
+  const [collapsedSections, setCollapsedSections] = useState(getCollapsedSections);
 
   // Map toggle drawer event to Command Palette trigger for backwards compat
   useEffect(() => {
@@ -115,252 +143,67 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
     return () => window.removeEventListener('rorca:toggle-drawer', handler);
   }, []);
 
-  const renderBadge = (item: NavItem) => {
-    if (item.id === 'specs' && queueCount > 0) {
-      return (
-        <span className="ml-auto shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-accent text-white text-[10px] font-bold px-1">
-          {queueCount > 99 ? '99+' : queueCount}
-        </span>
-      );
-    }
-    if (item.id === 'runs' && activeRunCount > 0) {
-      return (
-        <span className="ml-auto shrink-0 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-blue-500 text-white text-[10px] font-bold px-1 animate-pulse">
-          {activeRunCount}
-        </span>
-      );
-    }
-    if (item.id === 'direction' && healthColor) {
-      const colorMap = { green: 'bg-emerald-400', amber: 'bg-amber-400', red: 'bg-red-400' };
-      return <span className={`ml-auto shrink-0 w-2 h-2 rounded-full ${colorMap[healthColor]}`} />;
-    }
-    return null;
+  const toggleSection = (sectionId: string) => {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(sectionId)) next.delete(sectionId);
+      else next.add(sectionId);
+      persistCollapsedSections(next);
+      return next;
+    });
   };
 
-  /** Renders a compact badge dot positioned over an icon (for rail / tab bar) */
-  const renderIconBadge = (item: NavItem) => {
-    if (item.id === 'specs' && queueCount > 0) {
-      return (
-        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-accent text-white text-[8px] font-bold px-0.5">
-          {queueCount > 99 ? '99+' : queueCount}
-        </span>
-      );
-    }
-    if (item.id === 'runs' && activeRunCount > 0) {
-      return (
-        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-blue-500 text-white text-[8px] font-bold px-0.5 animate-pulse">
-          {activeRunCount}
-        </span>
-      );
-    }
-    return null;
-  };
+  // Expand standard nav sections with collapsible headers
+  const renderNavSection = (section: NavSection) => {
+    const isCollapsed = collapsedSections.has(section.id);
 
-  const sidebarContent = (
-    <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
-      {/* Top Section: Logo, Workspace & Search — hidden when collapsed */}
-      {collapsed ? (
-        /* Collapsed logo — centered icon only */
-        <div className="flex items-center justify-center h-12 border-b border-border shrink-0">
-          <RorcaLogo size={20} variant="gradient" />
-        </div>
-      ) : (
-        <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
-          <div className="flex items-center gap-2 px-1 mb-1">
-            <RorcaLogo size={22} variant="gradient" />
-            <span className="font-mono font-bold text-[var(--text)] text-sm tracking-tight">rorca</span>
-          </div>
-          <WorkspaceSelector />
-
-          <button
-            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
-            className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors min-h-[44px] sm:min-h-0"
-            aria-label="Search (⌘K)"
-          >
-            <Search size={14} className="text-muted/70 shrink-0" aria-hidden="true" />
-            <span className="flex-1 text-left truncate">Search...</span>
-            <kbd className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</kbd>
-          </button>
-        </div>
-      )}
-
-      {/* Main Navigation — 5 items */}
-      <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0" role="list">
-        <div className={collapsed ? 'flex flex-col items-center gap-1' : 'space-y-[1px]'}>
-          {SIDEBAR_ITEMS.map((item) => {
-            const Icon = item.icon;
-            if (collapsed) {
-              return (
-                <NavLink
-                  key={item.id}
-                  to={PANEL_ROUTES[item.id]}
-                  end={false}
-                  role="listitem"
-                  title={item.label}
-                  aria-label={item.label}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    onNavigate(item.id);
-                    onMobileClose?.();
-                  }}
-                  className={({ isActive }) =>
-                    `relative flex items-center justify-center w-9 h-9 rounded transition-colors ${isActive
-                      ? 'text-accent bg-surface-200'
-                      : 'text-muted/70 hover:bg-surface-100 hover:text-[var(--text)]'
-                    }`
-                  }
-                >
-                  {({ isActive }) => (
-                    <span className="relative">
-                      <Icon size={18} className={isActive ? 'text-accent' : undefined} />
-                      {renderIconBadge(item)}
-                    </span>
-                  )}
-                </NavLink>
-              );
-            }
-            return (
-              <NavLink
-                key={item.id}
-                to={PANEL_ROUTES[item.id]}
-                end={false}
-                role="listitem"
-                onClick={(e) => {
-                  e.preventDefault();
-                  onNavigate(item.id);
-                  onMobileClose?.();
-                }}
-                className={({ isActive }) => `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1.5 rounded text-[13px] transition-colors ${isActive
-                  ? 'text-[var(--text)] bg-surface-200 font-medium'
-                  : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
-                  }`}
-              >
-                {({ isActive }) => (
-                  <>
-                    <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
-                    <span className="truncate flex-1">{item.label}</span>
-                    {renderBadge(item)}
-                  </>
-                )}
-              </NavLink>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Bottom Section: Compact Controls */}
-      <div className={`border-t border-border shrink-0 ${collapsed ? 'flex flex-col items-center gap-1 py-2' : 'px-3 py-2 flex items-center gap-1.5'}`}>
-        <UserMenu onNavigate={onNavigate} />
-        <NotificationBell onNavigate={onNavigate} />
-        <ThemeToggle />
-      </div>
-    </div>
-  );
-
-  // Mobile: overlay sidebar + bottom tab bar
-  if (mobileOpen && breakpoint === 'mobile') {
     return (
-      <>
-        <div className="fixed inset-0 bg-black/50 z-40" onClick={onMobileClose} />
-        <nav aria-label="Main navigation" className="fixed top-0 left-0 bottom-0 z-50 animate-slideInLeft shadow-2xl w-[260px]">
-          {sidebarContent}
-        </nav>
-      </>
-    );
-  }
+      <div key={section.id} className="mb-1">
+        {/* Collapsible section header */}
+        <button
+          onClick={() => toggleSection(section.id)}
+          className="w-full flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted/70 hover:text-muted transition-colors cursor-pointer select-none group"
+        >
+          <span>{section.label}</span>
+          <ChevronDown
+            size={12}
+            className={`text-muted/50 group-hover:text-muted transition-transform duration-200 ${isCollapsed ? '-rotate-90' : ''}`}
+          />
+        </button>
 
-  // ─── Mobile: bottom tab bar (5 icons + active indicator) ─────────────────
-  if (breakpoint === 'mobile') {
-    return (
-      <nav aria-label="Main navigation" className="fixed bottom-0 left-0 right-0 z-40 bg-panel border-t border-border flex items-center justify-around px-1 py-1 safe-area-bottom">
-        {SIDEBAR_ITEMS.map((item) => {
-          const Icon = item.icon;
-          return (
-            <NavLink
-              key={item.id}
-              to={PANEL_ROUTES[item.id]}
-              end={false}
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(item.id);
-              }}
-              className={({ isActive }) =>
-                `flex flex-col items-center justify-center gap-0.5 min-w-[44px] min-h-[44px] px-2 py-1 rounded text-[10px] transition-colors relative
-                ${isActive ? 'text-accent' : 'text-muted'}`
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <span className="relative">
-                    <Icon size={20} />
-                    {renderIconBadge(item)}
-                  </span>
-                  <span className="truncate">{item.label}</span>
-                  {isActive && (
-                    <span className="absolute bottom-0 left-1/2 -translate-x-1/2 w-4 h-0.5 rounded-full bg-accent" />
-                  )}
-                </>
-              )}
-            </NavLink>
-          );
-        })}
-      </nav>
-    );
-  }
-
-  // ─── Tablet: collapsed rail (48px, icons only), expandable on hover/click ─
-  if (breakpoint === 'tablet') {
-    return (
-      <nav
-        aria-label="Main navigation"
-        className="h-full bg-panel border-r border-border flex flex-col shrink-0 transition-all duration-200"
-        style={{ width: tabletExpanded ? 200 : 48 }}
-        onMouseEnter={() => setTabletExpanded(true)}
-        onMouseLeave={() => setTabletExpanded(false)}
-      >
-        {/* Logo */}
-        <div className="flex items-center justify-center h-12 border-b border-border shrink-0">
-          <RorcaLogo size={20} variant="gradient" />
-          {tabletExpanded && (
-            <span className="ml-2 font-mono font-bold text-[var(--text)] text-sm tracking-tight">rorca</span>
-          )}
-        </div>
-
-        {/* Nav items */}
-        <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0">
-          <div className="space-y-1">
-            {SIDEBAR_ITEMS.map((item) => {
+        {/* Collapsible items container */}
+        <div
+          className="overflow-hidden transition-all duration-200 ease-out"
+          style={{
+            maxHeight: isCollapsed ? 0 : `${section.items.length * 32 + 8}px`,
+            opacity: isCollapsed ? 0 : 1,
+          }}
+        >
+          <div className="space-y-[1px] pb-1">
+            {section.items.map((item) => {
               const Icon = item.icon;
               return (
                 <NavLink
                   key={item.id}
                   to={PANEL_ROUTES[item.id]}
-                  end={false}
                   onClick={(e) => {
                     e.preventDefault();
                     onNavigate(item.id);
+                    onMobileClose?.();
                   }}
-                  title={tabletExpanded ? undefined : item.label}
-                  className={({ isActive }) =>
-                    `flex items-center gap-2 mx-1 rounded transition-colors relative min-h-[44px]
-                    ${tabletExpanded ? 'px-3' : 'justify-center px-0'}
-                    ${isActive
-                      ? 'text-[var(--text)] bg-surface-200 font-medium'
-                      : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
-                    }`
-                  }
+                  className={({ isActive }) => `w-[calc(100%-16px)] flex items-center gap-2 px-3 mx-2 py-1 rounded text-[13px] transition-colors ${isActive
+                    ? 'text-[var(--text)] bg-surface-200 font-medium'
+                    : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
+                    }`}
                 >
                   {({ isActive }) => (
                     <>
-                      <span className="relative shrink-0">
-                        <Icon size={18} className={isActive ? 'text-accent' : 'text-muted/70'} />
-                        {!tabletExpanded && renderIconBadge(item)}
-                      </span>
-                      {tabletExpanded && (
-                        <>
-                          <span className="truncate flex-1 text-[13px]">{item.label}</span>
-                          {renderBadge(item)}
-                        </>
+                      <Icon size={14} className={isActive ? 'text-accent' : 'text-muted/70'} />
+                      <span className="truncate">{item.label}</span>
+                      {item.id === 'queue' && queueCount > 0 && (
+                        <span className="ml-auto min-w-[16px] h-4 flex items-center justify-center px-1 text-[10px] font-bold rounded-full bg-accent text-white leading-none">
+                          {queueCount > 99 ? '99+' : queueCount}
+                        </span>
                       )}
                     </>
                   )}
@@ -369,24 +212,62 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
             })}
           </div>
         </div>
+      </div>
+    );
+  };
 
-        {/* Bottom: search trigger */}
-        <div className="border-t border-border p-1 shrink-0 flex flex-col items-center gap-1">
-          <button
-            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
-            title="Search (⌘K)"
-            aria-label="Search (⌘K)"
-            className="flex items-center justify-center min-w-[44px] min-h-[44px] rounded text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
-          >
-            <Search size={18} aria-hidden="true" />
-          </button>
-        </div>
-      </nav>
+  const sidebarContent = (
+    <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
+      {/* Top Section: Workspace & Primary Actions */}
+      <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
+        <WorkspaceSelector />
+
+        <button
+          onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
+          className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors"
+        >
+          <Search size={14} className="text-muted/70 shrink-0" />
+          <span className="flex-1 text-left truncate">Search...</span>
+          <span className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</span>
+        </button>
+
+        <NavLink
+          to={PANEL_ROUTES.forge}
+          onClick={(e) => { e.preventDefault(); onNavigate('forge'); }}
+          className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-accent hover:bg-accent/10 transition-colors focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-accent"
+        >
+          <Plus size={14} className="shrink-0" />
+          <span className="font-medium truncate">New Spec</span>
+          <span className="ml-auto text-[10px] font-mono text-accent/50 border border-accent/20 rounded px-1 shrink-0">C</span>
+        </NavLink>
+      </div>
+
+      {/* Main Navigation Sections */}
+      <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0">
+        {NAV_SECTIONS.map(renderNavSection)}
+      </div>
+
+      {/* Bottom Section: Compact Controls */}
+      <div className="px-3 py-2 border-t border-border flex items-center gap-1.5 shrink-0">
+        <UserMenu onNavigate={onNavigate} />
+        <NotificationBell onNavigate={onNavigate} />
+        <ThemeToggle />
+      </div>
+    </div>
+  );
+
+  // If mobile is open, wrap the content in the overlay layout
+  if (mobileOpen) {
+    return (
+      <>
+        <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={onMobileClose} />
+        <nav className="fixed top-0 left-0 bottom-0 z-50 animate-slideInLeft shadow-2xl md:hidden w-[260px]">
+          {sidebarContent}
+        </nav>
+      </>
     );
   }
 
-  // ─── Desktop: full sidebar (width controlled by ResizableSidebar parent) ──
-  return (
-    <nav aria-label="Main navigation" className="flex h-full">{sidebarContent}</nav>
-  );
+  // Desktop render — width is controlled by ResizableSidebar parent
+  return sidebarContent;
 }
