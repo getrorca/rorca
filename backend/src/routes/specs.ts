@@ -14,6 +14,7 @@ import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, g
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
+import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
@@ -815,7 +816,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // No validation gate — any model string is accepted. Unknown models route to openai-compat.
 
     // 2. Fetch workspace from DB
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as WorkspaceRow | undefined;
+    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as Record<string, unknown> | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
       return;
@@ -907,7 +908,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 6c. Discover skill + persona catalogs and read context files
-    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
+    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id as string | undefined);
 
     // 6d. Pre-compute contextSummary for error responses (also used in success response)
     const skillNamesList = catalogs.skillCatalog
@@ -1010,7 +1011,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // Base JSON schema and rules used by multi-pass Pass 1 (simpler format without skill/persona fields)
     const baseJsonSchema = `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]\\n  ${storyPrefix}-002[\\"Story title\\"]\\n  ${storyPrefix}-001 --> ${storyPrefix}-002"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`;
 
-    const _baseRules = [
+    const baseRules = [
       storyCount === 0
         ? `- Number stories sequentially starting from ${storyPrefix}-001`
         : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
@@ -2200,7 +2201,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   ].join('\n');
 
   // Call LLM (use vault key if available for this user)
-  const batchVaultCreds = item.userId ? await resolveVaultCreds(item.userId, resolvedModel) : {} as { apiKey?: string; baseUrl?: string };
+  const batchVaultCreds = item.userId ? await resolveVaultCreds(item.userId, resolvedModel) : {};
   const llmResult = await chatComplete(
     [{ role: 'user', content: fullPrompt }],
     { model: resolvedModel, apiKey: batchVaultCreds.apiKey, baseUrl: batchVaultCreds.baseUrl },
@@ -2557,7 +2558,8 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
   // Subscribe to WAL events for batch_progress
   const unsubscribe = subscribe((event) => {
     if (event.event_type !== 'batch_progress' && event.event_type !== 'batch_finished') return;
-    const payload = event.payload ? JSON.parse(event.payload) : {};
+    // pg auto-deserializes JSONB columns — typeof check prevents double-parse crash
+    const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : (event.payload ?? {});
     if (payload.batchId !== batchId) return;
     res.write(`event: progress\ndata: ${JSON.stringify(payload)}\n\n`);
   });
@@ -3480,7 +3482,7 @@ router.get('/archive', async (req: Request, res: Response) => {
         if (allSpecs.some(s => s.id === evt.spec_id)) continue;
         if (matchingSlugs && !matchingSlugs.has(evt.spec_id)) continue;
 
-        const payload = JSON.parse(evt.payload);
+        const payload = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : (evt.payload ?? {});
         allSpecs.push({
           id: evt.spec_id,
           specName: evt.spec_id,
@@ -6920,7 +6922,7 @@ router.get('/:specId/stories/:storyId/commits', async (req: Request, res: Respon
  */
 router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Response) => {
   try {
-    const _specId = req.params.specId as string;
+    const specId = req.params.specId as string;
     const storyId = req.params.storyId as string;
     const { workspaceId } = req.body;
 
@@ -8106,6 +8108,16 @@ router.get('/:specId/comments/counts', async (req: Request, res: Response) => {
 });
 
 // ─── V2-042: PUT /:specId/assign — Assign spec to a user ──────────────────────
+
+interface AssignmentRow {
+  id: number;
+  spec_id: string;
+  story_id: string;
+  workspace_id: string;
+  assignee_id: string;
+  assigned_at: string;
+  assigned_by: string | null;
+}
 
 /**
  * @swagger
@@ -9635,7 +9647,7 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
  */
 router.post('/:specId/fix', async (req: Request, res: Response) => {
   try {
-    const specId = req.params.specId as string;
+    const { specId } = req.params;
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
@@ -9726,7 +9738,7 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
       content.userStories = deduped;
       const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
       fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
-      await snapshotVersion(specId, JSON.stringify(content), specStatus);
+      await snapshotVersion(Array.isArray(specId) ? specId[0] : specId, JSON.stringify(content), specStatus);
     }
 
     res.json({ fixed, changes });
