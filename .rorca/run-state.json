@@ -2,7 +2,7 @@
   "specId": "rorca-post-run-qa",
   "runId": 51,
   "startedAt": "2026-03-12T07:21:44.343Z",
-  "lastUpdatedAt": "2026-03-12T09:18:01.669Z",
+  "lastUpdatedAt": "2026-03-12T09:19:23.547Z",
   "completedStories": [
     {
       "storyId": "QA-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 2353148
+    },
+    {
+      "storyId": "QA-002",
+      "title": "Backend TypeScript validation and error resolution",
+      "status": "passed",
+      "startedAt": "2026-03-12T09:18:23.408Z",
+      "finishedAt": "2026-03-12T09:19:23.546Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 60138
     }
   ],
   "failedStories": [],
