@@ -2,7 +2,7 @@
   "specId": "rorca-distribution",
   "runId": 48,
   "startedAt": "2026-03-12T06:04:21.346Z",
-  "lastUpdatedAt": "2026-03-12T06:05:05.009Z",
+  "lastUpdatedAt": "2026-03-12T06:05:51.169Z",
   "completedStories": [
     {
       "storyId": "DIST-006",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 40955
+    },
+    {
+      "storyId": "DIST-007",
+      "title": "GitHub Actions — Release Workflow",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:05:24.046Z",
+      "finishedAt": "2026-03-12T06:05:51.169Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 27123
     }
   ],
   "failedStories": [],

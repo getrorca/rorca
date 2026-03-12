@@ -3,7 +3,8 @@
 Spec: rorca-distribution
 Run ID: 48
 Started: 2026-03-12T06:04:21.346Z
-Last Updated: 2026-03-12T06:05:05.009Z
+Last Updated: 2026-03-12T06:05:51.169Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - DIST-006: LICENSE & Legal Files — DONE (claude, claude-sonnet-4-6, 41s)
+- DIST-007: GitHub Actions — Release Workflow — DONE (claude, claude-sonnet-4-6, 27s)
