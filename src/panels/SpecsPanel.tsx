@@ -1,14 +1,14 @@
 /* @refresh reset */
-import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useDebounce } from '../hooks/useDebounce';
 import { useLazyVisible } from '../hooks/useLazyVisible';
 import {
   Search, X, Clock, CheckCircle2, XCircle, AlertCircle,
   Check, ChevronRight, ChevronLeft, Play, GitBranch, GitFork,
-  Loader2, Plus, ExternalLink,
-  FileText, File, FileType, Layers, Archive, Inbox, ArrowRight,
-  RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
-  GripVertical, Trash2, Palette, Pencil, AlignJustify,
+  Loader2, Plus,
+  FileText, File as FileIcon, FileType, Layers, Archive, Inbox,
+  RefreshCw, AlertTriangle, LayoutGrid, List,
+  GripVertical, Trash2, Pencil, AlignJustify,
   Sparkles,
   Paperclip,
 } from 'lucide-react';
@@ -18,15 +18,15 @@ import { apiFetch, ApiError, BASE_URL } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWalSSE } from '../hooks/useWalSSE';
 import type { PanelId } from '../components/Sidebar';
-import { TagChipsReadonly, TagChips } from '../components/TagChips';
+import { TagChipsReadonly } from '../components/TagChips';
 import AppHeader from '../components/AppHeader';
 import AgentBadge from '../components/AgentBadge';
 import { SkeletonColumn } from '../components/skeletons';
 import SlideOver from '../components/SlideOver';
 import SpecDetailSlideOver from '../components/SpecDetailSlideOver';
 import type { SpecSlideOverSummary, PreviewTab } from '../components/SpecDetailSlideOver';
-import { relativeTime, REVIEW_STATUS_CONFIG } from '../components/SpecReviewInline';
-import type { SpecSummary, ReviewStatus } from '../components/SpecReviewInline';
+import { relativeTime } from '../components/SpecReviewInline';
+import type { ReviewStatus } from '../components/SpecReviewInline';
 import SpecForgeProgress, { type SpecGenerationError } from '../components/SpecForgeProgress';
 import SpecForgePreview from '../components/SpecForgePreview';
 import TemplatePickerModal from '../components/TemplatePickerModal';
@@ -191,7 +191,7 @@ const SYSTEM_COLUMNS = [
 ];
 
 // Legacy compat reference (used by keyboard nav and some helpers)
-const BOARD_COLUMNS = SYSTEM_COLUMNS;
+const _BOARD_COLUMNS = SYSTEM_COLUMNS;
 
 const COLUMN_COLORS: { name: string; hex: string }[] = [
   { name: 'indigo', hex: '#6366f1' },
@@ -284,9 +284,9 @@ interface SpecsPanelProps {
   initialView?: ViewMode;
 }
 
-export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview, initialBrief, onBriefConsumed, initialView }: SpecsPanelProps) {
+export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSpecReview: _onNavigateToSpecReview, initialBrief, onBriefConsumed, initialView }: SpecsPanelProps) {
   const { workspaceId } = useWorkspace();
-  const toast = useGlobalToast();
+  const _toast = useGlobalToast();
 
   // View mode: board or list (persisted in localStorage)
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -419,7 +419,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         onClose={handleDetailClose}
         onNavigate={onNavigate}
         onNavigateToRun={onNavigateToRun}
-        onDeleted={(id) => { handleDetailClose(); }}
+        onDeleted={(_id) => { handleDetailClose(); }}
       />
     </div>
   );
@@ -571,7 +571,7 @@ function DeleteColumnDialog({ columnName, specCount, onConfirm, onCancel }: {
   );
 }
 
-function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
+function BoardView({ workspaceId, onSpecClick, onNavigate: _onNavigate, onNewSpec }: {
   workspaceId: string;
   onSpecClick: (specId: string, summary?: ArchiveSpec, initialTab?: PreviewTab) => void;
   onNavigate: (panel: PanelId) => void;
@@ -594,7 +594,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   const dragOverCardRef = useRef<{ specId: string; position: 'before' | 'after' } | null>(null);
   const dragLeaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const dragGhostRef = useRef<HTMLDivElement | null>(null);
-  const [dragRenderKey, setDragRenderKey] = useState(0);
+  const [_dragRenderKey, setDragRenderKey] = useState(0);
   // Column header drag state
   const dragColumnIdRef = useRef<number | null>(null);
   const dragColumnOverIdRef = useRef<number | null>(null);
@@ -1776,7 +1776,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
    LIST VIEW — Searchable archive table
    ════════════════════════════════════════════════════════════════════ */
 
-function ListView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
+function ListView({ workspaceId, onSpecClick, onNavigate: _onNavigate, onNewSpec }: {
   workspaceId: string;
   onSpecClick: (specId: string, summary?: ArchiveSpec) => void;
   onNavigate: (panel: PanelId) => void;
@@ -2025,7 +2025,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   initialBrief?: string | null;
 }) {
   const { workspaceId, workspaces } = useWorkspace();
-  const workspace = workspaces.find((w) => w.id === workspaceId);
+  const _workspace = workspaces.find((w) => w.id === workspaceId);
   const { show: showToast } = useGlobalToast();
 
   // Spec fields
@@ -2044,9 +2044,9 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [activeProvider, setActiveProvider] = useState<string>('claude-cli');
 
   // Agent override
-  const [wsAgentType, setWsAgentType] = useState<AgentType>('claude');
+  const [_wsAgentType, setWsAgentType] = useState<AgentType>('claude');
   const [wsAgentModel, setWsAgentModel] = useState<string | null>(null);
-  const [wsModelDisplayName, setWsModelDisplayName] = useState<string | null>(null);
+  const [_wsModelDisplayName, setWsModelDisplayName] = useState<string | null>(null);
   const [wsAgentBinaries, setWsAgentBinaries] = useState<{ claudeInstalled?: boolean; opencodeInstalled?: boolean; codexInstalled?: boolean }>({});
   const [overrideAgent, setOverrideAgent] = useState(false);
   const [overrideAgentType, setOverrideAgentType] = useState<AgentType>('claude');
@@ -2480,7 +2480,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
               if (contentType.startsWith('image/')) return null;
               if (contentType === 'application/pdf' || filename.endsWith('.pdf')) return <FileType size={14} className="text-muted shrink-0" />;
               if (contentType === 'text/markdown' || filename.endsWith('.md') || contentType === 'text/plain' || filename.endsWith('.txt')) return <FileText size={14} className="text-muted shrink-0" />;
-              return <File size={14} className="text-muted shrink-0" />;
+              return <FileIcon size={14} className="text-muted shrink-0" />;
             };
 
             const hasSaved = savedAttachments.length > 0;
