@@ -2785,11 +2785,20 @@ router.get('/kanban', async (req: Request, res: Response) => {
     }
 
     const approvedSpecs: KanbanSpec[] = [];
+    // Track passed/failed counts from spec JSON (cumulative across all runs)
+    const storyProgress = new Map<string, number>();
+    const storyFailed = new Map<string, number>();
     for (const file of safeReaddir(approvedDir)) {
       try {
         const filePath = path.join(approvedDir, file);
         const content = parseSpecFile(filePath);
         const s = await buildSummary(filePath, file, 'approved', workspace.path, workspaceId);
+        // Count passes/fails directly from spec JSON — accurate across multiple runs
+        const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
+        const passedCount = stories.filter((st: any) => st.passes === true).length;
+        const failedCount = stories.filter((st: any) => st.passes === false && st.skipped !== true).length;
+        if (passedCount > 0) storyProgress.set(s.id, passedCount);
+        if (failedCount > 0) storyFailed.set(s.id, failedCount);
         approvedSpecs.push({
           id: s.id,
           title: s.specName,
@@ -2827,25 +2836,6 @@ router.get('/kanban', async (req: Request, res: Response) => {
       [workspaceId]
     );
     for (const row of manualDone) completedSlugs.add(row.spec_id);
-
-    // Fetch story pass/fail counts for approved specs with runs
-    const approvedSlugs = approvedSpecs.map(s => s.id);
-    const storyProgress = new Map<string, number>();
-    const storyFailed = new Map<string, number>();
-    if (approvedSlugs.length > 0) {
-      for (const slug of approvedSlugs) {
-        // Find latest run for this spec
-        const latestRun = runs.find(r =>
-          r.spec_path.replace(/^.*\//, '').replace(/\.json$/, '') === slug
-        );
-        if (latestRun) {
-          const passCount = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status = 'pass'`, [latestRun.id]) as { cnt: number } | undefined;
-          if (passCount) storyProgress.set(slug, passCount.cnt);
-          const failCount = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status = 'fail'`, [latestRun.id]) as { cnt: number } | undefined;
-          if (failCount) storyFailed.set(slug, failCount.cnt);
-        }
-      }
-    }
 
     // Bucket into columns:
     // - draft: pending specs (no active run)
