@@ -2,7 +2,7 @@
   "specId": "rorca-ensure-postgres",
   "runId": 1,
   "startedAt": "2026-03-12T18:19:22.650Z",
-  "lastUpdatedAt": "2026-03-12T18:27:23.221Z",
+  "lastUpdatedAt": "2026-03-12T18:32:06.463Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-12T18:27:23.221Z",
       "agentType": "claude",
       "elapsedMs": 350143
+    },
+    {
+      "storyId": "US-002",
+      "title": "Extract archive and run initdb to initialize data directory",
+      "status": "passed",
+      "startedAt": "2026-03-12T18:27:46.585Z",
+      "finishedAt": "2026-03-12T18:32:06.463Z",
+      "agentType": "claude",
+      "elapsedMs": 259878
     }
   ],
   "failedStories": [],
