@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { ChevronDown, ChevronRight, Download, AlertTriangle, TrendingDown, ArrowUpRight, Info } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, TrendingDown, ArrowUpRight, Info } from 'lucide-react';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ const TIER_COLORS: Record<string, string> = {
   opus: 'bg-purple-500',
 };
 
-const TIER_TEXT: Record<string, string> = {
+const _TIER_TEXT: Record<string, string> = {
   haiku: 'text-emerald-400',
   sonnet: 'text-blue-400',
   opus: 'text-purple-400',

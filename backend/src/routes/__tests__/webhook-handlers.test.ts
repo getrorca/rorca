@@ -9,7 +9,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { query, queryOne, execute } from '../../db/index';
+import { query, execute } from '../../db/index';
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
   getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
@@ -45,7 +45,7 @@ beforeEach(async () => {
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-webhook-handlers-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   // Initialize DB by requiring it

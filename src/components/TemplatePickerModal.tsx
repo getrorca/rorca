@@ -21,7 +21,7 @@ export default function TemplatePickerModal({ onClose, onSelect }: TemplatePicke
         setTemplates(res.items ?? []);
         setLoading(false);
       })
-      .catch((err) => {
+      .catch((_err) => {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();

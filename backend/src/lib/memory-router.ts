@@ -25,7 +25,6 @@ import { queryRelated, queryImpact, graphStats } from './knowledge-graph';
 import {
   getGraphContext,
   formatGraphContext,
-  type GraphContext as FullGraphContext,
 } from './graph-context';
 import { query as dbQuery } from '../db/index';
 

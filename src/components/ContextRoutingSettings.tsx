@@ -14,7 +14,7 @@
  * - Import/export config as JSON
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Save, Loader2, Check, ChevronRight, ChevronDown,
   Folder, FolderOpen, FileText, Plus, Trash2, X,
@@ -121,7 +121,7 @@ export default function ContextRoutingSettings({ workspaceId, showToast }: Props
   const [config, setConfig] = useState<RorcaConfig | null>(null);
   const [originalConfig, setOriginalConfig] = useState<RorcaConfig | null>(null);
   const [configExists, setConfigExists] = useState(false);
-  const [hasRorcaDir, setHasRorcaDir] = useState(false);
+  const [_hasRorcaDir, setHasRorcaDir] = useState(false);
 
   // Skills
   const [skills, setSkills] = useState<SkillFile[]>([]);

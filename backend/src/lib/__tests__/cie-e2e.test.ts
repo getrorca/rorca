@@ -97,13 +97,10 @@ jest.mock('../workspace-echolocation', () => ({
 
 import {
   estimateTokens,
-  extractPathMentions,
-  matchScopes,
-  enforceBudget,
   route,
   type ContextStory,
 } from '../context-router';
-import type { RoutingConfig, RoutingScope } from '../rorca-config';
+import type { RoutingConfig } from '../rorca-config';
 import {
   loadRorcaConfig,
   writeRorcaConfig,
@@ -124,8 +121,6 @@ import {
   type StoryEntry,
 } from '../run-state';
 import {
-  parseMemoryFile,
-  serializeEntry,
   buildSynthesisPrompt,
   parseSynthesisResponse,
   readMemory,
@@ -136,7 +131,6 @@ import {
 import { generateScaffoldPreview, writeScaffoldFiles } from '../workspace-scaffold';
 import { markWriting } from '../file-watcher';
 import { synthesize } from '../direction-stack';
-import { z } from 'zod';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -945,7 +939,7 @@ describe('CIE E2E: Bi-directional Sync — CLAUDE.md Diff on L3 Update', () => {
       storyAnnotations: 'Edge case: handle null input',
     };
 
-    const before = synthesize(params);
+    const _before = synthesize(params);
     const after = synthesize({ ...params, l3: 'New project context with PostgreSQL' });
 
     // All sections except L3 should be identical

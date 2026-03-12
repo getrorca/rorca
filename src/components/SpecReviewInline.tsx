@@ -33,7 +33,6 @@ import { InlineStoryEditor } from './InlineStoryEditor';
 import { StoryComments } from './StoryComments';
 import DependencyGraph from './DependencyGraph';
 import MermaidDiagram from './MermaidDiagram';
-import { ReadinessRing } from './ReadinessRing';
 import { AssigneeDropdown } from './AssigneeDropdown';
 import type { Assignee } from './AssigneeDropdown';
 

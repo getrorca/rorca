@@ -1,6 +1,5 @@
 import { Menu } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
-import type { PanelId } from './Sidebar';
 
 interface AppHeaderProps {
     onMenuToggle?: () => void;

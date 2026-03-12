@@ -41,9 +41,9 @@ interface SpecForgePreviewProps {
 export default function SpecForgePreview({
   spec,
   workspaceId,
-  onRegenerate,
-  onEditBrief,
-  isRegenerating,
+  onRegenerate: _onRegenerate,
+  onEditBrief: _onEditBrief,
+  isRegenerating: _isRegenerating,
   onNavigate,
   onNavigateToRun,
   onReset,

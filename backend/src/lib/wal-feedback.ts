@@ -11,7 +11,6 @@ import {
   readMemory,
   type MemoryEntry,
   type MemoryCategory,
-  MEMORY_CATEGORIES,
 } from './memory-ledger';
 import { logger } from './logger';
 
