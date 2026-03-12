@@ -2074,72 +2074,56 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       }
     }
 
-    // 7. Generate 1-story spec via LLM
-    // Inject workspace context (non-fatal if any step fails)
+    // 7. Synthesize direction stack (L1–L3) for this workspace
     let directionContext = '';
     try {
-      const l1Dir = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
-      const domain = workspace.domain ?? undefined;
-      const l2Dir = domain
-        ? await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined
-        : undefined;
-      const l3Dir = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
-      directionContext = synthesize({
-        l1: l1Dir?.content_yaml,
-        l2: l2Dir?.content_yaml,
-        l3: l3Dir?.content_yaml,
-        specBrief: brief,
-      });
-    } catch (err) {
-      console.warn('[quick-run] Direction stack synthesis failed:', err);
+      const domain = workspace.domain ?? '';
+      const [l1Row, l2Row, l3Row] = await Promise.all([
+        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = '' AND COALESCE(team_id, '') = '' LIMIT 1`, []),
+        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id, '') = '' AND (domain = $1 OR COALESCE(domain, '') = '') AND COALESCE(team_id, '') = '' ORDER BY (domain = $1) DESC LIMIT 1`, [domain]),
+        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = '' LIMIT 1`, [workspaceId]),
+      ]);
+      directionContext = synthesize({ l1: l1Row?.content_yaml, l2: l2Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: brief });
+    } catch (err: unknown) {
+      // Silently skip — direction context is best-effort
+      if (err instanceof Error) void err.message;
     }
 
-    let memoryContext = '';
+    // 8. Generate 1-story spec via LLM
+    // Read MEMORY.md from workspace root (best-effort, silent on error)
+    let memoryContent = '';
     try {
-      const memoryPath = path.join(workspace.path, 'MEMORY.md');
-      const memoryContent = fs.readFileSync(memoryPath, 'utf-8');
-      if (memoryContent) memoryContext = memoryContent.slice(0, 2000);
-    } catch {
-      // File missing or unreadable — proceed with empty
+      const memoryRaw = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
+      memoryContent = memoryRaw.slice(0, 2000);
+    } catch (err: unknown) {
+      // ENOENT or any read error — silently skip
+      if (err instanceof Error) void err.message;
     }
 
+    // Fetch installed skills for this workspace (best-effort, silent on error)
     let skillsContext = '';
     try {
-      const skillRows = await query<{ name: string; description: string }>(
-        'SELECT name, description FROM installed_skills LIMIT 20',
+      const skillRows = await query<{ name: string; description: string | null }>(
+        `SELECT name, description FROM installed_skills ORDER BY name`,
         [],
       );
       if (skillRows.length > 0) {
-        skillsContext = skillRows.map(s => `${s.name}: ${s.description}`).join('\n');
+        const skillLines = skillRows.map(s => `- ${s.name}: ${s.description ?? ''}`).join('\n');
+        skillsContext = `=== INSTALLED SKILLS ===\n${skillLines}`;
       }
-    } catch {
-      // Table missing — fall back to .rorca/skills/ directory listing
-      try {
-        const skillsDir = path.join(workspace.path, '.rorca', 'skills');
-        const files = fs.readdirSync(skillsDir);
-        const names = files
-          .filter(f => f.endsWith('.md'))
-          .map(f => f.replace(/\.md$/, ''));
-        if (names.length > 0) skillsContext = names.join('\n');
-      } catch {
-        // No skills available — proceed with empty
-      }
+    } catch (err: unknown) {
+      // DB error — silently skip
+      if (err instanceof Error) void err.message;
     }
 
-    const contextPreamble: string[] = [];
-    if (directionContext) {
-      contextPreamble.push('=== DIRECTION STACK (follow these conventions) ===', directionContext, '');
-    }
-    if (memoryContext) {
-      contextPreamble.push('=== PROJECT MEMORY (past decisions and patterns) ===', memoryContext, '');
-    }
-    if (skillsContext) {
-      contextPreamble.push('=== INSTALLED SKILLS (reference these when relevant) ===', skillsContext, '');
-    }
+    // Build ordered context blocks and filter empty entries
+    const contextBlocks = [
+      directionContext.trim() ? `=== DIRECTION STACK ===\n${directionContext.trim()}` : '',
+      memoryContent.trim() ? `=== MEMORY.md ===\n${memoryContent.trim()}` : '',
+      skillsContext,
+    ].filter(Boolean);
 
-    // Enforce single story + max 8 AC
-    const quickRunPrompt = [
-      ...contextPreamble,
+    const instructions = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
       'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
@@ -2163,6 +2147,10 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       '- The description should be detailed enough for an engineer to implement',
       '- Your entire response must be valid JSON parseable by JSON.parse()',
     ].join('\n');
+
+    const quickRunPrompt = contextBlocks.length > 0
+      ? `${contextBlocks.join('\n\n')}\n\n${instructions}`
+      : instructions;
 
     const llmResult = await chatComplete(
       [{ role: 'user', content: quickRunPrompt }],
