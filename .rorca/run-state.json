@@ -1,18 +1,18 @@
 {
-  "specId": "rorca-forge-approve-and-queue",
-  "runId": 39,
-  "startedAt": "2026-03-11T22:00:06.703Z",
-  "lastUpdatedAt": "2026-03-11T22:01:33.989Z",
+  "specId": "rorca-mcp-cli-spec-enhancement",
+  "runId": 40,
+  "startedAt": "2026-03-12T04:20:33.580Z",
+  "lastUpdatedAt": "2026-03-12T04:29:43.149Z",
   "completedStories": [
     {
-      "storyId": "FAQ-001",
-      "title": "Add Approve & Queue button to SpecForgePreview so specs can be queued when a run is already active",
+      "storyId": "US-001",
+      "title": "Research Best Practices and Rewrite rorca-mcp-cli Spec with Exhaustive Acceptance Criteria",
       "status": "passed",
-      "startedAt": "2026-03-11T22:00:14.864Z",
-      "finishedAt": "2026-03-11T22:01:33.989Z",
+      "startedAt": "2026-03-12T04:20:41.412Z",
+      "finishedAt": "2026-03-12T04:29:43.149Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 79125
+      "elapsedMs": 541737
     }
   ],
   "failedStories": [],

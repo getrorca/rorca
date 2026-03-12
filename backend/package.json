@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "license": "BSL-1.1",
   "scripts": {
-    "dev": "npx tsx src/server.ts",
+    "dev": "npx tsx watch src/server.ts",
     "build": "tsc",
     "test": "jest",
     "mcp": "npx tsx src/mcp/server.ts"

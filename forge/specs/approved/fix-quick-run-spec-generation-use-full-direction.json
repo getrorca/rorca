@@ -20,7 +20,17 @@
         {
           "name": "rorca",
           "relevance": 9,
-          "reason": "Core Rorca skill — guides correct integration of direction-stack.ts synthesize() into pipeline route"
+          "reason": "Story modifies pipeline.ts Quick Run handler — rorca skill covers Rorca codebase patterns including direction stack integration"
+        },
+        {
+          "name": "logging-fundamentals",
+          "relevance": 5,
+          "reason": "Context injection adds conditional blocks; proper structured logging of whether direction stack was found/skipped aids debugging"
+        },
+        {
+          "name": "database-optimization",
+          "relevance": 4,
+          "reason": "synthesize() may involve DB reads for direction layers — MEMORY.md notes pg is always async and requires await"
         }
       ],
       "suggestedPersona": "backend",
@@ -50,12 +60,12 @@
         {
           "name": "rorca",
           "relevance": 9,
-          "reason": "MEMORY.md ledger injection pattern is core to Rorca's context cascade"
+          "reason": "Story modifies Quick Run handler in pipeline.ts — rorca skill covers Rorca backend conventions and file reading patterns"
         },
         {
           "name": "logging-fundamentals",
-          "relevance": 4,
-          "reason": "Silent error swallowing pattern requires intentional logging decision"
+          "relevance": 5,
+          "reason": "Silent skip behavior for missing MEMORY.md should be logged at debug level — logging-fundamentals covers proper log levels for optional resource misses"
         }
       ],
       "suggestedPersona": "backend",
@@ -86,12 +96,17 @@
         {
           "name": "rorca",
           "relevance": 9,
-          "reason": "Skills injection is the third pillar of Rorca's context cascade for Quick Run"
+          "reason": "Story queries skills from DB in pipeline.ts — MEMORY.md notes pg is async (always await, $1/$2 placeholders) which is critical for this DB query"
         },
         {
           "name": "database-optimization",
-          "relevance": 6,
-          "reason": "Direct DB query pattern must use pg Pool correctly with $1 placeholders and await"
+          "relevance": 7,
+          "reason": "MEMORY.md explicitly warns: pg is async — always await DB calls, use numbered placeholders. This story adds a new DB query and must follow that pattern"
+        },
+        {
+          "name": "security-scan",
+          "relevance": 4,
+          "reason": "Querying skills by workspaceId requires proper parameterized query to avoid SQL injection — security-scan enforces this"
         }
       ],
       "suggestedPersona": "backend",
@@ -123,12 +138,12 @@
         {
           "name": "rorca",
           "relevance": 8,
-          "reason": "Prompt assembly is core to Rorca's context injection pattern used across spec generation"
+          "reason": "Story refactors prompt assembly in pipeline.ts — rorca skill covers Rorca execution engine and prompt construction patterns"
         },
         {
-          "name": "best-practice-guide",
-          "relevance": 5,
-          "reason": "Clean array-filter-join pattern is idiomatic and testable"
+          "name": "exhaustive-specification",
+          "relevance": 4,
+          "reason": "Context-block builder pattern should be extensible — exhaustive-specification skill helps ensure the abstraction handles edge cases (empty, null, error states)"
         }
       ],
       "suggestedPersona": "lead-dev",
@@ -156,8 +171,13 @@
       "suggestedSkills": [
         {
           "name": "rorca",
-          "relevance": 6,
-          "reason": "Prompt tuning for Rorca's spec generation format"
+          "relevance": 7,
+          "reason": "Story updates quickRunPrompt instruction text in pipeline.ts — straightforward but rorca skill ensures alignment with spec JSON schema conventions"
+        },
+        {
+          "name": "exhaustive-specification",
+          "relevance": 5,
+          "reason": "Increasing acceptance criteria limit to 8 aligns with MEMORY.md goal of exhaustive spec generation — exhaustive-specification skill encodes best practices for detailed AC writing"
         }
       ],
       "suggestedPersona": "backend",
@@ -185,13 +205,18 @@
       "suggestedSkills": [
         {
           "name": "rorca",
-          "relevance": 7,
-          "reason": "Rorca codebase enforces strict TypeScript — no implicit any, typed DB results"
+          "relevance": 8,
+          "reason": "TypeScript type safety for pipeline.ts backend changes — rorca skill covers Rorca backend conventions including typed error handling"
         },
         {
           "name": "best-practice-guide",
           "relevance": 6,
-          "reason": "Idiomatic TypeScript error handling and type safety patterns"
+          "reason": "Story explicitly requires typed error catching (catch (err: unknown)) and no implicit any — best-practice-guide enforces TypeScript strict mode patterns"
+        },
+        {
+          "name": "assumption-buster",
+          "relevance": 4,
+          "reason": "Type guards for skills query rows and direction stack result may reveal hidden interface assumptions — assumption-buster challenges implicit type assumptions"
         }
       ],
       "suggestedPersona": "backend",
@@ -222,18 +247,23 @@
       "suggestedSkills": [
         {
           "name": "rorca",
-          "relevance": 7,
-          "reason": "Tests validate Rorca-specific context injection contract for Quick Run"
+          "relevance": 9,
+          "reason": "Jest test file for pipeline.ts Quick Run — rorca skill covers Rorca test patterns and mock conventions for synthesize(), fs, and DB"
         },
         {
           "name": "assumption-testing",
           "relevance": 8,
-          "reason": "Unit tests make implicit assumptions about context injection order and skip logic explicit and verified"
+          "reason": "Story requires testing 5 explicit scenarios including silent-skip behaviors — assumption-testing skill ensures all implicit assumptions about mock behavior are documented and tested"
         },
         {
           "name": "gap-analysis",
           "relevance": 6,
-          "reason": "Tests close the gap between spec intent (full context cascade) and actual runtime behavior"
+          "reason": "After writing tests, gap-analysis can verify test coverage matches the 5 specified scenarios and catches missing edge cases in the mock setup"
+        },
+        {
+          "name": "spec-gap-analysis",
+          "relevance": 5,
+          "reason": "Test spec has explicit acceptance criteria (5 test cases) — spec-gap-analysis ensures implementation covers all specified cases"
         }
       ],
       "suggestedPersona": "qa",
@@ -261,18 +291,23 @@
       "suggestedSkills": [
         {
           "name": "rorca",
-          "relevance": 8,
-          "reason": "Smoke test validates the full Rorca context cascade end-to-end for Quick Run"
+          "relevance": 9,
+          "reason": "End-to-end smoke test + Swagger annotation update for Quick Run — rorca skill covers both manual validation patterns and JSDoc @swagger annotation conventions"
+        },
+        {
+          "name": "exhaustive-specification",
+          "relevance": 6,
+          "reason": "Swagger JSDoc update should document the cascade order (direction stack → MEMORY.md → skills → instructions) exhaustively — exhaustive-specification ensures no parameter or behavior is underdocumented"
+        },
+        {
+          "name": "logging-fundamentals",
+          "relevance": 5,
+          "reason": "Comment block above context injection section should follow structured documentation patterns — logging-fundamentals covers context propagation documentation conventions"
         },
         {
           "name": "api-documentation",
           "relevance": 7,
-          "reason": "Swagger JSDoc annotation update is explicit API documentation work"
-        },
-        {
-          "name": "reality-validation",
-          "relevance": 7,
-          "reason": "Validates that generated spec actually reflects injected context — not just that injection code ran"
+          "reason": "Story explicitly updates @swagger JSDoc annotation on POST /api/pipeline/quick-run — api-documentation skill covers REST endpoint documentation best practices and OpenAPI annotation patterns"
         }
       ],
       "suggestedPersona": "qa",
