@@ -2,7 +2,7 @@
   "specId": "rorca-post-run-qa",
   "runId": 57,
   "startedAt": "2026-03-12T08:22:15.934Z",
-  "lastUpdatedAt": "2026-03-12T09:22:01.339Z",
+  "lastUpdatedAt": "2026-03-12T09:36:45.803Z",
   "completedStories": [
     {
       "storyId": "QA-003",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 217713
+    },
+    {
+      "storyId": "QA-003",
+      "title": "ESLint validation and code quality fixes",
+      "status": "passed",
+      "startedAt": "2026-03-12T09:22:40.817Z",
+      "finishedAt": "2026-03-12T09:36:45.803Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 844986
     }
   ],
   "failedStories": [],
