@@ -1736,6 +1736,535 @@ server.registerPrompt(
   }
 );
 
+// ─── MC-001: rorca_forge_and_run — One-shot: brief → spec → approve → run ─────
+
+/** Error categories from specs.ts (mirror, no import needed in stdio server) */
+type SpecErrorCategory =
+  | 'model_error'
+  | 'api_key_error'
+  | 'rate_limit'
+  | 'context_too_large'
+  | 'timeout'
+  | 'parse_error'
+  | 'network_error'
+  | 'unknown';
+
+/** Maps numeric progress token → MCP notification sender. */
+type ProgressNotifier = (progress: number, total: number, message: string) => void;
+
+function makeProgressNotifier(server: McpServer, progressToken: string | number | undefined): ProgressNotifier {
+  return (progress, total, message) => {
+    if (progressToken == null) return;
+    server.server.notification({
+      method: 'notifications/progress',
+      params: { progressToken, progress, total, message },
+    });
+  };
+}
+
+/** Classify a fetch response / error into a SpecErrorCategory. */
+function classifySpecError(status: number, body: string): SpecErrorCategory {
+  const lower = body.toLowerCase();
+  if (status === 401 || status === 403 || lower.includes('api key') || lower.includes('unauthorized')) return 'api_key_error';
+  if (status === 429 || lower.includes('rate limit') || lower.includes('overloaded') || lower.includes('throttl')) return 'rate_limit';
+  if (lower.includes('context') && (lower.includes('exceed') || lower.includes('too large'))) return 'context_too_large';
+  if (status === 408 || status === 504 || lower.includes('timeout')) return 'timeout';
+  if (lower.includes('json') || lower.includes('parse') || lower.includes('invalid json')) return 'parse_error';
+  if (lower.includes('econnrefused') || lower.includes('network') || lower.includes('enotfound')) return 'network_error';
+  if (status >= 500 && lower.includes('model')) return 'model_error';
+  return 'unknown';
+}
+
+/** Return the user-facing suggestion for a SpecErrorCategory. */
+function specErrorSuggestion(cat: SpecErrorCategory): string {
+  switch (cat) {
+    case 'api_key_error': return 'Check your API key in Rorca Settings > API Keys or run rorca_update_direction to verify your configuration';
+    case 'rate_limit':    return 'Rate limit reached. Try again in 60 seconds or switch to a different model using the spec_model parameter';
+    case 'context_too_large': return 'Brief or direction stack too long. Shorten the brief or reduce L1/L2 direction layers via rorca_update_direction';
+    case 'parse_error':   return 'The model returned invalid JSON. Try spec_model: claude-sonnet-4-5-20250929 which has reliable JSON output';
+    case 'timeout':       return 'Spec generation timed out. Try a shorter brief or a faster model.';
+    case 'model_error':   return 'Check the model name in Rorca Settings or use the default by omitting the spec_model parameter';
+    case 'network_error': return 'Check your internet connection and API provider status. The brief has NOT been processed.';
+    default:              return 'An unexpected error occurred during spec generation. Try again.';
+  }
+}
+
+/** Generate spec with one automatic retry on parse_error. Returns the spec JSON or throws an error result object. */
+async function generateSpecWithRetry(
+  workspaceId: string,
+  brief: string,
+  model: string | undefined,
+  specModel: string | undefined,
+): Promise<{ spec: Record<string, unknown>; specId: string; storyCount: number }> {
+  const slugTitle = `forge-${Date.now()}`;
+  const body: Record<string, unknown> = {
+    workspaceId,
+    specBrief: brief,
+    title: slugTitle,
+    storyCount: 8,
+    includeDiagrams: false,
+    ...(specModel ? { model: specModel } : model ? { model } : {}),
+  };
+
+  let lastCategory: SpecErrorCategory = 'unknown';
+  let lastErrText = '';
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(`${RORCA_API}/api/specs/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (networkErr: unknown) {
+      const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+      if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
+        throw { phase: 'spec_generation', connRefused: true, error: msg };
+      }
+      throw { phase: 'spec_generation', category: 'network_error' as SpecErrorCategory, error: msg };
+    }
+
+    const rawText = await res.text();
+    if (!res.ok) {
+      lastCategory = classifySpecError(res.status, rawText);
+      lastErrText = rawText.slice(0, 200);
+      // Only retry on parse_error on first attempt
+      if (lastCategory === 'parse_error' && attempt === 0) continue;
+      throw { phase: 'spec_generation', category: lastCategory, error: rawText.slice(0, 300) };
+    }
+
+    let spec: Record<string, unknown>;
+    try {
+      spec = JSON.parse(rawText);
+    } catch {
+      lastCategory = 'parse_error';
+      lastErrText = rawText.slice(0, 200);
+      if (attempt === 0) continue; // retry once
+      throw { phase: 'spec_generation', category: 'parse_error' as SpecErrorCategory, error: 'Invalid JSON from spec generation' };
+    }
+
+    const stories = Array.isArray(spec.userStories) ? spec.userStories : [];
+    const specId = (spec.id ?? spec.title ?? slugTitle) as string;
+    return { spec, specId, storyCount: stories.length };
+  }
+
+  // Exhausted retries
+  throw { phase: 'spec_generation', category: lastCategory, error: lastErrText || 'Spec generation failed after retry' };
+}
+
+/** Poll GET /api/pipeline/runs/:runId every intervalMs until status is terminal or timeout. */
+async function pollRunUntilDone(
+  runId: number,
+  timeoutMs: number,
+  intervalMs: number,
+  onStory: (story: { id: string; title: string; status: string; elapsed_seconds: number; retries: number }) => void,
+): Promise<{
+  status: string;
+  stories: Array<{ id: string; title: string; status: string; elapsed_seconds: number; retries: number }>;
+  branchName: string | null;
+  worktreePath: string | null;
+}> {
+  const deadline = Date.now() + timeoutMs;
+  const seenStories = new Set<string>();
+
+  while (Date.now() < deadline) {
+    let res: Response;
+    try {
+      res = await fetch(`${RORCA_API}/api/pipeline/runs/${runId}`);
+    } catch (fetchErr: unknown) {
+      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
+        throw { phase: 'monitoring', connRefused: true, runId, error: msg };
+      }
+      // Non-fatal network blip — wait and retry
+      await new Promise(r => setTimeout(r, intervalMs));
+      continue;
+    }
+
+    if (!res.ok) {
+      await new Promise(r => setTimeout(r, intervalMs));
+      continue;
+    }
+
+    const data = await res.json() as {
+      run: { status: string; worktree_branch?: string; worktree_path?: string };
+      stories: Array<{ story_id: string; status: string; started_at?: string; finished_at?: string; retries?: number }>;
+      specStories: Array<{ id: string; title: string }>;
+    };
+
+    // Emit per-story progress for newly completed stories
+    const storyTitleMap = new Map<string, string>(
+      (data.specStories ?? []).map(s => [s.id, s.title] as [string, string])
+    );
+    for (const sr of (data.stories ?? [])) {
+      const storyKey = `${sr.story_id}:${sr.status}`;
+      if (!seenStories.has(storyKey) && ['pass', 'fail', 'skip'].includes(sr.status)) {
+        seenStories.add(storyKey);
+        const elapsedS = sr.started_at && sr.finished_at
+          ? Math.round((new Date(sr.finished_at).getTime() - new Date(sr.started_at).getTime()) / 1000)
+          : 0;
+        onStory({
+          id: sr.story_id,
+          title: storyTitleMap.get(sr.story_id) ?? sr.story_id,
+          status: sr.status === 'pass' ? 'passed' : sr.status === 'fail' ? 'failed' : 'skipped',
+          elapsed_seconds: elapsedS,
+          retries: sr.retries ?? 0,
+        });
+      }
+    }
+
+    const runStatus = data.run?.status ?? '';
+    if (['completed', 'failed', 'cancelled'].includes(runStatus)) {
+      // Build final story list
+      const finalStories = (data.stories ?? []).map(sr => {
+        const elapsedS = sr.started_at && sr.finished_at
+          ? Math.round((new Date(sr.finished_at).getTime() - new Date(sr.started_at).getTime()) / 1000)
+          : 0;
+        return {
+          id: sr.story_id,
+          title: storyTitleMap.get(sr.story_id) ?? sr.story_id,
+          status: sr.status === 'pass' ? 'passed' : sr.status === 'fail' ? 'failed' : 'skipped',
+          elapsed_seconds: elapsedS,
+          retries: sr.retries ?? 0,
+        };
+      });
+
+      return {
+        status: runStatus,
+        stories: finalStories,
+        branchName: data.run?.worktree_branch ?? null,
+        worktreePath: data.run?.worktree_path ?? null,
+      };
+    }
+
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+
+  // Timed out
+  throw { phase: 'timeout', runId };
+}
+
+server.registerTool(
+  'rorca_forge_and_run',
+  {
+    description: '[Specs & Pipeline] One-shot: brief → spec → approve → run → completion. Handles the full pipeline end-to-end. Returns structured results when done. Use for: I have an idea, build it. NOT for: monitoring existing runs (use rorca_run_status) or retrying failed stories (use rorca_retry_story). The auto_worktree parameter (default: true) runs in a new branch feat/<spec-slug>-<timestamp> — safe for parallel execution. When false, runs in the current working directory of the workspace — faster but blocks same-workspace parallel runs. This is a long-running tool call that blocks until complete (up to timeout_minutes).',
+    inputSchema: {
+      brief: z.string().min(10).describe('Plain-English description of what to build'),
+      workspace_id: z.string().describe('Workspace ID from rorca_list_workspaces'),
+      model: z.string().optional().describe('Execution model override'),
+      spec_model: z.string().optional().describe('Spec generation model override'),
+      auto_worktree: z.boolean().optional().default(true).describe('Run in isolated git worktree (default: true). When true, pipeline runs in a new branch feat/<spec-slug>-<timestamp> — safe for parallel execution. When false, runs in the current working directory of the workspace — faster but blocks same-workspace parallel runs.'),
+      timeout_minutes: z.number().optional().default(90).describe('Max runtime in minutes (1-480)'),
+    },
+  },
+  async ({ brief, workspace_id, model, spec_model, auto_worktree, timeout_minutes }, extra) => {
+    const startTime = Date.now();
+    const resolvedAutoWorktree = auto_worktree ?? true;
+    const resolvedTimeoutMinutes = timeout_minutes ?? 90;
+
+    // ── Progress notification helper ─────────────────────────────────────────
+    const progressToken = (extra as Record<string, unknown> & { _meta?: { progressToken?: string | number } })?._meta?.progressToken;
+    const notify = makeProgressNotifier(server, progressToken);
+
+    // Helper to return an error result (isError: true, not a protocol-level throw)
+    const errorResult = (payload: Record<string, unknown>) => ({
+      content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, ...payload }, null, 2) }],
+      isError: true,
+    });
+
+    // ── Input validation ─────────────────────────────────────────────────────
+    if (!brief || brief.trim().length < 10) {
+      return errorResult({ phase: 'validation', error: 'Brief is too short (minimum 10 characters)', suggestion: 'Provide a detailed description of what to build' });
+    }
+    if (resolvedTimeoutMinutes < 1 || resolvedTimeoutMinutes > 480) {
+      return errorResult({ phase: 'validation', error: 'timeout_minutes must be between 1 and 480' });
+    }
+
+    // Validate model if provided (check against backend)
+    if (model) {
+      // Quick check — allow any string for execution model (provider/model format for opencode)
+      // Only validate single-word Claude model IDs against SUPPORTED_MODELS
+      const CLAUDE_MODELS = ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001',
+        'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
+      if (!model.includes('/') && !CLAUDE_MODELS.includes(model)) {
+        return errorResult({
+          phase: 'validation',
+          error: `Unsupported model: ${model}`,
+          suggestion: 'Use rorca_list_specs or GET /api/direction/models to see supported models',
+        });
+      }
+    }
+
+    // Validate workspace_id
+    let workspaceCheck: Response;
+    try {
+      workspaceCheck = await fetch(`${RORCA_API}/api/workspaces/${encodeURIComponent(workspace_id)}`);
+    } catch (fetchErr: unknown) {
+      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
+        return errorResult({
+          phase: 'validation',
+          error: 'Cannot connect to Rorca server at http://localhost:3030',
+          suggestion: 'Run: rorca start — to launch the Rorca server',
+        });
+      }
+      return errorResult({ phase: 'validation', error: `Network error during workspace validation: ${msg}` });
+    }
+
+    if (workspaceCheck.status === 404) {
+      return errorResult({
+        phase: 'validation',
+        error: `Workspace not found: ${workspace_id}`,
+        suggestion: 'Use rorca_list_workspaces to see available workspace IDs',
+      });
+    }
+    if (!workspaceCheck.ok) {
+      return errorResult({ phase: 'validation', error: `Failed to validate workspace (${workspaceCheck.status})` });
+    }
+
+    // ── Phase 1: Generate spec ───────────────────────────────────────────────
+    notify(0, 5, 'Generating spec from brief...');
+
+    let specId: string;
+    let storyCount: number;
+
+    try {
+      const result = await generateSpecWithRetry(workspace_id, brief, model, spec_model);
+      specId = result.specId;
+      storyCount = result.storyCount;
+    } catch (err: unknown) {
+      const e = err as Record<string, unknown>;
+
+      // ECONNREFUSED during spec generation
+      if (e.connRefused) {
+        return errorResult({
+          phase: 'spec_generation',
+          error: 'Cannot connect to Rorca server at http://localhost:3030',
+          suggestion: 'Run: rorca start — to launch the Rorca server',
+        });
+      }
+
+      const cat = (e.category ?? 'unknown') as SpecErrorCategory;
+      const errPayload: Record<string, unknown> = {
+        phase: 'spec_generation',
+        category: cat,
+        error: cat === 'network_error' ? 'LLM API network error' : String(e.error ?? 'Spec generation failed'),
+        suggestion: specErrorSuggestion(cat),
+      };
+      if (cat === 'unknown') {
+        errPayload.raw_error = String(e.error ?? '').slice(0, 200);
+      }
+      return errorResult(errPayload);
+    }
+
+    notify(1, 5, `Spec generated: ${storyCount} stories`);
+
+    // ── Phase 2: Approve spec ────────────────────────────────────────────────
+    let approveRes: Response;
+    try {
+      approveRes = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId: workspace_id }),
+      });
+    } catch (fetchErr: unknown) {
+      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
+        return errorResult({
+          phase: 'approve',
+          spec_id: specId,
+          error: 'Cannot connect to Rorca server at http://localhost:3030',
+          suggestion: 'Run: rorca start — to launch the Rorca server',
+        });
+      }
+      return errorResult({ phase: 'approve', spec_id: specId, error: `Network error during approval: ${msg}` });
+    }
+
+    if (!approveRes.ok) {
+      const detail = await approveRes.text().catch(() => '');
+      return errorResult({
+        phase: 'approve',
+        spec_id: specId,
+        error: 'Failed to approve spec',
+        detail: detail.slice(0, 300),
+      });
+    }
+
+    // ── Phase 3: Trigger pipeline run ────────────────────────────────────────
+    notify(2, 5, 'Starting pipeline...');
+
+    const triggerBody: Record<string, unknown> = {
+      workspaceId: workspace_id,
+      specPath: `forge/specs/approved/${specId}.json`,
+      autoWorktree: resolvedAutoWorktree,
+      ...(model ? { modelOverride: model } : {}),
+    };
+
+    let triggerRes: Response;
+    try {
+      triggerRes = await fetch(`${RORCA_API}/api/pipeline/trigger`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(triggerBody),
+      });
+    } catch (fetchErr: unknown) {
+      const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
+        return errorResult({
+          phase: 'pipeline_trigger',
+          spec_id: specId,
+          error: 'Cannot connect to Rorca server at http://localhost:3030',
+          suggestion: 'Run: rorca start — to launch the Rorca server',
+        });
+      }
+      return errorResult({ phase: 'pipeline_trigger', spec_id: specId, error: `Network error during trigger: ${msg}` });
+    }
+
+    const triggerData = await triggerRes.json() as Record<string, unknown>;
+
+    if (!triggerRes.ok) {
+      return errorResult({
+        phase: 'pipeline_trigger',
+        spec_id: specId,
+        error: String(triggerData.error ?? `Pipeline trigger failed (${triggerRes.status})`),
+      });
+    }
+
+    // Conflict: another run is active for this workspace
+    if (triggerData.conflict) {
+      return errorResult({
+        phase: 'pipeline_trigger',
+        error: 'A run is already active for this workspace',
+        active_run_id: triggerData.activeRunId,
+        suggestion: 'Use rorca_cancel_run to stop the active run first, or wait for it to complete',
+      });
+    }
+
+    // Worktree creation failed gracefully
+    const worktreeFallback = !!(triggerData.worktreeFallback);
+    const worktreeError = worktreeFallback ? String(triggerData.worktreeError ?? '') : undefined;
+
+    const runId = triggerData.runId as number;
+    notify(3, 5 + storyCount, `Pipeline started, run #${runId}`);
+
+    // ── Phase 4: Monitor until done ──────────────────────────────────────────
+    const timeoutMs = resolvedTimeoutMinutes * 60 * 1000;
+    const pollIntervalMs = 15_000;
+    let storyProgressCount = 0;
+
+    let monitorResult: {
+      status: string;
+      stories: Array<{ id: string; title: string; status: string; elapsed_seconds: number; retries: number }>;
+      branchName: string | null;
+      worktreePath: string | null;
+    };
+
+    try {
+      monitorResult = await pollRunUntilDone(
+        runId,
+        timeoutMs,
+        pollIntervalMs,
+        (story) => {
+          storyProgressCount++;
+          const icon = story.status === 'passed' ? '✓' : story.status === 'failed' ? '✗' : '—';
+          notify(
+            3 + storyProgressCount,
+            5 + storyCount,
+            `${icon} ${story.id} ${story.title} (${story.elapsed_seconds}s)`,
+          );
+        },
+      );
+    } catch (err: unknown) {
+      const e = err as Record<string, unknown>;
+
+      if (String(e.phase) === 'timeout') {
+        // Try to cancel the run
+        try {
+          await fetch(`${RORCA_API}/api/pipeline/runs/${runId}/cancel`, { method: 'POST' });
+        } catch { /* best-effort */ }
+
+        // Get partial results
+        let partialStories: Array<{ id: string; title: string; status: string; elapsed_seconds: number; retries: number }> = [];
+        try {
+          const partialRes = await fetch(`${RORCA_API}/api/pipeline/runs/${runId}`);
+          if (partialRes.ok) {
+            const pd = await partialRes.json() as {
+              stories: Array<{ story_id: string; status: string; started_at?: string; finished_at?: string; retries?: number }>;
+              specStories: Array<{ id: string; title: string }>;
+            };
+            const titleMap = new Map<string, string>((pd.specStories ?? []).map(s => [s.id, s.title] as [string, string]));
+            partialStories = (pd.stories ?? []).map(sr => ({
+              id: sr.story_id,
+              title: titleMap.get(sr.story_id) ?? sr.story_id,
+              status: sr.status === 'pass' ? 'passed' : sr.status === 'fail' ? 'failed' : 'skipped',
+              elapsed_seconds: sr.started_at && sr.finished_at
+                ? Math.round((new Date(sr.finished_at).getTime() - new Date(sr.started_at).getTime()) / 1000) : 0,
+              retries: sr.retries ?? 0,
+            }));
+          }
+        } catch { /* best-effort */ }
+
+        const pPassed = partialStories.filter(s => s.status === 'passed').length;
+        const pFailed = partialStories.filter(s => s.status === 'failed').length;
+        const pSkipped = partialStories.filter(s => s.status === 'skipped').length;
+
+        return errorResult({
+          phase: 'timeout',
+          run_id: runId,
+          spec_id: specId,
+          error: 'Run exceeded timeout_minutes limit',
+          partial_results: { passed: pPassed, failed: pFailed, skipped: pSkipped, stories: partialStories },
+        });
+      }
+
+      if (e.connRefused) {
+        return errorResult({
+          phase: 'monitoring',
+          run_id: runId,
+          error: 'Lost connection to Rorca server mid-run',
+          suggestion: `Run: rorca status ${runId} after restarting the server to check run state. The pipeline process may still be running.`,
+        });
+      }
+
+      return errorResult({ phase: 'monitoring', run_id: runId, error: String(e.error ?? 'Unknown monitoring error') });
+    }
+
+    // ── Build success result ─────────────────────────────────────────────────
+    const { stories, branchName, worktreePath } = monitorResult;
+    const passed = stories.filter(s => s.status === 'passed').length;
+    const failed = stories.filter(s => s.status === 'failed').length;
+    const skipped = stories.filter(s => s.status === 'skipped').length;
+    const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
+
+    notify(5 + storyCount, 5 + storyCount, `Complete: ${passed} passed, ${failed} failed`);
+
+    const result: Record<string, unknown> = {
+      ok: true,
+      spec_id: specId,
+      spec_title: specId,
+      story_count: storyCount,
+      run_id: runId,
+      passed,
+      failed,
+      skipped,
+      branch: branchName,
+      worktree_path: worktreePath,
+      elapsed_seconds: elapsedSeconds,
+      stories,
+    };
+
+    if (worktreeFallback) {
+      result.worktree_fallback = true;
+      result.worktree_error = worktreeError;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
