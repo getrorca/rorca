@@ -2,7 +2,7 @@
   "specId": "collapsible-left-nav-drag-to-close",
   "runId": 54,
   "startedAt": "2026-03-12T08:12:11.075Z",
-  "lastUpdatedAt": "2026-03-12T08:17:14.594Z",
+  "lastUpdatedAt": "2026-03-12T08:19:39.250Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 88108
+    },
+    {
+      "storyId": "US-003",
+      "title": "Render icon-only sidebar in collapsed state",
+      "status": "passed",
+      "startedAt": "2026-03-12T08:17:29.293Z",
+      "finishedAt": "2026-03-12T08:19:39.250Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 129957
     }
   ],
   "failedStories": [],

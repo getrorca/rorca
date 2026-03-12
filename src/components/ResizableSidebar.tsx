@@ -1,5 +1,9 @@
-import { useState, useRef, useCallback, useEffect, type ReactNode } from 'react';
+import { useState, useRef, useCallback, useEffect, createContext, useContext, type ReactNode } from 'react';
 import { useBreakpoint } from '../hooks/useBreakpoint';
+
+// Context so child components (e.g. Sidebar) can read collapsed state without prop drilling
+export const SidebarCollapsedContext = createContext(false);
+export function useSidebarCollapsed() { return useContext(SidebarCollapsedContext); }
 
 const STORAGE_KEY = 'rorca:sidebar-state';
 const MIN_WIDTH = 200;
@@ -146,7 +150,9 @@ export default function ResizableSidebar({ children, className = '' }: Resizable
                     transition: isDragging ? 'none' : 'width 200ms cubic-bezier(0.16, 1, 0.3, 1)',
                 }}
             >
-                {children}
+                <SidebarCollapsedContext.Provider value={collapsed}>
+                    {children}
+                </SidebarCollapsedContext.Provider>
             </div>
 
             {/* Drag handle — always visible on the right edge */}
