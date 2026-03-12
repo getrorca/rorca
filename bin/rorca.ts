@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
-import { readFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync, fork, spawn } from 'child_process';
-import { homedir } from 'os';
+import { homedir, platform, arch } from 'os';
+import { get as httpsGet } from 'https';
+import { get as httpGet, type IncomingMessage } from 'http';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -142,6 +144,9 @@ async function runStart(startArgs: string[]): Promise<void> {
     console.log(`Created config directory: ${rorcaHome}`);
   }
 
+  // Ensure Postgres binaries are available
+  await ensurePostgres();
+
   const databaseUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5432/rorca';
 
   // Check Postgres reachability before starting
@@ -229,6 +234,187 @@ async function runStart(startArgs: string[]): Promise<void> {
     process.on(sig, () => {
       child.kill(sig);
     });
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// Embedded Postgres: detect, download, extract
+// ────────────────────────────────────────────────────────────────
+
+const PG_VERSION = '16.6.0';
+
+/** Maps Node.js os.platform()/os.arch() to the Maven artifact platform suffix */
+const PLATFORM_MAP: Record<string, string> = {
+  'darwin-arm64':  'darwin-arm64v8',
+  'darwin-x64':    'darwin-amd64',
+  'linux-x64':     'linux-amd64',
+  'linux-arm64':   'linux-arm64v8',
+  'win32-x64':     'windows-amd64',
+};
+
+type SupportedPlatform = 'darwin-arm64' | 'darwin-x64' | 'linux-x64' | 'linux-arm64' | 'win32-x64';
+
+/**
+ * Detect current OS/arch and return the platform key.
+ * Throws for unsupported combinations.
+ */
+function detectPlatform(): SupportedPlatform {
+  const key = `${platform()}-${arch()}`;
+  if (!(key in PLATFORM_MAP)) {
+    throw new Error(
+      `Unsupported platform: ${key}. ` +
+      `Supported platforms: ${Object.keys(PLATFORM_MAP).join(', ')}`
+    );
+  }
+  return key as SupportedPlatform;
+}
+
+/**
+ * Build the Maven Central download URL for the embedded-postgres-binaries jar.
+ */
+function buildDownloadUrl(platformKey: SupportedPlatform, version: string): string {
+  const mavenPlatform = PLATFORM_MAP[platformKey];
+  const artifact = `embedded-postgres-binaries-${mavenPlatform}`;
+  return `https://repo1.maven.org/maven2/io/zonky/test/postgres/${artifact}/${version}/${artifact}-${version}.jar`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Download a URL to a local file, following redirects, showing progress via \r spinner.
+ * Uses only Node.js built-in https/http modules.
+ */
+function downloadFile(url: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const doRequest = (requestUrl: string, redirectCount: number) => {
+      if (redirectCount > 10) {
+        reject(new Error('Too many redirects'));
+        return;
+      }
+
+      const getter = requestUrl.startsWith('https://') ? httpsGet : httpGet;
+      getter(requestUrl, (res: IncomingMessage) => {
+        // Handle redirects
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume(); // Drain the response
+          doRequest(res.headers.location, redirectCount + 1);
+          return;
+        }
+
+        if (!res.statusCode || res.statusCode !== 200) {
+          res.resume();
+          reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+          return;
+        }
+
+        const totalBytes = res.headers['content-length'] ? parseInt(res.headers['content-length'], 10) : 0;
+        let downloadedBytes = 0;
+
+        const file = createWriteStream(dest);
+        res.on('data', (chunk: Buffer) => {
+          downloadedBytes += chunk.length;
+          const progress = totalBytes
+            ? `${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`
+            : formatBytes(downloadedBytes);
+          process.stdout.write(`\r  Downloading Postgres ${PG_VERSION}... ${progress}`);
+        });
+
+        res.pipe(file);
+
+        file.on('finish', () => {
+          file.close();
+          process.stdout.write('\n');
+          resolve();
+        });
+
+        file.on('error', (err) => {
+          file.close();
+          try { unlinkSync(dest); } catch { /* ignore */ }
+          reject(err);
+        });
+
+        res.on('error', (err) => {
+          file.close();
+          try { unlinkSync(dest); } catch { /* ignore */ }
+          reject(err);
+        });
+      }).on('error', reject);
+    };
+
+    doRequest(url, 0);
+  });
+}
+
+/**
+ * Ensure Postgres binaries are installed at ~/.rorca/postgres/.
+ * Downloads from Maven Central if not already present at the correct version.
+ */
+async function ensurePostgres(): Promise<string> {
+  const pgDir = join(homedir(), '.rorca', 'postgres');
+  const versionFile = join(pgDir, '.version');
+
+  // Skip if already installed at correct version
+  if (existsSync(versionFile)) {
+    const installed = readFileSync(versionFile, 'utf8').trim();
+    if (installed === PG_VERSION) {
+      console.log(`Postgres ${PG_VERSION} already installed`);
+      return pgDir;
+    }
+  }
+
+  const platformKey = detectPlatform();
+  const url = buildDownloadUrl(platformKey, PG_VERSION);
+
+  console.log(`Installing Postgres ${PG_VERSION} for ${platformKey}...`);
+
+  // Ensure directories exist
+  mkdirSync(pgDir, { recursive: true });
+
+  const jarPath = join(pgDir, 'postgres.jar');
+  const extractDir = join(pgDir, '_extract');
+
+  try {
+    // Download the .jar (which is a zip containing a .txz)
+    await downloadFile(url, jarPath);
+
+    // Clean previous extraction
+    if (existsSync(extractDir)) {
+      rmSync(extractDir, { recursive: true });
+    }
+    mkdirSync(extractDir, { recursive: true });
+
+    // Extract the .txz from the jar (jar is a zip)
+    console.log('  Extracting archive...');
+    if (platform() === 'win32') {
+      execSync(`tar -xf "${jarPath}" -C "${extractDir}"`, { stdio: 'pipe' });
+    } else {
+      execSync(`unzip -o -q "${jarPath}" -d "${extractDir}"`, { stdio: 'pipe' });
+    }
+
+    // Find the .txz inside
+    const extractedFiles = execSync(`ls "${extractDir}"`, { encoding: 'utf8' }).trim().split('\n');
+    const txzFile = extractedFiles.find(f => f.endsWith('.txz'));
+    if (!txzFile) {
+      throw new Error('No .txz archive found inside downloaded jar');
+    }
+
+    // Extract the .txz into the postgres directory
+    const txzPath = join(extractDir, txzFile);
+    execSync(`tar xJf "${txzPath}" -C "${pgDir}"`, { stdio: 'pipe' });
+
+    // Write version marker
+    writeFileSync(versionFile, PG_VERSION);
+    console.log(`  Postgres ${PG_VERSION} installed to ${pgDir}`);
+
+    return pgDir;
+  } finally {
+    // Cleanup temp files
+    try { unlinkSync(jarPath); } catch { /* ignore */ }
+    try { rmSync(extractDir, { recursive: true }); } catch { /* ignore */ }
   }
 }
 
