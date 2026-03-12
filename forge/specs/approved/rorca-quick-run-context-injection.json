@@ -15,7 +15,8 @@
         "The context injection is non-blocking: if synthesize(), fs.readFileSync(), or the skills query throws, catch the error, log it with console.warn, and proceed with empty context strings. Quick Run must never fail due to context injection errors."
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }
