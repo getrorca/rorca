@@ -3,7 +3,8 @@
 Spec: fix-mcp-approve-spec-runloop-references
 Run ID: 58
 Started: 2026-03-12T08:30:35.786Z
-Last Updated: 2026-03-12T08:32:38.344Z
+Last Updated: 2026-03-12T08:34:30.641Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Fix rorca_approve_spec response destructuring and update stale run-loop.sh references in MCP server — DONE (claude, claude-sonnet-4-6, 114s)
+- US-002: Update model references from claude-sonnet-4-5-20250929 to claude-sonnet-4-6 in MCP server and specs.ts — DONE (claude, claude-sonnet-4-6, 78s)
