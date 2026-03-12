@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-cli",
   "runId": 47,
   "startedAt": "2026-03-12T06:04:08.654Z",
-  "lastUpdatedAt": "2026-03-12T06:40:54.393Z",
+  "lastUpdatedAt": "2026-03-12T06:44:39.969Z",
   "completedStories": [
     {
       "storyId": "MC-004",
@@ -43,6 +43,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 278732
+    },
+    {
+      "storyId": "MC-010",
+      "title": "Spec Tree View Provider — V2-060 Feature Properly Built",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:41:13.443Z",
+      "finishedAt": "2026-03-12T06:44:39.969Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 206526
     }
   ],
   "failedStories": [],
