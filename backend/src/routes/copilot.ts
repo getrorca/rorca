@@ -39,7 +39,7 @@ interface IntegrationCredentialRow {
 async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
   const user = (req as Request & { user: AuthUser }).user;
   if (user) return user;
-  return await queryOne<AuthUser>('SELECT id, email FROM users LIMIT 1', []);
+  return await queryOne<AuthUser>('SELECT id, email FROM users LIMIT 1', []) ?? null;
 }
 
 /**
