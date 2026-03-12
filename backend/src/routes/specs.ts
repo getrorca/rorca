@@ -94,8 +94,12 @@ async function extractAttachmentText(contentType: string, fileData: Buffer, file
  * Query spec_attachments for a given spec slug and build the
  * '=== ATTACHED DOCUMENTS ===' prompt section.
  * Returns empty string if no attachments found.
+ * Optionally emits SSE attachment_processing events via the provided callback.
  */
-async function buildAttachmentSection(specSlug: string): Promise<string> {
+async function buildAttachmentSection(
+  specSlug: string,
+  onAttachment?: (filename: string, status: 'extracting_text' | 'complete') => void,
+): Promise<string> {
   type AttachmentRow = {
     filename: string;
     content_type: string;
@@ -114,16 +118,20 @@ async function buildAttachmentSection(specSlug: string): Promise<string> {
 
   for (const row of rows) {
     if (IMAGE_CONTENT_TYPES.has(row.content_type)) {
+      onAttachment?.(row.filename, 'extracting_text');
       parts.push(
         `${row.filename}:`,
         `[Image attachment — type: ${row.content_type}, size: ${row.file_size} bytes. Image provided for visual context.]`,
         '',
       );
+      onAttachment?.(row.filename, 'complete');
     } else {
+      onAttachment?.(row.filename, 'extracting_text');
       const text = await extractAttachmentText(row.content_type, row.file_data, row.filename);
       if (text !== null) {
         parts.push(`${row.filename}:`, text, '');
       }
+      onAttachment?.(row.filename, 'complete');
     }
   }
 
@@ -710,6 +718,27 @@ async function emitPassEvent(
   });
 }
 
+/** Emit an attachment_processing WAL event and broadcast via SSE. */
+async function emitAttachmentEvent(
+  specId: string,
+  filename: string,
+  status: 'extracting_text' | 'complete',
+  workspaceId?: string,
+): Promise<void> {
+  const payload = JSON.stringify({ filename, status });
+  const result = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('attachment_processing', $1, $2, $3) RETURNING *`, [specId, workspaceId ?? null, payload]);
+  broadcastAll({
+    id: result!.id,
+    ts: new Date().toISOString(),
+    event_type: 'attachment_processing',
+    workspace_id: workspaceId ?? null,
+    spec_id: specId,
+    story_id: null,
+    actor: 'system',
+    payload,
+  });
+}
+
 /**
  * Load convention files from .rorca/conventions/ directory.
  * Returns a map of convention name → content for prompt injection.
@@ -1003,7 +1032,10 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     genSlug = slug;
 
     // Load attachment context for this spec slug (before prompt assembly)
-    const attachmentSection = await buildAttachmentSection(slug);
+    // Emit SSE events for each attachment as it's being processed
+    const attachmentSection = await buildAttachmentSection(slug, (filename, status) => {
+      emitAttachmentEvent(slug, filename, status, String(workspaceId)).catch(() => {/* non-fatal */});
+    });
 
     // Build catalog sections (only include if non-empty)
     const catalogSections: string[] = [];
