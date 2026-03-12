@@ -2089,9 +2089,21 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 8. Generate 1-story spec via LLM
+    // Read MEMORY.md from workspace root (best-effort, silent on error)
+    let memoryContent = '';
+    try {
+      const memoryRaw = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
+      memoryContent = memoryRaw.slice(0, 2000);
+    } catch {
+      // ENOENT or any read error — silently skip
+    }
+
     const quickRunPromptParts: string[] = [];
     if (directionContext.trim()) {
       quickRunPromptParts.push('=== DIRECTION STACK ===', directionContext.trim(), '');
+    }
+    if (memoryContent.trim()) {
+      quickRunPromptParts.push('=== MEMORY.md ===', memoryContent.trim(), '');
     }
     quickRunPromptParts.push(
       '=== INSTRUCTIONS: READ THIS FIRST ===',
