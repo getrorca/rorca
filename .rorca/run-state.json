@@ -1,86 +1,41 @@
 {
   "specId": "rorca-distribution",
-  "runId": 17,
-  "startedAt": "2026-03-10T13:18:22.929Z",
-  "lastUpdatedAt": "2026-03-10T14:44:35.291Z",
+  "runId": 48,
+  "startedAt": "2026-03-12T06:04:21.346Z",
+  "lastUpdatedAt": "2026-03-12T06:07:00.205Z",
   "completedStories": [
-    {
-      "storyId": "DIST-001",
-      "title": "Postgres Binary Download Manager",
-      "status": "passed",
-      "startedAt": "2026-03-10T13:18:25.486Z",
-      "finishedAt": "2026-03-10T13:21:18.622Z",
-      "agentType": "claude",
-      "elapsedMs": 173136
-    },
-    {
-      "storyId": "DIST-002",
-      "title": "Postgres Lifecycle Management (init, start, stop)",
-      "status": "passed",
-      "startedAt": "2026-03-10T13:21:27.197Z",
-      "finishedAt": "2026-03-10T13:36:38.485Z",
-      "agentType": "claude",
-      "elapsedMs": 911288
-    },
-    {
-      "storyId": "DIST-003",
-      "title": "Postgres Binary Build Pipeline",
-      "status": "passed",
-      "startedAt": "2026-03-10T13:36:47.037Z",
-      "finishedAt": "2026-03-10T13:36:58.481Z",
-      "agentType": "claude",
-      "elapsedMs": 11444
-    },
-    {
-      "storyId": "DIST-004",
-      "title": "Bun Build Compile — Proof of Concept",
-      "status": "passed",
-      "startedAt": "2026-03-10T13:37:11.852Z",
-      "finishedAt": "2026-03-10T14:06:05.041Z",
-      "agentType": "claude",
-      "elapsedMs": 1733189
-    },
-    {
-      "storyId": "DIST-005",
-      "title": "Cross-Platform Build Matrix",
-      "status": "passed",
-      "startedAt": "2026-03-10T14:06:20.614Z",
-      "finishedAt": "2026-03-10T14:10:27.255Z",
-      "agentType": "claude",
-      "elapsedMs": 246641
-    },
-    {
-      "storyId": "DIST-009",
-      "title": "First-Run Experience",
-      "status": "passed",
-      "startedAt": "2026-03-10T14:14:33.022Z",
-      "finishedAt": "2026-03-10T14:38:08.442Z",
-      "agentType": "claude",
-      "elapsedMs": 1415420
-    },
-    {
-      "storyId": "DIST-010",
-      "title": "End-to-End Binary Smoke Test",
-      "status": "passed",
-      "startedAt": "2026-03-10T14:38:24.021Z",
-      "finishedAt": "2026-03-10T14:44:35.291Z",
-      "agentType": "claude",
-      "elapsedMs": 371270
-    }
-  ],
-  "failedStories": [
     {
       "storyId": "DIST-006",
       "title": "LICENSE & Legal Files",
-      "status": "failed",
-      "startedAt": "2026-03-10T14:13:20.284Z",
-      "finishedAt": "2026-03-10T14:14:18.625Z",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:04:24.054Z",
+      "finishedAt": "2026-03-12T06:05:05.009Z",
       "agentType": "claude",
-      "failReason": "max_retries",
-      "retries": 3,
-      "elapsedMs": 58341
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 40955
+    },
+    {
+      "storyId": "DIST-007",
+      "title": "GitHub Actions — Release Workflow",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:05:24.046Z",
+      "finishedAt": "2026-03-12T06:05:51.169Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 27123
+    },
+    {
+      "storyId": "DIST-008",
+      "title": "Install Script (curl | sh)",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:06:09.044Z",
+      "finishedAt": "2026-03-12T06:07:00.205Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 51161
     }
   ],
+  "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
