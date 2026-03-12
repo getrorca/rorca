@@ -3,11 +3,12 @@
 Spec: rorca-mcp-cli
 Run ID: 46
 Started: 2026-03-12T05:51:51.758Z
-Last Updated: 2026-03-12T06:31:47.461Z
+Last Updated: 2026-03-12T06:37:06.514Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - MC-001: rorca_forge_and_run — Brief-to-Completion Single MCP Tool — DONE (claude, claude-sonnet-4-6, 453s)
 - MC-002: rorca_cancel_run MCP Tool — DONE (claude, claude-sonnet-4-6, 179s)
 - MC-004: MCP Tools Tree View in rorca VS Code Extension — DONE (claude, claude-sonnet-4-6, 415s)
 - MC-006: VS Code Extension Settings Contribution Point Schema — DONE (claude, claude-sonnet-4-6, 372s)
 - MC-007: MCP Tool Error Recovery and Offline Graceful Degradation — DONE (claude, claude-sonnet-4-6, 843s)
+- MC-009: rorca-vscode Extension Package Scaffold — DONE (claude, claude-sonnet-4-6, 300s)
