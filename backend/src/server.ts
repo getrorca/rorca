@@ -196,9 +196,15 @@ app.use('/api/mcp/tools', mcpToolsRouter);
 
 // ─── Auth middleware (all routes below require authentication) ───
 // PR-009: Conditional auth — AUTH_REQUIRED=true enforces JWT on all protected routes.
-// Default (false/absent) = no-op, preserving local single-user behavior.
+// Default (false/absent) = local single-user mode: inject local admin so req.user is
+// always defined (prevents crashes in routes that access user.id unconditionally).
 if (process.env.AUTH_REQUIRED === 'true') {
   app.use(authRequired);
+} else {
+  app.use((req: any, _res: any, next: any) => {
+    req.user = { id: 'local-admin', email: 'admin@rorca.local', displayName: 'Admin', role: 'admin' };
+    next();
+  });
 }
 
 // ─── Rate limiting (after auth so req.user is available) ───
@@ -302,6 +308,16 @@ subscribe((event: WalEvent) => {
       // Non-fatal — rotation/dedup failure must not affect the run result
     }
   })();
+});
+
+// Safety net: log unhandled rejections instead of crashing the process.
+// Routes should handle their own errors, but this prevents a single bad request
+// from taking down the entire backend.
+process.on('unhandledRejection', (reason) => {
+  logger.error({ err: reason }, '[UnhandledRejection] Caught — process kept alive');
+});
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, '[UncaughtException] Caught — process kept alive');
 });
 
 /* istanbul ignore next -- only when run directly, not in tests */
