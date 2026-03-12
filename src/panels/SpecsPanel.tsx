@@ -11,6 +11,7 @@ import {
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
   Paperclip,
+  ZoomIn,
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -36,6 +37,7 @@ import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
 import ContextSummaryCard from '../components/ContextSummaryCard';
+import { ImagePreviewModal } from '../components/ImagePreviewModal';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -2095,6 +2097,9 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Template picker
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
+  // Image preview lightbox
+  const [previewImage, setPreviewImage] = useState<{ url: string; filename: string } | null>(null);
+
   // Pasted image attachments (uploaded to backend, associated by specId after generation)
   const [pendingAttachments, setPendingAttachments] = useState<Array<{ filename: string; contentType: string; size: number }>>([]);
 
@@ -2496,15 +2501,28 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
             return (
               <div className="mt-2 space-y-1.5">
-                {savedAttachments.map((att) => (
+                {savedAttachments.map((att) => {
+                  const isImage = att.contentType.startsWith('image/');
+                  const attUrl = `${BASE_URL}/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(att.id)}`;
+                  return (
                   <div key={att.id} className="flex items-center gap-2 px-2 py-1.5 bg-panel border border-border rounded-lg group">
-                    {att.contentType.startsWith('image/') ? (
-                      <img
-                        src={`${BASE_URL}/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(att.id)}`}
-                        alt={att.filename}
-                        style={{ maxHeight: 80 }}
-                        className="rounded object-contain shrink-0"
-                      />
+                    {isImage ? (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewImage({ url: attUrl, filename: att.filename })}
+                        title="Preview image"
+                        aria-label={`Preview ${att.filename}`}
+                        className="shrink-0 rounded overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-accent relative group/thumb"
+                      >
+                        <img
+                          src={attUrl}
+                          alt={att.filename}
+                          className="w-10 h-10 object-cover rounded"
+                        />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center rounded">
+                          <ZoomIn size={14} className="text-white" />
+                        </div>
+                      </button>
                     ) : (
                       getFileIcon(att.contentType, att.filename)
                     )}
@@ -2522,7 +2540,8 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                       {deletingIds.has(att.id) ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
                     </button>
                   </div>
-                ))}
+                  );
+                })}
                 {pendingAttachments.map((att) => (
                   <div key={att.filename} className="flex items-center gap-2 px-2 py-1.5 bg-accent/5 border border-accent/20 rounded-lg">
                     {att.contentType.startsWith('image/') ? (
@@ -2765,6 +2784,13 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
         <TemplatePickerModal onClose={() => setShowTemplatePicker(false)}
           onSelect={(tpl) => { setSpecBrief(tpl.brief); setStoryCount(tpl.storyCount); setShowTemplatePicker(false); setTimeout(() => briefRef.current?.focus(), 50); }} />
       )}
+
+      <ImagePreviewModal
+        isOpen={previewImage !== null}
+        onClose={() => setPreviewImage(null)}
+        imageUrl={previewImage?.url ?? ''}
+        filename={previewImage?.filename ?? ''}
+      />
     </div>
   );
 }
