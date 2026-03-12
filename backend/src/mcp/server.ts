@@ -1061,6 +1061,176 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  'rorca_check_spec',
+  {
+    description: 'Validate a spec\'s structural integrity. Checks for missing required fields (id, title, description, acceptanceCriteria), duplicate story IDs, orphaned dependsOn references, and empty acceptanceCriteria arrays. Returns categorized errors (blocking), warnings (non-blocking), and aggregate stats.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces)'),
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/check?workspaceId=${encodeURIComponent(workspaceId)}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Spec check failed (${res.status}): ${err}`);
+    }
+    const data = await res.json() as {
+      valid: boolean;
+      errors: Array<{ storyId: string; field: string; message: string }>;
+      warnings: Array<{ storyId: string; field: string; message: string }>;
+      stats: { totalStories: number; avgACCount: number; maxDependencyDepth: number };
+    };
+
+    const lines: string[] = [];
+    lines.push(`Spec: ${specId}`);
+    lines.push(`Valid: ${data.valid ? '✅ yes' : '❌ no'}`);
+    lines.push(`Stories: ${data.stats.totalStories} | Avg AC: ${data.stats.avgACCount} | Max dep depth: ${data.stats.maxDependencyDepth}`);
+
+    if (data.errors.length > 0) {
+      lines.push(`\nErrors (${data.errors.length}):`);
+      for (const e of data.errors) {
+        lines.push(`  ❌ [${e.storyId}] ${e.field}: ${e.message}`);
+      }
+    }
+
+    if (data.warnings.length > 0) {
+      lines.push(`\nWarnings (${data.warnings.length}):`);
+      for (const w of data.warnings) {
+        lines.push(`  ⚠️  [${w.storyId}] ${w.field}: ${w.message}`);
+      }
+    }
+
+    if (data.errors.length === 0 && data.warnings.length === 0) {
+      lines.push('\nNo issues found.');
+    }
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
+server.registerTool(
+  'rorca_score_spec',
+  {
+    description: 'Score a spec\'s acceptance criteria quality on a 0-100 scale. Scores each story based on AC count (base score), specificity (penalty for vague phrases like "properly", "correctly", "as expected"), and state coverage (bonus for mentioning error, empty, and loading states). Returns per-story scores and aggregate spec score.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces)'),
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/score?workspaceId=${encodeURIComponent(workspaceId)}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Spec score failed (${res.status}): ${err}`);
+    }
+    const data = await res.json() as {
+      specScore: number;
+      stories: Array<{
+        id: string;
+        score: number;
+        acCount: number;
+        vaguePhrasesFound: string[];
+        stateCoverage: { error: boolean; empty: boolean; loading: boolean };
+      }>;
+    };
+
+    const lines: string[] = [];
+    lines.push(`Spec: ${specId}`);
+    lines.push(`Overall score: ${data.specScore}/100`);
+    lines.push(`Stories scored: ${data.stories.length}`);
+    lines.push('');
+
+    for (const s of data.stories) {
+      const coverage = [
+        s.stateCoverage.error ? 'error' : '',
+        s.stateCoverage.empty ? 'empty' : '',
+        s.stateCoverage.loading ? 'loading' : '',
+      ].filter(Boolean).join(', ') || 'none';
+      lines.push(`[${s.id}] score=${s.score}/100 ac=${s.acCount} coverage=${coverage}`);
+      if (s.vaguePhrasesFound.length > 0) {
+        lines.push(`  ⚠️  Vague: ${s.vaguePhrasesFound.join(', ')}`);
+      }
+    }
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
+server.registerTool(
+  'rorca_validate_spec',
+  {
+    description: 'LLM-powered deep spec review using claude-sonnet-4-6. Injects spec-gap-analysis and assumption-buster skills to identify: implicit assumptions (with risk assessment), coverage gaps (missing error handling, auth, edge cases), untestable acceptance criteria (vague/subjective), and missed stories. Returns structured analysis with four arrays: assumptions, gaps, untestableACs, missedStories.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces)'),
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Spec validation failed (${res.status}): ${err}`);
+    }
+    const data = await res.json() as {
+      assumptions: Array<{ storyId: string; assumption: string; risk: string }>;
+      gaps: Array<{ area: string; description: string }>;
+      untestableACs: Array<{ storyId: string; acIndex: number; reason: string }>;
+      missedStories: Array<{ title: string; description: string; reason: string }>;
+    };
+
+    const lines: string[] = [];
+    lines.push(`Deep Validation: ${specId}`);
+    lines.push('');
+
+    if (data.assumptions.length > 0) {
+      lines.push(`Implicit Assumptions (${data.assumptions.length}):`);
+      for (const a of data.assumptions) {
+        lines.push(`  ⚠️  [${a.storyId}] ${a.assumption}`);
+        lines.push(`       Risk: ${a.risk}`);
+      }
+      lines.push('');
+    }
+
+    if (data.gaps.length > 0) {
+      lines.push(`Coverage Gaps (${data.gaps.length}):`);
+      for (const g of data.gaps) {
+        lines.push(`  🔍 [${g.area}] ${g.description}`);
+      }
+      lines.push('');
+    }
+
+    if (data.untestableACs.length > 0) {
+      lines.push(`Untestable Acceptance Criteria (${data.untestableACs.length}):`);
+      for (const u of data.untestableACs) {
+        lines.push(`  ❌ [${u.storyId}] AC #${u.acIndex}: ${u.reason}`);
+      }
+      lines.push('');
+    }
+
+    if (data.missedStories.length > 0) {
+      lines.push(`Missed Stories (${data.missedStories.length}):`);
+      for (const m of data.missedStories) {
+        lines.push(`  📋 ${m.title}`);
+        lines.push(`       ${m.description}`);
+        lines.push(`       Why needed: ${m.reason}`);
+      }
+      lines.push('');
+    }
+
+    if (data.assumptions.length === 0 && data.gaps.length === 0 && data.untestableACs.length === 0 && data.missedStories.length === 0) {
+      lines.push('No issues found — spec looks comprehensive.');
+    }
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
 // ─── Slash-command Prompts (/mcp__rorca__<name>) ──────────────────────────────
 // These are user-invocable via /mcp__rorca__<name> [args] in Claude Code.
 // Each prompt calls the backend directly and injects formatted results into
@@ -1733,6 +1903,443 @@ server.registerPrompt(
     }
     const data = await res.json() as { entry: { title: string; rule: string }; total: number };
     return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `📝 Decision logged: ${data.entry.title}\n\n${data.entry.rule}\n\nTotal memories: ${data.total}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'validate_spec',
+  {
+    title: 'Validate Spec (Deep LLM Review)',
+    description: 'LLM-powered deep spec review. Uses claude-sonnet-4-6 with spec-gap-analysis and assumption-buster skills to find: implicit assumptions, coverage gaps, untestable ACs, and missed stories.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec validation failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      assumptions: Array<{ storyId: string; assumption: string; risk: string }>;
+      gaps: Array<{ area: string; description: string }>;
+      untestableACs: Array<{ storyId: string; acIndex: number; reason: string }>;
+      missedStories: Array<{ title: string; description: string; reason: string }>;
+    };
+
+    const lines: string[] = [];
+    lines.push(`Deep Validation: ${specId}`);
+    lines.push('');
+
+    if (data.assumptions.length > 0) {
+      lines.push(`Implicit Assumptions (${data.assumptions.length}):`);
+      for (const a of data.assumptions) {
+        lines.push(`  ⚠️  [${a.storyId}] ${a.assumption}`);
+        lines.push(`       Risk: ${a.risk}`);
+      }
+      lines.push('');
+    }
+
+    if (data.gaps.length > 0) {
+      lines.push(`Coverage Gaps (${data.gaps.length}):`);
+      for (const g of data.gaps) {
+        lines.push(`  🔍 [${g.area}] ${g.description}`);
+      }
+      lines.push('');
+    }
+
+    if (data.untestableACs.length > 0) {
+      lines.push(`Untestable Acceptance Criteria (${data.untestableACs.length}):`);
+      for (const u of data.untestableACs) {
+        lines.push(`  ❌ [${u.storyId}] AC #${u.acIndex}: ${u.reason}`);
+      }
+      lines.push('');
+    }
+
+    if (data.missedStories.length > 0) {
+      lines.push(`Missed Stories (${data.missedStories.length}):`);
+      for (const m of data.missedStories) {
+        lines.push(`  📋 ${m.title}`);
+        lines.push(`       ${m.description}`);
+        lines.push(`       Why needed: ${m.reason}`);
+      }
+      lines.push('');
+    }
+
+    if (data.assumptions.length === 0 && data.gaps.length === 0 && data.untestableACs.length === 0 && data.missedStories.length === 0) {
+      lines.push('No issues found — spec looks comprehensive.');
+    }
+
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  }
+);
+
+server.registerPrompt(
+  'check_spec',
+  {
+    title: 'Check Spec',
+    description: 'Validate a spec\'s structural integrity: missing required fields, duplicate IDs, orphaned dependsOn references, empty acceptanceCriteria.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/check?workspaceId=${encodeURIComponent(ws)}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec check failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      valid: boolean;
+      errors: Array<{ storyId: string; field: string; message: string }>;
+      warnings: Array<{ storyId: string; field: string; message: string }>;
+      stats: { totalStories: number; avgACCount: number; maxDependencyDepth: number };
+    };
+
+    const lines: string[] = [];
+    lines.push(`Spec: ${specId}`);
+    lines.push(`Valid: ${data.valid ? '✅ yes' : '❌ no'}`);
+    lines.push(`Stories: ${data.stats.totalStories} | Avg AC: ${data.stats.avgACCount} | Max dep depth: ${data.stats.maxDependencyDepth}`);
+
+    if (data.errors.length > 0) {
+      lines.push(`\nErrors (${data.errors.length}):`);
+      for (const e of data.errors) {
+        lines.push(`  ❌ [${e.storyId}] ${e.field}: ${e.message}`);
+      }
+    }
+
+    if (data.warnings.length > 0) {
+      lines.push(`\nWarnings (${data.warnings.length}):`);
+      for (const w of data.warnings) {
+        lines.push(`  ⚠️  [${w.storyId}] ${w.field}: ${w.message}`);
+      }
+    }
+
+    if (data.errors.length === 0 && data.warnings.length === 0) {
+      lines.push('\nNo issues found.');
+    }
+
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  }
+);
+
+server.registerPrompt(
+  'score_spec',
+  {
+    title: 'Score Spec',
+    description: 'Score a spec\'s acceptance criteria quality (0-100). Checks AC count, specificity (penalizes vague phrases like "properly", "correctly"), and state coverage (error/empty/loading states).',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/score?workspaceId=${encodeURIComponent(ws)}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec score failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      specScore: number;
+      stories: Array<{
+        id: string;
+        score: number;
+        acCount: number;
+        vaguePhrasesFound: string[];
+        stateCoverage: { error: boolean; empty: boolean; loading: boolean };
+      }>;
+    };
+
+    const lines: string[] = [];
+    lines.push(`Spec: ${specId}`);
+    lines.push(`Overall score: ${data.specScore}/100`);
+    lines.push(`Stories scored: ${data.stories.length}`);
+    lines.push('');
+
+    for (const s of data.stories) {
+      const coverage = [
+        s.stateCoverage.error ? 'error' : '',
+        s.stateCoverage.empty ? 'empty' : '',
+        s.stateCoverage.loading ? 'loading' : '',
+      ].filter(Boolean).join(', ') || 'none';
+      lines.push(`[${s.id}] score=${s.score}/100 ac=${s.acCount} coverage=${coverage}`);
+      if (s.vaguePhrasesFound.length > 0) {
+        lines.push(`  ⚠️  Vague: ${s.vaguePhrasesFound.join(', ')}`);
+      }
+    }
+
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  }
+);
+
+server.registerTool(
+  'rorca_suggest_skills',
+  {
+    description: 'Run LLM-driven skill matching for a spec. Reads installed skills from .rorca/skills/, MEMORY.md, and AGENTS.md, then assigns suggestedSkills arrays (name, relevance 1-10, reason) to each story. Writes updated spec JSON back to the filesystem.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/suggest-skills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId }),
+    });
+    if (!res.ok) {
+      throw new Error(`Skill suggestion failed (${res.status}): ${await res.text()}`);
+    }
+    const data = await res.json() as {
+      matched: number;
+      storiesAffected: number;
+      stories: Array<{ storyId: string; skills: Array<{ name: string; relevance: number; reason: string }> }>;
+    };
+    const lines: string[] = [
+      `Skill matching complete: ${data.matched} skills across ${data.storiesAffected} stories`,
+      '',
+    ];
+    for (const s of data.stories) {
+      if (s.skills.length === 0) continue;
+      lines.push(`[${s.storyId}]`);
+      for (const sk of s.skills) {
+        lines.push(`  • ${sk.name} (relevance ${sk.relevance}/10): ${sk.reason}`);
+      }
+    }
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  },
+);
+
+server.registerPrompt(
+  'suggest_skills',
+  {
+    title: 'Suggest Skills',
+    description: 'Run LLM-driven skill matching for a spec. Assigns suggestedSkills with name, relevance (1-10), and reasoning to each story based on installed skills, MEMORY.md, and AGENTS.md.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/suggest-skills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Skill suggestion failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      matched: number;
+      storiesAffected: number;
+      stories: Array<{ storyId: string; skills: Array<{ name: string; relevance: number; reason: string }> }>;
+    };
+    const lines: string[] = [
+      `Spec: ${specId}`,
+      `Skills matched: ${data.matched} across ${data.storiesAffected} stories`,
+      '',
+    ];
+    for (const s of data.stories) {
+      if (s.skills.length === 0) continue;
+      lines.push(`[${s.storyId}]`);
+      for (const sk of s.skills) {
+        lines.push(`  • ${sk.name} (${sk.relevance}/10): ${sk.reason}`);
+      }
+    }
+    if (data.matched === 0) {
+      lines.push('No skills matched. Install skills from the Marketplace first.');
+    }
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  },
+);
+
+server.registerTool(
+  'rorca_fix_spec',
+  {
+    description: 'Apply automated structural fixes to a spec: reindex story IDs to sequential US-001..US-N (updating dependsOn refs), add missing passes:false fields, normalize dependsOn to array, remove duplicate IDs. Never modifies title, description, or acceptanceCriteria text.',
+    inputSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/fix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Spec fix failed (${res.status}): ${err}`);
+    }
+    const data = await res.json() as {
+      fixed: boolean;
+      changes: Array<{ type: string; storyId: string; description: string }>;
+    };
+    const lines: string[] = [
+      `Spec: ${specId}`,
+      `Fixed: ${data.fixed ? '✅ yes' : '⬜ no changes needed'}`,
+      '',
+    ];
+    if (data.changes.length === 0) {
+      lines.push('No structural issues found.');
+    } else {
+      const byType: Record<string, typeof data.changes> = {};
+      for (const c of data.changes) {
+        (byType[c.type] ??= []).push(c);
+      }
+      const typeLabels: Record<string, string> = {
+        reindex: 'Reindexed IDs',
+        add_passes: 'Added passes field',
+        normalize_depends: 'Normalized dependsOn',
+        remove_duplicate: 'Removed duplicates',
+      };
+      for (const [type, items] of Object.entries(byType)) {
+        lines.push(`${typeLabels[type] ?? type} (${items.length}):`);
+        for (const item of items) {
+          lines.push(`  • [${item.storyId}] ${item.description}`);
+        }
+      }
+    }
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  },
+);
+
+server.registerPrompt(
+  'fix_spec',
+  {
+    title: 'Fix Spec',
+    description: 'Apply automated structural fixes to a spec (reindex IDs, add passes field, normalize dependsOn, remove duplicates). Never modifies acceptance criteria text.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/fix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec fix failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      fixed: boolean;
+      changes: Array<{ type: string; storyId: string; description: string }>;
+    };
+    const lines: string[] = [
+      `Spec: ${specId}`,
+      `Fixed: ${data.fixed ? '✅ yes' : '⬜ no changes needed'}`,
+      '',
+    ];
+    if (data.changes.length === 0) {
+      lines.push('No structural issues found.');
+    } else {
+      for (const c of data.changes) {
+        lines.push(`• [${c.type}] [${c.storyId}] ${c.description}`);
+      }
+    }
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  },
+);
+
+server.registerTool(
+  'rorca_queue_run',
+  {
+    description: 'Smart run trigger — start a pipeline run immediately if no active run exists, or queue it if one is already running. Accepts workspaceId + specId (slug) for convenience. Returns { queued, runId/queuePosition, activeRunId, message }.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec slug (filename without .json, e.g. rorca-curated-skills-library)'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/pipeline/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId, specId }),
+    });
+
+    const data = await res.json() as Record<string, unknown>;
+
+    if (!res.ok) {
+      throw new Error(`Queue run failed (${res.status}): ${data.error ?? JSON.stringify(data)}`);
+    }
+
+    if (data.queued) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Run queued for spec "${specId}" (position ${data.queuePosition}).\nActive run: #${data.activeRunId}\n\nUse rorca_run_status to monitor the active run.`,
+        }],
+      };
+    }
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Pipeline run #${data.runId} started immediately for spec "${specId}".\n\nTrack progress with: rorca_run_status runId=${data.runId}`,
+      }],
+    };
+  }
+);
+
+server.registerPrompt(
+  'queue_run',
+  {
+    title: 'Queue Pipeline Run',
+    description: 'Smart run trigger — starts immediately if no active run, or queues if one is running. Accepts specId (slug) and optional workspaceId.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. rorca-curated-skills-library)'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/pipeline/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws, specId }),
+    });
+    const data = await res.json() as Record<string, unknown>;
+    if (!res.ok) {
+      return {
+        messages: [{
+          role: 'user' as const,
+          content: { type: 'text' as const, text: `Queue run failed (${res.status}): ${data.error ?? JSON.stringify(data)}` },
+        }],
+      };
+    }
+    if (data.queued) {
+      return {
+        messages: [{
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: `⏳ Run queued for spec "${specId}" (position ${data.queuePosition}).\nActive run: #${data.activeRunId}\n\nTrack active run: /mcp__rorca__run_status ${data.activeRunId}`,
+          },
+        }],
+      };
+    }
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: {
+          type: 'text' as const,
+          text: `🚀 Pipeline run #${data.runId} started immediately!\nSpec: ${specId}\nWorkspace: ${ws}\n\nTrack progress: /mcp__rorca__run_status ${data.runId}`,
+        },
+      }],
+    };
   }
 );
 
