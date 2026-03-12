@@ -1925,22 +1925,18 @@ function DisplaySection() {
             Override the global default for this workspace. Persists to the Project direction layer.
           </p>
           <div className="flex gap-2">
-            <select
-              value={workspaceModel ?? ''}
-              onChange={e => {
-                const val = e.target.value || null;
-                setWorkspaceModel(val);
-              }}
-              disabled={savingWorkspace}
-              className="flex-1 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-            >
-              <option value="">Use global default ({models.find(m => m.id === defaultModel)?.label ?? defaultModel})</option>
-              {models.map(m => (
-                <option key={m.id} value={m.id}>
-                  {m.label} ({m.provider}) — {formatContextWindow(m.contextWindow)} ctx
-                </option>
-              ))}
-            </select>
+            <div className="flex-1">
+              <ModelSearchSelect
+                models={[
+                  { id: '', label: `Use global default (${models.find(m => m.id === defaultModel)?.label ?? defaultModel})`, provider: '', costPer1kInput: 0, costPer1kOutput: 0, recommended: false },
+                  ...models,
+                ]}
+                value={workspaceModel ?? ''}
+                defaultModelId={null}
+                onChange={modelId => setWorkspaceModel(modelId || null)}
+                disabled={savingWorkspace}
+              />
+            </div>
             <button
               onClick={() => saveWorkspaceModel(workspaceModel)}
               disabled={savingWorkspace || workspaceModel === workspaceModelInitial}
