@@ -122,6 +122,12 @@ interface EngineConfig {
   agentType: AgentType;
   agentModel: string | null;
   attachAddr: string | null;
+  /** Set when engine runs inside a git worktree (autoWorktree=true). Full path to worktree dir. */
+  worktreePath: string | null;
+  /** Git branch name of the worktree (e.g. 'feat/my-spec-1234567890'). */
+  branchName: string | null;
+  /** Workspace root (parent of worktree) — used for git merge commands. */
+  workspacePath: string | null;
 }
 
 // ─── Escalation Tracking ─────────────────────────────────────────────────────
@@ -1576,6 +1582,37 @@ function removeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): void {
   logger.info(`  [worktree] Removed ${wt.worktreePath}`);
 }
 
+// ─── Auto-merge run-level worktree ───────────────────────────────────────────
+// Called at the end of a successful run when the entire spec was executed inside
+// a git worktree (autoWorktree: true). Merges the worktree branch back into the
+// main workspace branch and removes the worktree directory.
+//
+// Runs synchronously so the log output appears before process.exit().
+function autoMergeRunWorktree(workspacePath: string, worktreePath: string, branchName: string): void {
+  try {
+    execSync(
+      `git -C "${workspacePath}" merge "${branchName}" --no-edit -m "merge: ${branchName} (auto)"`,
+      { stdio: 'pipe', timeout: 120_000 },
+    );
+    logger.info(`[auto-merge] merged ${branchName} to main successfully`);
+  } catch (mergeErr: unknown) {
+    const msg = (mergeErr as Error).message ?? String(mergeErr);
+    logger.warn(`[auto-merge] merge failed for ${branchName}, leaving worktree intact for manual resolution: ${msg}`);
+    return;
+  }
+
+  try {
+    execSync(
+      `git -C "${workspacePath}" worktree remove "${worktreePath}" --force`,
+      { stdio: 'pipe', timeout: 30_000 },
+    );
+    logger.info(`[auto-merge] worktree removed: ${worktreePath}`);
+  } catch (rmErr: unknown) {
+    const msg = (rmErr as Error).message ?? String(rmErr);
+    logger.warn(`[auto-merge] worktree removal failed (non-fatal): ${msg}`);
+  }
+}
+
 // ─── CA-011: Adversarial Review Types & Runner ──────────────────────────────
 
 interface ReviewIssue {
@@ -2848,6 +2885,18 @@ async function main(): Promise<void> {
       // CIE-007: Archive run-state.json and write final progress.txt
       writeProgressTxt(config.cwd);
       archiveRunState(config.cwd, config.runId);
+
+      // Auto-merge run-level worktree back into the workspace main branch
+      // Only fires when: worktreePath + branchName + workspacePath are set AND all non-excluded stories passed
+      if (config.worktreePath && config.branchName && config.workspacePath) {
+        const allPassed = currentStories.every(s => s.excluded || isPassed(s));
+        if (allPassed) {
+          autoMergeRunWorktree(config.workspacePath, config.worktreePath, config.branchName);
+        } else {
+          logger.warn(`[auto-merge] Skipping merge — not all stories passed for ${config.branchName}`);
+        }
+      }
+
       process.exit(0);
     }
 
@@ -3193,6 +3242,9 @@ function parseArgs(): EngineConfig {
   let cliAgent: string | undefined;
   let cliModel: string | undefined;
   let attachAddr: string | null = null;
+  let worktreePath: string | null = null;
+  let branchName: string | null = null;
+  let workspacePath: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -3226,6 +3278,15 @@ function parseArgs(): EngineConfig {
       case '--attach':
         attachAddr = args[++i];
         break;
+      case '--worktree-path':
+        worktreePath = args[++i];
+        break;
+      case '--branch-name':
+        branchName = args[++i];
+        break;
+      case '--workspace-path':
+        workspacePath = args[++i];
+        break;
       default:
         logger.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
@@ -3233,7 +3294,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>]');
     process.exit(1);
   }
 
@@ -3242,7 +3303,7 @@ function parseArgs(): EngineConfig {
   const agentType: AgentType = (cliAgent as AgentType) ?? envConfig.agentType;
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
-  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr };
+  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, worktreePath, branchName, workspacePath };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
