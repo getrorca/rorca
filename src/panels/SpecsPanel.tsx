@@ -6,14 +6,15 @@ import {
   Search, X, Clock, CheckCircle2, XCircle, AlertCircle,
   Check, ChevronRight, ChevronLeft, Play, GitBranch, GitFork,
   Loader2, Plus, ExternalLink,
-  FileText, Layers, Archive, Inbox, ArrowRight,
+  FileText, File, FileType, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
+  Paperclip,
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
-import { apiFetch, ApiError } from '../lib/apiFetch';
+import { apiFetch, ApiError, BASE_URL } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWalSSE } from '../hooks/useWalSSE';
 import type { PanelId } from '../components/Sidebar';
@@ -23,7 +24,7 @@ import AgentBadge from '../components/AgentBadge';
 import { SkeletonColumn } from '../components/skeletons';
 import SlideOver from '../components/SlideOver';
 import SpecDetailSlideOver from '../components/SpecDetailSlideOver';
-import type { SpecSlideOverSummary } from '../components/SpecDetailSlideOver';
+import type { SpecSlideOverSummary, PreviewTab } from '../components/SpecDetailSlideOver';
 import { relativeTime, REVIEW_STATUS_CONFIG } from '../components/SpecReviewInline';
 import type { SpecSummary, ReviewStatus } from '../components/SpecReviewInline';
 import SpecForgeProgress, { type SpecGenerationError } from '../components/SpecForgeProgress';
@@ -105,6 +106,8 @@ interface KanbanSpec {
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
   model?: string;
+  attachments?: import('../types').Attachment[];
+  attachmentCount?: number;
 }
 
 interface CustomColumnData {
@@ -297,6 +300,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
   // Spec detail slide-over
   const [detailSpecId, setDetailSpecId] = useState<string | null>(null);
   const [detailSpecSummary, setDetailSpecSummary] = useState<ArchiveSpec | null>(null);
+  const [detailInitialTab, setDetailInitialTab] = useState<PreviewTab | undefined>(undefined);
 
   // Persist view mode
   useEffect(() => {
@@ -311,14 +315,16 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
     }
   }, [initialBrief, onBriefConsumed]);
 
-  const handleSpecClick = useCallback((specId: string, summary?: ArchiveSpec) => {
+  const handleSpecClick = useCallback((specId: string, summary?: ArchiveSpec, initialTab?: PreviewTab) => {
     setDetailSpecId(specId);
     setDetailSpecSummary(summary ?? null);
+    setDetailInitialTab(initialTab);
   }, []);
 
   const handleDetailClose = useCallback(() => {
     setDetailSpecId(null);
     setDetailSpecSummary(null);
+    setDetailInitialTab(undefined);
   }, []);
 
   if (!workspaceId) {
@@ -409,6 +415,7 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         isOpen={detailSpecId !== null}
         specId={detailSpecId}
         initialSummary={detailSpecSummary as SpecSlideOverSummary | null}
+        initialTab={detailInitialTab}
         onClose={handleDetailClose}
         onNavigate={onNavigate}
         onNavigateToRun={onNavigateToRun}
@@ -566,7 +573,7 @@ function DeleteColumnDialog({ columnName, specCount, onConfirm, onCancel }: {
 
 function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   workspaceId: string;
-  onSpecClick: (specId: string, summary?: ArchiveSpec) => void;
+  onSpecClick: (specId: string, summary?: ArchiveSpec, initialTab?: PreviewTab) => void;
   onNavigate: (panel: PanelId) => void;
   onNewSpec?: () => void;
 }) {
@@ -1143,7 +1150,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   }, [workspaceId, executeMove]);
 
   // Helper: find kanban spec by ID and build summary for the slide-over
-  const findAndOpenSpec = useCallback((specId: string, columnKey?: string) => {
+  const findAndOpenSpec = useCallback((specId: string, columnKey?: string, initialTab?: PreviewTab) => {
     // Determine status from column key
     const colKey = columnKey || (() => {
       if (effectiveKanban.draft.some(s => s.id === specId)) return 'draft';
@@ -1166,9 +1173,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
         tags: spec.tags || [],
         storyTitles: spec.storyTitles || [],
         reviewStatus: spec.reviewStatus as ArchiveSpec['reviewStatus'],
-      });
+      }, initialTab);
     } else {
-      onSpecClick(specId);
+      onSpecClick(specId, undefined, initialTab);
     }
   }, [effectiveKanban, onSpecClick]);
 
@@ -1489,7 +1496,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
             </div>
           )}
 
-          {/* Row 3: Model badge + time-ago + tag pills */}
+          {/* Row 3: Model badge + time-ago + tag pills + attachment badge */}
           <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
             {modelName && (
               <span className={`shrink-0 inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border ${modelColorClass(spec.model)}`}>
@@ -1518,6 +1525,19 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); setTagPopoverSpecId(tagPopoverSpecId === spec.id ? null : spec.id); } }}
               >
                 +{overflowCount}
+              </span>
+            )}
+            {(spec.attachmentCount ?? 0) > 0 && (
+              <span
+                role="button"
+                tabIndex={0}
+                title={`${spec.attachmentCount} attachment${spec.attachmentCount === 1 ? '' : 's'}`}
+                className="shrink-0 inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-surface-100 text-muted border border-border cursor-pointer hover:text-[var(--text)] transition-colors"
+                onClick={(e) => { e.stopPropagation(); findAndOpenSpec(spec.id, colKey, 'attachments'); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); findAndOpenSpec(spec.id, colKey, 'attachments'); } }}
+              >
+                <Paperclip size={8} />
+                {spec.attachmentCount}
               </span>
             )}
           </div>
@@ -2013,6 +2033,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [specNameError, setSpecNameError] = useState('');
   const [specBrief, setSpecBrief] = useState(() => initialBrief ?? '');
   const briefRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Model
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
@@ -2074,6 +2095,58 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Template picker
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
+  // Pasted image attachments (uploaded to backend, associated by specId after generation)
+  const [pendingAttachments, setPendingAttachments] = useState<Array<{ filename: string; contentType: string; size: number }>>([]);
+
+  // Saved attachments fetched from backend (for existing specs)
+  interface SavedAttachment { id: string; filename: string; contentType: string; fileSize: number; createdAt: string; }
+  const [savedAttachments, setSavedAttachments] = useState<SavedAttachment[]>([]);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+
+  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData.items);
+    const imageItem = items.find((item) => item.type.startsWith('image/'));
+    if (!imageItem) return;
+
+    const file = imageItem.getAsFile();
+    if (!file) return;
+
+    const ext = file.type.split('/')[1] ?? 'png';
+    const filename = `pasted-image-${Date.now()}.${ext}`;
+    const namedFile = new File([file], filename, { type: file.type });
+
+    showToast('Image pasted, uploading...', 'info');
+
+    try {
+      const formData = new FormData();
+      formData.append('file', namedFile);
+      // Upload to a temporary "forge" slot — spec ID will be wired after generation (US-007)
+      await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+      setPendingAttachments((prev) => [...prev, { filename, contentType: file.type, size: file.size }]);
+    } catch {
+      showToast('Image upload failed', 'error');
+    }
+  }, [showToast]);
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+    // Reset so the same file can be re-selected
+    e.target.value = '';
+    for (const file of files) {
+      showToast(`Uploading ${file.name}...`, 'info');
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+        setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
+        showToast(`Uploaded ${file.name}`, 'success');
+      } catch {
+        showToast(`Upload failed: ${file.name}`, 'error');
+      }
+    }
+  }, [showToast]);
+
   // Model accept handler — PUTs the accepted model to the story on disk
   const handleModelAccepted = useCallback(async (storyId: string, model: string) => {
     if (!generatedSpec || !workspaceId) return;
@@ -2117,6 +2190,27 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   }, []);
 
   useEffect(() => { autoResizeBrief(); }, [specBrief, autoResizeBrief]);
+
+  // Fetch saved attachments when spec slug is known (editing existing spec)
+  useEffect(() => {
+    if (!effectiveSlug) { setSavedAttachments([]); return; }
+    apiFetch<SavedAttachment[]>(`/api/specs/${encodeURIComponent(effectiveSlug)}/attachments`, { silent: true })
+      .then(setSavedAttachments)
+      .catch(() => setSavedAttachments([]));
+  }, [effectiveSlug]);
+
+  const handleDeleteAttachment = useCallback(async (id: string) => {
+    if (!effectiveSlug) return;
+    setDeletingIds((prev) => new Set(prev).add(id));
+    try {
+      await apiFetch(`/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      setSavedAttachments((prev) => prev.filter((a) => a.id !== id));
+    } catch {
+      showToast('Failed to delete attachment', 'error');
+    } finally {
+      setDeletingIds((prev) => { const s = new Set(prev); s.delete(id); return s; });
+    }
+  }, [effectiveSlug, showToast]);
 
   // Fetch models and config
   useEffect(() => {
@@ -2351,10 +2445,102 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
           <textarea
             ref={briefRef} rows={6} value={specBrief}
             onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
+            onPaste={handlePaste}
             placeholder="What do you want to build?"
             aria-label="Spec brief — describe what you want to build"
             className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors resize-none leading-relaxed"
           />
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,.pdf,.md,.txt,.docx"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+          <div className="mt-1.5 flex items-center">
+            <button
+              type="button"
+              aria-label="Attach files"
+              disabled={isGenerating || !workspaceId}
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted hover:text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors rounded"
+            >
+              <Paperclip size={13} />
+              Attach files
+            </button>
+          </div>
+          {/* Attachment list — saved (from backend) + pending (local uploads) */}
+          {(() => {
+            const formatSize = (bytes: number) => bytes < 1024 * 1024
+              ? `${(bytes / 1024).toFixed(1)} KB`
+              : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+            const getFileIcon = (contentType: string, filename: string) => {
+              if (contentType.startsWith('image/')) return null;
+              if (contentType === 'application/pdf' || filename.endsWith('.pdf')) return <FileType size={14} className="text-muted shrink-0" />;
+              if (contentType === 'text/markdown' || filename.endsWith('.md') || contentType === 'text/plain' || filename.endsWith('.txt')) return <FileText size={14} className="text-muted shrink-0" />;
+              return <File size={14} className="text-muted shrink-0" />;
+            };
+
+            const hasSaved = savedAttachments.length > 0;
+            const hasPending = pendingAttachments.length > 0;
+
+            if (!hasSaved && !hasPending) {
+              return (
+                <p className="mt-2 text-[11px] text-muted/60 italic px-1">
+                  No attachments yet. Paste an image or click paperclip to attach files.
+                </p>
+              );
+            }
+
+            return (
+              <div className="mt-2 space-y-1.5">
+                {savedAttachments.map((att) => (
+                  <div key={att.id} className="flex items-center gap-2 px-2 py-1.5 bg-panel border border-border rounded-lg group">
+                    {att.contentType.startsWith('image/') ? (
+                      <img
+                        src={`${BASE_URL}/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(att.id)}`}
+                        alt={att.filename}
+                        style={{ maxHeight: 80 }}
+                        className="rounded object-contain shrink-0"
+                      />
+                    ) : (
+                      getFileIcon(att.contentType, att.filename)
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-text truncate">{att.filename}</p>
+                      <p className="text-[10px] text-muted">{formatSize(att.fileSize)} · {relativeTime(att.createdAt)}</p>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label={`Delete ${att.filename}`}
+                      disabled={deletingIds.has(att.id)}
+                      onClick={() => handleDeleteAttachment(att.id)}
+                      className="opacity-0 group-hover:opacity-100 p-1 rounded text-muted hover:text-red-500 disabled:opacity-40 transition-all"
+                    >
+                      {deletingIds.has(att.id) ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
+                    </button>
+                  </div>
+                ))}
+                {pendingAttachments.map((att) => (
+                  <div key={att.filename} className="flex items-center gap-2 px-2 py-1.5 bg-accent/5 border border-accent/20 rounded-lg">
+                    {att.contentType.startsWith('image/') ? (
+                      <div className="w-10 h-10 rounded bg-accent/10 flex items-center justify-center shrink-0">
+                        <FileText size={14} className="text-accent" />
+                      </div>
+                    ) : (
+                      getFileIcon(att.contentType, att.filename)
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-accent truncate">{att.filename}</p>
+                      <p className="text-[10px] text-muted">{formatSize(att.size)} · pending</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
           {/* Skills count indicator */}
           {skillsCount !== null && (
             <div className="mt-1.5 px-1">
@@ -2433,7 +2619,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       {(!generatedSpec || isGenerating) && (
         <div className="space-y-2">
           {isGenerating || (generateError && !generatedSpec) ? (
-            <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} onRetry={handleRetry} onRetryWithModel={handleRetryWithModel} model={selectedModel || defaultModelId || 'claude-sonnet-4-6'} provider={activeProvider} />
+            <SpecForgeProgress isActive={isGenerating} onCancel={handleCancel} error={generateError} apiDone={apiDone} multiPass={false} specSlug={effectiveSlug} onRetry={handleRetry} onRetryWithModel={handleRetryWithModel} model={selectedModel || defaultModelId || 'claude-sonnet-4-6'} provider={activeProvider} hasAttachments={pendingAttachments.length > 0 || savedAttachments.length > 0} />
           ) : !generatedSpec ? (
             <>
               <button onClick={handleGenerate} disabled={!canGenerate || isGenerating}
@@ -2569,7 +2755,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
           onEditBrief={() => { setGeneratedSpec(null); setGenerateError(null); setApiDone(false); setTimeout(() => briefRef.current?.focus(), 50); }}
           isRegenerating={isGenerating} onNavigate={onNavigate}
           onNavigateToRun={(runId) => { onClose(); onNavigateToRun?.(runId); }}
-          onReset={() => { setGeneratedSpec(null); setGenerateError(null); setApiDone(false); setSpecBrief(''); setTimeout(() => briefRef.current?.focus(), 50); }}
+          onReset={() => { setGeneratedSpec(null); setGenerateError(null); setApiDone(false); setSpecBrief(''); setPendingAttachments([]); setTimeout(() => briefRef.current?.focus(), 50); }}
           modelSuggestions={modelSuggestions}
           onModelAccepted={handleModelAccepted}
         />

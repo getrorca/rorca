@@ -10,8 +10,11 @@ import { createPortal } from 'react-dom';
 import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
   Download, Copy, Check, ChevronRight, Play, GitBranch, GitFork,
-  Loader2, Plus, Sparkles, Trash2, History, FileSearch,
+  Loader2, Plus, Sparkles, Trash2, History, FileSearch, Paperclip,
+  FileText, FileImage, File,
 } from 'lucide-react';
+import type { Attachment } from '../types/attachment';
+import { BASE_URL } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { useGlobalToast } from '../contexts/ToastContext';
@@ -30,7 +33,7 @@ import type { PanelId } from './Sidebar';
 /* ─── Types ───────────────────────────────────────────────────────── */
 
 type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
-type PreviewTab = 'stories' | 'history' | 'context' | 'skills' | 'graph' | 'diagram' | 'json';
+export type PreviewTab = 'stories' | 'history' | 'context' | 'skills' | 'graph' | 'diagram' | 'json' | 'attachments';
 
 export interface SpecSlideOverSummary {
   id: string;
@@ -102,6 +105,8 @@ export interface SpecDetailSlideOverProps {
   isOpen: boolean;
   specId: string | null;
   initialSummary?: SpecSlideOverSummary | null;
+  /** Which tab to open initially (defaults to 'stories') */
+  initialTab?: PreviewTab;
   onClose: () => void;
   onNavigate?: (panel: PanelId) => void;
   onNavigateToRun?: (runId: number) => void;
@@ -264,6 +269,7 @@ export default function SpecDetailSlideOver({
   isOpen,
   specId,
   initialSummary,
+  initialTab,
   onClose,
   onNavigate,
   onNavigateToRun,
@@ -311,6 +317,7 @@ export default function SpecDetailSlideOver({
         <SpecDetailContent
           specId={specId}
           initialSummary={initialSummary ?? null}
+          initialTab={initialTab}
           onClose={onClose}
           onNavigate={onNavigate}
           onNavigateToRun={onNavigateToRun}
@@ -330,6 +337,7 @@ export default function SpecDetailSlideOver({
 function SpecDetailContent({
   specId,
   initialSummary,
+  initialTab,
   onClose,
   onNavigate,
   onNavigateToRun,
@@ -340,6 +348,7 @@ function SpecDetailContent({
 }: {
   specId: string;
   initialSummary: SpecSlideOverSummary | null;
+  initialTab?: PreviewTab;
   onClose: () => void;
   onNavigate?: (panel: PanelId) => void;
   onNavigateToRun?: (runId: number) => void;
@@ -357,7 +366,7 @@ function SpecDetailContent({
   const [summary, setSummary] = useState<SpecSlideOverSummary | null>(initialSummary);
   const [detail, setDetail] = useState<SpecDetailData | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
+  const [activeTab, setActiveTab] = useState<PreviewTab>(initialTab ?? 'stories');
 
   // Stories
   const [localStories, setLocalStories] = useState<Story[]>([]);
@@ -417,7 +426,7 @@ function SpecDetailContent({
   useEffect(() => { setLocalStories(detail?.userStories ?? detail?.stories ?? []); }, [detail]);
 
   // Reset tab on spec change
-  useEffect(() => { setActiveTab('stories'); }, [specId]);
+  useEffect(() => { setActiveTab(initialTab ?? 'stories'); }, [specId, initialTab]);
 
   // Check if workspace has an active run (so we can show Queue button upfront)
   useEffect(() => {
@@ -549,6 +558,7 @@ function SpecDetailContent({
     { id: 'graph', label: 'Graph' },
     { id: 'diagram', label: 'Dependencies' },
     { id: 'json', label: 'Raw JSON' },
+    { id: 'attachments', label: 'Attachments', icon: Paperclip },
   ];
 
   /* ─── Render ────────────────────────────────────────────────────── */
@@ -652,6 +662,7 @@ function SpecDetailContent({
             {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
             {activeTab === 'json' && <JsonTab spec={detail} specId={specId} />}
+            {activeTab === 'attachments' && <AttachmentsTab specId={specId} />}
           </div>
         </>
       )}
@@ -1019,6 +1030,124 @@ function GenerationLogTab({ specId }: { specId: string }) {
           Show all generation attempts
         </button>
       )}
+    </div>
+  );
+}
+
+/* ─── Attachments Tab ───────────────────────────────────────────── */
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function AttachmentTypeIcon({ contentType }: { contentType: string }) {
+  if (contentType.startsWith('image/')) return <FileImage size={14} className="text-accent" />;
+  if (contentType === 'application/pdf' || contentType.includes('word')) return <FileText size={14} className="text-warning" />;
+  return <File size={14} className="text-muted" />;
+}
+
+function AttachmentsTab({ specId }: { specId: string }) {
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const toast = useGlobalToast();
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    apiFetch<Attachment[]>(`/api/specs/${specId}/attachments`)
+      .then(data => { if (!cancelled) setAttachments(data); })
+      .catch(() => { if (!cancelled) setAttachments([]); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [specId]);
+
+  async function handleDelete(id: string) {
+    setDeleting(id);
+    try {
+      await apiFetch(`/api/specs/${specId}/attachments/${id}`, { method: 'DELETE' });
+      setAttachments(prev => prev.filter(a => a.id !== id));
+      toast.show('Attachment deleted', 'success');
+    } catch {
+      toast.show('Failed to delete attachment', 'error');
+    } finally {
+      setDeleting(null);
+      setDeleteConfirm(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-muted text-sm">
+        <Loader2 size={16} className="animate-spin mr-2" />Loading attachments...
+      </div>
+    );
+  }
+
+  if (attachments.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-center px-6">
+        <Paperclip size={32} className="text-muted/30 mb-3" />
+        <p className="text-sm text-muted">No attachments.</p>
+        <p className="text-xs text-muted/60 mt-1">Go to Spec Forge to add files.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-border">
+      {attachments.map(a => (
+        <div key={a.id} className="flex items-center gap-3 px-4 py-3 hover:bg-panel/50 transition-colors">
+          <AttachmentTypeIcon contentType={a.contentType} />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-text truncate">{a.filename}</p>
+            <p className="text-[10px] text-muted mt-0.5">
+              {formatFileSize(a.fileSize)} · {new Date(a.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              {a.uploadedBy?.name && ` · ${a.uploadedBy.name}`}
+            </p>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <a
+              href={`${BASE_URL}/api/specs/${encodeURIComponent(specId)}/attachments/${a.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Download"
+              className="p-1.5 rounded text-muted hover:text-text hover:bg-panel transition-colors"
+            >
+              <Download size={13} />
+            </a>
+            {deleteConfirm === a.id ? (
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-muted whitespace-nowrap">Delete {a.filename.length > 12 ? a.filename.slice(0, 12) + '…' : a.filename}?</span>
+                <button
+                  onClick={() => handleDelete(a.id)}
+                  disabled={deleting === a.id}
+                  className="px-2 py-0.5 text-[10px] rounded bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors disabled:opacity-50"
+                >
+                  {deleting === a.id ? <Loader2 size={10} className="animate-spin" /> : 'Yes'}
+                </button>
+                <button
+                  onClick={() => setDeleteConfirm(null)}
+                  className="px-2 py-0.5 text-[10px] rounded bg-panel border border-border text-muted hover:text-text transition-colors"
+                >
+                  No
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setDeleteConfirm(a.id)}
+                title="Delete"
+                className="p-1.5 rounded text-muted hover:text-error hover:bg-error/10 transition-colors"
+              >
+                <Trash2 size={13} />
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

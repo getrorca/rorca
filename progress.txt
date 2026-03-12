@@ -1,30 +1,22 @@
 # Run State Summary
 
-Spec: Fix Quick Run spec generation to use the full direction + memory context cascade.
+Spec: add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.
+Run ID: 45
+Started: 2026-03-12T05:48:55.677Z
+Last Updated: 2026-03-12T06:53:57.334Z
 
-POST /api/pipeline/quick-run in backend/src/routes/pipeline.ts generates a 1-story spec with a bare LLM call (step 7, quickRunPrompt) that has no awareness of the workspace's direction stack, MEMORY.md, or installed skills. Fix this so the spec is generated with the same context that regular POST /api/specs/generate uses.
-
-Changes needed in backend/src/routes/pipeline.ts:
-
-After resolving the workspace, call synthesize(workspaceId, domain) from backend/src/lib/direction-stack.ts to get the merged L1–L3 direction context string.
-
-Read MEMORY.md from the workspace root (path.join(workspace.path, 'MEMORY.md')) — if it exists, include the first 2000 chars prefixed with === MEMORY.md ===.
-
-Read installed skills from GET /api/skills?workspaceId= internally (or query the DB directly) — include skill names + descriptions as a brief list prefixed with === INSTALLED SKILLS ===.
-
-Prepend all three context blocks to the quickRunPrompt before the === INSTRUCTIONS === section. If a block is empty/missing, skip it silently.
-
-Increase the acceptance criteria limit from 5 to 8 to match the richer context now available.
-
-The LLM call itself (chatComplete) stays unchanged — only the prompt content changes. The spec JSON schema and pipeline trigger logic are untouched.
-Run ID: 43
-Started: 2026-03-12T05:48:53.196Z
-Last Updated: 2026-03-12T06:05:35.876Z
-
-## Completed Stories (6)
-- US-001: Read and integrate direction stack into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 201s)
-- US-002: Read MEMORY.md and inject into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 100s)
-- US-003: Query installed skills from DB and inject into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 119s)
-- US-004: Assemble context blocks and update quickRunPrompt construction — DONE (claude, claude-sonnet-4-6, 126s)
-- US-005: Increase Quick Run acceptance criteria limit from 5 to 8 — DONE (claude, claude-sonnet-4-6, 84s)
-- US-006: Add TypeScript types and guard context injection paths — DONE (claude, claude-sonnet-4-6, 284s)
+## Completed Stories (14)
+- US-001: Add spec_attachments database table — DONE (claude, claude-sonnet-4-6, 91s)
+- US-002: Create backend API route for attachment upload — DONE (claude, claude-sonnet-4-6, 137s)
+- US-003: Create backend API route to list spec attachments — DONE (claude, claude-sonnet-4-6, 115s)
+- US-004: Create backend API route to download attachment — DONE (claude, claude-sonnet-4-6, 149s)
+- US-005: Create backend API route to delete attachment — DONE (claude, claude-sonnet-4-6, 102s)
+- US-006: Add paste event listener to SpecForge description textarea — DONE (claude, claude-sonnet-4-6, 232s)
+- US-007: Implement frontend attachment upload handler — DONE (claude, claude-sonnet-4-6, 144s)
+- US-008: Add file input button to SpecForge UI — DONE (claude, claude-sonnet-4-6, 250s)
+- US-009: Display attached files list in SpecForge UI — DONE (claude, claude-sonnet-4-6, 433s)
+- US-010: Pass attachment context to spec generation LLM call — DONE (claude, claude-sonnet-4-6, 528s)
+- US-011: Add Attachment type to frontend types — DONE (claude, claude-sonnet-4-6, 106s)
+- US-012: Show attachment count badge in SpecsPanel kanban cards — DONE (claude, claude-sonnet-4-6, 488s)
+- US-013: Add Attachments tab to SpecDetailSlideOver — DONE (claude, claude-sonnet-4-6, 259s)
+- US-014: Update SpecForgeProgress to show attachment upload status — DONE (claude, claude-sonnet-4-6, 532s)
