@@ -2,7 +2,7 @@
   "specId": "rorca-enrich-spec",
   "runId": 77,
   "startedAt": "2026-03-12T23:12:07.557Z",
-  "lastUpdatedAt": "2026-03-12T23:25:03.186Z",
+  "lastUpdatedAt": "2026-03-12T23:30:29.821Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 108613
+    },
+    {
+      "storyId": "US-004",
+      "title": "Enrich with Context button in SpecDetailSlideOver + retrieval method badge in Context tab",
+      "status": "passed",
+      "startedAt": "2026-03-12T23:25:17.917Z",
+      "finishedAt": "2026-03-12T23:30:29.821Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 311904
     }
   ],
   "failedStories": [],
