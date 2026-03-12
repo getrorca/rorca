@@ -1,137 +1,65 @@
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/** Maximum allowed file size for extraction (10 MB) */
-export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB in bytes
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface AttachmentExtractionResult {
-  text: string;
-  mimeType: string;
-  byteSize: number;
-}
-
-// ---------------------------------------------------------------------------
-// Extraction
-// ---------------------------------------------------------------------------
+export const MAX_ATTACHMENT_TOKENS = 2000;
+export const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+export const IMAGE_CONTENT_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'image/bmp',
+]);
 
 /**
- * Extract plain text from a file buffer based on its MIME type or filename.
+ * Extract text content from an attachment's binary data based on MIME type.
+ * Returns extracted text (truncated to MAX_ATTACHMENT_TOKENS tokens), or null for images.
  *
- * Supported:
- *  - application/pdf  → pdf-parse
- *  - application/vnd.openxmlformats-officedocument.wordprocessingml.document → mammoth
- *  - text/plain, text/markdown, text/* → UTF-8 decode
- *
- * Throws if the buffer exceeds MAX_FILE_SIZE or the file cannot be parsed.
+ * Throws if fileData exceeds MAX_FILE_SIZE_BYTES — callers (e.g. multer middleware) should
+ * enforce this before calling, but this provides a defence-in-depth guard.
  */
-export async function extractTextFromBuffer(
-  buffer: Buffer,
-  mimeType: string,
-  filename?: string,
-): Promise<AttachmentExtractionResult> {
-  if (buffer.byteLength > MAX_FILE_SIZE) {
-    throw Object.assign(
-      new Error(
-        `File exceeds maximum allowed size of ${MAX_FILE_SIZE / 1024 / 1024} MB (got ${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB)`,
-      ),
-      { statusCode: 413 },
-    );
-  }
-
-  // Normalise: derive type from filename extension when mimeType is generic
-  const effectiveMime = resolveEffectiveMime(mimeType, filename);
-
-  if (effectiveMime === 'application/pdf') {
-    return extractPdf(buffer);
-  }
-
-  if (effectiveMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-    return extractDocx(buffer);
-  }
-
-  if (effectiveMime.startsWith('text/') || effectiveMime === 'application/json') {
-    return extractPlainText(buffer, effectiveMime);
-  }
-
-  // Fallback: attempt UTF-8 decode (will be garbled for binary, but won't throw)
-  return extractPlainText(buffer, effectiveMime);
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-function resolveEffectiveMime(mimeType: string, filename?: string): string {
-  if (mimeType && mimeType !== 'application/octet-stream') {
-    return mimeType;
-  }
-  if (!filename) return mimeType;
-
-  const ext = filename.split('.').pop()?.toLowerCase();
-  switch (ext) {
-    case 'pdf':  return 'application/pdf';
-    case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    case 'txt':  return 'text/plain';
-    case 'md':   return 'text/markdown';
-    default:     return mimeType;
-  }
-}
-
-async function extractPdf(buffer: Buffer): Promise<AttachmentExtractionResult> {
-  if (buffer.byteLength === 0) {
-    return { text: '', mimeType: 'application/pdf', byteSize: 0 };
+export async function extractAttachmentText(
+  contentType: string,
+  fileData: Buffer,
+  filename: string,
+): Promise<string | null> {
+  if (fileData.length > MAX_FILE_SIZE_BYTES) {
+    throw new Error(`File exceeds maximum size of ${MAX_FILE_SIZE_BYTES / (1024 * 1024)}MB`);
   }
 
   try {
-    const parser = new PDFParse({ data: buffer });
-    const data = await parser.getText();
-    return {
-      text: data.text ?? '',
-      mimeType: 'application/pdf',
-      byteSize: buffer.byteLength,
-    };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[attachment-extraction] PDF parse failed: ${message}`);
-    throw Object.assign(new Error(`Failed to parse PDF: ${message}`), { statusCode: 422 });
-  }
-}
+    if (IMAGE_CONTENT_TYPES.has(contentType)) {
+      return null; // images handled separately as metadata
+    }
 
-async function extractDocx(buffer: Buffer): Promise<AttachmentExtractionResult> {
-  if (buffer.byteLength === 0) {
-    return {
-      text: '',
-      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      byteSize: 0,
-    };
-  }
+    let text = '';
+    if (contentType === 'application/pdf') {
+      const parser = new PDFParse({ data: fileData });
+      const result = await parser.getText();
+      await parser.destroy();
+      text = result.text;
+    } else if (
+      contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ) {
+      const result = await mammoth.extractRawText({ buffer: fileData });
+      text = result.value;
+    } else if (
+      contentType === 'text/plain' ||
+      contentType === 'text/markdown' ||
+      contentType.startsWith('text/')
+    ) {
+      text = fileData.toString('utf-8');
+    } else {
+      return `[Unsupported file type: ${contentType}]`;
+    }
 
-  try {
-    const result = await mammoth.extractRawText({ buffer });
-    return {
-      text: result.value ?? '',
-      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      byteSize: buffer.byteLength,
-    };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[attachment-extraction] DOCX parse failed: ${message}`);
-    throw Object.assign(new Error(`Failed to parse DOCX: ${message}`), { statusCode: 422 });
+    // Token budget: ~4 chars per token
+    const maxChars = MAX_ATTACHMENT_TOKENS * 4;
+    if (text.length > maxChars) {
+      return text.slice(0, maxChars) + '\n[truncated]';
+    }
+    return text;
+  } catch (err) {
+    return `[Error extracting text from ${filename}: ${(err as Error).message}]`;
   }
-}
-
-function extractPlainText(buffer: Buffer, mimeType: string): AttachmentExtractionResult {
-  return {
-    text: buffer.toString('utf8'),
-    mimeType,
-    byteSize: buffer.byteLength,
-  };
 }

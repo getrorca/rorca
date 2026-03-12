@@ -1,294 +1,212 @@
 /**
  * Unit tests for attachment-extraction.ts
- *
- * Covers:
- *  - PDF extraction via pdf-parse (Buffer blob)
- *  - DOCX extraction via mammoth (Buffer blob)
- *  - Plain text / Markdown extraction (UTF-8)
- *  - Edge cases: empty file, corrupted PDF, oversized file
- *
- * Strategy: mock pdf-parse and mammoth so tests run in Jest (no ESM workers needed).
- * The extraction logic, error handling, and size guard under test are in attachment-extraction.ts.
+ * Covers: PDF, DOCX, plain text extraction + edge cases (empty, corrupted, oversized).
  */
 
-// ---------------------------------------------------------------------------
-// Mocks — must be declared before imports
-// ---------------------------------------------------------------------------
+jest.mock('pdf-parse', () => {
+  const mockDestroy = jest.fn().mockResolvedValue(undefined);
+  const MockPDFParse = jest.fn().mockImplementation(({ data }: { data: Buffer }) => {
+    return {
+      getText: jest.fn(async () => {
+        if (data.length === 0) return { text: '' };
+        // Simulate corrupt detection: if buffer starts with 0xFF 0x00 (not a real PDF header)
+        if (data[0] === 0xff && data[1] === 0x00) {
+          throw new Error('Invalid PDF structure');
+        }
+        return { text: data.toString('utf-8').replace(/%PDF-1\.4\s*/, '') };
+      }),
+      destroy: mockDestroy,
+    };
+  });
+  return { PDFParse: MockPDFParse };
+});
 
-const mockGetText = jest.fn<Promise<{ text: string }>, []>();
-const MockPDFParse = jest.fn().mockImplementation(() => ({ getText: mockGetText }));
+jest.mock('mammoth', () => {
+  const extractRawText = jest.fn(async ({ buffer }: { buffer: Buffer }) => {
+    if (buffer.length === 0) return { value: '' };
+    // Simulate corrupt DOCX: PK header required for zip-based DOCX
+    if (buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+      throw new Error('End of Central Directory signature not found');
+    }
+    return { value: 'Hello from DOCX document.' };
+  });
+  // mammoth is a CommonJS module; the default export has extractRawText directly
+  return { __esModule: true, default: { extractRawText }, extractRawText };
+});
 
-jest.mock('pdf-parse', () => ({ PDFParse: MockPDFParse }));
+import {
+  extractAttachmentText,
+  MAX_ATTACHMENT_TOKENS,
+  MAX_FILE_SIZE_BYTES,
+} from '../attachment-extraction';
 
-const mockExtractRawText = jest.fn<Promise<{ value: string; messages: unknown[] }>, [{ buffer: Buffer }]>();
-jest.mock('mammoth', () => ({ extractRawText: mockExtractRawText }));
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// Imports — after mocks
-// ---------------------------------------------------------------------------
-
-import { extractTextFromBuffer, MAX_FILE_SIZE } from '../attachment-extraction';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Minimal PDF-like buffer — content doesn't matter since pdf-parse is mocked */
-function makePdfBuffer(byteLength = 512): Buffer {
-  const buf = Buffer.alloc(byteLength, 0);
-  buf.write('%PDF-1.4', 0, 'utf8');
-  return buf;
+/** Minimal fake PDF buffer with a valid-looking header prefix */
+function fakePdfBuffer(content: string): Buffer {
+  return Buffer.from(`%PDF-1.4\n${content}`);
 }
 
-/** Minimal DOCX-like buffer — content doesn't matter since mammoth is mocked */
-function makeDocxBuffer(byteLength = 1024): Buffer {
-  const buf = Buffer.alloc(byteLength, 0);
-  // ZIP local file header magic bytes
-  buf.writeUInt32LE(0x04034b50, 0);
-  return buf;
+/** Minimal fake DOCX buffer — starts with PK (zip magic bytes) */
+function fakeDocxBuffer(content: string): Buffer {
+  const pk = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+  return Buffer.concat([pk, Buffer.from(content, 'utf-8')]);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+/** Buffer that simulates a corrupt PDF (starts with 0xFF 0x00) */
+function corruptPdfBuffer(): Buffer {
+  return Buffer.from([0xff, 0x00, 0x00, 0x01, 0x02, 0x03]);
+}
 
-describe('extractTextFromBuffer', () => {
-  afterEach(() => {
-    jest.clearAllMocks();
+// ─── Plain text extraction ────────────────────────────────────────────────────
+
+describe('Plain text extraction', () => {
+  test('extracts UTF-8 text from text/plain', async () => {
+    const content = 'Hello, world! 🎉';
+    const result = await extractAttachmentText('text/plain', Buffer.from(content, 'utf-8'), 'readme.txt');
+    expect(result).toBe(content);
   });
 
-  // ── PDF ──────────────────────────────────────────────────────────────────
-
-  describe('PDF extraction', () => {
-    it('extracts text from a valid PDF buffer', async () => {
-      mockGetText.mockResolvedValue({ text: 'Hello PDF' });
-
-      const buf = makePdfBuffer();
-      const result = await extractTextFromBuffer(buf, 'application/pdf');
-
-      expect(MockPDFParse).toHaveBeenCalledWith({ data: buf });
-      expect(mockGetText).toHaveBeenCalledTimes(1);
-      expect(result.text).toBe('Hello PDF');
-      expect(result.mimeType).toBe('application/pdf');
-      expect(result.byteSize).toBe(buf.byteLength);
-    });
-
-    it('returns empty string for an empty PDF buffer (zero bytes)', async () => {
-      const result = await extractTextFromBuffer(Buffer.alloc(0), 'application/pdf');
-
-      // pdf-parse is NOT called for empty buffers
-      expect(MockPDFParse).not.toHaveBeenCalled();
-      expect(result.text).toBe('');
-      expect(result.byteSize).toBe(0);
-    });
-
-    it('throws and logs a warning for a corrupted PDF buffer', async () => {
-      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-      mockGetText.mockRejectedValue(new Error('Invalid PDF structure'));
-
-      await expect(
-        extractTextFromBuffer(makePdfBuffer(), 'application/pdf'),
-      ).rejects.toMatchObject({
-        message: expect.stringContaining('Failed to parse PDF'),
-        statusCode: 422,
-      });
-
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[attachment-extraction] PDF parse failed'),
-      );
-
-      warnSpy.mockRestore();
-    });
-
-    it('resolves mime type from .pdf filename when mime is application/octet-stream', async () => {
-      mockGetText.mockResolvedValue({ text: 'Resolved PDF' });
-
-      const buf = makePdfBuffer();
-      const result = await extractTextFromBuffer(buf, 'application/octet-stream', 'report.pdf');
-
-      expect(MockPDFParse).toHaveBeenCalledWith({ data: buf });
-      expect(result.mimeType).toBe('application/pdf');
-      expect(result.text).toBe('Resolved PDF');
-    });
+  test('extracts content from text/markdown', async () => {
+    const content = '# Heading\n\nSome **bold** text.';
+    const result = await extractAttachmentText('text/markdown', Buffer.from(content, 'utf-8'), 'notes.md');
+    expect(result).toBe(content);
   });
 
-  // ── DOCX ─────────────────────────────────────────────────────────────────
-
-  describe('DOCX extraction', () => {
-    const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-
-    it('extracts raw text from a valid DOCX buffer', async () => {
-      mockExtractRawText.mockResolvedValue({ value: 'Hello DOCX', messages: [] });
-
-      const buf = makeDocxBuffer();
-      const result = await extractTextFromBuffer(buf, DOCX_MIME);
-
-      expect(mockExtractRawText).toHaveBeenCalledWith({ buffer: buf });
-      expect(result.text).toBe('Hello DOCX');
-      expect(result.mimeType).toBe(DOCX_MIME);
-      expect(result.byteSize).toBe(buf.byteLength);
-    });
-
-    it('returns empty string for an empty DOCX buffer (zero bytes)', async () => {
-      const result = await extractTextFromBuffer(Buffer.alloc(0), DOCX_MIME);
-
-      // mammoth is NOT called for empty buffers
-      expect(mockExtractRawText).not.toHaveBeenCalled();
-      expect(result.text).toBe('');
-      expect(result.byteSize).toBe(0);
-    });
-
-    it('throws and logs a warning for a corrupted DOCX buffer', async () => {
-      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-      mockExtractRawText.mockRejectedValue(new Error('Corrupted zip or bug'));
-
-      await expect(
-        extractTextFromBuffer(makeDocxBuffer(), DOCX_MIME),
-      ).rejects.toMatchObject({
-        message: expect.stringContaining('Failed to parse DOCX'),
-        statusCode: 422,
-      });
-
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[attachment-extraction] DOCX parse failed'),
-      );
-
-      warnSpy.mockRestore();
-    });
-
-    it('resolves mime type from .docx filename when mime is application/octet-stream', async () => {
-      mockExtractRawText.mockResolvedValue({ value: 'Resolved DOCX', messages: [] });
-
-      const buf = makeDocxBuffer();
-      const result = await extractTextFromBuffer(buf, 'application/octet-stream', 'notes.docx');
-
-      expect(mockExtractRawText).toHaveBeenCalledWith({ buffer: buf });
-      expect(result.mimeType).toBe(DOCX_MIME);
-      expect(result.text).toBe('Resolved DOCX');
-    });
+  test('extracts content from generic text/* type', async () => {
+    const content = 'key=value';
+    const result = await extractAttachmentText('text/x-config', Buffer.from(content, 'utf-8'), 'config.txt');
+    expect(result).toBe(content);
   });
 
-  // ── Plain text / Markdown ─────────────────────────────────────────────────
-
-  describe('plain text extraction', () => {
-    it('extracts UTF-8 text from a .txt buffer', async () => {
-      const content = 'Hello, plain text!\nSecond line.';
-      const buf = Buffer.from(content, 'utf8');
-      const result = await extractTextFromBuffer(buf, 'text/plain', 'notes.txt');
-
-      expect(result.text).toBe(content);
-      expect(result.mimeType).toBe('text/plain');
-      expect(result.byteSize).toBe(buf.byteLength);
-    });
-
-    it('extracts UTF-8 text from a .md buffer', async () => {
-      const content = '# Title\n\nSome **markdown** content.';
-      const buf = Buffer.from(content, 'utf8');
-      const result = await extractTextFromBuffer(buf, 'text/markdown', 'README.md');
-
-      expect(result.text).toBe(content);
-      expect(result.mimeType).toBe('text/markdown');
-    });
-
-    it('preserves non-ASCII UTF-8 characters', async () => {
-      const content = 'Héllo wörld — 日本語テスト 🎉';
-      const buf = Buffer.from(content, 'utf8');
-      const result = await extractTextFromBuffer(buf, 'text/plain');
-
-      expect(result.text).toBe(content);
-    });
-
-    it('returns empty string for an empty text buffer', async () => {
-      const result = await extractTextFromBuffer(Buffer.alloc(0), 'text/plain');
-      expect(result.text).toBe('');
-      expect(result.byteSize).toBe(0);
-    });
-
-    it('resolves .txt filename from application/octet-stream', async () => {
-      const content = 'resolved text';
-      const buf = Buffer.from(content, 'utf8');
-      const result = await extractTextFromBuffer(buf, 'application/octet-stream', 'file.txt');
-
-      expect(result.mimeType).toBe('text/plain');
-      expect(result.text).toBe(content);
-    });
-
-    it('resolves .md filename from application/octet-stream', async () => {
-      const content = '# readme';
-      const buf = Buffer.from(content, 'utf8');
-      const result = await extractTextFromBuffer(buf, 'application/octet-stream', 'README.md');
-
-      expect(result.mimeType).toBe('text/markdown');
-      expect(result.text).toBe(content);
-    });
+  test('returns empty string for empty text file', async () => {
+    const result = await extractAttachmentText('text/plain', Buffer.alloc(0), 'empty.txt');
+    expect(result).toBe('');
   });
 
-  // ── Oversized file ────────────────────────────────────────────────────────
+  test('truncates text exceeding token budget', async () => {
+    const maxChars = MAX_ATTACHMENT_TOKENS * 4;
+    const longContent = 'a'.repeat(maxChars + 500);
+    const result = await extractAttachmentText('text/plain', Buffer.from(longContent, 'utf-8'), 'big.txt');
+    expect(result).not.toBeNull();
+    expect(result!.endsWith('\n[truncated]')).toBe(true);
+    expect(result!.length).toBeLessThan(longContent.length);
+  });
+});
 
-  describe('oversized file rejection', () => {
-    it('throws with statusCode 413 before extraction when buffer exceeds 10 MB', async () => {
-      const oversizedBuf = Buffer.alloc(MAX_FILE_SIZE + 1);
+// ─── PDF extraction ───────────────────────────────────────────────────────────
 
-      await expect(
-        extractTextFromBuffer(oversizedBuf, 'text/plain'),
-      ).rejects.toMatchObject({
-        message: expect.stringContaining('exceeds maximum allowed size'),
-        statusCode: 413,
-      });
-
-      // pdf-parse and mammoth must NOT be called
-      expect(MockPDFParse).not.toHaveBeenCalled();
-      expect(mockExtractRawText).not.toHaveBeenCalled();
-    });
-
-    it('allows a buffer exactly at the 10 MB limit', async () => {
-      const exactBuf = Buffer.alloc(MAX_FILE_SIZE, 65 /* 'A' */);
-      const result = await extractTextFromBuffer(exactBuf, 'text/plain');
-
-      expect(result.byteSize).toBe(MAX_FILE_SIZE);
-      expect(result.text.length).toBe(MAX_FILE_SIZE);
-    });
-
-    it('throws for oversized PDF before attempting pdf-parse', async () => {
-      const oversizedBuf = Buffer.alloc(MAX_FILE_SIZE + 1);
-
-      await expect(
-        extractTextFromBuffer(oversizedBuf, 'application/pdf'),
-      ).rejects.toMatchObject({ statusCode: 413 });
-
-      expect(MockPDFParse).not.toHaveBeenCalled();
-    });
-
-    it('throws for oversized DOCX before attempting mammoth', async () => {
-      const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-      const oversizedBuf = Buffer.alloc(MAX_FILE_SIZE + 1);
-
-      await expect(
-        extractTextFromBuffer(oversizedBuf, DOCX_MIME),
-      ).rejects.toMatchObject({ statusCode: 413 });
-
-      expect(mockExtractRawText).not.toHaveBeenCalled();
-    });
+describe('PDF extraction', () => {
+  test('extracts text from a valid PDF buffer', async () => {
+    const result = await extractAttachmentText(
+      'application/pdf',
+      fakePdfBuffer('This is the document body.'),
+      'report.pdf',
+    );
+    expect(result).toContain('This is the document body.');
   });
 
-  // ── Unknown MIME type fallback ─────────────────────────────────────────────
+  test('returns empty string for empty PDF', async () => {
+    // Empty buffer → mocked getText returns { text: '' }
+    const result = await extractAttachmentText('application/pdf', Buffer.alloc(0), 'empty.pdf');
+    expect(result).toBe('');
+  });
 
-  describe('unknown mime type fallback', () => {
-    it('falls back to UTF-8 decode for application/octet-stream with no filename', async () => {
-      const content = 'some content';
-      const buf = Buffer.from(content, 'utf8');
-      const result = await extractTextFromBuffer(buf, 'application/octet-stream');
+  test('returns error string for corrupted PDF instead of throwing', async () => {
+    const result = await extractAttachmentText('application/pdf', corruptPdfBuffer(), 'corrupt.pdf');
+    expect(typeof result).toBe('string');
+    expect(result).toMatch(/\[Error extracting text from corrupt\.pdf/);
+  });
 
-      expect(result.text).toBe(content);
-    });
+  test('truncates oversized PDF text to token budget', async () => {
+    const maxChars = MAX_ATTACHMENT_TOKENS * 4;
+    // The mock strips the %PDF-1.4\n prefix and returns the rest as text
+    const longBody = 'x'.repeat(maxChars + 1000);
+    const result = await extractAttachmentText(
+      'application/pdf',
+      fakePdfBuffer(longBody),
+      'large.pdf',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.endsWith('\n[truncated]')).toBe(true);
+  });
+});
 
-    it('falls back to UTF-8 decode for completely unknown mime types', async () => {
-      const content = 'custom content';
-      const buf = Buffer.from(content, 'utf8');
-      const result = await extractTextFromBuffer(buf, 'application/x-custom-type');
+// ─── DOCX extraction ──────────────────────────────────────────────────────────
 
-      expect(result.text).toBe(content);
-      expect(result.mimeType).toBe('application/x-custom-type');
-    });
+describe('DOCX extraction', () => {
+  test('extracts raw text from a valid DOCX buffer', async () => {
+    const result = await extractAttachmentText(
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      fakeDocxBuffer('payload'),
+      'document.docx',
+    );
+    expect(result).toBe('Hello from DOCX document.');
+  });
+
+  test('returns empty string for empty DOCX buffer', async () => {
+    // Empty buffer → mock returns { value: '' }
+    const result = await extractAttachmentText(
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      Buffer.alloc(0),
+      'empty.docx',
+    );
+    expect(result).toBe('');
+  });
+
+  test('returns error string for corrupted DOCX instead of throwing', async () => {
+    // Buffer missing PK magic bytes → mock throws
+    const corruptDocx = Buffer.from([0x00, 0x01, 0x02, 0x03]);
+    const result = await extractAttachmentText(
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      corruptDocx,
+      'bad.docx',
+    );
+    expect(typeof result).toBe('string');
+    expect(result).toMatch(/\[Error extracting text from bad\.docx/);
+  });
+});
+
+// ─── Image passthrough ────────────────────────────────────────────────────────
+
+describe('Image content types', () => {
+  test.each(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp'])(
+    'returns null for %s',
+    async (contentType) => {
+      const result = await extractAttachmentText(contentType, Buffer.from('binary'), 'photo.png');
+      expect(result).toBeNull();
+    },
+  );
+});
+
+// ─── Unsupported type ─────────────────────────────────────────────────────────
+
+describe('Unsupported content types', () => {
+  test('returns unsupported message for binary/octet-stream', async () => {
+    const result = await extractAttachmentText(
+      'application/octet-stream',
+      Buffer.from([0x00, 0x01]),
+      'data.bin',
+    );
+    expect(result).toContain('[Unsupported file type: application/octet-stream]');
+  });
+});
+
+// ─── Oversized file guard ─────────────────────────────────────────────────────
+
+describe('Oversized file rejection', () => {
+  test('throws before extraction when file exceeds 10MB', async () => {
+    // 10MB + 1 byte
+    const oversized = Buffer.alloc(MAX_FILE_SIZE_BYTES + 1);
+    await expect(
+      extractAttachmentText('text/plain', oversized, 'huge.txt'),
+    ).rejects.toThrow(/exceeds maximum size/);
+  });
+
+  test('does not throw for file exactly at 10MB limit', async () => {
+    const atLimit = Buffer.alloc(MAX_FILE_SIZE_BYTES, 'a');
+    // Should not throw — text extraction returns the (truncated) content
+    const result = await extractAttachmentText('text/plain', atLimit, 'boundary.txt');
+    expect(typeof result).toBe('string');
   });
 });
