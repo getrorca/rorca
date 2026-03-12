@@ -1213,6 +1213,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         env[k] = v;
       }
     }
+    // Mark subprocess as execution engine so db/index.ts does not register
+    // SIGTERM/SIGINT pool-close handlers inside the child process.
+    env['RORCA_PROCESS_ROLE'] = 'engine';
 
     // 7b. Inject workspace-specific env vars (decrypted)
     const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
@@ -2250,6 +2253,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
         env[k] = v;
       }
     }
+    env['RORCA_PROCESS_ROLE'] = 'engine';
     const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
     for (const [k, v] of Object.entries(workspaceEnvVars)) {
       env[k] = v;
@@ -3107,6 +3111,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
         env[k] = v;
       }
     }
+    env['RORCA_PROCESS_ROLE'] = 'engine';
 
     const wsEnvVars = getWorkspaceEnvVars(originalRun.workspace_id);
     for (const [k, v] of Object.entries(wsEnvVars)) {
