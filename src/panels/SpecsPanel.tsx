@@ -6,7 +6,7 @@ import {
   Search, X, Clock, CheckCircle2, XCircle, AlertCircle,
   Check, ChevronRight, ChevronLeft, Play, GitBranch, GitFork,
   Loader2, Plus, ExternalLink,
-  FileText, Layers, Archive, Inbox, ArrowRight,
+  FileText, File, FileType, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
-import { apiFetch, ApiError } from '../lib/apiFetch';
+import { apiFetch, ApiError, BASE_URL } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { useWalSSE } from '../hooks/useWalSSE';
 import type { PanelId } from '../components/Sidebar';
@@ -2079,6 +2079,11 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Pasted image attachments (uploaded to backend, associated by specId after generation)
   const [pendingAttachments, setPendingAttachments] = useState<Array<{ filename: string; contentType: string; size: number }>>([]);
 
+  // Saved attachments fetched from backend (for existing specs)
+  interface SavedAttachment { id: string; filename: string; contentType: string; fileSize: number; createdAt: string; }
+  const [savedAttachments, setSavedAttachments] = useState<SavedAttachment[]>([]);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(e.clipboardData.items);
     const imageItem = items.find((item) => item.type.startsWith('image/'));
@@ -2166,6 +2171,27 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   }, []);
 
   useEffect(() => { autoResizeBrief(); }, [specBrief, autoResizeBrief]);
+
+  // Fetch saved attachments when spec slug is known (editing existing spec)
+  useEffect(() => {
+    if (!effectiveSlug) { setSavedAttachments([]); return; }
+    apiFetch<SavedAttachment[]>(`/api/specs/${encodeURIComponent(effectiveSlug)}/attachments`, { silent: true })
+      .then(setSavedAttachments)
+      .catch(() => setSavedAttachments([]));
+  }, [effectiveSlug]);
+
+  const handleDeleteAttachment = useCallback(async (id: string) => {
+    if (!effectiveSlug) return;
+    setDeletingIds((prev) => new Set(prev).add(id));
+    try {
+      await apiFetch(`/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      setSavedAttachments((prev) => prev.filter((a) => a.id !== id));
+    } catch {
+      showToast('Failed to delete attachment', 'error');
+    } finally {
+      setDeletingIds((prev) => { const s = new Set(prev); s.delete(id); return s; });
+    }
+  }, [effectiveSlug, showToast]);
 
   // Fetch models and config
   useEffect(() => {
@@ -2425,16 +2451,77 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
               Attach files
             </button>
           </div>
-          {pendingAttachments.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {pendingAttachments.map((att) => (
-                <span key={att.filename} className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] bg-accent/10 text-accent rounded border border-accent/20">
-                  <FileText size={10} />
-                  {att.filename}
-                </span>
-              ))}
-            </div>
-          )}
+          {/* Attachment list — saved (from backend) + pending (local uploads) */}
+          {(() => {
+            const formatSize = (bytes: number) => bytes < 1024 * 1024
+              ? `${(bytes / 1024).toFixed(1)} KB`
+              : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+            const getFileIcon = (contentType: string, filename: string) => {
+              if (contentType.startsWith('image/')) return null;
+              if (contentType === 'application/pdf' || filename.endsWith('.pdf')) return <FileType size={14} className="text-muted shrink-0" />;
+              if (contentType === 'text/markdown' || filename.endsWith('.md') || contentType === 'text/plain' || filename.endsWith('.txt')) return <FileText size={14} className="text-muted shrink-0" />;
+              return <File size={14} className="text-muted shrink-0" />;
+            };
+
+            const hasSaved = savedAttachments.length > 0;
+            const hasPending = pendingAttachments.length > 0;
+
+            if (!hasSaved && !hasPending) {
+              return (
+                <p className="mt-2 text-[11px] text-muted/60 italic px-1">
+                  No attachments yet. Paste an image or click paperclip to attach files.
+                </p>
+              );
+            }
+
+            return (
+              <div className="mt-2 space-y-1.5">
+                {savedAttachments.map((att) => (
+                  <div key={att.id} className="flex items-center gap-2 px-2 py-1.5 bg-panel border border-border rounded-lg group">
+                    {att.contentType.startsWith('image/') ? (
+                      <img
+                        src={`${BASE_URL}/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(att.id)}`}
+                        alt={att.filename}
+                        style={{ maxHeight: 80 }}
+                        className="rounded object-contain shrink-0"
+                      />
+                    ) : (
+                      getFileIcon(att.contentType, att.filename)
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-text truncate">{att.filename}</p>
+                      <p className="text-[10px] text-muted">{formatSize(att.fileSize)} · {relativeTime(att.createdAt)}</p>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label={`Delete ${att.filename}`}
+                      disabled={deletingIds.has(att.id)}
+                      onClick={() => handleDeleteAttachment(att.id)}
+                      className="opacity-0 group-hover:opacity-100 p-1 rounded text-muted hover:text-red-500 disabled:opacity-40 transition-all"
+                    >
+                      {deletingIds.has(att.id) ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
+                    </button>
+                  </div>
+                ))}
+                {pendingAttachments.map((att) => (
+                  <div key={att.filename} className="flex items-center gap-2 px-2 py-1.5 bg-accent/5 border border-accent/20 rounded-lg">
+                    {att.contentType.startsWith('image/') ? (
+                      <div className="w-10 h-10 rounded bg-accent/10 flex items-center justify-center shrink-0">
+                        <FileText size={14} className="text-accent" />
+                      </div>
+                    ) : (
+                      getFileIcon(att.contentType, att.filename)
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-accent truncate">{att.filename}</p>
+                      <p className="text-[10px] text-muted">{formatSize(att.size)} · pending</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
           {/* Skills count indicator */}
           {skillsCount !== null && (
             <div className="mt-1.5 px-1">
