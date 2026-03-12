@@ -2,7 +2,7 @@
   "specId": "Rorca Context Usage Visibility — Spec Generation & Run View",
   "runId": 67,
   "startedAt": "2026-03-12T20:18:32.740Z",
-  "lastUpdatedAt": "2026-03-12T20:26:00.973Z",
+  "lastUpdatedAt": "2026-03-12T20:30:18.621Z",
   "completedStories": [
     {
       "storyId": "CU-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 169837
+    },
+    {
+      "storyId": "CU-004",
+      "title": "Injected context files list in ContextSummaryCard",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:26:15.137Z",
+      "finishedAt": "2026-03-12T20:30:18.621Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 243484
     }
   ],
   "failedStories": [],
