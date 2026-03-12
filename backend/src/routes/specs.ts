@@ -647,7 +647,7 @@ interface SpecDiffResult {
  *               title: { type: string, description: "Optional — auto-generated from brief if omitted", example: "User Authentication" }
  *               brief: { type: string, example: "Add login/register with JWT tokens" }
  *               storyCount: { type: integer, default: 5 }
- *               model: { type: string, example: "claude-sonnet-4-5-20250929" }
+ *               model: { type: string, example: "claude-sonnet-4-6" }
  *               domain: { type: string }
  *               diagramTypes: { type: array, items: { type: string } }
  *               storyAnnotations: { type: string }
@@ -9223,7 +9223,7 @@ router.post('/:specId/suggest-models', async (req: Request, res: Response) => {
 - Stories with 0-1 dependencies and few acceptance criteria can use faster/cheaper models.
 
 Respond with valid JSON only, no markdown fences. Format:
-{ "suggestions": [{ "storyId": "US-001", "suggestedModel": "claude-sonnet-4-5-20250929", "confidence": 0.85, "reason": "Standard feature with moderate complexity — Sonnet is sufficient" }] }
+{ "suggestions": [{ "storyId": "US-001", "suggestedModel": "claude-sonnet-4-6", "confidence": 0.85, "reason": "Standard feature with moderate complexity — Sonnet is sufficient" }] }
 
 confidence is 0.0-1.0 where 1.0 = highly confident this is the right model.
 
