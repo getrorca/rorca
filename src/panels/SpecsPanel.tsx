@@ -2152,6 +2152,43 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     }
   }, [showToast]);
 
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only clear if leaving the drop zone itself (not entering a child)
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDraggingOver(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+    for (const file of files) {
+      showToast(`Uploading ${file.name}...`, 'info');
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+        setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
+        showToast(`Uploaded ${file.name}`, 'success');
+      } catch {
+        showToast(`Upload failed: ${file.name}`, 'error');
+      }
+    }
+  }, [showToast]);
+
   // Model accept handler — PUTs the accepted model to the story on disk
   const handleModelAccepted = useCallback(async (storyId: string, model: string) => {
     if (!generatedSpec || !workspaceId) return;
@@ -2446,7 +2483,17 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
       {/* Brief textarea */}
       {(!generatedSpec || isGenerating) && (
-        <div>
+        <div
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`relative transition-colors rounded-lg ${isDraggingOver ? 'ring-2 ring-accent border-accent' : ''}`}
+        >
+          {isDraggingOver && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-accent/10 border-2 border-dashed border-accent pointer-events-none">
+              <span className="text-sm font-medium text-accent">Drop files here</span>
+            </div>
+          )}
           <textarea
             ref={briefRef} rows={6} value={specBrief}
             onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
