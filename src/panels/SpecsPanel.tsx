@@ -6,7 +6,7 @@ import {
   Search, X, Clock, CheckCircle2, XCircle, AlertCircle,
   Check, ChevronRight, ChevronLeft, Play, GitBranch, GitFork,
   Loader2, Plus, ExternalLink,
-  FileText, File, FileType, Layers, Archive, Inbox, ArrowRight,
+  FileText, File as FileIcon, FileType, Layers, Archive, Inbox, ArrowRight,
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
@@ -2480,7 +2480,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
               if (contentType.startsWith('image/')) return null;
               if (contentType === 'application/pdf' || filename.endsWith('.pdf')) return <FileType size={14} className="text-muted shrink-0" />;
               if (contentType === 'text/markdown' || filename.endsWith('.md') || contentType === 'text/plain' || filename.endsWith('.txt')) return <FileText size={14} className="text-muted shrink-0" />;
-              return <File size={14} className="text-muted shrink-0" />;
+              return <FileIcon size={14} className="text-muted shrink-0" />;
             };
 
             const hasSaved = savedAttachments.length > 0;

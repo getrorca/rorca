@@ -1,38 +1,18 @@
 {
-  "specId": "collapsible-left-nav-drag-to-close",
-  "runId": 54,
-  "startedAt": "2026-03-12T08:12:11.075Z",
-  "lastUpdatedAt": "2026-03-12T08:19:39.250Z",
+  "specId": "rorca-post-run-qa",
+  "runId": 61,
+  "startedAt": "2026-03-12T08:34:23.363Z",
+  "lastUpdatedAt": "2026-03-12T09:15:48.429Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Implement drag-to-collapse threshold and snap behavior",
+      "storyId": "QA-001",
+      "title": "Frontend TypeScript validation and error resolution",
       "status": "passed",
-      "startedAt": "2026-03-12T08:12:11.726Z",
-      "finishedAt": "2026-03-12T08:14:29.381Z",
+      "startedAt": "2026-03-12T08:35:52.778Z",
+      "finishedAt": "2026-03-12T09:15:48.429Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 137655
-    },
-    {
-      "storyId": "US-002",
-      "title": "Add double-click toggle on drag handle",
-      "status": "passed",
-      "startedAt": "2026-03-12T08:15:46.486Z",
-      "finishedAt": "2026-03-12T08:17:14.594Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 88108
-    },
-    {
-      "storyId": "US-003",
-      "title": "Render icon-only sidebar in collapsed state",
-      "status": "passed",
-      "startedAt": "2026-03-12T08:17:29.293Z",
-      "finishedAt": "2026-03-12T08:19:39.250Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 129957
+      "elapsedMs": 2395651
     }
   ],
   "failedStories": [],
