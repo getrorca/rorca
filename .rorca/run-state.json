@@ -1,98 +1,18 @@
 {
-  "specId": "rorca-mcp-cli",
-  "runId": 46,
-  "startedAt": "2026-03-12T05:51:51.758Z",
-  "lastUpdatedAt": "2026-03-12T06:48:15.784Z",
+  "specId": "Fix Quick Run spec generation to use the full direction + memory context cascade.\n\nPOST /api/pipeline/quick-run in backend/src/routes/pipeline.ts generates a 1-story spec with a bare LLM call (step 7, quickRunPrompt) that has no awareness of the workspace's direction stack, MEMORY.md, or installed skills. Fix this so the spec is generated with the same context that regular POST /api/specs/generate uses.\n\nChanges needed in backend/src/routes/pipeline.ts:\n\nAfter resolving the workspace, call synthesize(workspaceId, domain) from backend/src/lib/direction-stack.ts to get the merged L1–L3 direction context string.\n\nRead MEMORY.md from the workspace root (path.join(workspace.path, 'MEMORY.md')) — if it exists, include the first 2000 chars prefixed with === MEMORY.md ===.\n\nRead installed skills from GET /api/skills?workspaceId= internally (or query the DB directly) — include skill names + descriptions as a brief list prefixed with === INSTALLED SKILLS ===.\n\nPrepend all three context blocks to the quickRunPrompt before the === INSTRUCTIONS === section. If a block is empty/missing, skip it silently.\n\nIncrease the acceptance criteria limit from 5 to 8 to match the richer context now available.\n\nThe LLM call itself (chatComplete) stays unchanged — only the prompt content changes. The spec JSON schema and pipeline trigger logic are untouched.",
+  "runId": 49,
+  "startedAt": "2026-03-12T07:21:12.666Z",
+  "lastUpdatedAt": "2026-03-12T07:51:03.324Z",
   "completedStories": [
     {
-      "storyId": "MC-001",
-      "title": "rorca_forge_and_run — Brief-to-Completion Single MCP Tool",
+      "storyId": "US-007",
+      "title": "Write Jest unit tests for Quick Run context injection logic",
       "status": "passed",
-      "startedAt": "2026-03-12T05:52:32.095Z",
-      "finishedAt": "2026-03-12T06:00:05.165Z",
+      "startedAt": "2026-03-12T07:21:13.395Z",
+      "finishedAt": "2026-03-12T07:51:03.324Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 453070
-    },
-    {
-      "storyId": "MC-002",
-      "title": "rorca_cancel_run MCP Tool",
-      "status": "passed",
-      "startedAt": "2026-03-12T06:00:23.290Z",
-      "finishedAt": "2026-03-12T06:03:22.173Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 178883
-    },
-    {
-      "storyId": "MC-004",
-      "title": "MCP Tools Tree View in rorca VS Code Extension",
-      "status": "passed",
-      "startedAt": "2026-03-12T06:03:44.590Z",
-      "finishedAt": "2026-03-12T06:10:39.324Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 414734
-    },
-    {
-      "storyId": "MC-006",
-      "title": "VS Code Extension Settings Contribution Point Schema",
-      "status": "passed",
-      "startedAt": "2026-03-12T06:11:09.676Z",
-      "finishedAt": "2026-03-12T06:17:21.373Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 371696
-    },
-    {
-      "storyId": "MC-007",
-      "title": "MCP Tool Error Recovery and Offline Graceful Degradation",
-      "status": "passed",
-      "startedAt": "2026-03-12T06:17:44.097Z",
-      "finishedAt": "2026-03-12T06:31:47.460Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 843363
-    },
-    {
-      "storyId": "MC-009",
-      "title": "rorca-vscode Extension Package Scaffold",
-      "status": "passed",
-      "startedAt": "2026-03-12T06:32:06.576Z",
-      "finishedAt": "2026-03-12T06:37:06.513Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 299937
-    },
-    {
-      "storyId": "MC-010",
-      "title": "Spec Tree View Provider — V2-060 Feature Properly Built",
-      "status": "passed",
-      "startedAt": "2026-03-12T06:37:25.241Z",
-      "finishedAt": "2026-03-12T06:41:44.440Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 259199
-    },
-    {
-      "storyId": "MC-011",
-      "title": "JWT Auth and Server Connection Management",
-      "status": "passed",
-      "startedAt": "2026-03-12T06:42:02.824Z",
-      "finishedAt": "2026-03-12T06:45:32.974Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 210150
-    },
-    {
-      "storyId": "MC-012",
-      "title": "VSIX Packaging and Marketplace Publish Workflow",
-      "status": "passed",
-      "startedAt": "2026-03-12T06:45:47.123Z",
-      "finishedAt": "2026-03-12T06:48:15.784Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 148661
+      "elapsedMs": 1789929
     }
   ],
   "failedStories": [],
