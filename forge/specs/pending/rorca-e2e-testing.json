@@ -27,7 +27,7 @@
         "globalSetup.ts: starts backend if not running, waits for /api/health to return 200",
         "globalTeardown.ts: kills test backend process",
         "Test uses a separate test DB (rorca-test.db) not the production DB",
-        "DB_PATH env var (not RORCA_DB_PATH — see backend/.env docs) set to test DB path in globalSetup",
+        "DB_PATH env var (not RORCA_DB_PATH \u2014 see backend/.env docs) set to test DB path in globalSetup",
         "After each test: DB reset to known seed state via SQL reset script",
         "Frontend dev server started on port 5211 for tests (separate from dev port 5210); playwright.config.ts baseURL updated to http://localhost:5211 for test runs",
         "Backend started on port 3031 for tests",
@@ -81,9 +81,9 @@
     {
       "id": "E2E-005",
       "title": "Mock Server for Isolated API Tests",
-      "description": "A mock server intercepts external API calls (Linear, GitHub, Vercel, Slack) for integration tests. MSW (Mock Service Worker) intercepts browser-side fetch only — backend Express calls to external APIs require Node.js-level interception via nock.",
+      "description": "A mock server intercepts external API calls (Linear, GitHub, Vercel, Slack) for integration tests. MSW (Mock Service Worker) intercepts browser-side fetch only \u2014 backend Express calls to external APIs require Node.js-level interception via nock.",
       "acceptanceCriteria": [
-        "nock configured for Node.js-level HTTP interception (intercepts Express → external API calls in test mode)",
+        "nock configured for Node.js-level HTTP interception (intercepts Express \u2192 external API calls in test mode)",
         "msw (Mock Service Worker) configured separately for browser-level API interception (frontend fetch calls)",
         "nock interceptors for: Linear GraphQL, GitHub REST, Vercel REST, Slack Web API",
         "Mock responses return realistic data structures",
@@ -1081,7 +1081,7 @@
       "title": "Integration Smoke Test Suite",
       "description": "A fast subset of tests that run in < 2 minutes for quick PR validation.",
       "acceptanceCriteria": [
-        "@smoke tag applied to: E2E-009, E2E-010, E2E-011, E2E-013, E2E-021, E2E-025 (E2E-037 Lighthouse excluded from smoke — 30-90s runtime violates < 2 min smoke budget)",
+        "@smoke tag applied to: E2E-009, E2E-010, E2E-011, E2E-013, E2E-021, E2E-025 (E2E-037 Lighthouse excluded from smoke \u2014 30-90s runtime violates < 2 min smoke budget)",
         "npm run test:e2e:smoke runs only @smoke tagged tests",
         "Smoke suite completes in < 2 minutes on single worker",
         "Smoke suite runs first in CI before full suite",
@@ -1112,6 +1112,96 @@
       "dependsOn": [
         "E2E-009",
         "E2E-051"
+      ],
+      "passes": false
+    },
+    {
+      "id": "E2E-059",
+      "title": "Visual Regression Baselines with Playwright Screenshot Diffing",
+      "description": "SOTA E2E suites in 2026 include visual regression as a first-class test type. Playwright's built-in `expect(page).toHaveScreenshot()` captures pixel-level baselines and diffs on subsequent runs. This prevents unintended UI regressions when stories modify shared components like Sidebar, SpecsPanel, or the settings pages. Capture baselines for: Specs kanban board (populated), Run View (active run), Settings > Providers page, Direction panel, and Analytics panel. Visual regression tests run separately from functional tests (tagged `@visual`) so they don't block CI on intentional UI changes \u2014 they alert, not fail by default, unless a diff threshold is exceeded. Use `maxDiffPixelRatio: 0.02` (2% tolerance) to handle font rendering differences across machines.",
+      "acceptanceCriteria": [
+        "@playwright/test snapshot configuration added to playwright.config.ts: snapshotPathTemplate with OS-specific subdirectory (darwin/, linux/, win32/)",
+        "visual regression test file: tests/visual/baselines.spec.ts \u2014 tagged @visual",
+        "Baseline screenshots captured for: /specs (kanban with \u22652 cards), /runs (list with \u22651 run), /settings/providers, /direction, /analytics",
+        "Each screenshot uses await expect(page).toHaveScreenshot('page-name.png', { maxDiffPixelRatio: 0.02, fullPage: false })",
+        "Visual tests pass on first run (create baselines) and on subsequent runs with no UI changes",
+        "Intentional UI change (e.g., change a border color) causes test to fail with a diff image in test-results/",
+        "Diff images show highlighted changed pixels using Playwright's built-in diff viewer",
+        "npm run test:visual script in root package.json runs only @visual-tagged tests: `playwright test --grep @visual`",
+        "Baseline PNG files committed to git under tests/visual/snapshots/ \u2014 not gitignored",
+        "README section added explaining how to update baselines: `npx playwright test --update-snapshots`"
+      ],
+      "dependsOn": [
+        "E2E-001",
+        "E2E-003"
+      ],
+      "passes": false
+    },
+    {
+      "id": "E2E-060",
+      "title": "Automated Accessibility Audit with @axe-core/playwright on All 5 Main Panels",
+      "description": "WCAG 2.1 AA compliance is table stakes for any serious SaaS product in 2026. Automated axe-core testing catches 30-40% of accessibility issues before manual review. Add @axe-core/playwright to the E2E suite and run accessibility checks on every main panel: Specs, Runs, Analytics, Direction, Settings. Each test navigates to the panel, waits for content to load, then runs `await checkA11y(page)` \u2014 which uses axe-core under the hood and fails the test if any critical or serious violations are found. This pairs with the manual a11y work in the codebase audit (CA-019, CA-020) by providing a regression gate that prevents future violations from being introduced. All violations found during the test run should be auto-fixed if they're simple (missing aria-label on icon buttons, missing alt text) or logged as GitHub issues if complex.",
+      "acceptanceCriteria": [
+        "@axe-core/playwright installed as dev dependency in root package.json",
+        "Accessibility test file: tests/a11y/panels.spec.ts \u2014 tagged @a11y",
+        "Tests cover: /specs, /runs, /analytics, /direction, /settings/general",
+        "Each test: navigate to panel \u2192 wait for main content to load (no spinner visible) \u2192 await checkA11y(page, undefined, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } })",
+        "Zero critical violations on all 5 panels (critical = must fix)",
+        "Serious violations auto-reported to console as a structured list: { id, impact, description, nodes[] }",
+        "Test suite passes when only 'minor' or 'moderate' violations remain (these are logged but non-blocking)",
+        "Any auto-fixable violations found (e.g., missing aria-label on <button>) are fixed inline as part of this story",
+        "npm run test:a11y script in root package.json: `playwright test --grep @a11y`",
+        "CI job defined in .github/workflows/a11y.yml runs on push to main and on PR"
+      ],
+      "dependsOn": [
+        "E2E-001",
+        "E2E-056"
+      ],
+      "passes": false
+    },
+    {
+      "id": "E2E-061",
+      "title": "Performance Budget Assertions \u2014 LCP < 2.5s, TBT < 200ms, Bundle < 500KB",
+      "description": "Performance budgets are non-negotiable for SOTA products. Google's Core Web Vitals set the bar: LCP (Largest Contentful Paint) < 2.5s = Good, TBT (Total Blocking Time) < 200ms = Good. Playwright can measure these via `page.evaluate(() => performance.getEntriesByType(...))` and Chrome DevTools Protocol. Add performance tests that load the main Rorca app, measure key Web Vitals, and fail if budgets are exceeded. Also assert the production bundle size stays under 500KB gzipped (from npm run build output). These tests catch performance regressions before they reach users \u2014 especially important as the bundle grows with new panels and dependencies.",
+      "acceptanceCriteria": [
+        "Performance test file: tests/perf/budgets.spec.ts \u2014 tagged @perf",
+        "Test uses browserType: 'chromium' with args: ['--enable-precise-memory-info'] for accurate metrics",
+        "LCP measurement: navigate to /, wait for networkidle, then evaluate PerformanceObserver LCP entry \u2014 assert < 2500ms",
+        "TBT measurement: use CDP Performance.enable() + evaluate long tasks \u2014 assert sum of blocking time < 200ms",
+        "FCP (First Contentful Paint) measured and logged (non-blocking) for trend tracking",
+        "Bundle size check: after npm run build, parse dist/assets/ and assert total JS size gzipped < 500KB",
+        "Bundle size check uses native Node.js zlib.gzipSync() to measure compressed size",
+        "Tests run against production build (npm run build + serve) not the dev server",
+        "Performance results logged as structured JSON to tests/perf/results-{timestamp}.json for trend analysis",
+        "npm run test:perf script in root package.json: `playwright test --grep @perf`",
+        "Failure output is human-readable: 'LCP: 3200ms (budget: 2500ms) \u2014 EXCEEDED by 700ms'"
+      ],
+      "dependsOn": [
+        "E2E-001",
+        "E2E-003"
+      ],
+      "passes": false
+    },
+    {
+      "id": "E2E-062",
+      "title": "Mobile Viewport Smoke Tests \u2014 Core Flows at 375x812px (iPhone SE)",
+      "description": "Rorca targets power users who may occasionally use it on mobile to monitor runs or review specs. The app should be functional (not necessarily pixel-perfect) at 375x812px (iPhone SE viewport). Mobile viewport testing with Playwright verifies that: (1) the app loads without horizontal scroll, (2) the sidebar collapses to a hamburger menu or icon-only state, (3) the kanban board scrolls horizontally without overflow, (4) Run View terminal is readable, (5) key actions (approve spec, trigger run) are tappable. These tests run with { isMobile: true, viewport: { width: 375, height: 812 } } in the Playwright project config. Any layout breakages found are fixed inline as part of this story.",
+      "acceptanceCriteria": [
+        "Mobile test project added to playwright.config.ts: { name: 'mobile-chrome', use: { ...devices['iPhone SE'] } }",
+        "Mobile smoke test file: tests/mobile/smoke.spec.ts \u2014 tagged @mobile",
+        "Test: navigate to / at 375x812 \u2192 assert no horizontal scrollbar (document.documentElement.scrollWidth <= 375)",
+        "Sidebar at mobile: either collapsed to icon-only or hidden behind hamburger \u2014 verify sidebar nav items are reachable",
+        "Specs panel: kanban board horizontally scrollable \u2014 assert all columns reachable without layout overflow",
+        "Run View: terminal text readable \u2014 assert font-size \u2265 12px in the xterm container",
+        "Settings panel: all sub-tabs reachable on mobile \u2014 scrollable tab nav",
+        "Approve Spec button in SpecDetailSlideOver: tappable at mobile (min touch target 44x44px)",
+        "No fixed-position elements overflow the viewport at 375px",
+        "Any layout bugs found (overflow, tiny touch targets, unreadable text) are fixed in the same PR as this story",
+        "npm run test:mobile script in root package.json: `playwright test --project=mobile-chrome --grep @mobile`"
+      ],
+      "dependsOn": [
+        "E2E-003",
+        "E2E-006"
       ],
       "passes": false
     }

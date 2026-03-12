@@ -76,6 +76,7 @@ import pinoHttp from 'pino-http';
 import { startGraphPopulator } from './lib/graph-populator';
 import workspaceDriftRouter from './routes/workspace-drift';
 import { startDriftSubscriber } from './lib/drift-subscriber';
+import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 
 dotenv.config();
@@ -253,6 +254,7 @@ app.use('/api/workspaces', contextFilesRouter);
 app.use('/api/conventions', conventionsRouter);
 app.use('/api/packs', packsRouter);
 app.use('/api/skills', skillsRouter);
+app.use('/api/attachments', attachmentsRouter);
 app.use('/api/personas', personasRouter);
 app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);
