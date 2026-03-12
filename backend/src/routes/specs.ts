@@ -5292,6 +5292,170 @@ router.get('/:specId/check', async (req: Request, res: Response) => {
   }
 });
 
+// ─── SV-002: GET /:specId/score — AC quality scoring ─────────────────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/score:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Compute quality score for a spec's acceptance criteria
+ *     operationId: scoreSpec
+ *     description: >
+ *       Scores each story's acceptance criteria on a 0-100 scale using three
+ *       dimensions: AC count (base score), specificity (penalty for vague
+ *       phrases like "properly", "correctly", "as expected"), and state
+ *       coverage (bonus for mentioning error, empty, and loading states).
+ *       Returns per-story scores and an aggregate spec score (average).
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Quality score result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specScore:
+ *                   type: number
+ *                   description: Aggregate score 0-100 (average of all story scores)
+ *                 stories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       score: { type: number }
+ *                       acCount: { type: integer }
+ *                       vaguePhrasesFound:
+ *                         type: array
+ *                         items: { type: string }
+ *                       stateCoverage:
+ *                         type: object
+ *                         properties:
+ *                           error: { type: boolean }
+ *                           empty: { type: boolean }
+ *                           loading: { type: boolean }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ */
+router.get('/:specId/score', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const workspaceId = req.query.workspaceId as string;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let content: any;
+    if (fs.existsSync(pendingFile)) {
+      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories: any[] = content.userStories ?? content.stories ?? [];
+
+    // Vague phrases that indicate non-measurable acceptance criteria
+    const VAGUE_PHRASES = [
+      'properly', 'correctly', 'as expected', 'appropriate', 'suitable',
+      'should work', 'must work', 'works correctly', 'works properly',
+      'behaves correctly', 'behaves properly', 'functions correctly',
+      'functions properly', 'handles correctly', 'handles properly',
+    ];
+
+    // State coverage patterns
+    const ERROR_PATTERNS = /\b(error|errors|fail|failure|failures|exception|invalid|unauthorized|forbidden|not found|500|404|400|401|403)\b/i;
+    const EMPTY_PATTERNS = /\b(empty|no results|no items|no data|no records|zero results|empty state|nothing found)\b/i;
+    const LOADING_PATTERNS = /\b(loading|load|spinner|skeleton|pending|fetching|in progress|progress)\b/i;
+
+    interface StoryScore {
+      id: string;
+      score: number;
+      acCount: number;
+      vaguePhrasesFound: string[];
+      stateCoverage: { error: boolean; empty: boolean; loading: boolean };
+    }
+
+    const storyScores: StoryScore[] = stories.map((story: any) => {
+      const sid = typeof story.id === 'string' ? story.id : '(unknown)';
+      const acs: string[] = Array.isArray(story.acceptanceCriteria) ? story.acceptanceCriteria.filter((ac: any) => typeof ac === 'string') : [];
+      const acCount = acs.length;
+      const allAcText = acs.join(' ');
+
+      // Base score from AC count:
+      // 0 AC = 0pt, 1-2 AC = 20pt, 3-4 AC = 40pt, 5-6 AC = 60pt, 7+ AC = 70pt (diminishing returns cap)
+      let baseScore: number;
+      if (acCount === 0) {
+        baseScore = 0;
+      } else if (acCount <= 2) {
+        baseScore = 20;
+      } else if (acCount <= 4) {
+        baseScore = 40;
+      } else if (acCount <= 6) {
+        baseScore = 60;
+      } else {
+        baseScore = 70;
+      }
+
+      // Specificity penalty: -5pt per unique vague phrase found, min 0
+      const vaguePhrasesFound: string[] = [];
+      for (const phrase of VAGUE_PHRASES) {
+        if (allAcText.toLowerCase().includes(phrase.toLowerCase()) && !vaguePhrasesFound.includes(phrase)) {
+          vaguePhrasesFound.push(phrase);
+        }
+      }
+      const specificityPenalty = vaguePhrasesFound.length * 5;
+
+      // State coverage bonus: +10pt each for error/empty/loading mentions (max +30pt)
+      const stateCoverage = {
+        error: ERROR_PATTERNS.test(allAcText),
+        empty: EMPTY_PATTERNS.test(allAcText),
+        loading: LOADING_PATTERNS.test(allAcText),
+      };
+      const coverageBonus = (stateCoverage.error ? 10 : 0) + (stateCoverage.empty ? 10 : 0) + (stateCoverage.loading ? 10 : 0);
+
+      const score = Math.min(100, Math.max(0, baseScore - specificityPenalty + coverageBonus));
+
+      return { id: sid, score, acCount, vaguePhrasesFound, stateCoverage };
+    });
+
+    const specScore = storyScores.length > 0
+      ? Math.round(storyScores.reduce((sum, s) => sum + s.score, 0) / storyScores.length)
+      : 0;
+
+    res.json({ specScore, stories: storyScores });
+  } catch (error: any) {
+    logger.error('[Specs] Score error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── DELETE /:specId — Hard-delete a spec (any status) ──────────────────────
 
 /**
