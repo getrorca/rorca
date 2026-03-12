@@ -7,7 +7,8 @@ interface ContextSummaryCardProps {
   isGenerating?: boolean;
 }
 
-function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
+function StatusBadge({ ok, label, title, tokens }: { ok: boolean; label: string; title?: string | null; tokens?: number }) {
+  const displayLabel = ok && title ? `${label} ${title}` : label;
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
@@ -16,7 +17,12 @@ function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
       aria-label={`${label}: ${ok ? 'present' : 'missing'}`}
     >
       {ok ? <Check className="w-3 h-3" /> : <X className="w-3 h-3" />}
-      {label}
+      {displayLabel}
+      {ok && tokens != null && tokens > 0 && (
+        <span className="ml-1 px-1 py-0 rounded bg-success/20 text-[10px] font-mono text-success">
+          {tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : tokens} tok
+        </span>
+      )}
     </span>
   );
 }
@@ -106,6 +112,7 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
             <StatusBadge ok={directionLayers.l1} label="L1" />
             <StatusBadge ok={directionLayers.l2.present} label="L2" />
             <StatusBadge ok={directionLayers.l3} label="L3" />
+
             {skills.length > 0 && (
               <span className="text-[10px] text-muted font-medium px-1.5 py-0.5 bg-muted/10 rounded-full">
                 {skills.length} skill{skills.length !== 1 ? 's' : ''}
@@ -120,12 +127,36 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
         <div className="px-3 pb-3 space-y-3 border-t border-border/50">
           {/* Direction layers */}
           <div className="flex flex-wrap items-center gap-1.5 pt-2">
-            <StatusBadge ok={directionLayers.l1} label="L1 Standards" />
-            <StatusBadge
-              ok={directionLayers.l2.present}
-              label={directionLayers.l2.domain ? `L2 ${directionLayers.l2.domain}` : 'L2 Conventions'}
-            />
-            <StatusBadge ok={directionLayers.l3} label="L3 Project" />
+            {directionLayers.l1 ? (
+              <StatusBadge
+                ok={true}
+                label="L1"
+                title={directionLayers.l1Title ?? 'Standards'}
+                tokens={directionLayers.l1Tokens}
+              />
+            ) : (
+              <StatusBadge ok={false} label="L1 Standards" />
+            )}
+            {directionLayers.l2.present ? (
+              <StatusBadge
+                ok={true}
+                label="L2"
+                title={directionLayers.l2Title ?? (directionLayers.l2.domain ? directionLayers.l2.domain : 'Conventions')}
+                tokens={directionLayers.l2Tokens}
+              />
+            ) : (
+              <StatusBadge ok={false} label={directionLayers.l2.domain ? `L2 ${directionLayers.l2.domain}` : 'L2 Conventions'} />
+            )}
+            {directionLayers.l3 ? (
+              <StatusBadge
+                ok={true}
+                label="L3"
+                title={directionLayers.l3Title ?? 'Project'}
+                tokens={directionLayers.l3Tokens}
+              />
+            ) : (
+              <StatusBadge ok={false} label="L3 Project" />
+            )}
           </div>
 
           {/* Context files row */}
