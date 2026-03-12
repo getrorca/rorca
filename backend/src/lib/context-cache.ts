@@ -208,11 +208,11 @@ export async function getDirectionLayers(workspaceId: string): Promise<Direction
   );
 
   // Get workspace domain
-  const wsRow = await queryOne<{ domains: string | null }>(
-    'SELECT domains FROM workspaces WHERE id = $1',
+  const wsRow = await queryOne<{ domain: string | null }>(
+    'SELECT domain FROM workspaces WHERE id = $1',
     [workspaceId],
   );
-  const domain = wsRow?.domains;
+  const domain = wsRow?.domain;
 
   // L2: domain conventions
   const l2Row = domain
@@ -290,7 +290,9 @@ export async function getRecentMemory(workspaceId: string): Promise<Array<{ text
     [workspaceId],
   );
 
-  const entries = rows.map(r => ({ text: r.content, ts: r.created_at }));
+  const entries = rows
+    .filter(r => r.content.length > 0)
+    .map(r => ({ text: r.content, ts: r.created_at }));
 
   set(cacheKey, entries, 'warm');
   return entries;
@@ -308,7 +310,8 @@ export async function getInstalledSkills(workspaceId: string): Promise<Array<{ n
   }
 
   const rows = await query<{ name: string; content: string }>(
-    `SELECT name, content FROM installed_skills`,
+    `SELECT name, content FROM installed_skills WHERE workspace_id = $1`,
+    [workspaceId],
   );
 
   set(cacheKey, rows, 'warm');

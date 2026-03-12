@@ -36,11 +36,6 @@ export function startGraphPopulator(): void {
 }
 
 async function handleWalEvent(event: WalEvent): Promise<void> {
-  logger.info(
-    { eventType: event.event_type, specId: event.spec_id, storyId: event.story_id, walEventId: event.id },
-    '[graph-populator] Received WAL event',
-  );
-
   switch (event.event_type) {
     case 'run_finished':
       await handleRunFinished(event);
@@ -66,7 +61,10 @@ async function handleWalEvent(event: WalEvent): Promise<void> {
 // ── Per-story graph population (SW-005) ─────────────────────────────────────
 
 async function handleStoryCompleted(event: WalEvent, status: 'pass' | 'fail'): Promise<void> {
-  logger.info({ storyId: event.story_id, status }, '[graph-populator] handleStoryCompleted dispatched');
+  logger.info(
+    { eventType: event.event_type, storyId: event.story_id, specId: event.spec_id, status },
+    '[graph-populator] handleStoryCompleted received WAL event',
+  );
   if (!(await isGraphAvailable())) return;
 
   let payload: { run_id?: number; story_id?: string; story_title?: string };
@@ -131,7 +129,10 @@ async function handleStoryCompleted(event: WalEvent, status: 'pass' | 'fail'): P
 // ── Memory graph population (SW-005) ────────────────────────────────────────
 
 async function handleMemoryCreated(event: WalEvent): Promise<void> {
-  logger.info({ storyId: event.story_id, eventType: event.event_type }, '[graph-populator] handleMemoryCreated dispatched');
+  logger.info(
+    { eventType: event.event_type, storyId: event.story_id, specId: event.spec_id },
+    '[graph-populator] handleMemoryCreated received WAL event',
+  );
   if (!(await isGraphAvailable())) return;
 
   let payload: { storyId?: string; categories?: string[]; id?: string; category?: string };
@@ -161,7 +162,10 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
 // ── Existing handlers ───────────────────────────────────────────────────────
 
 async function handleRunFinished(event: WalEvent): Promise<void> {
-  logger.info({ specId: event.spec_id }, '[graph-populator] handleRunFinished dispatched');
+  logger.info(
+    { eventType: event.event_type, specId: event.spec_id, workspaceId: event.workspace_id },
+    '[graph-populator] handleRunFinished received WAL event',
+  );
   if (!(await isGraphAvailable())) return;
 
   let payload: { run_id?: number; status?: string };
@@ -190,7 +194,10 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
 }
 
 async function handleSpecApproved(event: WalEvent): Promise<void> {
-  logger.info({ specId: event.spec_id, workspaceId: event.workspace_id }, '[graph-populator] handleSpecApproved dispatched');
+  logger.info(
+    { eventType: event.event_type, specId: event.spec_id, workspaceId: event.workspace_id },
+    '[graph-populator] handleSpecApproved received WAL event',
+  );
   if (!(await isGraphAvailable())) return;
 
   if (!event.spec_id || !event.workspace_id) return;
