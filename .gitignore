@@ -11,3 +11,4 @@ dist
 progress.txt
 .rorca/run-state.json
 .rorca/memory/health-log.json
+.rorca-results.jsonl
