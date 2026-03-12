@@ -301,7 +301,8 @@ router.get('/top', async (req: Request, res: Response) => {
         signal: AbortSignal.timeout(5_000),
       });
       if (!r.ok) return [];
-      const d = await r.json().catch(() => null);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const d: any = await r.json().catch(() => null);
       if (!d) return [];
       return Array.isArray(d?.skills) ? d.skills
         : Array.isArray(d?.results) ? d.results
