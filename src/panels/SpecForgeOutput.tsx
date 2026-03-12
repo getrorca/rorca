@@ -52,6 +52,8 @@ export interface ContextSummary {
     tier: 'cache' | 'search' | 'hybrid';
     latencyMs: number;
   };
+  /** CU-004: Predicted injected file paths from context-router (up to 30 paths) */
+  predictedFiles?: string[];
 }
 
 export interface GeneratedSpec {
