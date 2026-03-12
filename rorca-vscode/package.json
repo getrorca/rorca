@@ -92,6 +92,42 @@
         "icon": "$(wand)"
       }
     ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "rorca.approveSpec",
+          "when": "view == rorcaSpecs && viewItem == rorcaSpec",
+          "group": "inline"
+        },
+        {
+          "command": "rorca.triggerRun",
+          "when": "view == rorcaSpecs && viewItem == rorcaSpec",
+          "group": "inline"
+        },
+        {
+          "command": "rorca.openInBrowser",
+          "when": "view == rorcaSpecs && viewItem == rorcaSpec",
+          "group": "1_actions"
+        },
+        {
+          "command": "rorca.copySpecJson",
+          "when": "view == rorcaSpecs && viewItem == rorcaSpec",
+          "group": "1_actions"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "rorca.refreshSpecs",
+          "when": "view == rorcaSpecs",
+          "group": "navigation"
+        },
+        {
+          "command": "rorca.forgeFromSelection",
+          "when": "view == rorcaSpecs && rorca.serverOnline",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Rorca",
       "properties": {

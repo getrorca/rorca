@@ -1,56 +1,74 @@
 import * as vscode from 'vscode';
-import { SpecTreeDataProvider } from './specProvider';
 import { McpToolsProvider } from './mcpToolsProvider';
+import {
+  SpecTreeDataProvider,
+  SpecTreeItem,
+  cmdApproveSpec,
+  cmdCopySpecJson,
+  cmdForgeFromSelection,
+  cmdOpenInBrowser,
+  cmdTriggerRun,
+} from './specProvider';
 
 let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext): void {
+  // ── Providers ──────────────────────────────────────────────────────────────
   const specProvider = new SpecTreeDataProvider();
   const mcpProvider = new McpToolsProvider();
 
   vscode.window.registerTreeDataProvider('rorcaSpecs', specProvider);
   vscode.window.registerTreeDataProvider('rorcaMcpTools', mcpProvider);
 
-  const commands: [string, () => void][] = [
-    ['rorca.refreshSpecs', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-    ['rorca.refreshMcpTools', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-    ['rorca.approveSpec', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-    ['rorca.triggerRun', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-    ['rorca.openInBrowser', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-    ['rorca.copySpecJson', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-    ['rorca.testConnection', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-    ['rorca.startServer', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-    ['rorca.forgeFromSelection', () => {
-      vscode.window.showInformationMessage('Not yet implemented');
-    }],
-  ];
+  // ── Commands ───────────────────────────────────────────────────────────────
+  context.subscriptions.push(
+    vscode.commands.registerCommand('rorca.refreshSpecs', () => {
+      specProvider.refresh();
+    }),
 
-  for (const [command, handler] of commands) {
-    context.subscriptions.push(vscode.commands.registerCommand(command, handler));
-  }
+    vscode.commands.registerCommand('rorca.refreshMcpTools', () => {
+      mcpProvider.refresh();
+    }),
 
+    vscode.commands.registerCommand('rorca.approveSpec', (item: SpecTreeItem) => {
+      void cmdApproveSpec(item, specProvider);
+    }),
+
+    vscode.commands.registerCommand('rorca.triggerRun', (item: SpecTreeItem) => {
+      void cmdTriggerRun(item, specProvider);
+    }),
+
+    vscode.commands.registerCommand('rorca.openInBrowser', (item: SpecTreeItem) => {
+      void cmdOpenInBrowser(item);
+    }),
+
+    vscode.commands.registerCommand('rorca.copySpecJson', (item: SpecTreeItem) => {
+      void cmdCopySpecJson(item);
+    }),
+
+    vscode.commands.registerCommand('rorca.forgeFromSelection', () => {
+      void cmdForgeFromSelection(specProvider);
+    }),
+
+    vscode.commands.registerCommand('rorca.testConnection', () => {
+      vscode.window.showInformationMessage('Not yet implemented');
+    }),
+
+    vscode.commands.registerCommand('rorca.startServer', () => {
+      vscode.window.showInformationMessage('Not yet implemented');
+    })
+  );
+
+  // ── Status bar ─────────────────────────────────────────────────────────────
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBarItem.text = '$(circle-outline) Rorca';
   statusBarItem.tooltip = 'Rorca: Disconnected';
   statusBarItem.command = 'rorca.testConnection';
   context.subscriptions.push(statusBarItem);
   statusBarItem.show();
+
+  // Dispose provider on deactivate
+  context.subscriptions.push({ dispose: () => specProvider.dispose() });
 }
 
 export function deactivate(): void {
