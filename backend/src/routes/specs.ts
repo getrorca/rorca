@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import multer from 'multer';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
@@ -25,6 +26,8 @@ import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
+import { PDFParse } from 'pdf-parse';
+import mammoth from 'mammoth';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -47,6 +50,94 @@ function briefToSlug(text: string): string {
   let slug = words.slice(0, 8).join('-');
   if (slug.length > 60) slug = words.slice(0, 5).join('-');
   return slug.slice(0, 60).replace(/-$/, '');
+}
+
+const MAX_ATTACHMENT_TOKENS = 2000;
+const IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
+
+/**
+ * Extract text content from an attachment's binary data based on MIME type.
+ * Returns extracted text (truncated to MAX_ATTACHMENT_TOKENS tokens), or null for images.
+ */
+async function extractAttachmentText(contentType: string, fileData: Buffer, filename: string): Promise<string | null> {
+  try {
+    if (IMAGE_CONTENT_TYPES.has(contentType)) {
+      return null; // images handled separately as metadata
+    }
+
+    let text = '';
+    if (contentType === 'application/pdf') {
+      const parser = new PDFParse({ data: fileData });
+      const result = await parser.getText();
+      await parser.destroy();
+      text = result.text;
+    } else if (contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      const result = await mammoth.extractRawText({ buffer: fileData });
+      text = result.value;
+    } else if (contentType === 'text/plain' || contentType === 'text/markdown' || contentType.startsWith('text/')) {
+      text = fileData.toString('utf-8');
+    } else {
+      return `[Unsupported file type: ${contentType}]`;
+    }
+
+    // Token budget: ~4 chars per token
+    const maxChars = MAX_ATTACHMENT_TOKENS * 4;
+    if (text.length > maxChars) {
+      return text.slice(0, maxChars) + '\n[truncated]';
+    }
+    return text;
+  } catch (err) {
+    return `[Error extracting text from ${filename}: ${(err as Error).message}]`;
+  }
+}
+
+/**
+ * Query spec_attachments for a given spec slug and build the
+ * '=== ATTACHED DOCUMENTS ===' prompt section.
+ * Returns empty string if no attachments found.
+ * Optionally emits SSE attachment_processing events via the provided callback.
+ */
+async function buildAttachmentSection(
+  specSlug: string,
+  onAttachment?: (filename: string, status: 'extracting_text' | 'complete') => void,
+): Promise<string> {
+  type AttachmentRow = {
+    filename: string;
+    content_type: string;
+    file_size: number;
+    file_data: Buffer;
+  };
+
+  const rows = await query<AttachmentRow>(
+    'SELECT filename, content_type, file_size, file_data FROM spec_attachments WHERE spec_id = $1 ORDER BY created_at ASC',
+    [specSlug],
+  );
+
+  if (rows.length === 0) return '';
+
+  const parts: string[] = ['=== ATTACHED DOCUMENTS ==='];
+
+  for (const row of rows) {
+    if (IMAGE_CONTENT_TYPES.has(row.content_type)) {
+      onAttachment?.(row.filename, 'extracting_text');
+      parts.push(
+        `${row.filename}:`,
+        `[Image attachment — type: ${row.content_type}, size: ${row.file_size} bytes. Image provided for visual context.]`,
+        '',
+      );
+      onAttachment?.(row.filename, 'complete');
+    } else {
+      onAttachment?.(row.filename, 'extracting_text');
+      const text = await extractAttachmentText(row.content_type, row.file_data, row.filename);
+      if (text !== null) {
+        parts.push(`${row.filename}:`, text, '');
+      }
+      onAttachment?.(row.filename, 'complete');
+    }
+  }
+
+  parts.push('=== END ATTACHED DOCUMENTS ===');
+  return parts.join('\n');
 }
 
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
@@ -628,6 +719,27 @@ async function emitPassEvent(
   });
 }
 
+/** Emit an attachment_processing WAL event and broadcast via SSE. */
+async function emitAttachmentEvent(
+  specId: string,
+  filename: string,
+  status: 'extracting_text' | 'complete',
+  workspaceId?: string,
+): Promise<void> {
+  const payload = JSON.stringify({ filename, status });
+  const result = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('attachment_processing', $1, $2, $3) RETURNING *`, [specId, workspaceId ?? null, payload]);
+  broadcastAll({
+    id: result!.id,
+    ts: new Date().toISOString(),
+    event_type: 'attachment_processing',
+    workspace_id: workspaceId ?? null,
+    spec_id: specId,
+    story_id: null,
+    actor: 'system',
+    payload,
+  });
+}
+
 /**
  * Load convention files from .rorca/conventions/ directory.
  * Returns a map of convention name → content for prompt injection.
@@ -914,6 +1026,18 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ];
 
+    // Pre-compute slug — needed for attachment lookup and multi-pass version snapshots
+    const slug = title
+      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      : briefToSlug(brief);
+    genSlug = slug;
+
+    // Load attachment context for this spec slug (before prompt assembly)
+    // Emit SSE events for each attachment as it's being processed
+    const attachmentSection = await buildAttachmentSection(slug, (filename, status) => {
+      emitAttachmentEvent(slug, filename, status, String(workspaceId)).catch(() => {/* non-fatal */});
+    });
+
     // Build catalog sections (only include if non-empty)
     const catalogSections: string[] = [];
     if (catalogs.memoryMd) {
@@ -948,6 +1072,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         '',
       ] : []),
       ...catalogSections,
+      ...(attachmentSection ? [attachmentSection, ''] : []),
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
       storyCount === 0
@@ -986,12 +1111,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
     let tokenUsage = { inputTokens: 0, outputTokens: 0 };
 
-    // Pre-compute slug early — needed for multi-pass version snapshots
-    const slug = title
-      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-      : briefToSlug(brief);
-    genSlug = slug;
-
     if (multiPass) {
       // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
       logger.info(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
@@ -1024,6 +1143,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         '=== END PERSONA ===',
         '',
         synthesized,
+        ...(attachmentSection ? [attachmentSection, ''] : []),
         ...(templateContext ? [templateContext, '---'] : []),
         '---',
         'TASK: Generate a HIGH-LEVEL software specification JSON with coarse user stories (10-20 stories).',
@@ -2614,6 +2734,7 @@ interface KanbanSpec {
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
   model?: string;
+  attachmentCount: number;
 }
 
 router.get('/kanban', async (req: Request, res: Response) => {
@@ -2632,6 +2753,15 @@ router.get('/kanban', async (req: Request, res: Response) => {
 
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
 
+    // Fetch attachment counts for all specs
+    const attachmentRows = await query<{ spec_id: string; cnt: string }>(
+      `SELECT spec_id, COUNT(*)::text AS cnt FROM spec_attachments GROUP BY spec_id`
+    );
+    const attachmentCountBySpecId = new Map<string, number>();
+    for (const row of attachmentRows) {
+      attachmentCountBySpecId.set(row.spec_id, parseInt(row.cnt, 10));
+    }
+
     // Build summaries from filesystem
     const pendingSpecs: KanbanSpec[] = [];
     for (const file of safeReaddir(pendingDir)) {
@@ -2649,6 +2779,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
+          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
         });
       } catch { /* skip unparseable */ }
     }
@@ -2670,6 +2801,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
+          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
         });
       } catch { /* skip unparseable */ }
     }
@@ -9474,13 +9606,6 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
  *       adds passes:false to stories missing the field, normalizes dependsOn to array,
  *       and removes duplicate story IDs (keeping first occurrence). Never modifies
  *       title, description, or acceptanceCriteria text.
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema:
- *           type: string
- *         description: Spec slug (filename without .json)
  *     requestBody:
  *       required: true
  *       content:
@@ -9620,6 +9745,339 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
     logger.error('[Specs] fix error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// GET /api/specs/:specId/attachments — list all attachments for a spec
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments:
+ *   get:
+ *     summary: List all attachments for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug ID
+ *     responses:
+ *       200:
+ *         description: List of attachments (metadata only, no binary data)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   id:
+ *                     type: string
+ *                   filename:
+ *                     type: string
+ *                   contentType:
+ *                     type: string
+ *                   fileSize:
+ *                     type: integer
+ *                   createdAt:
+ *                     type: string
+ *                   uploadedBy:
+ *                     type: object
+ *                     nullable: true
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       name:
+ *                         type: string
+ *       404:
+ *         description: Spec not found
+ */
+router.get('/:specId/attachments', async (req: Request, res: Response) => {
+  const { specId } = req.params;
+
+  // Verify spec exists across all workspaces
+  const workspaces = await query<{ id: string; path: string }>(
+    `SELECT id, path FROM workspaces`
+  );
+  let specExists = false;
+  for (const ws of workspaces) {
+    const pendingPath = path.join(ws.path, 'forge/specs/pending', `${specId}.json`);
+    const approvedPath = path.join(ws.path, 'forge/specs/approved', `${specId}.json`);
+    if (fs.existsSync(pendingPath) || fs.existsSync(approvedPath)) {
+      specExists = true;
+      break;
+    }
+  }
+
+  if (!specExists) {
+    res.status(404).json({ error: `Spec not found: ${specId}` });
+    return;
+  }
+
+  const rows = await query<{
+    id: string;
+    filename: string;
+    content_type: string;
+    file_size: number;
+    created_at: string;
+    uploader_id: string | null;
+    uploader_name: string | null;
+  }>(
+    `SELECT
+       sa.id,
+       sa.filename,
+       sa.content_type,
+       sa.file_size,
+       sa.created_at,
+       u.id AS uploader_id,
+       u.name AS uploader_name
+     FROM spec_attachments sa
+     LEFT JOIN users u ON u.id = sa.uploaded_by
+     WHERE sa.spec_id = $1
+     ORDER BY sa.created_at DESC`,
+    [specId]
+  );
+
+  res.json(
+    rows.map((row) => ({
+      id: row.id,
+      filename: row.filename,
+      contentType: row.content_type,
+      fileSize: row.file_size,
+      createdAt: row.created_at,
+      uploadedBy: row.uploader_id
+        ? { id: row.uploader_id, name: row.uploader_name }
+        : null,
+    }))
+  );
+});
+
+// GET /api/specs/:specId/attachments/:attachmentId — download a specific attachment
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments/{attachmentId}:
+ *   get:
+ *     summary: Download a specific attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug ID
+ *       - in: path
+ *         name: attachmentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Attachment UUID
+ *     responses:
+ *       200:
+ *         description: Binary file data
+ *         content:
+ *           application/octet-stream:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       404:
+ *         description: Attachment not found or spec mismatch
+ */
+router.get('/:specId/attachments/:attachmentId', async (req: Request, res: Response) => {
+  const { specId, attachmentId } = req.params;
+
+  const row = await queryOne<{
+    filename: string;
+    content_type: string;
+    file_size: number;
+    file_data: Buffer;
+  }>(
+    `SELECT filename, content_type, file_size, file_data
+     FROM spec_attachments
+     WHERE id = $1 AND spec_id = $2`,
+    [attachmentId, specId]
+  );
+
+  if (!row || !row.file_data) {
+    res.status(404).json({ error: 'Attachment not found' });
+    return;
+  }
+
+  res.setHeader('Content-Type', row.content_type);
+  res.setHeader('Content-Disposition', `attachment; filename="${row.filename}"`);
+  res.setHeader('Content-Length', row.file_size);
+  res.send(row.file_data);
+});
+
+// POST /api/specs/:specId/attachments — upload a file attachment for a spec
+const ALLOWED_CONTENT_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'application/pdf',
+  'text/markdown',
+  'text/plain',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_CONTENT_TYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`INVALID_FILE_TYPE:${file.mimetype}`));
+    }
+  },
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments:
+ *   post:
+ *     summary: Upload a file attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       201:
+ *         description: Attachment created
+ *       400:
+ *         description: Invalid file type
+ *       404:
+ *         description: Spec not found
+ *       413:
+ *         description: File size exceeded
+ */
+router.post(
+  '/:specId/attachments',
+  (req: Request, res: Response, next: any) => {
+    attachmentUpload.single('file')(req, res, (err: any) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          res.status(413).json({ error: 'File size exceeds 10MB limit' });
+          return;
+        }
+        if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
+          const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
+          res.status(400).json({ error: `Invalid file type: ${mimeType}` });
+          return;
+        }
+        next(err);
+        return;
+      }
+      next();
+    });
+  },
+  async (req: Request, res: Response) => {
+    const { specId } = req.params;
+
+    if (!req.file) {
+      res.status(400).json({ error: 'No file uploaded' });
+      return;
+    }
+
+    // Verify spec exists — check both pending and approved directories across all workspaces
+    const workspaces = await query<{ id: string; path: string }>(`SELECT id, path FROM workspaces`);
+    let specExists = false;
+    for (const ws of workspaces) {
+      const pendingPath = path.join(ws.path, 'forge', 'specs', 'pending', `${specId}.json`);
+      const approvedPath = path.join(ws.path, 'forge', 'specs', 'approved', `${specId}.json`);
+      if (fs.existsSync(pendingPath) || fs.existsSync(approvedPath)) {
+        specExists = true;
+        break;
+      }
+    }
+
+    if (!specExists) {
+      res.status(404).json({ error: `Spec not found: ${specId}` });
+      return;
+    }
+
+    const { originalname, mimetype, size, buffer } = req.file;
+
+    const row = await queryOne<{
+      id: string;
+      filename: string;
+      content_type: string;
+      file_size: number;
+      created_at: string;
+    }>(
+      `INSERT INTO spec_attachments (spec_id, filename, content_type, file_size, storage_type, file_data)
+       VALUES ($1, $2, $3, $4, 'database', $5)
+       RETURNING id, filename, content_type, file_size, created_at`,
+      [specId, originalname, mimetype, size, buffer],
+    );
+
+    if (!row) {
+      res.status(500).json({ error: 'Failed to save attachment' });
+      return;
+    }
+
+    res.status(201).json({
+      id: row.id,
+      filename: row.filename,
+      contentType: row.content_type,
+      fileSize: row.file_size,
+      createdAt: row.created_at,
+    });
+  },
+);
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments/{attachmentId}:
+ *   delete:
+ *     summary: Delete a specific attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: attachmentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       204:
+ *         description: Attachment deleted
+ *       404:
+ *         description: Attachment not found
+ */
+router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Response) => {
+  const { specId, attachmentId } = req.params;
+
+  const result = await execute(
+    `DELETE FROM spec_attachments WHERE id = $1 AND spec_id = $2`,
+    [attachmentId, specId],
+  );
+
+  if (result.rowCount === 0) {
+    res.status(404).json({ error: 'Attachment not found' });
+    return;
+  }
+
+  res.status(204).send();
 });
 
 export default router;

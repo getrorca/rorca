@@ -1326,7 +1326,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1479,14 +1479,13 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-007):
-As a user, I want the expanded OpenRouter section to initially show only 30 models with a Show More button so the DOM stays fast even when fully expanded.
+Add Jest tests in backend/src/routes/__tests__/pipeline.quickrun.test.ts (or equivalent) that cover the context injection behavior added by this spec. Mock synthesize(), fs.promises.readFile, and the DB query function. Test: (1) all three blocks present and prepended in correct order, (2) missing MEMORY.md silently skipped, (3) empty direction stack skipped, (4) no skills — block omitted, (5) all missing — prompt equals original. Do not test chatComplete internals.
 
 Acceptance Criteria:
-- A showAllOpenRouter: boolean state (default false) is added to DisplaySection; it resets to false when OpenRouter is collapsed
-- When OpenRouter is expanded and showAllOpenRouter is false and no search text is active, only the first 30 OpenRouter models are rendered as ModelCards
-- A 'Show more (N remaining)' button appears below the 30 cards — clicking it sets showAllOpenRouter to true, rendering all OpenRouter models
-- When search text is active, all matching OpenRouter models are shown regardless of showAllOpenRouter (search implies intent)
-- The currently selected OpenRouter model (if any) is always rendered even if it falls outside the first 30 — hoist it to the top of the OpenRouter section with a subtle 'Selected' separator line above the remaining cards
-- showAllOpenRouter resets to false when the OpenRouter section is collapsed
-- npx tsc --noEmit passes, npm run lint passes
-- Verify in browser: expand OpenRouter, see 30 cards + 'Show more (N remaining)' button; click it to reveal all; collapse and re-expand resets to 30
+- Test file created at backend/src/routes/__tests__/pipeline.quickrun.test.ts or equivalent path
+- synthesize() is mocked to return a direction string and separately tested with empty string return
+- fs.promises.readFile is mocked for MEMORY.md exists (returns content) and ENOENT (throws) cases
+- DB query for skills is mocked to return rows and to return empty array
+- Test asserts correct block order: direction stack → MEMORY.md → installed skills → === INSTRUCTIONS ===
+- Test asserts acceptance criteria limit in prompt is '8'
+- cd backend && npx jest --testPathPattern=pipeline.quickrun passes with all tests green
