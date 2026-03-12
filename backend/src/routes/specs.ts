@@ -9135,4 +9135,196 @@ ${storyList}`;
   }
 });
 
+// ─── SV-003: POST /:specId/validate — LLM-powered deep spec review ────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/validate:
+ *   post:
+ *     tags: [Specs]
+ *     summary: LLM-powered deep spec review
+ *     operationId: validateSpec
+ *     description: >
+ *       Uses an LLM (claude-sonnet-4-6) to perform a deep review of a spec,
+ *       injecting spec-gap-analysis and assumption-buster skills into the prompt.
+ *       Returns structured analysis: implicit assumptions, coverage gaps,
+ *       untestable acceptance criteria, and missed stories.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Deep validation result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 assumptions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       assumption: { type: string }
+ *                       risk: { type: string }
+ *                 gaps:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       area: { type: string }
+ *                       description: { type: string }
+ *                 untestableACs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       acIndex: { type: integer }
+ *                       reason: { type: string }
+ *                 missedStories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       title: { type: string }
+ *                       description: { type: string }
+ *                       reason: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ *       422: { description: "LLM response is not valid JSON" }
+ */
+router.post('/:specId/validate', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId } = req.body as { workspaceId?: string };
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specContent: any;
+    if (fs.existsSync(pendingFile)) {
+      specContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    // Load skill files from .claude/skills/ (primary) or .rorca/skills/ (fallback)
+    function loadSkill(name: string): string {
+      const claudeSkillPath = path.join(workspace!.path, '.claude', 'skills', `${name}.md`);
+      const rorcaSkillPath = path.join(workspace!.path, '.rorca', 'skills', `${name}.md`);
+      if (fs.existsSync(claudeSkillPath)) {
+        return fs.readFileSync(claudeSkillPath, 'utf8');
+      }
+      if (fs.existsSync(rorcaSkillPath)) {
+        return fs.readFileSync(rorcaSkillPath, 'utf8');
+      }
+      return '';
+    }
+
+    const specGapSkill = loadSkill('spec-gap-analysis');
+    const assumptionBusterSkill = loadSkill('assumption-buster');
+
+    const prompt = `You are an expert spec reviewer performing a deep quality analysis. Your goal is to identify hidden risks, gaps, and assumptions in the following spec.
+
+${specGapSkill ? `## Spec Gap Analysis Skill\n${specGapSkill}\n\n` : ''}${assumptionBusterSkill ? `## Assumption Buster Skill\n${assumptionBusterSkill}\n\n` : ''}## Spec to Review
+
+\`\`\`json
+${JSON.stringify(specContent, null, 2)}
+\`\`\`
+
+## Your Task
+
+Analyze this spec and return a JSON object with exactly these four arrays:
+
+1. **assumptions** — implicit assumptions embedded in stories that are never explicitly stated or validated. For each: which story, what assumption, and what risk if it's wrong.
+
+2. **gaps** — areas of functionality not covered by any story. Think: error handling, auth, edge cases, data validation, rollback/undo, permissions, empty states, concurrent access, rate limiting, accessibility.
+
+3. **untestableACs** — acceptance criteria that are vague, subjective, or otherwise not verifiable by an automated test. Examples: "works correctly", "looks good", "is fast enough".
+
+4. **missedStories** — user stories that should exist but don't, given the feature area being built. Think about onboarding, error recovery, admin views, audit logs, notifications, mobile/responsive behavior.
+
+Respond with ONLY valid JSON, no markdown fences, no prose. Format:
+{
+  "assumptions": [{ "storyId": "US-001", "assumption": "...", "risk": "..." }],
+  "gaps": [{ "area": "...", "description": "..." }],
+  "untestableACs": [{ "storyId": "US-001", "acIndex": 0, "reason": "..." }],
+  "missedStories": [{ "title": "...", "description": "...", "reason": "..." }]
+}`;
+
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: prompt }],
+      { model: 'claude-sonnet-4-6' },
+    );
+
+    // Parse LLM response — strip markdown fences and extract JSON
+    let parsed: {
+      assumptions: Array<{ storyId: string; assumption: string; risk: string }>;
+      gaps: Array<{ area: string; description: string }>;
+      untestableACs: Array<{ storyId: string; acIndex: number; reason: string }>;
+      missedStories: Array<{ title: string; description: string; reason: string }>;
+    };
+
+    try {
+      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const jsonStart = cleaned.indexOf('{');
+      if (jsonStart > 0) {
+        cleaned = cleaned.slice(jsonStart);
+      }
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
+        cleaned = cleaned.slice(0, lastBrace + 1);
+      }
+      parsed = JSON.parse(cleaned);
+    } catch {
+      logger.error(`[Specs] validate: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
+      res.status(422).json({ error: 'LLM response is not valid JSON' });
+      return;
+    }
+
+    const result = {
+      assumptions: Array.isArray(parsed.assumptions) ? parsed.assumptions : [],
+      gaps: Array.isArray(parsed.gaps) ? parsed.gaps : [],
+      untestableACs: Array.isArray(parsed.untestableACs) ? parsed.untestableACs : [],
+      missedStories: Array.isArray(parsed.missedStories) ? parsed.missedStories : [],
+    };
+
+    res.json(result);
+  } catch (error: any) {
+    logger.error('[Specs] validate error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
