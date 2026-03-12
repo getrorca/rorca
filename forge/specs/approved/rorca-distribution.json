@@ -143,9 +143,8 @@
         "No NOTICE file needed (BSL-1.1 doesn't require it unless using Apache-licensed dependencies)"
       ],
       "dependsOn": [],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story DIST-006"
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "DIST-007",
@@ -170,7 +169,8 @@
         "DIST-005",
         "DIST-006"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "DIST-008",
@@ -195,7 +195,8 @@
       "dependsOn": [
         "DIST-007"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "DIST-009",
