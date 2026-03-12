@@ -28,8 +28,8 @@ export async function testA11y(container: HTMLElement): Promise<void> {
 
   const violations = results.violations;
   if (violations.length > 0) {
-    const messages = violations.map((v) => {
-      const nodes = v.nodes.map((n) => `  - ${n.html}`).join('\n');
+    const messages = violations.map((v: import('axe-core').Result) => {
+      const nodes = v.nodes.map((n: import('axe-core').NodeResult) => `  - ${n.html}`).join('\n');
       return `[${v.impact}] ${v.id}: ${v.help}\n${nodes}`;
     });
     expect.fail(
