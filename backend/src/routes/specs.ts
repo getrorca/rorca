@@ -24,6 +24,7 @@ import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
+import { matchSkills } from '../lib/skill-matcher';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -9323,6 +9324,140 @@ Respond with ONLY valid JSON, no markdown fences, no prose. Format:
     res.json(result);
   } catch (error: any) {
     logger.error('[Specs] validate error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /:specId/suggest-skills — Skill-matcher module entry point ────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/suggest-skills:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Run skill matching for a spec via the skill-matcher module
+ *     operationId: suggestSkills
+ *     description: >
+ *       Delegates to the skill-matcher module (backend/src/lib/skill-matcher.ts).
+ *       Reads installed skills from .rorca/skills/, MEMORY.md, and AGENTS.md,
+ *       then calls the LLM to assign suggestedSkills arrays to each story with
+ *       name, relevance (1-10), and reasoning. Writes the updated spec JSON back
+ *       to the filesystem.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Skill suggestions written to spec
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 matched: { type: integer, description: Total skills matched across all stories }
+ *                 storiesAffected: { type: integer, description: Stories that received at least one skill }
+ *                 stories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       skills:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             name: { type: string }
+ *                             relevance: { type: integer }
+ *                             reason: { type: string }
+ *       400:
+ *         description: Missing workspaceId
+ *       404:
+ *         description: Spec or workspace not found
+ *       422:
+ *         description: No skills installed or spec has no stories
+ */
+router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId is required' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Resolve spec file: approved first, then pending
+    const { pendingDir, approvedDir } = specsDirs(workspace.path as string);
+    let specFilePath = path.join(approvedDir, `${specId}.json`);
+    let specStatus = 'approved';
+    if (!fs.existsSync(specFilePath)) {
+      specFilePath = path.join(pendingDir, `${specId}.json`);
+      specStatus = 'pending';
+      if (!fs.existsSync(specFilePath)) {
+        res.status(404).json({ error: 'Spec not found in approved or pending directories' });
+        return;
+      }
+    }
+
+    // Read spec
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    if (!Array.isArray(specContent.userStories) || specContent.userStories.length === 0) {
+      res.status(422).json({ error: 'Spec has no user stories' });
+      return;
+    }
+
+    // Delegate to skill-matcher module
+    let result;
+    try {
+      result = await matchSkills(specContent, workspace.path as string, specFilePath, workspaceId);
+    } catch (matchErr: any) {
+      if (matchErr.message?.includes('No skills installed')) {
+        res.status(422).json({ error: matchErr.message });
+        return;
+      }
+      throw matchErr;
+    }
+
+    // Create spec version for audit trail
+    await snapshotVersion(specId, JSON.stringify(result.spec), specStatus === 'approved' ? 'approved' : 'pending');
+
+    // Emit WAL event
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4) RETURNING *`,
+      ['skill_matched', specId, workspaceId, JSON.stringify({
+        matched_count: result.matched,
+        stories_affected: result.storiesAffected,
+        source: 'suggest-skills',
+      })],
+    );
+    broadcastAll(walEvent!);
+
+    res.json({
+      matched: result.matched,
+      storiesAffected: result.storiesAffected,
+      stories: result.stories,
+    });
+  } catch (error: any) {
+    logger.error('[Specs] suggest-skills error:', error);
     res.status(500).json({ error: error.message });
   }
 });
