@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-cli",
   "runId": 46,
   "startedAt": "2026-03-12T05:51:51.758Z",
-  "lastUpdatedAt": "2026-03-12T06:03:22.173Z",
+  "lastUpdatedAt": "2026-03-12T06:10:39.325Z",
   "completedStories": [
     {
       "storyId": "MC-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 178883
+    },
+    {
+      "storyId": "MC-004",
+      "title": "MCP Tools Tree View in rorca VS Code Extension",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:03:44.590Z",
+      "finishedAt": "2026-03-12T06:10:39.324Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 414734
     }
   ],
   "failedStories": [],
