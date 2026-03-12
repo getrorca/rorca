@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-cli",
   "runId": 46,
   "startedAt": "2026-03-12T05:51:51.758Z",
-  "lastUpdatedAt": "2026-03-12T06:00:05.166Z",
+  "lastUpdatedAt": "2026-03-12T06:03:22.173Z",
   "completedStories": [
     {
       "storyId": "MC-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 453070
+    },
+    {
+      "storyId": "MC-002",
+      "title": "rorca_cancel_run MCP Tool",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:00:23.290Z",
+      "finishedAt": "2026-03-12T06:03:22.173Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 178883
     }
   ],
   "failedStories": [],
