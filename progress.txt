@@ -1,14 +1,15 @@
 # Run State Summary
 
-Spec: rorca-spec-validator
-Run ID: 41
-Started: 2026-03-12T05:48:49.923Z
-Last Updated: 2026-03-12T06:28:36.917Z
+Spec: rorca-model-catalog-ux
+Run ID: 42
+Started: 2026-03-12T05:48:51.132Z
+Last Updated: 2026-03-12T06:20:18.246Z
 
-## Completed Stories (6)
-- SV-001: Implement rorca_check_spec structural validation — DONE (claude, claude-sonnet-4-6, 203s)
-- SV-002: Implement rorca_score_spec quality scoring — DONE (claude, claude-sonnet-4-6, 234s)
-- SV-003: Implement rorca_validate_spec LLM deep review — DONE (claude, claude-sonnet-4-6, 389s)
-- SV-004: Implement rorca_suggest_skills on-demand skill matcher — DONE (claude, claude-sonnet-4-6, 738s)
-- SV-005: Implement rorca_fix_spec structural auto-fixer — DONE (claude, claude-sonnet-4-6, 290s)
-- SV-006: Implement rorca_queue_run smart run trigger — DONE (claude, claude-sonnet-4-6, 225s)
+## Completed Stories (7)
+- US-001: Fix hardcoded stale default model state — DONE (claude, claude-sonnet-4-6, 93s)
+- US-002: Replace Default Model native select with ModelSearchSelect — DONE (claude, claude-sonnet-4-6, 68s)
+- US-003: Replace Workspace Model Override native select with ModelSearchSelect — DONE (claude, claude-sonnet-4-6, 158s)
+- US-004: Add search bar and provider filter chips to Available Models catalog — DONE (claude, claude-sonnet-4-6, 190s)
+- US-005: Add cost tier and speed filter pills to model catalog — DONE (claude, claude-sonnet-4-6, 174s)
+- US-006: Collapse OpenRouter section by default with count badge and expand toggle — DONE (claude, claude-sonnet-4-6, 359s)
+- US-007: Limit OpenRouter expanded view to 30 models with Show More button — DONE (claude, claude-sonnet-4-6, 588s)
