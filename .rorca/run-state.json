@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-cli",
   "runId": 47,
   "startedAt": "2026-03-12T06:04:08.654Z",
-  "lastUpdatedAt": "2026-03-12T06:12:11.062Z",
+  "lastUpdatedAt": "2026-03-12T06:19:34.590Z",
   "completedStories": [
     {
       "storyId": "MC-004",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 472354
+    },
+    {
+      "storyId": "MC-006",
+      "title": "VS Code Extension Settings Contribution Point Schema",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:12:33.616Z",
+      "finishedAt": "2026-03-12T06:19:34.590Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 420974
     }
   ],
   "failedStories": [],
