@@ -2,7 +2,7 @@
   "specId": "Rorca Context Usage Visibility — Spec Generation & Run View",
   "runId": 67,
   "startedAt": "2026-03-12T20:18:32.740Z",
-  "lastUpdatedAt": "2026-03-12T20:22:55.718Z",
+  "lastUpdatedAt": "2026-03-12T20:26:00.973Z",
   "completedStories": [
     {
       "storyId": "CU-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 126782
+    },
+    {
+      "storyId": "CU-003",
+      "title": "Skill chips with relevance and reason in ContextSummaryCard",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:23:11.136Z",
+      "finishedAt": "2026-03-12T20:26:00.973Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 169837
     }
   ],
   "failedStories": [],
