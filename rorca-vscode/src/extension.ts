@@ -1,7 +1,14 @@
 import * as vscode from 'vscode';
 import { SpecTreeDataProvider, SpecTreeItem } from './specProvider';
 import { McpToolsProvider } from './mcpToolsProvider';
-import { apiFetch, getServerUrl } from './auth';
+import {
+  apiFetch,
+  getServerUrl,
+  initConfigWatcher,
+  startHealthCheck,
+  stopHealthCheck,
+  RorcaApiError,
+} from './auth';
 
 export function activate(context: vscode.ExtensionContext): void {
   const specProvider = new SpecTreeDataProvider();
@@ -11,6 +18,18 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerTreeDataProvider('rorcaSpecs', specProvider),
     vscode.window.registerTreeDataProvider('rorcaMcpTools', mcpProvider),
   );
+
+  // Status bar item — created early so startHealthCheck can reference it
+  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBarItem.text = '$(circle-outline) Rorca: Disconnected';
+  statusBarItem.tooltip = 'Rorca: Disconnected';
+  statusBarItem.command = { command: 'workbench.action.openSettings', arguments: ['rorca'], title: 'Rorca Settings' };
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
+
+  // Wire up config watchers and start the health polling loop
+  initConfigWatcher(context);
+  startHealthCheck(statusBarItem);
 
   // --- rorca.refreshSpecs ---
   const refreshSpecs = vscode.commands.registerCommand('rorca.refreshSpecs', () => {
@@ -29,18 +48,15 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     try {
-      const res = await apiFetch(`/api/specs/${item.specId}/approve`, { method: 'POST' });
-      if (res.status === 200) {
-        vscode.window.showInformationMessage(`Spec approved: ${String(item.label)}`);
-        specProvider.refresh();
-      } else if (res.status === 409) {
+      await apiFetch(`/api/specs/${item.specId}/approve`, { method: 'POST' });
+      vscode.window.showInformationMessage(`Spec approved: ${String(item.label)}`);
+      specProvider.refresh();
+    } catch (err: unknown) {
+      if (err instanceof RorcaApiError && err.status === 409) {
         vscode.window.showWarningMessage('Spec is already approved');
       } else {
-        const body = await res.json();
-        vscode.window.showErrorMessage(`Failed to approve spec: ${JSON.stringify(body)}`);
+        vscode.window.showErrorMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
       }
-    } catch (err: unknown) {
-      vscode.window.showErrorMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
@@ -62,15 +78,11 @@ export function activate(context: vscode.ExtensionContext): void {
         body['queue'] = true;
       }
       try {
-        const res = await apiFetch('/api/pipeline/trigger', {
+        const data = await apiFetch('/api/pipeline/trigger', {
           method: 'POST',
           body: JSON.stringify(body),
-        });
-        const data = await res.json() as Record<string, unknown>;
-        if (res.status === 200 || res.status === 201) {
-          vscode.window.showInformationMessage(`Pipeline started: run #${data['runId'] ?? data['id'] ?? '?'}`);
-          specProvider.refresh();
-        } else if (data['conflict'] === true) {
+        }) as Record<string, unknown>;
+        if (data['conflict'] === true) {
           const choice = await vscode.window.showWarningMessage(
             'A run is already active',
             { modal: true },
@@ -80,7 +92,8 @@ export function activate(context: vscode.ExtensionContext): void {
             await trigger(true);
           }
         } else {
-          vscode.window.showErrorMessage(`Failed to trigger run: ${JSON.stringify(data)}`);
+          vscode.window.showInformationMessage(`Pipeline started: run #${data['runId'] ?? data['id'] ?? '?'}`);
+          specProvider.refresh();
         }
       } catch (err: unknown) {
         vscode.window.showErrorMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -107,12 +120,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     try {
-      const res = await apiFetch(`/api/specs/${item.specId}`);
-      if (res.status !== 200) {
-        vscode.window.showErrorMessage(`Failed to fetch spec: HTTP ${res.status}`);
-        return;
-      }
-      const data = await res.json();
+      const data = await apiFetch(`/api/specs/${item.specId}`);
       await vscode.env.clipboard.writeText(JSON.stringify(data, null, 2));
       vscode.window.showInformationMessage('Spec JSON copied to clipboard');
     } catch (err: unknown) {
@@ -123,20 +131,23 @@ export function activate(context: vscode.ExtensionContext): void {
   // --- rorca.testConnection ---
   const testConnection = vscode.commands.registerCommand('rorca.testConnection', async () => {
     try {
-      const res = await apiFetch('/api/health');
-      if (res.status === 200) {
-        vscode.window.showInformationMessage(`Connected to Rorca backend at ${getServerUrl()}`);
-        statusBarItem.text = '$(circle-filled) Rorca';
-        statusBarItem.tooltip = `Rorca: Connected (${getServerUrl()})`;
-      } else {
-        vscode.window.showWarningMessage(`Backend responded with HTTP ${res.status}`);
-        statusBarItem.text = '$(warning) Rorca';
-        statusBarItem.tooltip = `Rorca: Degraded (HTTP ${res.status})`;
+      await apiFetch('/api/health');
+      const choice = await vscode.window.showInformationMessage(
+        'Rorca server is online at ' + getServerUrl(),
+        'Change Server URL',
+      );
+      if (choice === 'Change Server URL') {
+        void vscode.commands.executeCommand('workbench.action.openSettings', 'rorca.apiUrl');
       }
-    } catch (_err) {
-      vscode.window.showErrorMessage(`Cannot reach Rorca backend at ${getServerUrl()}`);
-      statusBarItem.text = '$(circle-outline) Rorca';
-      statusBarItem.tooltip = 'Rorca: Disconnected';
+    } catch (err: unknown) {
+      const choice = await vscode.window.showErrorMessage(
+        `Cannot connect to Rorca at ${getServerUrl()}`,
+        'Open Settings',
+      );
+      if (choice === 'Open Settings') {
+        void vscode.commands.executeCommand('workbench.action.openSettings', 'rorca.apiUrl');
+      }
+      void err; // suppress unused warning
     }
   });
 
@@ -167,19 +178,13 @@ export function activate(context: vscode.ExtensionContext): void {
       body['workspaceId'] = workspaceId;
     }
     try {
-      const res = await apiFetch('/api/specs/generate', {
+      const data = await apiFetch('/api/specs/generate', {
         method: 'POST',
         body: JSON.stringify(body),
-      });
-      if (res.status === 200 || res.status === 201) {
-        const data = await res.json() as Record<string, unknown>;
-        const specId = data['id'] ?? data['specId'] ?? 'new spec';
-        vscode.window.showInformationMessage(`Spec generated: ${String(specId)}`);
-        specProvider.refresh();
-      } else {
-        const data = await res.json();
-        vscode.window.showErrorMessage(`Failed to generate spec: ${JSON.stringify(data)}`);
-      }
+      }) as Record<string, unknown>;
+      const specId = data['id'] ?? data['specId'] ?? 'new spec';
+      vscode.window.showInformationMessage(`Spec generated: ${String(specId)}`);
+      specProvider.refresh();
     } catch (err: unknown) {
       vscode.window.showErrorMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -196,16 +201,8 @@ export function activate(context: vscode.ExtensionContext): void {
     startServer,
     forgeFromSelection,
   );
-
-  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  statusBarItem.text = '$(circle-outline) Rorca';
-  statusBarItem.tooltip = 'Rorca: Disconnected';
-  statusBarItem.command = 'rorca.testConnection';
-  statusBarItem.show();
-
-  context.subscriptions.push(statusBarItem);
 }
 
 export function deactivate(): void {
-  // Cleanup is handled via context.subscriptions disposal
+  stopHealthCheck();
 }
