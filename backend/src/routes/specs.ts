@@ -141,20 +141,20 @@ async function buildAttachmentSection(
 }
 
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
-function resolveVaultCreds(userId: string, model: string): { apiKey?: string; baseUrl?: string } {
+async function resolveVaultCreds(userId: string, model: string): Promise<{ apiKey?: string; baseUrl?: string }> {
   // Try provider inferred from model registry first
   const vaultProvider = resolveVaultProvider(model);
   if (vaultProvider) {
-    const result = getVaultKey(userId, vaultProvider);
+    const result = await getVaultKey(userId, vaultProvider);
     if (result) return { apiKey: result.key, baseUrl: result.baseUrl ?? undefined };
   }
   // Fallback: try 'openai-compat' for unrecognized models (pass-through)
   if (!vaultProvider) {
-    const compat = getVaultKey(userId, 'openai-compat');
+    const compat = await getVaultKey(userId, 'openai-compat');
     if (compat) return { apiKey: compat.key, baseUrl: compat.baseUrl ?? undefined };
   }
   // Final fallback: try anthropic (backward compat — many users have this stored)
-  const anthropic = getVaultKey(userId, 'anthropic');
+  const anthropic = await getVaultKey(userId, 'anthropic');
   if (anthropic) return { apiKey: anthropic.key };
   return {};
 }
@@ -908,7 +908,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 6c. Discover skill + persona catalogs and read context files
-    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
+    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id as string | undefined);
 
     // 6d. Pre-compute contextSummary for error responses (also used in success response)
     const skillNamesList = catalogs.skillCatalog
@@ -1125,7 +1125,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
       const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-      const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+      const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
 
       // ── Pass 1: PM Agent — coarse high-level stories ──
       await emitPassEvent(slug, 1, 'started', workspaceId);
@@ -1864,7 +1864,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
         const user = await getEffectiveUser(req);
         if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-        const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+        const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
         const llmResult = await chatComplete(
           [{ role: 'user', content: fullPrompt }],
           { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
@@ -1901,7 +1901,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       // ── SDK path: direct LLM call via chatComplete ──
       const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-      const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
+      const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
       const llmResult = await chatComplete(
         [{ role: 'user', content: fullPrompt }],
         { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
@@ -2201,7 +2201,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   ].join('\n');
 
   // Call LLM (use vault key if available for this user)
-  const batchVaultCreds = item.userId ? resolveVaultCreds(item.userId, resolvedModel) : {};
+  const batchVaultCreds = item.userId ? await resolveVaultCreds(item.userId, resolvedModel) : {};
   const llmResult = await chatComplete(
     [{ role: 'user', content: fullPrompt }],
     { model: resolvedModel, apiKey: batchVaultCreds.apiKey, baseUrl: batchVaultCreds.baseUrl },
@@ -3817,7 +3817,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     const { chatComplete: chatCompleteFn } = await import('../lib/llm-client');
     const addStoriesUser = await getEffectiveUser(req);
     if (!addStoriesUser) { res.status(500).json({ error: 'No user configured' }); return; }
-    const addStoriesVaultCreds = resolveVaultCreds(addStoriesUser.id, DEFAULT_MODEL);
+    const addStoriesVaultCreds = await resolveVaultCreds(addStoriesUser.id, DEFAULT_MODEL);
     const rawResponse = await chatCompleteFn(
       [{ role: 'user', content: fullPrompt }],
       { apiKey: addStoriesVaultCreds.apiKey, baseUrl: addStoriesVaultCreds.baseUrl },
@@ -4733,7 +4733,7 @@ Rewrite the story following the user instructions. Keep the same scope unless to
     const resolvedModel = model || undefined;
     const rewriteUser = await getEffectiveUser(req);
     if (!rewriteUser) { res.status(500).json({ error: 'No user configured' }); return; }
-    const rewriteVaultCreds = resolveVaultCreds(rewriteUser.id, resolvedModel ?? DEFAULT_MODEL);
+    const rewriteVaultCreds = await resolveVaultCreds(rewriteUser.id, resolvedModel ?? DEFAULT_MODEL);
     const llmResult = await chatComplete(
       [{ role: 'user', content: prompt }],
       { model: resolvedModel, apiKey: rewriteVaultCreds.apiKey, baseUrl: rewriteVaultCreds.baseUrl },
@@ -6445,7 +6445,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
 
     const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-    const depVaultCreds = resolveVaultCreds(user.id, DEFAULT_MODEL);
+    const depVaultCreds = await resolveVaultCreds(user.id, DEFAULT_MODEL);
     const llmResult = await chatComplete(
       [{ role: 'user', content: prompt }],
       { apiKey: depVaultCreds.apiKey, baseUrl: depVaultCreds.baseUrl },
@@ -8624,7 +8624,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
 
     const enhanceUser = await getEffectiveUser(req);
     if (!enhanceUser) { res.status(500).json({ error: 'No user configured' }); return; }
-    const enhanceVaultCreds = resolveVaultCreds(enhanceUser.id, DEFAULT_MODEL);
+    const enhanceVaultCreds = await resolveVaultCreds(enhanceUser.id, DEFAULT_MODEL);
     const rawResponse = await chatComplete(
       [{ role: 'user', content: fullPrompt }],
       { apiKey: enhanceVaultCreds.apiKey, baseUrl: enhanceVaultCreds.baseUrl },
@@ -9737,7 +9737,7 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
       content.userStories = deduped;
       const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
       fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
-      await snapshotVersion(specId, JSON.stringify(content), specStatus);
+      await snapshotVersion(Array.isArray(specId) ? specId[0] : specId, JSON.stringify(content), specStatus);
     }
 
     res.json({ fixed, changes });

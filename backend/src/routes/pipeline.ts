@@ -872,7 +872,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 2. Budget cap guard — block if hard cap exceeded for this period
-    const budgetStatus = checkBudgetThresholds(workspaceId);
+    const budgetStatus = await checkBudgetThresholds(workspaceId);
     if (budgetStatus.capExceeded) {
       res.status(409).json({
         error: 'Budget cap exceeded for this period',
@@ -1222,25 +1222,25 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // 7c. Inject vault API keys for all configured providers
     const pipelineUser = await getEffectiveUser(req);
-    const anthropicVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'anthropic') : null;
+    const anthropicVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'anthropic') : null;
     if (anthropicVaultKey) {
       env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
     }
-    const openaiVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'openai-compat') : null;
+    const openaiVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'openai-compat') : null;
     if (openaiVaultKey) {
       env['OPENAI_API_KEY'] = openaiVaultKey.key;
       if (openaiVaultKey.baseUrl) {
         env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
       }
     }
-    const openrouterVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'openrouter') : null;
+    const openrouterVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'openrouter') : null;
     if (openrouterVaultKey) {
       env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
     }
 
     // 7c-copilot. Inject GitHub Copilot token when using github/copilot model
     if (resolvedAgentModel === 'github/copilot' && pipelineUser) {
-      const copilotToken = getCopilotToken(pipelineUser.id);
+      const copilotToken = await getCopilotToken(pipelineUser.id);
       if (copilotToken) {
         env['GITHUB_TOKEN'] = copilotToken;
       }
@@ -2026,7 +2026,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 3. Budget cap guard
-    const budgetStatus = checkBudgetThresholds(workspaceId);
+    const budgetStatus = await checkBudgetThresholds(workspaceId);
     if (budgetStatus.capExceeded) {
       res.status(409).json({
         error: 'Budget cap exceeded for this period',
@@ -2061,15 +2061,15 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     if (user?.id) {
       const vaultProvider = resolveVaultProvider(resolvedModel);
       if (vaultProvider) {
-        const result = getVaultKey(user.id, vaultProvider);
+        const result = await getVaultKey(user.id, vaultProvider);
         if (result) vaultCreds = { apiKey: result.key, baseUrl: result.baseUrl ?? undefined };
       }
       if (!vaultCreds.apiKey) {
-        const compat = getVaultKey(user.id, 'openai-compat');
+        const compat = await getVaultKey(user.id, 'openai-compat');
         if (compat) vaultCreds = { apiKey: compat.key, baseUrl: compat.baseUrl ?? undefined };
       }
       if (!vaultCreds.apiKey) {
-        const anthropic = getVaultKey(user.id, 'anthropic');
+        const anthropic = await getVaultKey(user.id, 'anthropic');
         if (anthropic) vaultCreds = { apiKey: anthropic.key };
       }
     }
@@ -2237,20 +2237,20 @@ router.post('/quick-run', async (req: Request, res: Response) => {
 
     // Inject vault API keys
     if (user?.id) {
-      const anthropicVaultKey = getVaultKey(user.id, 'anthropic');
+      const anthropicVaultKey = await getVaultKey(user.id, 'anthropic');
       if (anthropicVaultKey) env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
-      const openaiVaultKey = getVaultKey(user.id, 'openai-compat');
+      const openaiVaultKey = await getVaultKey(user.id, 'openai-compat');
       if (openaiVaultKey) {
         env['OPENAI_API_KEY'] = openaiVaultKey.key;
         if (openaiVaultKey.baseUrl) env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
       }
-      const openrouterVaultKey = getVaultKey(user.id, 'openrouter');
+      const openrouterVaultKey = await getVaultKey(user.id, 'openrouter');
       if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
 
       // Inject Copilot token when using github/copilot model
       const resolvedModel = agentConfig.agentModel;
       if (resolvedModel === 'github/copilot') {
-        const copilotToken = getCopilotToken(user.id);
+        const copilotToken = await getCopilotToken(user.id);
         if (copilotToken) env['GITHUB_TOKEN'] = copilotToken;
       }
     }
