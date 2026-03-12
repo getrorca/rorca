@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import multer from 'multer';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
@@ -23,11 +22,7 @@ import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
-import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
-import { matchSkills } from '../lib/skill-matcher';
-import { PDFParse } from 'pdf-parse';
-import mammoth from 'mammoth';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -52,109 +47,21 @@ function briefToSlug(text: string): string {
   return slug.slice(0, 60).replace(/-$/, '');
 }
 
-const MAX_ATTACHMENT_TOKENS = 2000;
-const IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
-
-/**
- * Extract text content from an attachment's binary data based on MIME type.
- * Returns extracted text (truncated to MAX_ATTACHMENT_TOKENS tokens), or null for images.
- */
-async function extractAttachmentText(contentType: string, fileData: Buffer, filename: string): Promise<string | null> {
-  try {
-    if (IMAGE_CONTENT_TYPES.has(contentType)) {
-      return null; // images handled separately as metadata
-    }
-
-    let text = '';
-    if (contentType === 'application/pdf') {
-      const parser = new PDFParse({ data: fileData });
-      const result = await parser.getText();
-      await parser.destroy();
-      text = result.text;
-    } else if (contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      const result = await mammoth.extractRawText({ buffer: fileData });
-      text = result.value;
-    } else if (contentType === 'text/plain' || contentType === 'text/markdown' || contentType.startsWith('text/')) {
-      text = fileData.toString('utf-8');
-    } else {
-      return `[Unsupported file type: ${contentType}]`;
-    }
-
-    // Token budget: ~4 chars per token
-    const maxChars = MAX_ATTACHMENT_TOKENS * 4;
-    if (text.length > maxChars) {
-      return text.slice(0, maxChars) + '\n[truncated]';
-    }
-    return text;
-  } catch (err) {
-    return `[Error extracting text from ${filename}: ${(err as Error).message}]`;
-  }
-}
-
-/**
- * Query spec_attachments for a given spec slug and build the
- * '=== ATTACHED DOCUMENTS ===' prompt section.
- * Returns empty string if no attachments found.
- * Optionally emits SSE attachment_processing events via the provided callback.
- */
-async function buildAttachmentSection(
-  specSlug: string,
-  onAttachment?: (filename: string, status: 'extracting_text' | 'complete') => void,
-): Promise<string> {
-  type AttachmentRow = {
-    filename: string;
-    content_type: string;
-    file_size: number;
-    file_data: Buffer;
-  };
-
-  const rows = await query<AttachmentRow>(
-    'SELECT filename, content_type, file_size, file_data FROM spec_attachments WHERE spec_id = $1 ORDER BY created_at ASC',
-    [specSlug],
-  );
-
-  if (rows.length === 0) return '';
-
-  const parts: string[] = ['=== ATTACHED DOCUMENTS ==='];
-
-  for (const row of rows) {
-    if (IMAGE_CONTENT_TYPES.has(row.content_type)) {
-      onAttachment?.(row.filename, 'extracting_text');
-      parts.push(
-        `${row.filename}:`,
-        `[Image attachment — type: ${row.content_type}, size: ${row.file_size} bytes. Image provided for visual context.]`,
-        '',
-      );
-      onAttachment?.(row.filename, 'complete');
-    } else {
-      onAttachment?.(row.filename, 'extracting_text');
-      const text = await extractAttachmentText(row.content_type, row.file_data, row.filename);
-      if (text !== null) {
-        parts.push(`${row.filename}:`, text, '');
-      }
-      onAttachment?.(row.filename, 'complete');
-    }
-  }
-
-  parts.push('=== END ATTACHED DOCUMENTS ===');
-  return parts.join('\n');
-}
-
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
-async function resolveVaultCreds(userId: string, model: string): Promise<{ apiKey?: string; baseUrl?: string }> {
+function resolveVaultCreds(userId: string, model: string): { apiKey?: string; baseUrl?: string } {
   // Try provider inferred from model registry first
   const vaultProvider = resolveVaultProvider(model);
   if (vaultProvider) {
-    const result = await getVaultKey(userId, vaultProvider);
+    const result = getVaultKey(userId, vaultProvider);
     if (result) return { apiKey: result.key, baseUrl: result.baseUrl ?? undefined };
   }
   // Fallback: try 'openai-compat' for unrecognized models (pass-through)
   if (!vaultProvider) {
-    const compat = await getVaultKey(userId, 'openai-compat');
+    const compat = getVaultKey(userId, 'openai-compat');
     if (compat) return { apiKey: compat.key, baseUrl: compat.baseUrl ?? undefined };
   }
   // Final fallback: try anthropic (backward compat — many users have this stored)
-  const anthropic = await getVaultKey(userId, 'anthropic');
+  const anthropic = getVaultKey(userId, 'anthropic');
   if (anthropic) return { apiKey: anthropic.key };
   return {};
 }
@@ -363,7 +270,7 @@ function safeReadFile(filePath: string): string {
  * Build skill + persona catalog context for spec generation prompts.
  * Discovers installed skills and personas from the workspace, reads MEMORY.md and AGENTS.md.
  */
-async function buildCatalogContext(workspacePath: string, workspaceId?: string): Promise<{
+async function buildCatalogContext(workspacePath: string): Promise<{
   skillCatalog: string;
   personaCatalog: string;
   memoryMd: string;
@@ -377,28 +284,7 @@ async function buildCatalogContext(workspacePath: string, workspaceId?: string):
   const skillCatalog = skillRegistry.getCatalogForPrompt();
   const personaCatalog = personaRegistry.getPersonaCatalogForPrompt();
 
-  let memoryMd = safeReadFile(path.join(rorcaDir, 'MEMORY.md'))
-    || safeReadFile(path.join(rorcaDir, 'memory', 'MEMORY.md'))
-    || safeReadFile(path.join(workspacePath, 'MEMORY.md'));
-
-  // Fallback: if no MEMORY.md file found, build from DB memories table
-  if (!memoryMd && workspaceId) {
-    try {
-      const dbMemories = await query<{ category: string; content: string; created_at: string }>(
-        `SELECT category, content, created_at FROM memories
-         WHERE workspace_id = $1 AND deleted_at IS NULL
-         ORDER BY created_at DESC LIMIT 50`,
-        [workspaceId]
-      );
-      if (dbMemories.length > 0) {
-        memoryMd = dbMemories.map(m => {
-          const date = new Date(m.created_at).toISOString().slice(0, 10);
-          return `## ${date} [${m.category}]\n${m.content}`;
-        }).join('\n\n');
-      }
-    } catch { /* DB memories optional — don't block spec gen */ }
-  }
-
+  const memoryMd = safeReadFile(path.join(rorcaDir, 'MEMORY.md'));
   const agentsMd = safeReadFile(path.join(workspacePath, 'AGENTS.md'))
     || safeReadFile(path.join(rorcaDir, 'AGENTS.md'));
 
@@ -647,7 +533,7 @@ interface SpecDiffResult {
  *               title: { type: string, description: "Optional — auto-generated from brief if omitted", example: "User Authentication" }
  *               brief: { type: string, example: "Add login/register with JWT tokens" }
  *               storyCount: { type: integer, default: 5 }
- *               model: { type: string, example: "claude-sonnet-4-6" }
+ *               model: { type: string, example: "claude-sonnet-4-5-20250929" }
  *               domain: { type: string }
  *               diagramTypes: { type: array, items: { type: string } }
  *               storyAnnotations: { type: string }
@@ -711,27 +597,6 @@ async function emitPassEvent(
     id: result!.id,
     ts: new Date().toISOString(),
     event_type: 'spec_generation_pass',
-    workspace_id: workspaceId ?? null,
-    spec_id: specId,
-    story_id: null,
-    actor: 'system',
-    payload,
-  });
-}
-
-/** Emit an attachment_processing WAL event and broadcast via SSE. */
-async function emitAttachmentEvent(
-  specId: string,
-  filename: string,
-  status: 'extracting_text' | 'complete',
-  workspaceId?: string,
-): Promise<void> {
-  const payload = JSON.stringify({ filename, status });
-  const result = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('attachment_processing', $1, $2, $3) RETURNING *`, [specId, workspaceId ?? null, payload]);
-  broadcastAll({
-    id: result!.id,
-    ts: new Date().toISOString(),
-    event_type: 'attachment_processing',
     workspace_id: workspaceId ?? null,
     spec_id: specId,
     story_id: null,
@@ -865,7 +730,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     let semanticGraphSection = '';
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
-      const retrieved = await retrieveContext(workspaceId, brief, {
+      const retrieved = await retrieveContext(Number(workspaceId), brief, {
         maxTokens: 16000,
         includeGraph: true,
       });
@@ -908,7 +773,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 6c. Discover skill + persona catalogs and read context files
-    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id as string | undefined);
+    const catalogs = await buildCatalogContext(workspace.path as string);
 
     // 6d. Pre-compute contextSummary for error responses (also used in success response)
     const skillNamesList = catalogs.skillCatalog
@@ -919,9 +784,9 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       : 0;
     const dbMemoryRow = await queryOne<{ cnt: string }>(
       'SELECT COUNT(*) as cnt FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL',
-      [workspace.id]
+      [workspaceId]
     );
-    const dbMemoryCount = dbMemoryRow ? parseInt(dbMemoryRow.cnt, 10) : 0;
+    const dbMemoryCount = parseInt(dbMemoryRow?.cnt || '0', 10);
     const memoryEntryCount = Math.max(fsMemoryCount, dbMemoryCount);
     const catalogTokens = Math.ceil(
       (catalogs.skillCatalog.length + catalogs.personaCatalog.length +
@@ -1026,18 +891,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ];
 
-    // Pre-compute slug — needed for attachment lookup and multi-pass version snapshots
-    const slug = title
-      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-      : briefToSlug(brief);
-    genSlug = slug;
-
-    // Load attachment context for this spec slug (before prompt assembly)
-    // Emit SSE events for each attachment as it's being processed
-    const attachmentSection = await buildAttachmentSection(slug, (filename, status) => {
-      emitAttachmentEvent(slug, filename, status, String(workspaceId)).catch(() => {/* non-fatal */});
-    });
-
     // Build catalog sections (only include if non-empty)
     const catalogSections: string[] = [];
     if (catalogs.memoryMd) {
@@ -1072,7 +925,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         '',
       ] : []),
       ...catalogSections,
-      ...(attachmentSection ? [attachmentSection, ''] : []),
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
       storyCount === 0
@@ -1111,6 +963,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
     let tokenUsage = { inputTokens: 0, outputTokens: 0 };
 
+    // Pre-compute slug early — needed for multi-pass version snapshots
+    const slug = title
+      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      : briefToSlug(brief);
+    genSlug = slug;
+
     if (multiPass) {
       // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
       logger.info(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
@@ -1125,7 +983,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
       const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-      const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
+      const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
 
       // ── Pass 1: PM Agent — coarse high-level stories ──
       await emitPassEvent(slug, 1, 'started', workspaceId);
@@ -1143,7 +1001,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         '=== END PERSONA ===',
         '',
         synthesized,
-        ...(attachmentSection ? [attachmentSection, ''] : []),
         ...(templateContext ? [templateContext, '---'] : []),
         '---',
         'TASK: Generate a HIGH-LEVEL software specification JSON with coarse user stories (10-20 stories).',
@@ -1864,7 +1721,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
         const user = await getEffectiveUser(req);
         if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-        const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
+        const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
         const llmResult = await chatComplete(
           [{ role: 'user', content: fullPrompt }],
           { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
@@ -1901,7 +1758,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       // ── SDK path: direct LLM call via chatComplete ──
       const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-      const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
+      const vaultCreds = resolveVaultCreds(user.id, resolvedModel);
       const llmResult = await chatComplete(
         [{ role: 'user', content: fullPrompt }],
         { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
@@ -2145,7 +2002,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const storyPrefix = 'US';
 
   // Discover skill + persona catalogs for batch brief
-  const batchCatalogs = await buildCatalogContext(workspace.path, workspace.id);
+  const batchCatalogs = await buildCatalogContext(workspace.path);
   const batchCatalogSections: string[] = [];
   if (batchCatalogs.memoryMd) {
     batchCatalogSections.push('=== PROJECT MEMORY ===', batchCatalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
@@ -2201,7 +2058,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   ].join('\n');
 
   // Call LLM (use vault key if available for this user)
-  const batchVaultCreds = item.userId ? await resolveVaultCreds(item.userId, resolvedModel) : {};
+  const batchVaultCreds = item.userId ? resolveVaultCreds(item.userId, resolvedModel) : {};
   const llmResult = await chatComplete(
     [{ role: 'user', content: fullPrompt }],
     { model: resolvedModel, apiKey: batchVaultCreds.apiKey, baseUrl: batchVaultCreds.baseUrl },
@@ -2558,8 +2415,7 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
   // Subscribe to WAL events for batch_progress
   const unsubscribe = subscribe((event) => {
     if (event.event_type !== 'batch_progress' && event.event_type !== 'batch_finished') return;
-    // pg auto-deserializes JSONB columns — typeof check prevents double-parse crash
-    const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : (event.payload ?? {});
+    const payload = event.payload ? JSON.parse(event.payload) : {};
     if (payload.batchId !== batchId) return;
     res.write(`event: progress\ndata: ${JSON.stringify(payload)}\n\n`);
   });
@@ -2735,7 +2591,6 @@ interface KanbanSpec {
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
   model?: string;
-  attachmentCount: number;
 }
 
 router.get('/kanban', async (req: Request, res: Response) => {
@@ -2754,15 +2609,6 @@ router.get('/kanban', async (req: Request, res: Response) => {
 
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
 
-    // Fetch attachment counts for all specs
-    const attachmentRows = await query<{ spec_id: string; cnt: string }>(
-      `SELECT spec_id, COUNT(*)::text AS cnt FROM spec_attachments GROUP BY spec_id`
-    );
-    const attachmentCountBySpecId = new Map<string, number>();
-    for (const row of attachmentRows) {
-      attachmentCountBySpecId.set(row.spec_id, parseInt(row.cnt, 10));
-    }
-
     // Build summaries from filesystem
     const pendingSpecs: KanbanSpec[] = [];
     for (const file of safeReaddir(pendingDir)) {
@@ -2780,26 +2626,16 @@ router.get('/kanban', async (req: Request, res: Response) => {
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
-          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
         });
       } catch { /* skip unparseable */ }
     }
 
     const approvedSpecs: KanbanSpec[] = [];
-    // Track passed/failed counts from spec JSON (cumulative across all runs)
-    const storyProgress = new Map<string, number>();
-    const storyFailed = new Map<string, number>();
     for (const file of safeReaddir(approvedDir)) {
       try {
         const filePath = path.join(approvedDir, file);
         const content = parseSpecFile(filePath);
         const s = await buildSummary(filePath, file, 'approved', workspace.path, workspaceId);
-        // Count passes/fails directly from spec JSON — accurate across multiple runs
-        const stories: any[] = Array.isArray(content.userStories) ? content.userStories : [];
-        const passedCount = stories.filter((st: any) => st.passes === true).length;
-        const failedCount = stories.filter((st: any) => st.passes === false && st.skipped !== true).length;
-        if (passedCount > 0) storyProgress.set(s.id, passedCount);
-        if (failedCount > 0) storyFailed.set(s.id, failedCount);
         approvedSpecs.push({
           id: s.id,
           title: s.specName,
@@ -2811,7 +2647,6 @@ router.get('/kanban', async (req: Request, res: Response) => {
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
-          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
         });
       } catch { /* skip unparseable */ }
     }
@@ -2837,6 +2672,25 @@ router.get('/kanban', async (req: Request, res: Response) => {
       [workspaceId]
     );
     for (const row of manualDone) completedSlugs.add(row.spec_id);
+
+    // Fetch story pass/fail counts for approved specs with runs
+    const approvedSlugs = approvedSpecs.map(s => s.id);
+    const storyProgress = new Map<string, number>();
+    const storyFailed = new Map<string, number>();
+    if (approvedSlugs.length > 0) {
+      for (const slug of approvedSlugs) {
+        // Find latest run for this spec
+        const latestRun = runs.find(r =>
+          r.spec_path.replace(/^.*\//, '').replace(/\.json$/, '') === slug
+        );
+        if (latestRun) {
+          const passCount = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status = 'pass'`, [latestRun.id]) as { cnt: number } | undefined;
+          if (passCount) storyProgress.set(slug, passCount.cnt);
+          const failCount = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status = 'fail'`, [latestRun.id]) as { cnt: number } | undefined;
+          if (failCount) storyFailed.set(slug, failCount.cnt);
+        }
+      }
+    }
 
     // Bucket into columns:
     // - draft: pending specs (no active run)
@@ -3472,7 +3326,7 @@ router.get('/archive', async (req: Request, res: Response) => {
         if (allSpecs.some(s => s.id === evt.spec_id)) continue;
         if (matchingSlugs && !matchingSlugs.has(evt.spec_id)) continue;
 
-        const payload = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : (evt.payload ?? {});
+        const payload = JSON.parse(evt.payload);
         allSpecs.push({
           id: evt.spec_id,
           specName: evt.spec_id,
@@ -3757,7 +3611,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     let semanticGraphSection = '';
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
-      const retrieved = await retrieveContext(workspaceId, brief || specContent.title || specId, {
+      const retrieved = await retrieveContext(Number(workspaceId), brief || specContent.title || specId, {
         maxTokens: 16000,
         includeGraph: true,
       });
@@ -3808,7 +3662,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     const { chatComplete: chatCompleteFn } = await import('../lib/llm-client');
     const addStoriesUser = await getEffectiveUser(req);
     if (!addStoriesUser) { res.status(500).json({ error: 'No user configured' }); return; }
-    const addStoriesVaultCreds = await resolveVaultCreds(addStoriesUser.id, DEFAULT_MODEL);
+    const addStoriesVaultCreds = resolveVaultCreds(addStoriesUser.id, DEFAULT_MODEL);
     const rawResponse = await chatCompleteFn(
       [{ role: 'user', content: fullPrompt }],
       { apiKey: addStoriesVaultCreds.apiKey, baseUrl: addStoriesVaultCreds.baseUrl },
@@ -4724,7 +4578,7 @@ Rewrite the story following the user instructions. Keep the same scope unless to
     const resolvedModel = model || undefined;
     const rewriteUser = await getEffectiveUser(req);
     if (!rewriteUser) { res.status(500).json({ error: 'No user configured' }); return; }
-    const rewriteVaultCreds = await resolveVaultCreds(rewriteUser.id, resolvedModel ?? DEFAULT_MODEL);
+    const rewriteVaultCreds = resolveVaultCreds(rewriteUser.id, resolvedModel ?? DEFAULT_MODEL);
     const llmResult = await chatComplete(
       [{ role: 'user', content: prompt }],
       { model: resolvedModel, apiKey: rewriteVaultCreds.apiKey, baseUrl: rewriteVaultCreds.baseUrl },
@@ -5200,409 +5054,16 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
       return;
     }
 
-    const log = await queryOne<{
-      id: number;
-      spec_slug: string;
-      model: string;
-      provider: string | null;
-      duration_ms: number | null;
-      input_tokens: number | null;
-      output_tokens: number | null;
-      context_summary: string;
-      error: string | null;
-      status: string;
-      created_at: string;
-    }>(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC LIMIT 1`, [specId]);
+    const log = await queryOne(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC LIMIT 1`, [specId]);
 
     if (!log) {
       res.status(404).json({ error: 'No generation log found' });
       return;
     }
 
-    let contextSummary: any = null;
-    try {
-      contextSummary = log.context_summary ? JSON.parse(log.context_summary) : null;
-    } catch {
-      contextSummary = null;
-    }
-
-    res.json({
-      contextSummary,
-      model: log.model,
-      provider: log.provider ?? null,
-      duration: log.duration_ms ?? 0,
-      tokens: (log.input_tokens ?? 0) + (log.output_tokens ?? 0),
-      createdAt: log.created_at,
-    });
+    res.json(log);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch generation log' });
-  }
-});
-
-// ─── SV-001: GET /:specId/check — Structural spec validation ─────────────────
-
-/**
- * @swagger
- * /api/specs/{specId}/check:
- *   get:
- *     tags: [Specs]
- *     summary: Validate a spec's structure and story integrity
- *     operationId: checkSpec
- *     description: >
- *       Performs structural validation on a spec JSON file. Checks for missing
- *       required fields per story (id, title, description, acceptanceCriteria),
- *       orphaned dependsOn references, duplicate story IDs, and empty
- *       acceptanceCriteria arrays. Returns categorized errors, warnings, and
- *       aggregate structural stats.
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema: { type: string }
- *         description: Spec slug (filename without .json)
- *       - in: query
- *         name: workspaceId
- *         required: true
- *         schema: { type: string }
- *         description: Workspace ID
- *     responses:
- *       200:
- *         description: Validation result
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 valid: { type: boolean }
- *                 errors:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       storyId: { type: string }
- *                       field: { type: string }
- *                       message: { type: string }
- *                 warnings:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       storyId: { type: string }
- *                       field: { type: string }
- *                       message: { type: string }
- *                 stats:
- *                   type: object
- *                   properties:
- *                     totalStories: { type: integer }
- *                     avgACCount: { type: number }
- *                     maxDependencyDepth: { type: integer }
- *       400: { description: "Missing workspaceId" }
- *       404: { description: "Workspace or spec not found" }
- */
-router.get('/:specId/check', async (req: Request, res: Response) => {
-  try {
-    const { specId } = req.params;
-    const workspaceId = req.query.workspaceId as string;
-
-    if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
-      return;
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
-    }
-
-    const { pendingDir, approvedDir } = specsDirs(workspace.path);
-    const pendingFile = path.join(pendingDir, `${specId}.json`);
-    const approvedFile = path.join(approvedDir, `${specId}.json`);
-
-    let content: any;
-    if (fs.existsSync(pendingFile)) {
-      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
-    } else if (fs.existsSync(approvedFile)) {
-      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
-    } else {
-      res.status(404).json({ error: 'Spec not found' });
-      return;
-    }
-
-    const stories: any[] = content.userStories ?? content.stories ?? [];
-
-    interface ValidationIssue {
-      storyId: string;
-      field: string;
-      message: string;
-    }
-
-    const errors: ValidationIssue[] = [];
-    const warnings: ValidationIssue[] = [];
-
-    // Collect all story IDs for orphan detection
-    const storyIds = new Set<string>();
-    const seenIds = new Set<string>();
-
-    // First pass: collect IDs and detect duplicates
-    for (const story of stories) {
-      const sid = story.id;
-      if (typeof sid !== 'string' || sid.trim() === '') {
-        errors.push({ storyId: '(unknown)', field: 'id', message: 'Story is missing required field: id' });
-        continue;
-      }
-      if (seenIds.has(sid)) {
-        errors.push({ storyId: sid, field: 'id', message: `Duplicate story ID: ${sid}` });
-      } else {
-        seenIds.add(sid);
-        storyIds.add(sid);
-      }
-    }
-
-    // Second pass: validate required fields and dependsOn references
-    let totalACCount = 0;
-
-    for (const story of stories) {
-      const sid = (typeof story.id === 'string' && story.id.trim() !== '') ? story.id : '(unknown)';
-
-      // Required field: title
-      if (typeof story.title !== 'string' || story.title.trim() === '') {
-        errors.push({ storyId: sid, field: 'title', message: 'Story is missing required field: title' });
-      }
-
-      // Required field: description
-      if (typeof story.description !== 'string' || story.description.trim() === '') {
-        errors.push({ storyId: sid, field: 'description', message: 'Story is missing required field: description' });
-      }
-
-      // Required field: acceptanceCriteria (must be array)
-      if (!Array.isArray(story.acceptanceCriteria)) {
-        errors.push({ storyId: sid, field: 'acceptanceCriteria', message: 'Story is missing required field: acceptanceCriteria (must be array)' });
-      } else {
-        totalACCount += story.acceptanceCriteria.length;
-        if (story.acceptanceCriteria.length === 0) {
-          warnings.push({ storyId: sid, field: 'acceptanceCriteria', message: 'Story has empty acceptanceCriteria array' });
-        }
-        // Validate each AC is a string
-        for (let i = 0; i < story.acceptanceCriteria.length; i++) {
-          if (typeof story.acceptanceCriteria[i] !== 'string') {
-            errors.push({ storyId: sid, field: `acceptanceCriteria[${i}]`, message: `Acceptance criteria entry ${i} is not a string` });
-          }
-        }
-      }
-
-      // Orphaned dependsOn references
-      if (Array.isArray(story.dependsOn)) {
-        for (const dep of story.dependsOn) {
-          if (typeof dep !== 'string') {
-            errors.push({ storyId: sid, field: 'dependsOn', message: `dependsOn entry is not a string: ${JSON.stringify(dep)}` });
-          } else if (!storyIds.has(dep)) {
-            errors.push({ storyId: sid, field: 'dependsOn', message: `Orphaned dependsOn reference: "${dep}" does not exist in this spec` });
-          }
-        }
-      }
-    }
-
-    // Compute maxDependencyDepth via BFS/memoization
-    function computeDepth(sid: string, visited: Set<string>): number {
-      if (visited.has(sid)) return 0; // cycle guard
-      const story = stories.find((s: any) => s.id === sid);
-      if (!story || !Array.isArray(story.dependsOn) || story.dependsOn.length === 0) return 0;
-      visited.add(sid);
-      let max = 0;
-      for (const dep of story.dependsOn) {
-        if (typeof dep === 'string' && storyIds.has(dep)) {
-          const d = computeDepth(dep, new Set(visited));
-          if (d > max) max = d;
-        }
-      }
-      return max + 1;
-    }
-
-    let maxDependencyDepth = 0;
-    for (const story of stories) {
-      if (typeof story.id === 'string' && storyIds.has(story.id)) {
-        const depth = computeDepth(story.id, new Set<string>());
-        if (depth > maxDependencyDepth) maxDependencyDepth = depth;
-      }
-    }
-
-    const totalStories = stories.length;
-    const avgACCount = totalStories > 0 ? Math.round((totalACCount / totalStories) * 10) / 10 : 0;
-
-    res.json({
-      valid: errors.length === 0,
-      errors,
-      warnings,
-      stats: { totalStories, avgACCount, maxDependencyDepth },
-    });
-  } catch (error: any) {
-    logger.error('[Specs] Check error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ─── SV-002: GET /:specId/score — AC quality scoring ─────────────────────────
-
-/**
- * @swagger
- * /api/specs/{specId}/score:
- *   get:
- *     tags: [Specs]
- *     summary: Compute quality score for a spec's acceptance criteria
- *     operationId: scoreSpec
- *     description: >
- *       Scores each story's acceptance criteria on a 0-100 scale using three
- *       dimensions: AC count (base score), specificity (penalty for vague
- *       phrases like "properly", "correctly", "as expected"), and state
- *       coverage (bonus for mentioning error, empty, and loading states).
- *       Returns per-story scores and an aggregate spec score (average).
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema: { type: string }
- *         description: Spec slug (filename without .json)
- *       - in: query
- *         name: workspaceId
- *         required: true
- *         schema: { type: string }
- *         description: Workspace ID
- *     responses:
- *       200:
- *         description: Quality score result
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 specScore:
- *                   type: number
- *                   description: Aggregate score 0-100 (average of all story scores)
- *                 stories:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       id: { type: string }
- *                       score: { type: number }
- *                       acCount: { type: integer }
- *                       vaguePhrasesFound:
- *                         type: array
- *                         items: { type: string }
- *                       stateCoverage:
- *                         type: object
- *                         properties:
- *                           error: { type: boolean }
- *                           empty: { type: boolean }
- *                           loading: { type: boolean }
- *       400: { description: "Missing workspaceId" }
- *       404: { description: "Workspace or spec not found" }
- */
-router.get('/:specId/score', async (req: Request, res: Response) => {
-  try {
-    const { specId } = req.params;
-    const workspaceId = req.query.workspaceId as string;
-
-    if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
-      return;
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
-    }
-
-    const { pendingDir, approvedDir } = specsDirs(workspace.path);
-    const pendingFile = path.join(pendingDir, `${specId}.json`);
-    const approvedFile = path.join(approvedDir, `${specId}.json`);
-
-    let content: any;
-    if (fs.existsSync(pendingFile)) {
-      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
-    } else if (fs.existsSync(approvedFile)) {
-      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
-    } else {
-      res.status(404).json({ error: 'Spec not found' });
-      return;
-    }
-
-    const stories: any[] = content.userStories ?? content.stories ?? [];
-
-    // Vague phrases that indicate non-measurable acceptance criteria
-    const VAGUE_PHRASES = [
-      'properly', 'correctly', 'as expected', 'appropriate', 'suitable',
-      'should work', 'must work', 'works correctly', 'works properly',
-      'behaves correctly', 'behaves properly', 'functions correctly',
-      'functions properly', 'handles correctly', 'handles properly',
-    ];
-
-    // State coverage patterns
-    const ERROR_PATTERNS = /\b(error|errors|fail|failure|failures|exception|invalid|unauthorized|forbidden|not found|500|404|400|401|403)\b/i;
-    const EMPTY_PATTERNS = /\b(empty|no results|no items|no data|no records|zero results|empty state|nothing found)\b/i;
-    const LOADING_PATTERNS = /\b(loading|load|spinner|skeleton|pending|fetching|in progress|progress)\b/i;
-
-    interface StoryScore {
-      id: string;
-      score: number;
-      acCount: number;
-      vaguePhrasesFound: string[];
-      stateCoverage: { error: boolean; empty: boolean; loading: boolean };
-    }
-
-    const storyScores: StoryScore[] = stories.map((story: any) => {
-      const sid = typeof story.id === 'string' ? story.id : '(unknown)';
-      const acs: string[] = Array.isArray(story.acceptanceCriteria) ? story.acceptanceCriteria.filter((ac: any) => typeof ac === 'string') : [];
-      const acCount = acs.length;
-      const allAcText = acs.join(' ');
-
-      // Base score from AC count:
-      // 0 AC = 0pt, 1-2 AC = 20pt, 3-4 AC = 40pt, 5-6 AC = 60pt, 7+ AC = 70pt (diminishing returns cap)
-      let baseScore: number;
-      if (acCount === 0) {
-        baseScore = 0;
-      } else if (acCount <= 2) {
-        baseScore = 20;
-      } else if (acCount <= 4) {
-        baseScore = 40;
-      } else if (acCount <= 6) {
-        baseScore = 60;
-      } else {
-        baseScore = 70;
-      }
-
-      // Specificity penalty: -5pt per unique vague phrase found, min 0
-      const vaguePhrasesFound: string[] = [];
-      for (const phrase of VAGUE_PHRASES) {
-        if (allAcText.toLowerCase().includes(phrase.toLowerCase()) && !vaguePhrasesFound.includes(phrase)) {
-          vaguePhrasesFound.push(phrase);
-        }
-      }
-      const specificityPenalty = vaguePhrasesFound.length * 5;
-
-      // State coverage bonus: +10pt each for error/empty/loading mentions (max +30pt)
-      const stateCoverage = {
-        error: ERROR_PATTERNS.test(allAcText),
-        empty: EMPTY_PATTERNS.test(allAcText),
-        loading: LOADING_PATTERNS.test(allAcText),
-      };
-      const coverageBonus = (stateCoverage.error ? 10 : 0) + (stateCoverage.empty ? 10 : 0) + (stateCoverage.loading ? 10 : 0);
-
-      const score = Math.min(100, Math.max(0, baseScore - specificityPenalty + coverageBonus));
-
-      return { id: sid, score, acCount, vaguePhrasesFound, stateCoverage };
-    });
-
-    const specScore = storyScores.length > 0
-      ? Math.round(storyScores.reduce((sum, s) => sum + s.score, 0) / storyScores.length)
-      : 0;
-
-    res.json({ specScore, stories: storyScores });
-  } catch (error: any) {
-    logger.error('[Specs] Score error:', error);
-    res.status(500).json({ error: error.message });
   }
 });
 
@@ -6462,7 +5923,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
 
     const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-    const depVaultCreds = await resolveVaultCreds(user.id, DEFAULT_MODEL);
+    const depVaultCreds = resolveVaultCreds(user.id, DEFAULT_MODEL);
     const llmResult = await chatComplete(
       [{ role: 'user', content: prompt }],
       { apiKey: depVaultCreds.apiKey, baseUrl: depVaultCreds.baseUrl },
@@ -8641,7 +8102,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
 
     const enhanceUser = await getEffectiveUser(req);
     if (!enhanceUser) { res.status(500).json({ error: 'No user configured' }); return; }
-    const enhanceVaultCreds = await resolveVaultCreds(enhanceUser.id, DEFAULT_MODEL);
+    const enhanceVaultCreds = resolveVaultCreds(enhanceUser.id, DEFAULT_MODEL);
     const rawResponse = await chatComplete(
       [{ role: 'user', content: fullPrompt }],
       { apiKey: enhanceVaultCreds.apiKey, baseUrl: enhanceVaultCreds.baseUrl },
@@ -8879,7 +8340,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     }
 
     // Build skill catalog context
-    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
+    const catalogs = await buildCatalogContext(workspace.path as string);
     if (catalogs.skillNames.size === 0) {
       res.status(422).json({ error: 'No skills installed. Install skills from the Marketplace before matching.' });
       return;
@@ -8895,7 +8356,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
       const storyBrief = stories.map(s => `${s.title}: ${s.description ?? ''}`).join('\n');
-      const retrieved = await retrieveContext(workspaceId, storyBrief, {
+      const retrieved = await retrieveContext(Number(workspaceId), storyBrief, {
         maxTokens: 8000,
         includeGraph: true,
       });
@@ -8913,50 +8374,6 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       logger.warn({ err, workspaceId }, '[Specs] match-skills: retrieveContext failed — using catalog context only');
     }
 
-    // Query graph for skill effectiveness and file-path affinity (SE-011)
-    let skillEffectivenessData: SkillEffectivenessRow[] = [];
-    let skillPathAffinityData: SkillPathAffinityRow[] = [];
-    let skillEffectivenessSection = '';
-    try {
-      const [effectiveness, pathAffinity] = await Promise.all([
-        querySkillEffectiveness(),
-        querySkillPathAffinity(50),
-      ]);
-      skillEffectivenessData = effectiveness;
-      skillPathAffinityData = pathAffinity;
-
-      if (effectiveness.length > 0) {
-        const lines: string[] = ['## SKILL EFFECTIVENESS (from past runs)'];
-        for (const row of effectiveness) {
-          const passRate = Math.round((row.passCount / row.totalCount) * 100);
-          lines.push(`- ${row.skill}: used in ${row.totalCount} stories, ${row.passCount} passed (${passRate}% pass rate)`);
-        }
-
-        if (pathAffinity.length > 0) {
-          lines.push('');
-          lines.push('## SKILL FILE-PATH AFFINITY (skills effective on specific file patterns)');
-          // Group by skill
-          const bySkill = new Map<string, Array<{ filePath: string; storyCount: number }>>();
-          for (const pa of pathAffinity) {
-            const existing = bySkill.get(pa.skill) ?? [];
-            existing.push({ filePath: pa.filePath, storyCount: pa.storyCount });
-            bySkill.set(pa.skill, existing);
-          }
-          for (const [skill, paths] of bySkill) {
-            const pathList = paths.slice(0, 5).map(p => `\`${p.filePath}\` (${p.storyCount}x)`).join(', ');
-            lines.push(`- ${skill}: effective on ${pathList}`);
-          }
-        }
-
-        skillEffectivenessSection = lines.join('\n');
-        logger.debug({ effectivenessCount: effectiveness.length, pathAffinityCount: pathAffinity.length }, '[Specs] match-skills: graph skill effectiveness data available');
-      } else {
-        logger.debug('[Specs] match-skills: graph returned 0 skill effectiveness results — prompt works without it');
-      }
-    } catch (err) {
-      logger.debug({ err }, '[Specs] match-skills: graph skill effectiveness query unavailable — prompt works without it');
-    }
-
     // Build numbered story list
     const storyList = stories.map((s, i) =>
       `${i + 1}. [${s.id}] ${s.title}\n   ${s.description ?? ''}`
@@ -8969,9 +8386,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       resolvedModel = l3Pref.preferred_model;
     }
 
-    const hasEffectiveness = skillEffectivenessSection.length > 0;
-    const hasGraphContext = !!skillGraphSection;
-    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.${hasGraphContext ? ' Use the KNOWLEDGE GRAPH CONTEXT to see which skills were effective on similar stories in the past (USED_IN edges) — prefer skills with proven track records.' : ''}${hasEffectiveness ? ' Use the SKILL EFFECTIVENESS data to prefer skills with high pass rates. Use FILE-PATH AFFINITY to match skills to stories that will touch similar files.' : ''}
+    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.${skillGraphSection ? ' Use the KNOWLEDGE GRAPH CONTEXT to see which skills were effective on similar stories in the past (USED_IN edges) — prefer skills with proven track records.' : ''}
 
 Relevance scoring: 10 = this skill is essential for the story, 7-9 = highly relevant, 4-6 = moderately helpful, 1-3 = tangentially related. Only include skills with relevance >= 4. If no skills apply to a story, return empty suggestedSkills array.
 
@@ -8980,9 +8395,7 @@ Respond with valid JSON only, no markdown fences. Format:
 
 ## Installed Skills (one per line: name: description)
 ${catalogs.skillCatalog}
-${skillEffectivenessSection ? `
-${skillEffectivenessSection}
-` : ''}${skillGraphSection ? `
+${skillGraphSection ? `
 ## KNOWLEDGE GRAPH CONTEXT
 ${skillGraphSection}
 ` : ''}
@@ -9000,20 +8413,10 @@ ${storyList}`;
       { model: resolvedModel as any },
     );
 
-    // Parse LLM response — strip markdown fences and prose preamble before JSON
+    // Parse LLM response
     let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkillRaw[] }> };
     try {
-      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-      // If the LLM added prose before the JSON, extract the first { ... } block
-      const jsonStart = cleaned.indexOf('{');
-      if (jsonStart > 0) {
-        cleaned = cleaned.slice(jsonStart);
-      }
-      // Trim any trailing prose after the JSON
-      const lastBrace = cleaned.lastIndexOf('}');
-      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
-        cleaned = cleaned.slice(0, lastBrace + 1);
-      }
+      const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
       parsed = JSON.parse(cleaned);
     } catch {
       logger.error(`[Specs] match-skills: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
@@ -9077,32 +8480,15 @@ ${storyList}`;
     res.json({
       matched: totalSkillsMatched,
       stories: responseStories,
-      ...((retrievalMeta || skillEffectivenessData.length > 0) ? {
+      ...(retrievalMeta ? {
         contextSummary: {
-          ...(retrievalMeta ? {
-            retrieval: {
-              cagHits: retrievalMeta.cagHits,
-              ragHits: retrievalMeta.ragHits,
-              graphHits: retrievalMeta.graphHits,
-              tier: retrievalMeta.tier,
-              latencyMs: retrievalMeta.latencyMs,
-            },
-          } : {}),
-          ...(skillEffectivenessData.length > 0 ? {
-            skillEffectiveness: skillEffectivenessData.map(row => ({
-              skill: row.skill,
-              passCount: row.passCount,
-              totalCount: row.totalCount,
-              passRate: Math.round((row.passCount / row.totalCount) * 100),
-            })),
-          } : {}),
-          ...(skillPathAffinityData.length > 0 ? {
-            skillPathAffinity: skillPathAffinityData.slice(0, 20).map(row => ({
-              skill: row.skill,
-              filePath: row.filePath,
-              storyCount: row.storyCount,
-            })),
-          } : {}),
+          retrieval: {
+            cagHits: retrievalMeta.cagHits,
+            ragHits: retrievalMeta.ragHits,
+            graphHits: retrievalMeta.graphHits,
+            tier: retrievalMeta.tier,
+            latencyMs: retrievalMeta.latencyMs,
+          },
         },
       } : {}),
     });
@@ -9223,7 +8609,7 @@ router.post('/:specId/suggest-models', async (req: Request, res: Response) => {
 - Stories with 0-1 dependencies and few acceptance criteria can use faster/cheaper models.
 
 Respond with valid JSON only, no markdown fences. Format:
-{ "suggestions": [{ "storyId": "US-001", "suggestedModel": "claude-sonnet-4-6", "confidence": 0.85, "reason": "Standard feature with moderate complexity — Sonnet is sufficient" }] }
+{ "suggestions": [{ "storyId": "US-001", "suggestedModel": "claude-sonnet-4-5-20250929", "confidence": 0.85, "reason": "Standard feature with moderate complexity — Sonnet is sufficient" }] }
 
 confidence is 0.0-1.0 where 1.0 = highly confident this is the right model.
 
@@ -9238,18 +8624,10 @@ ${storyList}`;
       { model: resolvedModel as any },
     );
 
-    // Parse LLM response — strip markdown fences and prose preamble before JSON
+    // Parse LLM response
     let parsed: { suggestions: Array<{ storyId: string; suggestedModel: string; confidence: number; reason: string }> };
     try {
-      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-      const jsonStart = cleaned.indexOf('{');
-      if (jsonStart > 0) {
-        cleaned = cleaned.slice(jsonStart);
-      }
-      const lastBrace = cleaned.lastIndexOf('}');
-      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
-        cleaned = cleaned.slice(0, lastBrace + 1);
-      }
+      const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
       parsed = JSON.parse(cleaned);
     } catch {
       logger.error(`[Specs] suggest-models: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
@@ -9283,818 +8661,6 @@ ${storyList}`;
     logger.error('[Specs] suggest-models error:', error);
     res.status(500).json({ error: error.message });
   }
-});
-
-// ─── SV-003: POST /:specId/validate — LLM-powered deep spec review ────────────
-
-/**
- * @swagger
- * /api/specs/{specId}/validate:
- *   post:
- *     tags: [Specs]
- *     summary: LLM-powered deep spec review
- *     operationId: validateSpec
- *     description: >
- *       Uses an LLM (claude-sonnet-4-6) to perform a deep review of a spec,
- *       injecting spec-gap-analysis and assumption-buster skills into the prompt.
- *       Returns structured analysis: implicit assumptions, coverage gaps,
- *       untestable acceptance criteria, and missed stories.
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema: { type: string }
- *         description: Spec slug (filename without .json)
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId]
- *             properties:
- *               workspaceId:
- *                 type: string
- *                 description: Workspace ID
- *     responses:
- *       200:
- *         description: Deep validation result
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 assumptions:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       storyId: { type: string }
- *                       assumption: { type: string }
- *                       risk: { type: string }
- *                 gaps:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       area: { type: string }
- *                       description: { type: string }
- *                 untestableACs:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       storyId: { type: string }
- *                       acIndex: { type: integer }
- *                       reason: { type: string }
- *                 missedStories:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       title: { type: string }
- *                       description: { type: string }
- *                       reason: { type: string }
- *       400: { description: "Missing workspaceId" }
- *       404: { description: "Workspace or spec not found" }
- *       422: { description: "LLM response is not valid JSON" }
- */
-router.post('/:specId/validate', async (req: Request, res: Response) => {
-  try {
-    const { specId } = req.params;
-    const { workspaceId } = req.body as { workspaceId?: string };
-
-    if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
-      return;
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
-    }
-
-    const { pendingDir, approvedDir } = specsDirs(workspace.path);
-    const pendingFile = path.join(pendingDir, `${specId}.json`);
-    const approvedFile = path.join(approvedDir, `${specId}.json`);
-
-    let specContent: any;
-    if (fs.existsSync(pendingFile)) {
-      specContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
-    } else if (fs.existsSync(approvedFile)) {
-      specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
-    } else {
-      res.status(404).json({ error: 'Spec not found' });
-      return;
-    }
-
-    // Load skill files from .claude/skills/ (primary) or .rorca/skills/ (fallback)
-    function loadSkill(name: string): string {
-      const claudeSkillPath = path.join(workspace!.path, '.claude', 'skills', `${name}.md`);
-      const rorcaSkillPath = path.join(workspace!.path, '.rorca', 'skills', `${name}.md`);
-      if (fs.existsSync(claudeSkillPath)) {
-        return fs.readFileSync(claudeSkillPath, 'utf8');
-      }
-      if (fs.existsSync(rorcaSkillPath)) {
-        return fs.readFileSync(rorcaSkillPath, 'utf8');
-      }
-      return '';
-    }
-
-    const specGapSkill = loadSkill('spec-gap-analysis');
-    const assumptionBusterSkill = loadSkill('assumption-buster');
-
-    const prompt = `You are an expert spec reviewer performing a deep quality analysis. Your goal is to identify hidden risks, gaps, and assumptions in the following spec.
-
-${specGapSkill ? `## Spec Gap Analysis Skill\n${specGapSkill}\n\n` : ''}${assumptionBusterSkill ? `## Assumption Buster Skill\n${assumptionBusterSkill}\n\n` : ''}## Spec to Review
-
-\`\`\`json
-${JSON.stringify(specContent, null, 2)}
-\`\`\`
-
-## Your Task
-
-Analyze this spec and return a JSON object with exactly these four arrays:
-
-1. **assumptions** — implicit assumptions embedded in stories that are never explicitly stated or validated. For each: which story, what assumption, and what risk if it's wrong.
-
-2. **gaps** — areas of functionality not covered by any story. Think: error handling, auth, edge cases, data validation, rollback/undo, permissions, empty states, concurrent access, rate limiting, accessibility.
-
-3. **untestableACs** — acceptance criteria that are vague, subjective, or otherwise not verifiable by an automated test. Examples: "works correctly", "looks good", "is fast enough".
-
-4. **missedStories** — user stories that should exist but don't, given the feature area being built. Think about onboarding, error recovery, admin views, audit logs, notifications, mobile/responsive behavior.
-
-Respond with ONLY valid JSON, no markdown fences, no prose. Format:
-{
-  "assumptions": [{ "storyId": "US-001", "assumption": "...", "risk": "..." }],
-  "gaps": [{ "area": "...", "description": "..." }],
-  "untestableACs": [{ "storyId": "US-001", "acIndex": 0, "reason": "..." }],
-  "missedStories": [{ "title": "...", "description": "...", "reason": "..." }]
-}`;
-
-    const llmResult = await chatComplete(
-      [{ role: 'user', content: prompt }],
-      { model: 'claude-sonnet-4-6' },
-    );
-
-    // Parse LLM response — strip markdown fences and extract JSON
-    let parsed: {
-      assumptions: Array<{ storyId: string; assumption: string; risk: string }>;
-      gaps: Array<{ area: string; description: string }>;
-      untestableACs: Array<{ storyId: string; acIndex: number; reason: string }>;
-      missedStories: Array<{ title: string; description: string; reason: string }>;
-    };
-
-    try {
-      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-      const jsonStart = cleaned.indexOf('{');
-      if (jsonStart > 0) {
-        cleaned = cleaned.slice(jsonStart);
-      }
-      const lastBrace = cleaned.lastIndexOf('}');
-      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
-        cleaned = cleaned.slice(0, lastBrace + 1);
-      }
-      parsed = JSON.parse(cleaned);
-    } catch {
-      logger.error(`[Specs] validate: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
-      res.status(422).json({ error: 'LLM response is not valid JSON' });
-      return;
-    }
-
-    const result = {
-      assumptions: Array.isArray(parsed.assumptions) ? parsed.assumptions : [],
-      gaps: Array.isArray(parsed.gaps) ? parsed.gaps : [],
-      untestableACs: Array.isArray(parsed.untestableACs) ? parsed.untestableACs : [],
-      missedStories: Array.isArray(parsed.missedStories) ? parsed.missedStories : [],
-    };
-
-    res.json(result);
-  } catch (error: any) {
-    logger.error('[Specs] validate error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ─── POST /:specId/suggest-skills — Skill-matcher module entry point ────────
-
-/**
- * @swagger
- * /api/specs/{specId}/suggest-skills:
- *   post:
- *     tags: [Specs]
- *     summary: Run skill matching for a spec via the skill-matcher module
- *     operationId: suggestSkills
- *     description: >
- *       Delegates to the skill-matcher module (backend/src/lib/skill-matcher.ts).
- *       Reads installed skills from .rorca/skills/, MEMORY.md, and AGENTS.md,
- *       then calls the LLM to assign suggestedSkills arrays to each story with
- *       name, relevance (1-10), and reasoning. Writes the updated spec JSON back
- *       to the filesystem.
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema: { type: string }
- *         description: Spec slug (filename without .json)
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId]
- *             properties:
- *               workspaceId: { type: string }
- *     responses:
- *       200:
- *         description: Skill suggestions written to spec
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 matched: { type: integer, description: Total skills matched across all stories }
- *                 storiesAffected: { type: integer, description: Stories that received at least one skill }
- *                 stories:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       storyId: { type: string }
- *                       skills:
- *                         type: array
- *                         items:
- *                           type: object
- *                           properties:
- *                             name: { type: string }
- *                             relevance: { type: integer }
- *                             reason: { type: string }
- *       400:
- *         description: Missing workspaceId
- *       404:
- *         description: Spec or workspace not found
- *       422:
- *         description: No skills installed or spec has no stories
- */
-router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
-  try {
-    const specId = req.params.specId as string;
-    const { workspaceId } = req.body;
-
-    if (!workspaceId) {
-      res.status(400).json({ error: 'workspaceId is required' });
-      return;
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
-    }
-
-    // Resolve spec file: approved first, then pending
-    const { pendingDir, approvedDir } = specsDirs(workspace.path as string);
-    let specFilePath = path.join(approvedDir, `${specId}.json`);
-    let specStatus = 'approved';
-    if (!fs.existsSync(specFilePath)) {
-      specFilePath = path.join(pendingDir, `${specId}.json`);
-      specStatus = 'pending';
-      if (!fs.existsSync(specFilePath)) {
-        res.status(404).json({ error: 'Spec not found in approved or pending directories' });
-        return;
-      }
-    }
-
-    // Read spec
-    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
-    if (!Array.isArray(specContent.userStories) || specContent.userStories.length === 0) {
-      res.status(422).json({ error: 'Spec has no user stories' });
-      return;
-    }
-
-    // Delegate to skill-matcher module
-    let result;
-    try {
-      result = await matchSkills(specContent, workspace.path as string, specFilePath, workspaceId);
-    } catch (matchErr: any) {
-      if (matchErr.message?.includes('No skills installed')) {
-        res.status(422).json({ error: matchErr.message });
-        return;
-      }
-      throw matchErr;
-    }
-
-    // Create spec version for audit trail
-    await snapshotVersion(specId, JSON.stringify(result.spec), specStatus === 'approved' ? 'approved' : 'pending');
-
-    // Emit WAL event
-    const walEvent = await queryOne<WalEvent>(
-      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4) RETURNING *`,
-      ['skill_matched', specId, workspaceId, JSON.stringify({
-        matched_count: result.matched,
-        stories_affected: result.storiesAffected,
-        source: 'suggest-skills',
-      })],
-    );
-    broadcastAll(walEvent!);
-
-    res.json({
-      matched: result.matched,
-      storiesAffected: result.storiesAffected,
-      stories: result.stories,
-    });
-  } catch (error: any) {
-    logger.error('[Specs] suggest-skills error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * @swagger
- * /api/specs/{specId}/fix:
- *   post:
- *     tags: [Specs]
- *     summary: Apply automated structural fixes to a spec
- *     operationId: fixSpec
- *     description: >
- *       Reindexes story IDs to sequential US-001..US-N (updating dependsOn references),
- *       adds passes:false to stories missing the field, normalizes dependsOn to array,
- *       and removes duplicate story IDs (keeping first occurrence). Never modifies
- *       title, description, or acceptanceCriteria text.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId]
- *             properties:
- *               workspaceId:
- *                 type: string
- *                 description: Workspace ID
- *     responses:
- *       200:
- *         description: Fix result
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 fixed:
- *                   type: boolean
- *                 changes:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       type:
- *                         type: string
- *                         enum: [reindex, add_passes, normalize_depends, remove_duplicate]
- *                       storyId:
- *                         type: string
- *                       description:
- *                         type: string
- *       400:
- *         description: Missing workspaceId
- *       404:
- *         description: Workspace or spec not found
- */
-router.post('/:specId/fix', async (req: Request, res: Response) => {
-  try {
-    const { specId } = req.params;
-    const { workspaceId } = req.body;
-
-    if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required body param: workspaceId' });
-      return;
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
-    }
-
-    const { pendingDir, approvedDir } = specsDirs(workspace.path);
-    const pendingFile = path.join(pendingDir, `${specId}.json`);
-    const approvedFile = path.join(approvedDir, `${specId}.json`);
-
-    let specFile: string;
-    let content: any;
-    if (fs.existsSync(pendingFile)) {
-      specFile = pendingFile;
-      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
-    } else if (fs.existsSync(approvedFile)) {
-      specFile = approvedFile;
-      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
-    } else {
-      res.status(404).json({ error: 'Spec not found' });
-      return;
-    }
-
-    const stories: any[] = content.userStories ?? [];
-    const changes: Array<{ type: 'reindex' | 'add_passes' | 'normalize_depends' | 'remove_duplicate'; storyId: string; description: string }> = [];
-
-    // Fix 4: Remove duplicate IDs (keep first occurrence)
-    const seenIds = new Set<string>();
-    const deduped: any[] = [];
-    for (const story of stories) {
-      const sid = story.id as string;
-      if (seenIds.has(sid)) {
-        changes.push({ type: 'remove_duplicate', storyId: sid, description: `Duplicate story ID "${sid}" removed (keeping first occurrence)` });
-        logger.warn(`[Specs] fix: duplicate story ID "${sid}" in spec ${specId}`);
-      } else {
-        seenIds.add(sid);
-        deduped.push(story);
-      }
-    }
-
-    // Fix 3: Normalize dependsOn to array before reindex
-    for (const story of deduped) {
-      if (story.dependsOn === undefined || story.dependsOn === null) {
-        changes.push({ type: 'normalize_depends', storyId: story.id, description: `dependsOn was undefined/null, set to []` });
-        story.dependsOn = [];
-      } else if (typeof story.dependsOn === 'string') {
-        const orig = story.dependsOn;
-        story.dependsOn = orig === '' ? [] : [orig];
-        changes.push({ type: 'normalize_depends', storyId: story.id, description: `dependsOn was string "${orig}", normalized to array` });
-      }
-    }
-
-    // Fix 1: Reindex story IDs to US-001..US-N and update dependsOn references
-    const idMap = new Map<string, string>();
-    deduped.forEach((story, idx) => {
-      const newId = `US-${String(idx + 1).padStart(3, '0')}`;
-      if (story.id !== newId) {
-        idMap.set(story.id, newId);
-        changes.push({ type: 'reindex', storyId: story.id, description: `Story "${story.id}" reindexed to "${newId}"` });
-        story.id = newId;
-      }
-    });
-
-    if (idMap.size > 0) {
-      // Update dependsOn references to use new IDs
-      for (const story of deduped) {
-        story.dependsOn = (story.dependsOn as string[]).map((dep: string) => idMap.get(dep) ?? dep);
-      }
-    }
-
-    // Fix 2: Add passes:false to stories missing the field
-    for (const story of deduped) {
-      if (!Object.prototype.hasOwnProperty.call(story, 'passes')) {
-        changes.push({ type: 'add_passes', storyId: story.id, description: `Missing passes field added as false` });
-        story.passes = false;
-      }
-    }
-
-    const fixed = changes.length > 0;
-    if (fixed) {
-      content.userStories = deduped;
-      const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
-      fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
-      await snapshotVersion(Array.isArray(specId) ? specId[0] : specId, JSON.stringify(content), specStatus);
-    }
-
-    res.json({ fixed, changes });
-  } catch (error: any) {
-    logger.error('[Specs] fix error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// GET /api/specs/:specId/attachments — list all attachments for a spec
-
-/**
- * @swagger
- * /api/specs/{specId}/attachments:
- *   get:
- *     summary: List all attachments for a spec
- *     tags: [Specs]
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema:
- *           type: string
- *         description: Spec slug ID
- *     responses:
- *       200:
- *         description: List of attachments (metadata only, no binary data)
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 properties:
- *                   id:
- *                     type: string
- *                   filename:
- *                     type: string
- *                   contentType:
- *                     type: string
- *                   fileSize:
- *                     type: integer
- *                   createdAt:
- *                     type: string
- *                   uploadedBy:
- *                     type: object
- *                     nullable: true
- *                     properties:
- *                       id:
- *                         type: string
- *                       name:
- *                         type: string
- *       404:
- *         description: Spec not found
- */
-router.get('/:specId/attachments', async (req: Request, res: Response) => {
-  const { specId } = req.params;
-
-  // Verify spec exists across all workspaces
-  const workspaces = await query<{ id: string; path: string }>(
-    `SELECT id, path FROM workspaces`
-  );
-  let specExists = false;
-  for (const ws of workspaces) {
-    const pendingPath = path.join(ws.path, 'forge/specs/pending', `${specId}.json`);
-    const approvedPath = path.join(ws.path, 'forge/specs/approved', `${specId}.json`);
-    if (fs.existsSync(pendingPath) || fs.existsSync(approvedPath)) {
-      specExists = true;
-      break;
-    }
-  }
-
-  if (!specExists) {
-    res.status(404).json({ error: `Spec not found: ${specId}` });
-    return;
-  }
-
-  const rows = await query<{
-    id: string;
-    filename: string;
-    content_type: string;
-    file_size: number;
-    created_at: string;
-    uploader_id: string | null;
-    uploader_name: string | null;
-  }>(
-    `SELECT
-       sa.id,
-       sa.filename,
-       sa.content_type,
-       sa.file_size,
-       sa.created_at,
-       u.id AS uploader_id,
-       u.name AS uploader_name
-     FROM spec_attachments sa
-     LEFT JOIN users u ON u.id = sa.uploaded_by
-     WHERE sa.spec_id = $1
-     ORDER BY sa.created_at DESC`,
-    [specId]
-  );
-
-  res.json(
-    rows.map((row) => ({
-      id: row.id,
-      filename: row.filename,
-      contentType: row.content_type,
-      fileSize: row.file_size,
-      createdAt: row.created_at,
-      uploadedBy: row.uploader_id
-        ? { id: row.uploader_id, name: row.uploader_name }
-        : null,
-    }))
-  );
-});
-
-// GET /api/specs/:specId/attachments/:attachmentId — download a specific attachment
-
-/**
- * @swagger
- * /api/specs/{specId}/attachments/{attachmentId}:
- *   get:
- *     summary: Download a specific attachment for a spec
- *     tags: [Specs]
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema:
- *           type: string
- *         description: Spec slug ID
- *       - in: path
- *         name: attachmentId
- *         required: true
- *         schema:
- *           type: string
- *         description: Attachment UUID
- *     responses:
- *       200:
- *         description: Binary file data
- *         content:
- *           application/octet-stream:
- *             schema:
- *               type: string
- *               format: binary
- *       404:
- *         description: Attachment not found or spec mismatch
- */
-router.get('/:specId/attachments/:attachmentId', async (req: Request, res: Response) => {
-  const { specId, attachmentId } = req.params;
-
-  const row = await queryOne<{
-    filename: string;
-    content_type: string;
-    file_size: number;
-    file_data: Buffer;
-  }>(
-    `SELECT filename, content_type, file_size, file_data
-     FROM spec_attachments
-     WHERE id = $1 AND spec_id = $2`,
-    [attachmentId, specId]
-  );
-
-  if (!row || !row.file_data) {
-    res.status(404).json({ error: 'Attachment not found' });
-    return;
-  }
-
-  res.setHeader('Content-Type', row.content_type);
-  res.setHeader('Content-Disposition', `attachment; filename="${row.filename}"`);
-  res.setHeader('Content-Length', row.file_size);
-  res.send(row.file_data);
-});
-
-// POST /api/specs/:specId/attachments — upload a file attachment for a spec
-const ALLOWED_CONTENT_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'application/pdf',
-  'text/markdown',
-  'text/plain',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-]);
-
-const attachmentUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
-  fileFilter: (_req, file, cb) => {
-    if (ALLOWED_CONTENT_TYPES.has(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`INVALID_FILE_TYPE:${file.mimetype}`));
-    }
-  },
-});
-
-/**
- * @swagger
- * /api/specs/{specId}/attachments:
- *   post:
- *     summary: Upload a file attachment for a spec
- *     tags: [Specs]
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema:
- *           type: string
- *     requestBody:
- *       required: true
- *       content:
- *         multipart/form-data:
- *           schema:
- *             type: object
- *             properties:
- *               file:
- *                 type: string
- *                 format: binary
- *     responses:
- *       201:
- *         description: Attachment created
- *       400:
- *         description: Invalid file type
- *       404:
- *         description: Spec not found
- *       413:
- *         description: File size exceeded
- */
-router.post(
-  '/:specId/attachments',
-  (req: Request, res: Response, next: any) => {
-    attachmentUpload.single('file')(req, res, (err: any) => {
-      if (err) {
-        if (err.code === 'LIMIT_FILE_SIZE') {
-          res.status(413).json({ error: 'File size exceeds 10MB limit' });
-          return;
-        }
-        if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
-          const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
-          res.status(400).json({ error: `Invalid file type: ${mimeType}` });
-          return;
-        }
-        next(err);
-        return;
-      }
-      next();
-    });
-  },
-  async (req: Request, res: Response) => {
-    const { specId } = req.params;
-
-    if (!req.file) {
-      res.status(400).json({ error: 'No file uploaded' });
-      return;
-    }
-
-    // Verify spec exists — check both pending and approved directories across all workspaces
-    const workspaces = await query<{ id: string; path: string }>(`SELECT id, path FROM workspaces`);
-    let specExists = false;
-    for (const ws of workspaces) {
-      const pendingPath = path.join(ws.path, 'forge', 'specs', 'pending', `${specId}.json`);
-      const approvedPath = path.join(ws.path, 'forge', 'specs', 'approved', `${specId}.json`);
-      if (fs.existsSync(pendingPath) || fs.existsSync(approvedPath)) {
-        specExists = true;
-        break;
-      }
-    }
-
-    if (!specExists) {
-      res.status(404).json({ error: `Spec not found: ${specId}` });
-      return;
-    }
-
-    const { originalname, mimetype, size, buffer } = req.file;
-
-    const row = await queryOne<{
-      id: string;
-      filename: string;
-      content_type: string;
-      file_size: number;
-      created_at: string;
-    }>(
-      `INSERT INTO spec_attachments (spec_id, filename, content_type, file_size, storage_type, file_data)
-       VALUES ($1, $2, $3, $4, 'database', $5)
-       RETURNING id, filename, content_type, file_size, created_at`,
-      [specId, originalname, mimetype, size, buffer],
-    );
-
-    if (!row) {
-      res.status(500).json({ error: 'Failed to save attachment' });
-      return;
-    }
-
-    res.status(201).json({
-      id: row.id,
-      filename: row.filename,
-      contentType: row.content_type,
-      fileSize: row.file_size,
-      createdAt: row.created_at,
-    });
-  },
-);
-
-/**
- * @swagger
- * /api/specs/{specId}/attachments/{attachmentId}:
- *   delete:
- *     summary: Delete a specific attachment for a spec
- *     tags: [Specs]
- *     parameters:
- *       - in: path
- *         name: specId
- *         required: true
- *         schema:
- *           type: string
- *       - in: path
- *         name: attachmentId
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       204:
- *         description: Attachment deleted
- *       404:
- *         description: Attachment not found
- */
-router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Response) => {
-  const { specId, attachmentId } = req.params;
-
-  const result = await execute(
-    `DELETE FROM spec_attachments WHERE id = $1 AND spec_id = $2`,
-    [attachmentId, specId],
-  );
-
-  if (result.rowCount === 0) {
-    res.status(404).json({ error: 'Attachment not found' });
-    return;
-  }
-
-  res.status(204).send();
 });
 
 export default router;
