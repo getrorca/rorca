@@ -2,7 +2,7 @@
   "specId": "rorca-model-catalog-ux",
   "runId": 42,
   "startedAt": "2026-03-12T05:48:51.132Z",
-  "lastUpdatedAt": "2026-03-12T05:50:32.804Z",
+  "lastUpdatedAt": "2026-03-12T05:53:44.904Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 93237
+    },
+    {
+      "storyId": "US-002",
+      "title": "Replace Default Model native select with ModelSearchSelect",
+      "status": "passed",
+      "startedAt": "2026-03-12T05:52:37.114Z",
+      "finishedAt": "2026-03-12T05:53:44.904Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 67790
     }
   ],
   "failedStories": [],
