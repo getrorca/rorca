@@ -2075,7 +2075,71 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 7. Generate 1-story spec via LLM
+    // Inject workspace context (non-fatal if any step fails)
+    let directionContext = '';
+    try {
+      const l1Dir = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
+      const domain = workspace.domain ?? undefined;
+      const l2Dir = domain
+        ? await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined
+        : undefined;
+      const l3Dir = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
+      directionContext = synthesize({
+        l1: l1Dir?.content_yaml,
+        l2: l2Dir?.content_yaml,
+        l3: l3Dir?.content_yaml,
+        specBrief: brief,
+      });
+    } catch (err) {
+      console.warn('[quick-run] Direction stack synthesis failed:', err);
+    }
+
+    let memoryContext = '';
+    try {
+      const memoryPath = path.join(workspace.path, 'MEMORY.md');
+      const memoryContent = fs.readFileSync(memoryPath, 'utf-8');
+      if (memoryContent) memoryContext = memoryContent.slice(0, 2000);
+    } catch {
+      // File missing or unreadable — proceed with empty
+    }
+
+    let skillsContext = '';
+    try {
+      const skillRows = await query<{ name: string; description: string }>(
+        'SELECT name, description FROM installed_skills LIMIT 20',
+        [],
+      );
+      if (skillRows.length > 0) {
+        skillsContext = skillRows.map(s => `${s.name}: ${s.description}`).join('\n');
+      }
+    } catch {
+      // Table missing — fall back to .rorca/skills/ directory listing
+      try {
+        const skillsDir = path.join(workspace.path, '.rorca', 'skills');
+        const files = fs.readdirSync(skillsDir);
+        const names = files
+          .filter(f => f.endsWith('.md'))
+          .map(f => f.replace(/\.md$/, ''));
+        if (names.length > 0) skillsContext = names.join('\n');
+      } catch {
+        // No skills available — proceed with empty
+      }
+    }
+
+    const contextPreamble: string[] = [];
+    if (directionContext) {
+      contextPreamble.push('=== DIRECTION STACK (follow these conventions) ===', directionContext, '');
+    }
+    if (memoryContext) {
+      contextPreamble.push('=== PROJECT MEMORY (past decisions and patterns) ===', memoryContext, '');
+    }
+    if (skillsContext) {
+      contextPreamble.push('=== INSTALLED SKILLS (reference these when relevant) ===', skillsContext, '');
+    }
+
+    // Enforce single story + max 8 AC
     const quickRunPrompt = [
+      ...contextPreamble,
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
       'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
@@ -2093,7 +2157,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       '',
       'Rules:',
       '- Generate exactly 1 story with id "QR-001"',
-      '- The story must have at most 5 acceptance criteria',
+      '- The story must have at most 8 acceptance criteria',
       '- acceptanceCriteria must be specific and testable',
       '- dependsOn must be an empty array (single story has no deps)',
       '- The description should be detailed enough for an engineer to implement',
@@ -2123,10 +2187,10 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       return;
     }
 
-    // Enforce single story + max 5 AC
+    // Enforce single story + max 8 AC
     const story = parsed.stories[0];
-    if (story.acceptanceCriteria && story.acceptanceCriteria.length > 5) {
-      story.acceptanceCriteria = story.acceptanceCriteria.slice(0, 5);
+    if (story.acceptanceCriteria && story.acceptanceCriteria.length > 8) {
+      story.acceptanceCriteria = story.acceptanceCriteria.slice(0, 8);
     }
 
     // 9. Build slug and write spec directly to approved/
