@@ -427,10 +427,14 @@ export function ProviderSettingsTab() {
             <ModelRoutingSection />
           </div>
           <div ref={el => { sectionRefs.current['providers'] = el; }} className="border-t border-border pt-6">
-            <ProvidersSection />
-          </div>
-          <div ref={el => { sectionRefs.current['display'] = el; }} className="border-t border-border pt-6">
-            <ExaSearchSection />
+            <div className="flex items-center gap-2 mb-1">
+              <Globe size={15} className="text-accent flex-shrink-0" />
+              <span className="text-sm font-semibold text-[var(--text)]">Providers &amp; Vault</span>
+            </div>
+            <p className="text-xs text-muted mb-0">
+              Configure LLM providers and manage encrypted API keys.
+            </p>
+            <ProviderConnectionsAndVaultSection />
           </div>
         </div>
       </div>
@@ -1598,6 +1602,425 @@ function SemanticEngineSection() {
           ) : (
             <p className="text-xs text-muted">No graph stats available</p>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Provider Connections + API Key Vault (PM-006) ──────────────────────────
+
+interface ProviderRowDef {
+  id: string;
+  name: string;
+  dot: 'green' | 'amber' | 'grey';
+  statusLabel: string;
+  actionLabel?: string;
+  actionVariant?: 'connect' | 'disconnect';
+  onAction?: () => void;
+  actionDisabled?: boolean;
+}
+
+function ProviderConnectionsAndVaultSection() {
+  const toast = useGlobalToast();
+  const { user } = useAuth();
+  const { workspaceId } = useWorkspace();
+  const isFreePlan = !user?.plan || user.plan === 'free';
+
+  // ── Vault key state ──────────────────────────────────────────────────────
+  const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
+  const [keysLoading, setKeysLoading] = useState(true);
+
+  // Add key form
+  const [addProvider, setAddProvider] = useState('anthropic');
+  const [addKey, setAddKey] = useState('');
+  const [addBaseUrl, setAddBaseUrl] = useState('');
+  const [addLabel, setAddLabel] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  // ── Agent config / provider status state ────────────────────────────────
+  const [agentConfig, setAgentConfig] = useState<AgentConfig | null>(null);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
+  const [copilotStatus, setCopilotStatus] = useState<CopilotStatus>({ connected: false, githubUsername: null, connectedAt: null });
+  const [copilotLoading, setCopilotLoading] = useState(false);
+  const [openRouterConnected, setOpenRouterConnected] = useState(false);
+  const [openRouterModelCount, setOpenRouterModelCount] = useState<number | null>(null);
+  const [configLoading, setConfigLoading] = useState(true);
+
+  // ── Default provider (for workspace) ────────────────────────────────────
+  const [defaultProvider, setDefaultProvider] = useState('claude-cli');
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [agentCfg, provData, keyData, ollama, defaultData] = await Promise.all([
+        apiFetch<AgentConfig>('/api/config'),
+        apiFetch<{ providers: ProviderStatus[] }>('/api/vault/keys/providers'),
+        apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+        apiFetch<OllamaStatus>('/api/config/ollama'),
+        workspaceId
+          ? apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`)
+          : Promise.resolve({ provider: 'claude-cli' }),
+      ]);
+      setAgentConfig(agentCfg);
+      setCopilotStatus({ connected: agentCfg.copilotConnected, githubUsername: agentCfg.copilotUsername, connectedAt: null });
+      setProviders(provData.providers);
+      setKeys(keyData.keys);
+      setOllamaStatus(ollama);
+      setDefaultProvider(defaultData.provider);
+      // Check OpenRouter connection
+      const orProvider = provData.providers.find(p => p.id === 'openrouter');
+      if (orProvider?.configured) {
+        setOpenRouterConnected(true);
+        try {
+          const orData = await apiFetch<{ modelCount: number }>('/api/config/openrouter-models');
+          setOpenRouterModelCount(orData.modelCount);
+        } catch { /* silent */ }
+      }
+    } catch { /* silent */ } finally {
+      setConfigLoading(false);
+      setKeysLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // ── Copilot connect / disconnect ─────────────────────────────────────────
+  const handleCopilotConnect = async () => {
+    setCopilotLoading(true);
+    try {
+      const { url } = await apiFetch<{ url: string }>('/api/copilot/connect');
+      window.location.href = url;
+    } catch { setCopilotLoading(false); }
+  };
+
+  const handleCopilotDisconnect = async () => {
+    setCopilotLoading(true);
+    try {
+      await apiFetch('/api/copilot/disconnect', { method: 'DELETE' });
+      setCopilotStatus({ connected: false, githubUsername: null, connectedAt: null });
+    } catch { /* silent */ } finally {
+      setCopilotLoading(false);
+    }
+  };
+
+  // ── Vault key handlers ───────────────────────────────────────────────────
+  const removeKey = async (id: string) => {
+    try {
+      await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
+      toast.show('API key removed', 'success');
+      fetchData();
+    } catch {
+      toast.show('Failed to remove API key', 'error');
+    }
+  };
+
+  const handleAddKey = async () => {
+    setAdding(true);
+    setAddError(null);
+    try {
+      await apiFetch('/api/vault/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: addProvider,
+          key: addKey,
+          label: addLabel,
+          base_url: addProvider === 'openai-compat' && addBaseUrl ? addBaseUrl : undefined,
+        }),
+      });
+      setAddKey('');
+      setAddBaseUrl('');
+      setAddLabel('');
+      toast.show('API key added', 'success');
+      fetchData();
+    } catch (err: any) {
+      const msg = err.message || 'Failed to add key';
+      setAddError(msg);
+      toast.show(msg, 'error');
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  // ── Build provider row definitions ───────────────────────────────────────
+  const providerRows: ProviderRowDef[] = (() => {
+    // Claude
+    const claudeAuth = agentConfig;
+    const claudeRow: ProviderRowDef = {
+      id: 'claude',
+      name: 'Claude',
+      dot: claudeAuth ? 'green' : 'grey',
+      statusLabel: claudeAuth?.opencodeInstalled !== false ? 'Connected' : 'CLI not found',
+      actionLabel: 'Manage',
+      actionVariant: 'connect',
+    };
+
+    // Codex
+    const codexRow: ProviderRowDef = {
+      id: 'codex',
+      name: 'Codex',
+      dot: agentConfig?.codexInstalled ? 'green' : 'grey',
+      statusLabel: agentConfig?.codexInstalled
+        ? `Installed${agentConfig.codexVersion ? ` (v${agentConfig.codexVersion})` : ''}`
+        : 'Not configured',
+    };
+
+    // GitHub Copilot
+    const copilotRow: ProviderRowDef = {
+      id: 'copilot',
+      name: 'GitHub Copilot',
+      dot: copilotStatus.connected ? 'green' : 'grey',
+      statusLabel: copilotStatus.connected
+        ? `Connected${copilotStatus.githubUsername ? ` (${copilotStatus.githubUsername})` : ''}`
+        : 'Not configured',
+      actionLabel: copilotStatus.connected ? 'Disconnect' : 'Connect',
+      actionVariant: copilotStatus.connected ? 'disconnect' : 'connect',
+      onAction: copilotStatus.connected ? handleCopilotDisconnect : handleCopilotConnect,
+      actionDisabled: copilotLoading,
+    };
+
+    // OpenRouter
+    const orProvider = providers.find(p => p.id === 'openrouter');
+    const openRouterRow: ProviderRowDef = {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      dot: openRouterConnected ? 'green' : orProvider?.configured ? 'amber' : 'grey',
+      statusLabel: openRouterConnected
+        ? `Running${openRouterModelCount !== null ? ` (${openRouterModelCount} models)` : ''}`
+        : orProvider?.configured ? 'API key set' : 'Not configured',
+    };
+
+    // Ollama
+    const ollamaRow: ProviderRowDef = {
+      id: 'ollama',
+      name: 'Ollama',
+      dot: ollamaStatus?.available ? 'green' : 'grey',
+      statusLabel: ollamaStatus?.available
+        ? `Running (${ollamaStatus.models.length} model${ollamaStatus.models.length !== 1 ? 's' : ''})`
+        : 'Not configured',
+    };
+
+    // Exa
+    const exaRow: ProviderRowDef = {
+      id: 'exa',
+      name: 'Exa Search',
+      dot: 'grey',
+      statusLabel: isFreePlan ? 'Upgrade to unlock' : 'Coming soon',
+      actionLabel: isFreePlan ? 'Upgrade' : undefined,
+      actionVariant: isFreePlan ? 'connect' : undefined,
+    };
+
+    return [claudeRow, codexRow, copilotRow, openRouterRow, ollamaRow, exaRow];
+  })();
+
+  const dotColor = (dot: ProviderRowDef['dot']) => {
+    if (dot === 'green') return 'bg-green-500';
+    if (dot === 'amber') return 'bg-amber-400';
+    return 'bg-zinc-500';
+  };
+
+  const VAULT_PROVIDER_OPTIONS = [
+    { id: 'anthropic', name: 'Anthropic' },
+    { id: 'openai-compat', name: 'OpenAI / compatible' },
+    { id: 'openrouter', name: 'OpenRouter' },
+    { id: 'google', name: 'Google' },
+    { id: 'mistral', name: 'Mistral' },
+  ];
+
+  return (
+    <div className="space-y-4 mt-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+
+        {/* ── Left: Provider Connections ──────────────────────────────────── */}
+        <div className="rounded-xl border border-border bg-panel p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <Globe size={15} className="text-accent flex-shrink-0" />
+            <span className="text-sm font-semibold text-[var(--text)]">Provider Connections</span>
+          </div>
+          {configLoading ? (
+            <div className="flex items-center gap-2 text-muted text-xs">
+              <Loader2 size={12} className="animate-spin" /> Loading...
+            </div>
+          ) : (
+            <div>
+              {providerRows.map(row => (
+                <div key={row.id} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${dotColor(row.dot)}`} />
+                  <span className="text-xs font-medium text-[var(--text)] min-w-0 flex-1">{row.name}</span>
+                  <span className="text-xs text-muted truncate">{row.statusLabel}</span>
+                  {row.actionLabel && (
+                    row.id === 'exa' && isFreePlan ? (
+                      <a
+                        href="#billing"
+                        className="shrink-0 px-2.5 py-1 text-xs rounded border border-accent/40 text-accent hover:bg-accent/10 transition-colors"
+                      >
+                        {row.actionLabel}
+                      </a>
+                    ) : row.onAction ? (
+                      <button
+                        onClick={row.onAction}
+                        disabled={row.actionDisabled}
+                        className={`shrink-0 px-2.5 py-1 text-xs rounded border transition-colors disabled:opacity-50 ${
+                          row.actionVariant === 'disconnect'
+                            ? 'border-red-500/30 text-red-400 hover:bg-red-500/10'
+                            : 'border-accent/40 text-accent hover:bg-accent/10'
+                        }`}
+                      >
+                        {row.actionDisabled ? <Loader2 size={10} className="animate-spin inline" /> : row.actionLabel}
+                      </button>
+                    ) : null
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── Right: API Key Vault ─────────────────────────────────────────── */}
+        <div className="rounded-xl border border-border bg-panel p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <Key size={15} className="text-accent flex-shrink-0" />
+            <span className="text-sm font-semibold text-[var(--text)]">API Key Vault</span>
+          </div>
+          {keysLoading ? (
+            <div className="flex items-center gap-2 text-muted text-xs">
+              <Loader2 size={12} className="animate-spin" /> Loading...
+            </div>
+          ) : (
+            <div>
+              {/* Existing keys */}
+              {keys.length > 0 && (
+                <div className="mb-4">
+                  {keys.map(k => (
+                    <div key={k.id} className="flex items-center gap-2 py-2 border-b border-border last:border-0 text-xs">
+                      <Key size={11} className="text-muted shrink-0" />
+                      <span className="font-mono text-muted truncate">{k.masked_key}</span>
+                      {k.label && <span className="text-[var(--text)] truncate">{k.label}</span>}
+                      <span className="text-muted capitalize">{k.provider}</span>
+                      {k.spend_total_usd > 0 && (
+                        <span className="text-muted ml-auto shrink-0">${k.spend_total_usd.toFixed(2)}</span>
+                      )}
+                      {k.last_used_at && (
+                        <span className="text-muted shrink-0" title={k.last_used_at}>
+                          {new Date(k.last_used_at).toLocaleDateString()}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => removeKey(k.id)}
+                        className="ml-auto shrink-0 p-1 text-muted hover:text-red-500 transition-colors"
+                        title="Remove key"
+                        aria-label="Remove API key"
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {keys.length === 0 && (
+                <p className="text-xs text-muted mb-4">No API keys stored yet.</p>
+              )}
+
+              {/* Add Key form */}
+              <div className="border border-border rounded p-3 space-y-2.5 bg-bg">
+                <p className="text-xs font-medium text-[var(--text)]">Add Key</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-muted mb-1">Provider</label>
+                    <select
+                      value={addProvider}
+                      onChange={e => setAddProvider(e.target.value)}
+                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
+                    >
+                      {VAULT_PROVIDER_OPTIONS.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-muted mb-1">Label (optional)</label>
+                    <input
+                      type="text"
+                      value={addLabel}
+                      onChange={e => setAddLabel(e.target.value)}
+                      placeholder="e.g. Personal"
+                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[10px] text-muted mb-1">API Key</label>
+                  <input
+                    type="password"
+                    value={addKey}
+                    onChange={e => setAddKey(e.target.value)}
+                    placeholder="sk-..."
+                    className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none font-mono"
+                  />
+                </div>
+                {addProvider === 'openai-compat' && (
+                  <div>
+                    <label className="block text-[10px] text-muted mb-1">Base URL</label>
+                    <input
+                      type="url"
+                      value={addBaseUrl}
+                      onChange={e => setAddBaseUrl(e.target.value)}
+                      placeholder="https://api.openai.com/v1"
+                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none font-mono"
+                    />
+                    <p className="text-[10px] text-muted mt-1">Groq, Together, DeepSeek, Ollama, etc.</p>
+                  </div>
+                )}
+                {addError && <p className="text-xs text-red-500">{addError}</p>}
+                <button
+                  onClick={handleAddKey}
+                  disabled={adding || !addKey}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+                >
+                  {adding ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+                  Save Key
+                </button>
+              </div>
+              <p className="text-[10px] text-muted mt-2">Keys are AES-256-GCM encrypted at rest.</p>
+            </div>
+          )}
+        </div>
+
+      </div>
+
+      {/* Default provider (workspace-scoped) */}
+      {workspaceId && providers.length > 0 && (
+        <div className="border border-border rounded p-4 bg-bg">
+          <div className="flex items-center justify-between mb-2">
+            <div>
+              <h3 className="text-sm font-medium text-[var(--text)]">Default Provider</h3>
+              <p className="text-xs text-muted mt-0.5">Used when no per-spec model override is set</p>
+            </div>
+          </div>
+          <select
+            value={defaultProvider}
+            onChange={async e => {
+              const provider = e.target.value;
+              setDefaultProvider(provider);
+              try {
+                await apiFetch('/api/vault/keys/default-provider', {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ workspaceId, provider }),
+                });
+                toast.show('Default provider saved', 'success');
+              } catch { /* silent */ }
+            }}
+            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
+          >
+            {providers.map(p => (
+              <option key={p.id} value={p.id} disabled={p.id !== 'claude-cli' && !p.configured}>
+                {p.name}{!p.configured && p.id !== 'claude-cli' ? ' (not configured)' : ''}
+              </option>
+            ))}
+          </select>
         </div>
       )}
     </div>
