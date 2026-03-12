@@ -1103,7 +1103,7 @@ function GitHubSubTab({
 /* ─── Sub-Tab 3: Custom ────────────────────────────────────────── */
 
 function CustomSubTab({
-  workspaceId, fetchInstalled, toast,
+  workspaceId: _workspaceId, fetchInstalled, toast,
 }: {
   workspaceId: string | null;
   fetchInstalled: () => Promise<void>;

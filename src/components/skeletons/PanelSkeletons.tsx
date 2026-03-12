@@ -2,7 +2,6 @@
  * Panel-specific skeleton compositions matching each panel's final layout shape.
  * Uses shimmer animation (not animate-pulse) per ULT-017.
  */
-import { SkeletonCard } from './SkeletonCard';
 import { SkeletonColumn } from './SkeletonColumn';
 import { SkeletonTable } from './SkeletonTable';
 import { SkeletonChart } from './SkeletonChart';

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { ArrowLeft, Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench } from 'lucide-react';
+import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -390,7 +390,7 @@ interface RunViewPanelProps {
   onNavigate: (panel: PanelId) => void;
 }
 
-export default function RunViewPanel({ runId, onBack, onNavigate }: RunViewPanelProps) {
+export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }: RunViewPanelProps) {
   const { workspaceId } = useWorkspace();
   const isMobile = useIsMobile();
   const [run, setRun] = useState<PipelineRun | null>(null);

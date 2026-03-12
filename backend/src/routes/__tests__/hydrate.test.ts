@@ -24,14 +24,14 @@ jest.mock('../../lib/schema-hydrator', () => ({
 
 let app: Express;
 let tmpDir: string;
-let dbPath: string;
+let _dbPath: string;
 let authToken: string;
 
 beforeEach(async () => {
   jest.resetModules();
   jest.clearAllMocks();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-hydrate-test-'));
-  dbPath = path.join(tmpDir, 'test.db');
+  _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;

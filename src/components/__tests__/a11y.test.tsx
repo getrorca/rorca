@@ -67,7 +67,7 @@ describe('SlideOver accessibility', () => {
   it('renders with proper dialog role and aria-modal', async () => {
     // Dynamic import to avoid module resolution issues with hooks
     const { default: SlideOver } = await import('../SlideOver');
-    const { container } = render(
+    const { container: _container } = render(
       <SlideOver isOpen={true} onClose={() => {}} title="Test Panel">
         <p>Panel content</p>
       </SlideOver>,

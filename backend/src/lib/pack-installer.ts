@@ -409,7 +409,7 @@ function copySkills(pack: Pack, workspacePath: string): string[] {
 
 // ─── Skills DB Registration ─────────────────────────────────────────────────
 
-async function registerSkillsInDb(pack: Pack, packPath: string): Promise<void> {
+async function registerSkillsInDb(pack: Pack, _packPath: string): Promise<void> {
   const registry = new SkillRegistry();
 
   for (const conv of pack.conventions) {

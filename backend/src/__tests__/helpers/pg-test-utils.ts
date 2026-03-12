@@ -83,7 +83,7 @@ export async function truncateAll(pool: Pool): Promise<void> {
     ORDER BY tablename
   `);
   if (rows.length > 0) {
-    const tableNames = rows.map(r => `"${r.tablename}"`).join(', ');
+    const tableNames = rows.map((r: { tablename: string }) => `"${r.tablename}"`).join(', ');
     await pool.query(`TRUNCATE ${tableNames} CASCADE`);
   }
 }

@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import { subscribe, type WalEvent } from './sse-hub';
 import { logger } from './logger';
+import { loadRorcaConfig } from './rorca-config';
 
 // ─── Provider Interface ─────────────────────────────────────────────────────
 
@@ -102,6 +103,151 @@ class VoyageEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+// ─── OpenRouter Provider ─────────────────────────────────────────────────────
+
+class OpenRouterEmbeddingProvider implements EmbeddingProvider {
+  readonly name = 'openrouter';
+  readonly model = 'openai/text-embedding-3-small';
+  readonly dimension = 1536;
+  readonly maxBatchSize = 100;
+
+  async embed(texts: string[]): Promise<{ embeddings: number[][]; tokenCount: number }> {
+    const apiKey = await resolveApiKey('openrouter');
+
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) {
+        const delayMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+        logger.warn({ attempt, delayMs }, '[Embeddings] OpenRouter rate limited, retrying after %dms', delayMs);
+        await sleep(delayMs);
+      }
+
+      let res: Response;
+      try {
+        res = await fetch('https://openrouter.ai/api/v1/embeddings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'HTTP-Referer': 'https://rorca.app',
+            'X-Title': 'Rorca',
+          },
+          body: JSON.stringify({ input: texts, model: this.model }),
+        });
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        logger.warn({ err: lastError, attempt }, '[Embeddings] OpenRouter network error on attempt %d', attempt + 1);
+        if (attempt < 3) continue;
+        throw new EmbeddingApiError(`OpenRouter network error after ${attempt + 1} attempts: ${lastError.message}`);
+      }
+
+      if (res.status === 429 && attempt < 3) {
+        lastError = new EmbeddingApiError(`OpenRouter rate limited (429)`, 429);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new EmbeddingApiError(`OpenRouter embedding API error ${res.status}: ${body}`, res.status);
+      }
+
+      const json = await res.json() as {
+        data: Array<{ embedding: number[]; index: number }>;
+        usage: { total_tokens: number };
+      };
+
+      const sorted = json.data.sort((a, b) => a.index - b.index);
+      return {
+        embeddings: sorted.map(d => d.embedding),
+        tokenCount: json.usage.total_tokens,
+      };
+    }
+
+    throw lastError || new EmbeddingApiError('OpenRouter embedding failed after retries');
+  }
+}
+
+// ─── Google Provider ─────────────────────────────────────────────────────────
+
+/**
+ * Google text-embedding-004 via batchEmbedContents API.
+ * Native dimension: 768. Free tier: 1500 req/min.
+ *
+ * Embeddings are zero-padded to 1536 for storage in the vector(1536) column.
+ * This is safe because we filter by `dimensions = 768` at search time,
+ * so Google embeddings are only compared against other Google embeddings.
+ * Within same-provider comparisons, the zero-padded dimensions cancel out
+ * in cosine similarity (0*0 = 0 contributes nothing to dot product or magnitude).
+ */
+class GoogleEmbeddingProvider implements EmbeddingProvider {
+  readonly name = 'google';
+  readonly model = 'text-embedding-004';
+  readonly dimension = 768;
+  readonly maxBatchSize = 100; // batchEmbedContents supports up to 100
+
+  async embed(texts: string[]): Promise<{ embeddings: number[][]; tokenCount: number }> {
+    const apiKey = await resolveApiKey('google');
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${apiKey}`;
+
+    const requests = texts.map(text => ({
+      model: 'models/text-embedding-004',
+      content: { parts: [{ text }] },
+    }));
+
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) {
+        const delayMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+        logger.warn({ attempt, delayMs }, '[Embeddings] Google rate limited, retrying after %dms', delayMs);
+        await sleep(delayMs);
+      }
+
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requests }),
+        });
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        logger.warn({ err: lastError, attempt }, '[Embeddings] Google network error on attempt %d', attempt + 1);
+        if (attempt < 3) continue;
+        throw new EmbeddingApiError(`Google network error after ${attempt + 1} attempts: ${lastError.message}`);
+      }
+
+      if (res.status === 429 && attempt < 3) {
+        lastError = new EmbeddingApiError(`Google rate limited (429)`, 429);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new EmbeddingApiError(`Google embedding API error ${res.status}: ${body}`, res.status);
+      }
+
+      const json = await res.json() as {
+        embeddings: Array<{ values: number[] }>;
+      };
+
+      // Zero-pad 768 → 1536 for storage compatibility.
+      // Safe within same-provider: see class docstring.
+      const padded = json.embeddings.map(e => {
+        const vec = e.values;
+        while (vec.length < 1536) vec.push(0);
+        return vec;
+      });
+
+      // Google doesn't return token counts; estimate from char length
+      const tokenCount = texts.reduce((sum, t) => sum + Math.ceil(t.length / 4), 0);
+
+      return { embeddings: padded, tokenCount };
+    }
+
+    throw lastError || new EmbeddingApiError('Google embedding failed after retries');
+  }
+}
+
 // ─── Local TF-IDF Provider (no API key required) ────────────────────────────
 
 /**
@@ -185,29 +331,180 @@ class LocalEmbeddingProvider implements EmbeddingProvider {
 
 // ─── Provider Resolution ────────────────────────────────────────────────────
 
-export function getProvider(): EmbeddingProvider {
-  const providerName = process.env.EMBEDDING_PROVIDER || 'auto';
-  switch (providerName) {
-    case 'openai':
-      return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
-    case 'openai-large':
-      return new OpenAIEmbeddingProvider('text-embedding-3-large', 3072);
-    case 'voyage':
-      return new VoyageEmbeddingProvider();
-    case 'local':
-      return new LocalEmbeddingProvider();
-    case 'auto': {
-      // Auto-detect: use API provider if key available, else local fallback
-      if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
-      if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
-      return new LocalEmbeddingProvider();
-    }
-    default:
-      logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
-      if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
-      if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
-      return new LocalEmbeddingProvider();
+// Cache for vault key existence checks (refreshed every 60s)
+let vaultKeyCache: Map<string, boolean> | null = null;
+let vaultKeyCacheTs = 0;
+const VAULT_CACHE_TTL = 60_000;
+
+async function refreshVaultKeyCache(): Promise<Map<string, boolean>> {
+  const cache = new Map<string, boolean>();
+  try {
+    const rows = await query<{ provider: string }>(
+      `SELECT DISTINCT provider FROM api_key_vault`
+    );
+    for (const r of rows) cache.set(r.provider, true);
+  } catch {
+    // Table may not exist — treat as empty
   }
+  vaultKeyCache = cache;
+  vaultKeyCacheTs = Date.now();
+  return cache;
+}
+
+async function hasVaultKey(provider: string): Promise<boolean> {
+  const now = Date.now();
+  if (!vaultKeyCache || now - vaultKeyCacheTs > VAULT_CACHE_TTL) {
+    await refreshVaultKeyCache();
+  }
+  return vaultKeyCache!.get(provider) ?? false;
+}
+
+/**
+ * Invalidate the vault key cache immediately. Call this when vault keys
+ * are added or removed so that auto-detection picks up changes without
+ * waiting for the 60s TTL to expire.
+ */
+export function invalidateProviderCache(): void {
+  vaultKeyCache = null;
+  vaultKeyCacheTs = 0;
+  // Also clear the cached async provider so next getProviderAsync() re-resolves
+  cachedAsyncProvider = null;
+  cachedAsyncProviderTs = 0;
+}
+
+// Cached result from getProviderAsync() so getProvider() can return vault-aware results synchronously
+let cachedAsyncProvider: EmbeddingProvider | null = null;
+let cachedAsyncProviderTs = 0;
+let cachedAsyncProviderSource: 'config' | 'env' | 'vault' | 'local' = 'local';
+
+/**
+ * Resolve the provider name from config.json → env var → 'auto'.
+ * Config.json takes priority: if a workspace has embedding.provider set to
+ * anything other than 'auto', that value wins over the EMBEDDING_PROVIDER env var.
+ */
+function resolveProviderName(workspacePath?: string): { name: string; source: 'config' | 'env' | 'auto' } {
+  // 1. Check .rorca/config.json
+  if (workspacePath) {
+    try {
+      const cfg = loadRorcaConfig(workspacePath);
+      if (cfg.embedding?.provider && cfg.embedding.provider !== 'auto') {
+        return { name: cfg.embedding.provider, source: 'config' };
+      }
+    } catch {
+      // Config load failed — fall through
+    }
+  }
+
+  // 2. Check env var
+  const envProvider = process.env.EMBEDDING_PROVIDER;
+  if (envProvider && envProvider !== 'auto') {
+    return { name: envProvider, source: 'env' };
+  }
+
+  return { name: 'auto', source: 'auto' };
+}
+
+function providerFromName(name: string): EmbeddingProvider | null {
+  switch (name) {
+    case 'openai': return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+    case 'openai-large': return new OpenAIEmbeddingProvider('text-embedding-3-large', 3072);
+    case 'openrouter': return new OpenRouterEmbeddingProvider();
+    case 'voyage': return new VoyageEmbeddingProvider();
+    case 'google': return new GoogleEmbeddingProvider();
+    case 'local': return new LocalEmbeddingProvider();
+    default: return null;
+  }
+}
+
+export function getProvider(workspacePath?: string): EmbeddingProvider {
+  const { name: providerName } = resolveProviderName(workspacePath);
+
+  const explicit = providerFromName(providerName);
+  if (explicit) return explicit;
+
+  if (providerName !== 'auto') {
+    logger.warn({ providerName }, '[Embeddings] Unknown provider, falling back to auto');
+  }
+
+  // Auto-detect: env vars first (sync)
+  // Order: openai → openrouter → voyage → google → vault cache → local
+  if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+  if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
+  if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
+  if (process.env.GOOGLE_API_KEY) return new GoogleEmbeddingProvider();
+
+  // Use cached vault-resolved provider if available and fresh
+  const now = Date.now();
+  if (cachedAsyncProvider && now - cachedAsyncProviderTs < VAULT_CACHE_TTL) {
+    return cachedAsyncProvider;
+  }
+
+  return new LocalEmbeddingProvider();
+}
+
+/** Returns the source of the currently active provider resolution. */
+export function getProviderSource(workspacePath?: string): 'config' | 'env' | 'vault' | 'local' {
+  const { source } = resolveProviderName(workspacePath);
+  if (source === 'config') return 'config';
+  if (source === 'env') return 'env';
+  // source === 'auto' — check further
+  if (process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY ||
+      process.env.VOYAGE_API_KEY || process.env.GOOGLE_API_KEY) return 'env';
+  if (cachedAsyncProvider && Date.now() - cachedAsyncProviderTs < VAULT_CACHE_TTL) {
+    return cachedAsyncProviderSource;
+  }
+  return 'local';
+}
+
+/**
+ * Async auto-detect that also checks the vault. Call this at startup or
+ * when you need vault-aware provider resolution.
+ * Populates the sync cache so subsequent getProvider() calls benefit.
+ */
+export async function getProviderAsync(workspacePath?: string): Promise<EmbeddingProvider> {
+  const { name: providerName } = resolveProviderName(workspacePath);
+
+  // Explicit provider from config or env — return immediately
+  const explicit = providerFromName(providerName);
+  if (explicit) return explicit;
+
+  // Auto mode: check env vars first: openai → openrouter → voyage → google
+  if (process.env.OPENAI_API_KEY) return new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+  if (process.env.OPENROUTER_API_KEY) return new OpenRouterEmbeddingProvider();
+  if (process.env.VOYAGE_API_KEY) return new VoyageEmbeddingProvider();
+  if (process.env.GOOGLE_API_KEY) return new GoogleEmbeddingProvider();
+
+  // Check vault: openai → openrouter → voyage → google
+  if (await hasVaultKey('openai') || await hasVaultKey('openai-compat')) {
+    const p = new OpenAIEmbeddingProvider('text-embedding-3-small', 1536);
+    cachedAsyncProvider = p;
+    cachedAsyncProviderTs = Date.now();
+    cachedAsyncProviderSource = 'vault';
+    return p;
+  }
+  if (await hasVaultKey('openrouter')) {
+    const p = new OpenRouterEmbeddingProvider();
+    cachedAsyncProvider = p;
+    cachedAsyncProviderTs = Date.now();
+    cachedAsyncProviderSource = 'vault';
+    return p;
+  }
+  if (await hasVaultKey('voyage')) {
+    const p = new VoyageEmbeddingProvider();
+    cachedAsyncProvider = p;
+    cachedAsyncProviderTs = Date.now();
+    cachedAsyncProviderSource = 'vault';
+    return p;
+  }
+  if (await hasVaultKey('google')) {
+    const p = new GoogleEmbeddingProvider();
+    cachedAsyncProvider = p;
+    cachedAsyncProviderTs = Date.now();
+    cachedAsyncProviderSource = 'vault';
+    return p;
+  }
+
+  return new LocalEmbeddingProvider();
 }
 
 // ─── API Key Resolution ─────────────────────────────────────────────────────
@@ -219,20 +516,18 @@ class EmbeddingApiError extends Error {
   }
 }
 
-async function resolveApiKey(provider: 'openai' | 'voyage'): Promise<string> {
-  // 1. Check vault_keys table (most recent key for first user)
+async function resolveApiKey(provider: 'openai' | 'voyage' | 'openrouter' | 'google'): Promise<string> {
+  // 1. Check vault_keys table (most recent key for provider)
   try {
-    const vaultProvider = provider === 'openai' ? 'openai' : 'voyage';
-    // Vault uses 'openai-compat' for OpenAI keys in some setups
+    const vaultAliases: string[] = [provider];
+    if (provider === 'openai') vaultAliases.push('openai-compat');
     const row = await queryOne<{ encrypted_key: string }>(
       `SELECT encrypted_key FROM api_key_vault
-       WHERE provider IN ($1, $2)
+       WHERE provider = ANY($1::text[])
        ORDER BY created_at DESC LIMIT 1`,
-      [vaultProvider, provider === 'openai' ? 'openai-compat' : vaultProvider]
+      [vaultAliases]
     );
     if (row) {
-      // Decrypt using the same approach as vault.ts
-      // Import is avoided to prevent circular deps — key decryption inline
       const jwtSecret = process.env.JWT_SECRET || 'rorca-dev-secret';
       const vaultKey = crypto.createHash('sha256').update(jwtSecret).digest();
       const [ivHex, authTagHex, ciphertextHex] = row.encrypted_key.split(':');
@@ -251,11 +546,14 @@ async function resolveApiKey(provider: 'openai' | 'voyage'): Promise<string> {
   }
 
   // 2. Check env vars
-  if (provider === 'openai' && process.env.OPENAI_API_KEY) {
-    return process.env.OPENAI_API_KEY;
-  }
-  if (provider === 'voyage' && process.env.VOYAGE_API_KEY) {
-    return process.env.VOYAGE_API_KEY;
+  const envMap: Record<string, string | undefined> = {
+    openai: process.env.OPENAI_API_KEY,
+    openrouter: process.env.OPENROUTER_API_KEY,
+    voyage: process.env.VOYAGE_API_KEY,
+    google: process.env.GOOGLE_API_KEY,
+  };
+  if (envMap[provider]) {
+    return envMap[provider]!;
   }
 
   // 3. Return 'local' sentinel — enables local TF-IDF fallback without API key
@@ -352,15 +650,17 @@ async function upsertEmbedding(
   const vectorStr = `[${embedding.join(',')}]`;
 
   await execute(
-    `INSERT INTO embeddings (workspace_id, source_type, source_id, content_hash, embedding, model, token_count)
-     VALUES ($1, $2, $3, $4, $5::vector, $6, $7)
+    `INSERT INTO embeddings (workspace_id, source_type, source_id, content_hash, embedding, model, token_count, provider, dimensions)
+     VALUES ($1, $2, $3, $4, $5::vector, $6, $7, $8, $9)
      ON CONFLICT (workspace_id, source_type, source_id)
      DO UPDATE SET content_hash = EXCLUDED.content_hash,
                    embedding = EXCLUDED.embedding,
                    model = EXCLUDED.model,
                    token_count = EXCLUDED.token_count,
+                   provider = EXCLUDED.provider,
+                   dimensions = EXCLUDED.dimensions,
                    updated_at = NOW()`,
-    [workspaceId, sourceType, sourceId, contentHash, vectorStr, provider.model, tokenCount]
+    [workspaceId, sourceType, sourceId, contentHash, vectorStr, provider.model, tokenCount, provider.name, provider.dimension]
   );
 }
 
@@ -855,25 +1155,40 @@ export async function backfillAll(workspaceId?: string, force?: boolean): Promis
         }
       }
 
-      // 4b. Embed memory entries from the memories DB table
+      // 5. Embed memories from DB (memories table) — covers auto-synthesized entries
       try {
-        const dbMemories = await query<{ id: number; content: string }>(
-          'SELECT id, content FROM memories WHERE deleted_at IS NULL AND workspace_id = $1',
-          [ws.id]
+        const dbMemoryQuery = workspaceId
+          ? 'SELECT id, workspace_id, category, content, embedding FROM memories WHERE deleted_at IS NULL AND workspace_id = $1'
+          : 'SELECT id, workspace_id, category, content, embedding FROM memories WHERE deleted_at IS NULL';
+        const dbMemoryParams = workspaceId ? [ws.id] : [];
+        const dbMemories = await query<{ id: number; workspace_id: string; category: string; content: string; embedding: unknown }>(
+          dbMemoryQuery, dbMemoryParams
         );
-        for (const mem of dbMemories) {
-          const memText = prepareText('memory', mem.content);
+
+        let dbMemQueued = 0;
+        let dbMemSkipped = 0;
+        for (const row of dbMemories) {
+          // Skip memories that already have embeddings stored in-row
+          if (row.embedding != null) {
+            dbMemSkipped++;
+            continue;
+          }
+          const sourceId = `mem-${row.id}`;
+          const memText = prepareText('memory', row.content);
           const memHash = computeHash(memText);
-          const memSourceId = `mem-${mem.id}`;
-          if (await needsEmbed(ws.id, 'memory', memSourceId, memHash)) {
-            enqueueJob({ workspaceId: ws.id, sourceType: 'memory', sourceId: memSourceId, text: memText });
+          if (await needsEmbed(row.workspace_id, 'memory', sourceId, memHash)) {
+            enqueueJob({ workspaceId: row.workspace_id, sourceType: 'memory', sourceId, text: memText });
+            dbMemQueued++;
             queued++;
           } else {
+            dbMemSkipped++;
             skippedStale++;
           }
         }
-      } catch {
+        logger.info('[Embeddings] DB memories: %d queued, %d skipped (already embedded or unchanged)', dbMemQueued, dbMemSkipped);
+      } catch (err) {
         // memories table may not exist in older installations — skip gracefully
+        logger.warn({ err }, '[Embeddings] Could not query memories table — skipping DB memories');
       }
     }
 

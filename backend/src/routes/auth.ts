@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import Stripe from 'stripe';
 import { z } from 'zod';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { logger } from '../lib/logger';
 
@@ -133,7 +133,7 @@ async function generateAndStoreVerificationToken(userId: string, email: string):
     [tokenId, userId, tokenHash]
   );
 
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
+  const _frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
   const verifyLink = `http://localhost:3030/api/auth/verify-email?token=${rawToken}`;
 
   logger.info(`[auth] Email verification link for ${email}: ${verifyLink}`);
@@ -753,7 +753,7 @@ router.post('/resend-verification', async (req: Request, res: Response) => {
 
 // ─── Password reset constants ───
 
-const RESET_TOKEN_EXPIRES_HOURS = 1;
+const _RESET_TOKEN_EXPIRES_HOURS = 1;
 const RESET_RATE_LIMIT_PER_HOUR = 3;
 
 interface PasswordResetTokenRow {

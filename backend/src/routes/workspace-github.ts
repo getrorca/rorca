@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
 

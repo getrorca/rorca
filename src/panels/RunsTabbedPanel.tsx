@@ -18,7 +18,7 @@ interface RunsTabbedPanelProps {
   onNavigateToRun?: (runId: number) => void;
 }
 
-export default function RunsTabbedPanel({ onNavigate, onNavigateToRun }: RunsTabbedPanelProps) {
+export default function RunsTabbedPanel({ onNavigate: _onNavigate, onNavigateToRun }: RunsTabbedPanelProps) {
   const [activeTab, setActiveTab] = useState<RunsTab>('active');
 
   return (

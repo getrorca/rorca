@@ -6,11 +6,10 @@
  * Fallback: exact text comparison via Levenshtein distance when vector search unavailable.
  */
 
-import { query, queryOne } from '../db/index';
+import { queryOne } from '../db/index';
 import {
   readMemory,
   writeMemory,
-  serializeEntry,
   type MemoryEntry,
 } from './memory-ledger';
 import { prepareText, embedText } from './embedding-pipeline';

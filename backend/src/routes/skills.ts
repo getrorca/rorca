@@ -13,7 +13,7 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import { query, queryOne, execute } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { SkillRegistry, inferCategory } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
@@ -301,11 +301,10 @@ router.get('/top', async (req: Request, res: Response) => {
         signal: AbortSignal.timeout(5_000),
       });
       if (!r.ok) return [];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const d: any = await r.json().catch(() => null);
+      const d = await r.json().catch(() => null) as Record<string, unknown> | null;
       if (!d) return [];
-      return Array.isArray(d?.skills) ? d.skills
-        : Array.isArray(d?.results) ? d.results
+      return Array.isArray((d as Record<string, unknown>)?.skills) ? (d as Record<string, unknown[]>).skills
+        : Array.isArray((d as Record<string, unknown>)?.results) ? (d as Record<string, unknown[]>).results
         : Array.isArray(d) ? d : [];
     } catch {
       return [];
@@ -1822,7 +1821,7 @@ router.get('/export', async (req: Request, res: Response) => {
 });
 
 /** Recursively find .md files in a directory. */
-function findMdFiles(dir: string): string[] {
+function _findMdFiles(dir: string): string[] {
   const results: string[] = [];
   if (!fs.existsSync(dir)) return results;
   try {
@@ -1830,7 +1829,7 @@ function findMdFiles(dir: string): string[] {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        results.push(...findMdFiles(fullPath));
+        results.push(..._findMdFiles(fullPath));
       } else if (entry.isFile() && entry.name.endsWith('.md')) {
         results.push(fullPath);
       }

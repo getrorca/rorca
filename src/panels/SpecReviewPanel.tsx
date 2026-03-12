@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-  ArrowLeft,
   ChevronDown,
   ChevronRight,
   CheckCircle2,

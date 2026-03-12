@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import {
   Terminal as TerminalIcon, Layers, CheckCircle2, XCircle,
   FileText, Pencil, Brain, GitCommitHorizontal, Search, Hash, AlertCircle,
-  ChevronDown, ChevronRight, Loader2,
+  Loader2,
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';

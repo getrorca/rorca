@@ -53,16 +53,10 @@ jest.mock('../sse-hub', () => ({
 
 // ─── Imports (after mocks) ─────────────────────────────────────────────────
 
-import { PackLoader } from '../convention-packs';
-import type { Pack } from '../convention-packs';
 import { PackRegistry } from '../pack-registry';
-import type { PackJson } from '../pack-registry';
 import { installPack, forkPack } from '../pack-installer';
-import type { PackInstallResult, PackForkResult } from '../pack-installer';
-import { PersonaRegistry, parseFrontmatter } from '../agent-personas';
-import type { Persona, PersonaCategory } from '../agent-personas';
-import { SkillRegistry, parseFrontmatter as parseSkillFrontmatter } from '../skill-registry';
-import type { Skill } from '../skill-registry';
+import { PersonaRegistry, parseFrontmatter, PersonaCategory } from '../agent-personas';
+import { SkillRegistry } from '../skill-registry';
 import { chatComplete } from '../llm-client';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -411,7 +405,7 @@ describe('Pack Lifecycle — install, fork, uninstall', () => {
       lastChanges = 1;
 
       // Mock: no existing registration for new name
-      const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
+      const _existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
       // Return undefined for registration check (will be called for both old and new)
 
       // Mock: register returns row

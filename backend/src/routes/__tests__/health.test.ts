@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
-import { query, queryOne, execute } from '../../db/index';
+import { execute } from '../../db/index';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -32,7 +32,7 @@ beforeEach(() => {
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
@@ -198,7 +198,7 @@ describe('GET /api/health (agentType=opencode)', () => {
     }));
 
     ocTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-oc-test-'));
-    const dbPath = path.join(ocTmpDir, 'test.db');
+    const _dbPath = path.join(ocTmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
     const serverMod = require('../../server');
