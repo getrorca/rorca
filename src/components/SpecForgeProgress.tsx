@@ -309,6 +309,11 @@ function SpecErrorCard({
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
+interface AttachmentStep {
+  filename: string;
+  status: 'extracting_text' | 'complete';
+}
+
 interface SpecForgeProgressProps {
   isActive: boolean;
   onCancel: () => void;
@@ -327,9 +332,11 @@ interface SpecForgeProgressProps {
   model?: string;
   /** Provider used for generation */
   provider?: string;
+  /** When true, shows attachment processing steps before generating */
+  hasAttachments?: boolean;
 }
 
-export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, multiPass, specSlug, onRetry, onRetryWithModel, model, provider }: SpecForgeProgressProps) {
+export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, multiPass, specSlug, onRetry, onRetryWithModel, model, provider, hasAttachments }: SpecForgeProgressProps) {
   const stages = multiPass ? MULTI_PASS_STAGES : SINGLE_PASS_STAGES;
 
   // Single-pass: simulated index-based stage tracking
@@ -342,6 +349,9 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const sseRef = useRef<EventSource | null>(null);
 
+  // Attachment processing steps (populated via SSE)
+  const [attachmentSteps, setAttachmentSteps] = useState<AttachmentStep[]>([]);
+
   // Reset on activation
   useEffect(() => {
     if (!isActive) return;
@@ -351,10 +361,32 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
     setStageStartTimes({ [stages[0].id]: now });
     setElapsed({});
     setCompletedPasses(new Set());
+    setAttachmentSteps([]);
   }, [isActive, stages]);
 
-  // Multi-pass: listen to SSE events for real pass progress via shared singleton
+  // Listen to SSE events for attachment processing and multi-pass progress
   useWalSSE((event) => {
+    // Handle attachment_processing events (single-pass and multi-pass)
+    if (isActive && event.event_type === 'attachment_processing') {
+      try {
+        const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
+        const filename = payload.filename as string;
+        const status = payload.status as 'extracting_text' | 'complete';
+        if (specSlug && event.spec_id && event.spec_id !== specSlug) return;
+        setAttachmentSteps((prev) => {
+          const idx = prev.findIndex((s) => s.filename === filename);
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = { filename, status };
+            return updated;
+          }
+          return [...prev, { filename, status }];
+        });
+      } catch {
+        // Ignore parse errors
+      }
+    }
+
     if (!isActive || !multiPass) return;
     if (event.event_type !== 'spec_generation_pass') return;
 
@@ -479,6 +511,48 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
           </span>
         )}
       </div>
+
+      {/* Attachment processing steps — shown when attachments exist */}
+      {(hasAttachments || attachmentSteps.length > 0) && (
+        <div className="rounded-lg border border-border bg-panel/50 overflow-hidden">
+          <div className="flex items-center gap-3 px-4 py-2 border-b border-border/50">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4 shrink-0 text-muted">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+            </svg>
+            <span className="text-xs font-medium text-muted">Processing attachments</span>
+          </div>
+          {attachmentSteps.length === 0 ? (
+            <div className="flex items-center gap-3 px-4 py-2.5">
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-accent" />
+              </span>
+              <span className="text-sm text-text font-medium">Preparing attachments...</span>
+            </div>
+          ) : (
+            attachmentSteps.map((step) => {
+              const isDone = step.status === 'complete';
+              return (
+                <div key={step.filename} className="flex items-center gap-3 px-4 py-2 border-t border-border/50 first:border-t-0">
+                  <div className={`shrink-0 ${isDone ? 'text-green-400' : 'text-accent animate-pulse'}`}>
+                    {isDone ? <CheckIcon /> : (
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    )}
+                  </div>
+                  <span className={`text-sm flex-1 truncate ${isDone ? 'text-muted' : 'text-text font-medium'}`}>
+                    {isDone ? step.filename : `Extracting text from ${step.filename}...`}
+                  </span>
+                  {isDone && (
+                    <span className="text-xs text-muted/50">Complete</span>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
 
       <div
         className="rounded-lg border border-border bg-panel/50 overflow-hidden"
