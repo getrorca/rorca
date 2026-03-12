@@ -1,0 +1,30 @@
+name: Publish VS Code Extension
+
+on:
+  push:
+    tags:
+      - 'v*-vscode'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: cd rorca-vscode && npm ci
+
+      - name: Type check
+        run: cd rorca-vscode && npm run check-types
+
+      - name: Publish to VS Code Marketplace
+        run: cd rorca-vscode && npx @vscode/vsce publish -p ${{ secrets.VSCE_PAT }}
+
+      - name: Publish to Open VSX Registry
+        if: ${{ secrets.OVSX_PAT != '' }}
+        run: cd rorca-vscode && npx ovsx publish -p ${{ secrets.OVSX_PAT }}
