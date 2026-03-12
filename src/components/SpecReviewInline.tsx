@@ -52,6 +52,7 @@ export interface SpecSummary {
   tags?: string[];
   reviewStatus?: ReviewStatus;
   assignee?: Assignee;
+  attachments?: import('../types').Attachment[];
 }
 
 export const REVIEW_STATUS_CONFIG: Record<ReviewStatus, { label: string; className: string; icon: typeof Eye }> = {
