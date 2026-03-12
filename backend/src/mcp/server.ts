@@ -105,12 +105,13 @@ server.registerTool(
     const resolvedStatus = status ?? 'all';
     const res = await fetch(`${RORCA_API}/api/specs?workspaceId=${workspaceId}&status=${resolvedStatus}`);
     if (!res.ok) throw new Error(`Failed to list specs: ${res.status}`);
-    const specs = await res.json() as Array<{ id: string; title: string; status: string; storyCount: number; createdAt: string }>;
+    const data = await res.json() as { items?: Array<{ id: string; title?: string; specName?: string; status: string; storyCount: number; createdAt: string }> } | Array<{ id: string; title?: string; specName?: string; status: string; storyCount: number; createdAt: string }>;
+    const specs = Array.isArray(data) ? data : (data.items ?? []);
     if (specs.length === 0) {
       return { content: [{ type: 'text' as const, text: `No specs found for workspace ${workspaceId} (filter: ${resolvedStatus})` }] };
     }
     const lines = specs.map(s =>
-      `[${s.status.toUpperCase()}] ${s.title} (${s.storyCount} stories) — ${s.id}`
+      `[${s.status.toUpperCase()}] ${s.specName ?? s.title ?? s.id} (${s.storyCount} stories) — ${s.id}`
     );
     return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
   }
@@ -429,13 +430,11 @@ server.registerTool(
       throw new Error(`Failed to list runs (${res.status}): ${err}`);
     }
 
-    const { runs } = await res.json() as {
-      runs: Array<{
-        id: number; status: string; spec_path: string;
-        branch_name: string | null; trigger_type: string | null;
-        started_at: string; finished_at: string | null;
-      }>;
+    const payload = await res.json() as {
+      runs?: Array<{ id: number; status: string; spec_path: string; branch_name: string | null; trigger_type: string | null; started_at: string; finished_at: string | null }>;
+      items?: Array<{ id: number; status: string; spec_path: string; branch_name: string | null; trigger_type: string | null; started_at: string; finished_at: string | null }>;
     };
+    const runs = payload.runs ?? payload.items ?? [];
 
     if (runs.length === 0) {
       return { content: [{ type: 'text' as const, text: `No pipeline runs found for workspace ${workspaceId}` }] };
@@ -777,12 +776,11 @@ server.registerTool(
   async () => {
     const res = await fetch(`${RORCA_API}/api/workspaces`);
     if (!res.ok) throw new Error(`Failed to list workspaces: ${res.status}`);
-    const { workspaces } = await res.json() as {
-      workspaces: Array<{
-        id: string; label: string; path: string;
-        domains: string[]; created_at: string;
-      }>;
+    const data = await res.json() as {
+      items?: Array<{ id: string; label: string; path: string; domains: string[]; created_at: string; }>;
+      workspaces?: Array<{ id: string; label: string; path: string; domains: string[]; created_at: string; }>;
     };
+    const workspaces = data.items ?? data.workspaces ?? [];
 
     if (workspaces.length === 0) {
       return { content: [{ type: 'text' as const, text: 'No workspaces registered. Use rorca_create_workspace to register one.' }] };
@@ -1060,6 +1058,681 @@ server.registerTool(
         text: `Memories (${data.items.length}/${data.total}):\n\n${lines.join('\n\n')}`
       }]
     };
+  }
+);
+
+// ─── Slash-command Prompts (/mcp__rorca__<name>) ──────────────────────────────
+// These are user-invocable via /mcp__rorca__<name> [args] in Claude Code.
+// Each prompt calls the backend directly and injects formatted results into
+// the conversation — no secondary tool call required.
+
+const DEFAULT_WORKSPACE = 'rorcha';
+
+server.registerPrompt(
+  'list_specs',
+  {
+    title: 'List Specs',
+    description: 'List all specs for a workspace grouped by status (pending/approved). Defaults to the rorcha workspace.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      status: z.enum(['pending', 'approved', 'all']).optional().describe('Filter: pending | approved | all (default: all)'),
+    },
+  },
+  async ({ workspaceId, status }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const st = status ?? 'all';
+    const res = await fetch(`${RORCA_API}/api/specs?workspaceId=${ws}&status=${st}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Error fetching specs (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { items?: Array<{ id: string; specName?: string; title?: string; status: string; storyCount: number }> } | Array<{ id: string; specName?: string; title?: string; status: string; storyCount: number }>;
+    const specs = Array.isArray(data) ? data : (data.items ?? []);
+    if (specs.length === 0) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `No specs found for workspace "${ws}" (filter: ${st})` } }] };
+    }
+    const byStatus: Record<string, typeof specs> = {};
+    for (const s of specs) {
+      const key = s.status ?? 'unknown';
+      (byStatus[key] ??= []).push(s);
+    }
+    const sections = Object.entries(byStatus).map(([k, items]) => {
+      const lines = items.map(s => `  • ${s.specName ?? s.title ?? s.id} (${s.storyCount} stories) — ${s.id}`);
+      return `## ${k.toUpperCase()} (${items.length})\n${lines.join('\n')}`;
+    });
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: { type: 'text' as const, text: `Specs for workspace "${ws}" (${specs.length} total):\n\n${sections.join('\n\n')}` },
+      }],
+    };
+  }
+);
+
+server.registerPrompt(
+  'list_runs',
+  {
+    title: 'List Runs',
+    description: 'List recent pipeline runs for a workspace. Defaults to the rorcha workspace, last 10 runs.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      limit: z.string().optional().describe('Number of runs to show (default: 10, max: 50)'),
+    },
+  },
+  async ({ workspaceId, limit }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const n = Math.min(50, Math.max(1, parseInt(limit ?? '10', 10) || 10));
+    const res = await fetch(`${RORCA_API}/api/pipeline/runs?workspaceId=${encodeURIComponent(ws)}&limit=${n}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Error fetching runs (${res.status}): ${await res.text()}` } }] };
+    }
+    const payload = await res.json() as {
+      runs?: Array<{ id: number; status: string; spec_path: string; branch_name: string | null; started_at: string; finished_at: string | null }>;
+      items?: Array<{ id: number; status: string; spec_path: string; branch_name: string | null; started_at: string; finished_at: string | null }>;
+    };
+    const runs = payload.runs ?? payload.items ?? [];
+    if (runs.length === 0) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `No pipeline runs found for workspace "${ws}"` } }] };
+    }
+    const STATUS_ICON: Record<string, string> = { done: '✅', failed: '❌', running: '🔄', queued: '⏳' };
+    const lines = runs.map(r => {
+      const icon = STATUS_ICON[r.status] ?? '❓';
+      const elapsed = r.finished_at
+        ? `${Math.round((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 60000)}m`
+        : `${Math.round((Date.now() - new Date(r.started_at).getTime()) / 60000)}m (running)`;
+      const spec = r.spec_path.replace('forge/specs/approved/', '').replace('.json', '');
+      const branch = r.branch_name ? ` [${r.branch_name}]` : '';
+      return `${icon} #${r.id}: ${r.status.toUpperCase()} — ${spec} (${elapsed})${branch}`;
+    });
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: { type: 'text' as const, text: `Recent runs for workspace "${ws}" (${runs.length} shown):\n\n${lines.join('\n')}` },
+      }],
+    };
+  }
+);
+
+server.registerPrompt(
+  'run_status',
+  {
+    title: 'Run Status',
+    description: 'Get detailed per-story status for a specific pipeline run by ID.',
+    argsSchema: {
+      runId: z.string().describe('Pipeline run ID (e.g. 39)'),
+    },
+  },
+  async ({ runId }) => {
+    const id = parseInt(runId, 10);
+    if (isNaN(id)) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Invalid run ID: "${runId}". Must be a number.` } }] };
+    }
+    const res = await fetch(`${RORCA_API}/api/pipeline/runs/${id}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Error fetching run #${id} (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      run: { id: number; status: string; spec_path: string; started_at: string; finished_at: string | null; branch_name: string | null };
+      stories: Array<{ story_id: string; status: string; retries: number; elapsed_seconds: number | null; input_tokens: number | null; output_tokens: number | null }>;
+    };
+    const { run, stories } = data;
+    const elapsed = run.finished_at
+      ? `${Math.round((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 60000)}m`
+      : `${Math.round((Date.now() - new Date(run.started_at).getTime()) / 60000)}m (running)`;
+    const pass = stories.filter(s => s.status === 'pass').length;
+    const fail = stories.filter(s => s.status === 'fail').length;
+    const skip = stories.filter(s => s.status === 'skip').length;
+    const STATUS_ICON: Record<string, string> = { pass: '✅', fail: '❌', skip: '⏭️', retry: '🔄', running: '⚡' };
+    const storyLines = stories.map(s => {
+      const icon = STATUS_ICON[s.status] ?? '❓';
+      const time = s.elapsed_seconds ? ` (${Math.round(s.elapsed_seconds)}s)` : '';
+      const tokens = (s.input_tokens || s.output_tokens) ? ` [${(s.input_tokens ?? 0).toLocaleString()}/${(s.output_tokens ?? 0).toLocaleString()} tok]` : '';
+      const retries = s.retries > 0 ? ` retry#${s.retries}` : '';
+      return `  ${icon} ${s.story_id}: ${s.status.toUpperCase()}${retries}${time}${tokens}`;
+    });
+    const spec = run.spec_path.replace('forge/specs/approved/', '').replace('.json', '');
+    const header = [
+      `**Run #${run.id}** — ${run.status.toUpperCase()} (${elapsed})`,
+      `Spec: ${spec}`,
+      `Progress: ${pass} pass / ${fail} fail / ${skip} skip / ${stories.length} total`,
+    ];
+    if (run.branch_name) header.push(`Branch: ${run.branch_name}`);
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: { type: 'text' as const, text: `${header.join('\n')}\n\nStories:\n${storyLines.join('\n')}` },
+      }],
+    };
+  }
+);
+
+server.registerPrompt(
+  'pipeline_status',
+  {
+    title: 'Pipeline Status',
+    description: 'Get the status of the most recent pipeline run for a workspace. Defaults to the rorcha workspace.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/pipeline/runs?workspaceId=${encodeURIComponent(ws)}&limit=1`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Error fetching pipeline status (${res.status}): ${await res.text()}` } }] };
+    }
+    const payload = await res.json() as {
+      runs?: Array<{ id: number; status: string; spec_path: string; started_at: string; finished_at: string | null }>;
+      items?: Array<{ id: number; status: string; spec_path: string; started_at: string; finished_at: string | null }>;
+    };
+    const runs = payload.runs ?? payload.items ?? [];
+    if (runs.length === 0) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `No pipeline runs found for workspace "${ws}". Nothing has been run yet.` } }] };
+    }
+    const run = runs[0];
+    // Fetch detailed story results for the latest run
+    const detailRes = await fetch(`${RORCA_API}/api/pipeline/runs/${run.id}`);
+    if (!detailRes.ok) {
+      const elapsed = run.finished_at
+        ? `${Math.round((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 60000)}m`
+        : `${Math.round((Date.now() - new Date(run.started_at).getTime()) / 60000)}m (running)`;
+      const spec = run.spec_path.replace('forge/specs/approved/', '').replace('.json', '');
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Latest run #${run.id}: ${run.status.toUpperCase()} (${elapsed})\nSpec: ${spec}` } }] };
+    }
+    const detail = await detailRes.json() as {
+      run: { id: number; status: string; spec_path: string; started_at: string; finished_at: string | null };
+      stories: Array<{ story_id: string; status: string; retries: number }>;
+    };
+    const elapsed = detail.run.finished_at
+      ? `${Math.round((new Date(detail.run.finished_at).getTime() - new Date(detail.run.started_at).getTime()) / 60000)}m`
+      : `${Math.round((Date.now() - new Date(detail.run.started_at).getTime()) / 60000)}m (running)`;
+    const pass = detail.stories.filter(s => s.status === 'pass').length;
+    const fail = detail.stories.filter(s => s.status === 'fail').length;
+    const skip = detail.stories.filter(s => s.status === 'skip').length;
+    const spec = detail.run.spec_path.replace('forge/specs/approved/', '').replace('.json', '');
+    const STATUS_EMOJI: Record<string, string> = { done: '✅', failed: '❌', running: '🔄', queued: '⏳' };
+    const icon = STATUS_EMOJI[detail.run.status] ?? '❓';
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: {
+          type: 'text' as const,
+          text: `${icon} **Latest pipeline run** for workspace "${ws}":\n\nRun #${detail.run.id}: ${detail.run.status.toUpperCase()} (${elapsed})\nSpec: ${spec}\nStories: ${pass} pass / ${fail} fail / ${skip} skip / ${detail.stories.length} total\n\nUse /mcp__rorca__run_status ${detail.run.id} for full per-story breakdown.`,
+        },
+      }],
+    };
+  }
+);
+
+server.registerPrompt(
+  'trigger_run',
+  {
+    title: 'Trigger Pipeline Run',
+    description: 'Start a pipeline run for an approved spec. Spec must be in the approved queue.',
+    argsSchema: {
+      specId: z.string().describe('Spec ID slug (e.g. rorca-curated-skills-library)'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/pipeline/trigger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws, specPath: `forge/specs/approved/${specId}.json` }),
+    });
+    const data = await res.json() as Record<string, unknown>;
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to trigger run (${res.status}): ${data.error ?? JSON.stringify(data)}` } }] };
+    }
+    if (data.conflict) {
+      return {
+        messages: [{
+          role: 'user' as const,
+          content: { type: 'text' as const, text: `⚠️ Conflict: workspace "${ws}" already has active run #${data.activeRunId}.\n\nWait for it to finish, or use rorca_trigger_run with autoWorktree: true to run in parallel.` },
+        }],
+      };
+    }
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: { type: 'text' as const, text: `🚀 Pipeline run #${data.runId} started!\nSpec: ${specId}\nWorkspace: ${ws}\n\nTrack progress with: /mcp__rorca__run_status ${data.runId}` },
+      }],
+    };
+  }
+);
+
+server.registerPrompt(
+  'generate_spec',
+  {
+    title: 'Generate Spec',
+    description: 'Generate a spec JSON from a title and brief. Usage: /mcp__rorca__generate_spec "my-spec-slug" "One paragraph describing the feature"',
+    argsSchema: {
+      title: z.string().describe('Spec slug (e.g. add-dark-mode) — becomes the filename'),
+      specBrief: z.string().describe('One-paragraph description of the feature to spec out'),
+      storyCount: z.string().optional().describe('Number of stories to generate (default: 8)'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ title, specBrief, storyCount, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const count = parseInt(storyCount ?? '8', 10) || 8;
+    const res = await fetch(`${RORCA_API}/api/specs/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws, title, specBrief, storyCount: count, includeDiagrams: false }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec generation failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const spec = await res.json() as { title?: string; userStories?: Array<{ id: string; title: string }>; model?: string };
+    const stories = spec.userStories ?? [];
+    const storyList = stories.map(s => `  • ${s.id}: ${s.title}`).join('\n');
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: {
+          type: 'text' as const,
+          text: `✅ Spec "${title}" generated (${stories.length} stories, model: ${spec.model ?? 'unknown'}):\n\n${storyList}\n\nApprove it with: /mcp__rorca__approve_spec ${title}`,
+        },
+      }],
+    };
+  }
+);
+
+server.registerPrompt(
+  'approve_spec',
+  {
+    title: 'Approve Spec',
+    description: 'Approve a pending spec and move it to the approved queue.',
+    argsSchema: {
+      specId: z.string().describe('Spec ID slug (e.g. rorca-curated-skills-library)'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      notes: z.string().optional().describe('Optional approval notes'),
+    },
+  },
+  async ({ specId, workspaceId, notes }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const body: Record<string, string> = { workspaceId: ws };
+    if (notes) body.notes = notes;
+    const res = await fetch(`${RORCA_API}/api/specs/${specId}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to approve spec "${specId}" (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { path: string };
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `✅ Spec "${specId}" approved.\nMoved to: ${data.path}\n\nRun it with: /mcp__rorca__trigger_run ${specId}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'get_context',
+  {
+    title: 'Get Context',
+    description: 'Get the synthesized Direction Stack (L1–L5) for a workspace.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      specBrief: z.string().optional().describe('Optional L4 spec brief to include in synthesis'),
+    },
+  },
+  async ({ workspaceId, specBrief }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/direction/synthesize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws, l4SpecBrief: specBrief ?? '', l5Annotations: '' }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to get context (${res.status}): ${await res.text()}` } }] };
+    }
+    const { synthesized } = await res.json() as { synthesized: string };
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: synthesized } }] };
+  }
+);
+
+server.registerPrompt(
+  'get_direction',
+  {
+    title: 'Get Direction Stack',
+    description: 'Get all direction layers (L1–L3) with raw content for a workspace.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/direction/all?workspaceId=${encodeURIComponent(ws)}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to get direction (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      layers: { l1: { content: string | null }; l2: { content: string | null }; l3: { content: string | null; preferredModel: string | null } };
+    };
+    const lines = [
+      `=== L1: Standards ===\n${data.layers.l1.content ?? '(not configured)'}`,
+      `=== L2: Conventions ===\n${data.layers.l2.content ?? '(not configured)'}`,
+      `=== L3: Project ===\n${data.layers.l3.content ?? '(not configured)'}${data.layers.l3.preferredModel ? `\nPreferred model: ${data.layers.l3.preferredModel}` : ''}`,
+    ];
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Direction Stack for "${ws}":\n\n${lines.join('\n\n')}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'synthesize_direction',
+  {
+    title: 'Synthesize Direction',
+    description: 'Preview the fully merged direction stack exactly as sent to the LLM.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      specBrief: z.string().optional().describe('Optional L4 spec brief'),
+    },
+  },
+  async ({ workspaceId, specBrief }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/direction/synthesize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws, l4SpecBrief: specBrief ?? '', l5Annotations: '' }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to synthesize direction (${res.status}): ${await res.text()}` } }] };
+    }
+    const { synthesized } = await res.json() as { synthesized: string };
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Synthesized direction for "${ws}":\n\n${synthesized}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'search_stories',
+  {
+    title: 'Search Stories',
+    description: 'Search across all specs for stories matching a query.',
+    argsSchema: {
+      query: z.string().describe('Search query (matches ID, title, description, acceptance criteria)'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ query, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/search/stories?workspaceId=${encodeURIComponent(ws)}&q=${encodeURIComponent(query)}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Search failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      resultCount: number;
+      results: Array<{ specId: string; status: string; story: { id: string; title: string; acceptanceCriteria: string[] }; matchFields: string[] }>;
+    };
+    if (data.resultCount === 0) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `No stories found matching "${query}"` } }] };
+    }
+    const lines = data.results.map(r =>
+      `[${r.status.toUpperCase()}] ${r.specId} → ${r.story.id}: ${r.story.title}\n  Matched in: ${r.matchFields.join(', ')}`
+    );
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Found ${data.resultCount} stories matching "${query}":\n\n${lines.join('\n\n')}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'add_stories',
+  {
+    title: 'Add Stories',
+    description: 'Generate and append new LLM-generated stories to an existing spec.',
+    argsSchema: {
+      specId: z.string().describe('Spec ID slug'),
+      count: z.string().optional().describe('Number of stories to add (default: 3)'),
+      brief: z.string().optional().describe('Guidance for what the new stories should cover'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, count, brief, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const body: Record<string, unknown> = { workspaceId: ws, count: parseInt(count ?? '3', 10) || 3 };
+    if (brief) body.brief = brief;
+    const res = await fetch(`${RORCA_API}/api/specs/${specId}/add-stories`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to add stories (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { added: number; totalStories: number; newStories: Array<{ id: string; title: string }> };
+    const storyList = data.newStories.map(s => `  • ${s.id}: ${s.title}`).join('\n');
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Added ${data.added} stories to "${specId}" (${data.totalStories} total):\n\n${storyList}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'delete_story',
+  {
+    title: 'Delete Story',
+    description: 'Remove a story from a spec. Remaining stories are reindexed.',
+    argsSchema: {
+      specId: z.string().describe('Spec ID slug'),
+      storyId: z.string().describe('Story ID (e.g. US-003)'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, storyId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${specId}/stories/${storyId}?workspaceId=${encodeURIComponent(ws)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to delete story (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { deletedStory: { id: string; title: string }; version: number; remainingCount: number };
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `🗑️ Deleted "${data.deletedStory.title}" (${storyId}) from spec "${specId}".\nVersion snapshot: ${data.version}\nRemaining stories: ${data.remainingCount}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'retry_story',
+  {
+    title: 'Retry Story',
+    description: 'Retry failed stories in a completed pipeline run.',
+    argsSchema: {
+      runId: z.string().describe('Pipeline run ID'),
+      storyIds: z.string().optional().describe('Comma-separated story IDs to retry (e.g. US-003,US-005). Omit to retry ALL failed.'),
+    },
+  },
+  async ({ runId, storyIds }) => {
+    const id = parseInt(runId, 10);
+    if (isNaN(id)) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Invalid run ID: "${runId}"` } }] };
+    }
+    const body: Record<string, unknown> = {};
+    if (storyIds) body.storyIds = storyIds.split(',').map(s => s.trim()).filter(Boolean);
+    const res = await fetch(`${RORCA_API}/api/pipeline/runs/${id}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Retry failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { runId: number; retriedStories: Array<{ storyId: string; attempt: number }> };
+    const list = data.retriedStories.map(s => `  • ${s.storyId} (attempt #${s.attempt})`).join('\n');
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `🔄 Retry started for run #${data.runId}:\n\n${list}\n\nTrack progress with: /mcp__rorca__run_status ${data.runId}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'usage_stats',
+  {
+    title: 'Usage Stats',
+    description: 'Token usage and cost summary for a workspace.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      groupBy: z.enum(['model', 'spec', 'story', 'user']).optional().describe('Group by: model | spec | story | user (default: model)'),
+      from: z.string().optional().describe('Start date ISO-8601 (e.g. 2026-01-01). Defaults to 30 days ago.'),
+      to: z.string().optional().describe('End date ISO-8601 (e.g. 2026-02-01). Defaults to now.'),
+    },
+  },
+  async ({ workspaceId, groupBy, from, to }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const params = new URLSearchParams({ workspace_id: ws, group_by: groupBy ?? 'model' });
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    const res = await fetch(`${RORCA_API}/api/analytics/usage?${params}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to get usage stats (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      grouped: Array<{ group_key: string; total_input_tokens: number; total_output_tokens: number; total_cost_usd: number; count: number }>;
+      totals: { total_input_tokens: number; total_output_tokens: number; total_cost_usd: number };
+    };
+    const lines = data.grouped.length === 0
+      ? ['No usage data for this period.']
+      : data.grouped.map(g => `  ${g.group_key}: ${g.total_input_tokens.toLocaleString()} in / ${g.total_output_tokens.toLocaleString()} out — $${g.total_cost_usd.toFixed(4)} (${g.count} records)`);
+    lines.push(`\nTotal: ${data.totals.total_input_tokens.toLocaleString()} in / ${data.totals.total_output_tokens.toLocaleString()} out — $${data.totals.total_cost_usd.toFixed(4)}`);
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Token usage for "${ws}" (by ${groupBy ?? 'model'}):\n\n${lines.join('\n')}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'workspace_stats',
+  {
+    title: 'Workspace Stats',
+    description: 'Quick health check: spec counts, run counts, story pass rate, last activity.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/workspaces/${encodeURIComponent(ws)}/stats`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to get workspace stats (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      specs: { pending: number; approved: number; total: number };
+      runs: { total: number; active: number; completed: number; failed: number };
+      stories: { total: number; passed: number; failed: number; passRate: number };
+      lastActivity: string | null;
+    };
+    const text = [
+      `📊 Workspace stats: ${ws}`,
+      ``,
+      `Specs:   ${data.specs.total} total (${data.specs.pending} pending, ${data.specs.approved} approved)`,
+      `Runs:    ${data.runs.total} total (${data.runs.active} active, ${data.runs.completed} completed, ${data.runs.failed} failed)`,
+      `Stories: ${data.stories.total} executed — ${data.stories.passRate}% pass rate`,
+      `Last activity: ${data.lastActivity ?? 'never'}`,
+    ].join('\n');
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text } }] };
+  }
+);
+
+server.registerPrompt(
+  'list_workspaces',
+  {
+    title: 'List Workspaces',
+    description: 'List all registered workspaces with their paths and domains.',
+    argsSchema: {},
+  },
+  async () => {
+    const res = await fetch(`${RORCA_API}/api/workspaces`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to list workspaces (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { items?: Array<{ id: string; label: string; path: string; domains: string[] }>; workspaces?: Array<{ id: string; label: string; path: string; domains: string[] }> };
+    const workspaces = data.items ?? data.workspaces ?? [];
+    if (workspaces.length === 0) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: 'No workspaces registered.' } }] };
+    }
+    const lines = workspaces.map(w => `  • ${w.label} (${w.id})\n    Path: ${w.path}\n    Domains: ${w.domains.join(', ') || 'none'}`);
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Workspaces (${workspaces.length}):\n\n${lines.join('\n\n')}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'get_memories',
+  {
+    title: 'Get Memories',
+    description: 'Retrieve memories from the memory ledger, optionally filtered by category.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter by category'),
+      limit: z.string().optional().describe('Max entries to return (default: 20)'),
+    },
+  },
+  async ({ workspaceId, category, limit }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const params = new URLSearchParams({ workspaceId: ws });
+    if (category) params.set('category', category);
+    if (limit) params.set('limit', limit);
+    const res = await fetch(`${RORCA_API}/api/memory?${params}`);
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to get memories (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { items: Array<{ date: string; category: string; title: string; rule: string }>; total: number };
+    if (data.items.length === 0) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `No memories found for "${ws}"${category ? ` in category ${category}` : ''}` } }] };
+    }
+    const lines = data.items.map(m => `[${m.date}] [${m.category}] ${m.title}\n  ${m.rule}`);
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Memories (${data.items.length}/${data.total}):\n\n${lines.join('\n\n')}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'save_memory',
+  {
+    title: 'Save Memory',
+    description: 'Save a memory entry (convention, bug fix, decision, pattern, gotcha) to the workspace ledger.',
+    argsSchema: {
+      category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).describe('Memory category'),
+      title: z.string().describe('Short title summarizing the memory'),
+      rule: z.string().describe('The rule, convention, or lesson learned'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      context: z.string().optional().describe('Additional context'),
+    },
+  },
+  async ({ category, title, rule, workspaceId, context }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const body: Record<string, string> = { workspaceId: ws, category, title, rule };
+    if (context) body.context = context;
+    const res = await fetch(`${RORCA_API}/api/memory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to save memory (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { entry: { category: string; title: string; rule: string }; total: number };
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `🧠 Memory saved to "${ws}":\n[${data.entry.category}] ${data.entry.title}\n${data.entry.rule}\n\nTotal memories: ${data.total}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'log_decision',
+  {
+    title: 'Log Decision',
+    description: 'Record an architectural or technical decision with reasoning.',
+    argsSchema: {
+      title: z.string().describe('Decision title (e.g. "Use Zustand over Redux")'),
+      decision: z.string().describe('What was decided and why'),
+      alternatives: z.string().optional().describe('Alternatives considered and why rejected'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ title, decision, alternatives, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const rule = alternatives ? `${decision}\n\nAlternatives considered: ${alternatives}` : decision;
+    const res = await fetch(`${RORCA_API}/api/memory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws, category: 'Decision', title, rule, source: 'mcp-cli' }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to log decision (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { entry: { title: string; rule: string }; total: number };
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `📝 Decision logged: ${data.entry.title}\n\n${data.entry.rule}\n\nTotal memories: ${data.total}` } }] };
   }
 );
 

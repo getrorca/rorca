@@ -8483,10 +8483,20 @@ ${storyList}`;
       { model: resolvedModel as any },
     );
 
-    // Parse LLM response
+    // Parse LLM response — strip markdown fences and prose preamble before JSON
     let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkillRaw[] }> };
     try {
-      const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      // If the LLM added prose before the JSON, extract the first { ... } block
+      const jsonStart = cleaned.indexOf('{');
+      if (jsonStart > 0) {
+        cleaned = cleaned.slice(jsonStart);
+      }
+      // Trim any trailing prose after the JSON
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
+        cleaned = cleaned.slice(0, lastBrace + 1);
+      }
       parsed = JSON.parse(cleaned);
     } catch {
       logger.error(`[Specs] match-skills: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
@@ -8711,10 +8721,18 @@ ${storyList}`;
       { model: resolvedModel as any },
     );
 
-    // Parse LLM response
+    // Parse LLM response — strip markdown fences and prose preamble before JSON
     let parsed: { suggestions: Array<{ storyId: string; suggestedModel: string; confidence: number; reason: string }> };
     try {
-      const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const jsonStart = cleaned.indexOf('{');
+      if (jsonStart > 0) {
+        cleaned = cleaned.slice(jsonStart);
+      }
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
+        cleaned = cleaned.slice(0, lastBrace + 1);
+      }
       parsed = JSON.parse(cleaned);
     } catch {
       logger.error(`[Specs] suggest-models: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
