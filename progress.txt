@@ -1,15 +1,30 @@
 # Run State Summary
 
-Spec: rorca-model-catalog-ux
-Run ID: 42
-Started: 2026-03-12T05:48:51.132Z
-Last Updated: 2026-03-12T06:20:18.246Z
+Spec: Fix Quick Run spec generation to use the full direction + memory context cascade.
 
-## Completed Stories (7)
-- US-001: Fix hardcoded stale default model state — DONE (claude, claude-sonnet-4-6, 93s)
-- US-002: Replace Default Model native select with ModelSearchSelect — DONE (claude, claude-sonnet-4-6, 68s)
-- US-003: Replace Workspace Model Override native select with ModelSearchSelect — DONE (claude, claude-sonnet-4-6, 158s)
-- US-004: Add search bar and provider filter chips to Available Models catalog — DONE (claude, claude-sonnet-4-6, 190s)
-- US-005: Add cost tier and speed filter pills to model catalog — DONE (claude, claude-sonnet-4-6, 174s)
-- US-006: Collapse OpenRouter section by default with count badge and expand toggle — DONE (claude, claude-sonnet-4-6, 359s)
-- US-007: Limit OpenRouter expanded view to 30 models with Show More button — DONE (claude, claude-sonnet-4-6, 588s)
+POST /api/pipeline/quick-run in backend/src/routes/pipeline.ts generates a 1-story spec with a bare LLM call (step 7, quickRunPrompt) that has no awareness of the workspace's direction stack, MEMORY.md, or installed skills. Fix this so the spec is generated with the same context that regular POST /api/specs/generate uses.
+
+Changes needed in backend/src/routes/pipeline.ts:
+
+After resolving the workspace, call synthesize(workspaceId, domain) from backend/src/lib/direction-stack.ts to get the merged L1–L3 direction context string.
+
+Read MEMORY.md from the workspace root (path.join(workspace.path, 'MEMORY.md')) — if it exists, include the first 2000 chars prefixed with === MEMORY.md ===.
+
+Read installed skills from GET /api/skills?workspaceId= internally (or query the DB directly) — include skill names + descriptions as a brief list prefixed with === INSTALLED SKILLS ===.
+
+Prepend all three context blocks to the quickRunPrompt before the === INSTRUCTIONS === section. If a block is empty/missing, skip it silently.
+
+Increase the acceptance criteria limit from 5 to 8 to match the richer context now available.
+
+The LLM call itself (chatComplete) stays unchanged — only the prompt content changes. The spec JSON schema and pipeline trigger logic are untouched.
+Run ID: 43
+Started: 2026-03-12T05:48:53.196Z
+Last Updated: 2026-03-12T06:05:35.876Z
+
+## Completed Stories (6)
+- US-001: Read and integrate direction stack into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 201s)
+- US-002: Read MEMORY.md and inject into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 100s)
+- US-003: Query installed skills from DB and inject into Quick Run prompt — DONE (claude, claude-sonnet-4-6, 119s)
+- US-004: Assemble context blocks and update quickRunPrompt construction — DONE (claude, claude-sonnet-4-6, 126s)
+- US-005: Increase Quick Run acceptance criteria limit from 5 to 8 — DONE (claude, claude-sonnet-4-6, 84s)
+- US-006: Add TypeScript types and guard context injection paths — DONE (claude, claude-sonnet-4-6, 284s)
