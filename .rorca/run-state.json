@@ -2,7 +2,7 @@
   "specId": "rorca-post-run-qa",
   "runId": 57,
   "startedAt": "2026-03-12T08:22:15.934Z",
-  "lastUpdatedAt": "2026-03-12T10:29:13.400Z",
+  "lastUpdatedAt": "2026-03-12T11:09:46.805Z",
   "completedStories": [
     {
       "storyId": "QA-003",
@@ -53,6 +53,26 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 106496
+    },
+    {
+      "storyId": "QA-006",
+      "title": "MCP tool registration verification",
+      "status": "passed",
+      "startedAt": "2026-03-12T10:40:00.000Z",
+      "finishedAt": "2026-03-12T10:45:00.000Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 300000
+    },
+    {
+      "storyId": "QA-006",
+      "title": "MCP tool registration and schema validation",
+      "status": "passed",
+      "startedAt": "2026-03-12T10:34:47.102Z",
+      "finishedAt": "2026-03-12T11:09:46.755Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 2099647
     }
   ],
   "failedStories": [
