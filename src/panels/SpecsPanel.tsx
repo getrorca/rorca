@@ -2108,6 +2108,14 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [savedAttachments, setSavedAttachments] = useState<SavedAttachment[]>([]);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
+  const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+  const SUPPORTED_FILE_TYPES = new Set([
+    'image/png', 'image/jpeg', 'image/webp',
+    'application/pdf', 'text/markdown', 'text/plain',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ]);
+  const SUPPORTED_EXTENSIONS = 'PNG, JPEG, WebP, PDF, Markdown, TXT, DOCX';
+
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(e.clipboardData.items);
     const imageItem = items.find((item) => item.type.startsWith('image/'));
@@ -2115,6 +2123,11 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
     const file = imageItem.getAsFile();
     if (!file) return;
+
+    if (!SUPPORTED_IMAGE_TYPES.has(file.type)) {
+      showToast('Unsupported image format. Please use PNG, JPEG, or WebP.', 'error');
+      return;
+    }
 
     const ext = file.type.split('/')[1] ?? 'png';
     const filename = `pasted-image-${Date.now()}.${ext}`;
@@ -2126,12 +2139,13 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       const formData = new FormData();
       formData.append('file', namedFile);
       // Upload to a temporary "forge" slot — spec ID will be wired after generation (US-007)
-      await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+      await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
       setPendingAttachments((prev) => [...prev, { filename, contentType: file.type, size: file.size }]);
-    } catch {
-      showToast('Image upload failed', 'error');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Image upload failed';
+      showToast(msg, 'error');
     }
-  }, [showToast]);
+  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -2139,18 +2153,24 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     // Reset so the same file can be re-selected
     e.target.value = '';
     for (const file of files) {
+      if (!SUPPORTED_FILE_TYPES.has(file.type)) {
+        const ext = file.name.includes('.') ? file.name.split('.').pop()?.toUpperCase() ?? 'unknown' : 'unknown';
+        showToast(`Unsupported file type: .${ext.toLowerCase()}. Supported: ${SUPPORTED_EXTENSIONS}.`, 'error');
+        continue;
+      }
       showToast(`Uploading ${file.name}...`, 'info');
       try {
         const formData = new FormData();
         formData.append('file', file);
-        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
         setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
         showToast(`Uploaded ${file.name}`, 'success');
-      } catch {
-        showToast(`Upload failed: ${file.name}`, 'error');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : `Upload failed: ${file.name}`;
+        showToast(msg, 'error');
       }
     }
-  }, [showToast]);
+  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [isDraggingOver, setIsDraggingOver] = useState(false);
 
@@ -2176,18 +2196,24 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
     for (const file of files) {
+      if (!SUPPORTED_FILE_TYPES.has(file.type)) {
+        const ext = file.name.includes('.') ? file.name.split('.').pop()?.toUpperCase() ?? 'unknown' : 'unknown';
+        showToast(`Unsupported file type: .${ext.toLowerCase()}. Supported: ${SUPPORTED_EXTENSIONS}.`, 'error');
+        continue;
+      }
       showToast(`Uploading ${file.name}...`, 'info');
       try {
         const formData = new FormData();
         formData.append('file', file);
-        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
         setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
         showToast(`Uploaded ${file.name}`, 'success');
-      } catch {
-        showToast(`Upload failed: ${file.name}`, 'error');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : `Upload failed: ${file.name}`;
+        showToast(msg, 'error');
       }
     }
-  }, [showToast]);
+  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Model accept handler — PUTs the accepted model to the story on disk
   const handleModelAccepted = useCallback(async (storyId: string, model: string) => {
