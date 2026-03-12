@@ -149,7 +149,7 @@ async function formatTemplate(row: TemplateRow, includeBody: boolean = false) {
  */
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
     const { name, description, sourceSpecId, brief, storyStructure, directionLayers, teamId } = req.body;
 
@@ -206,7 +206,7 @@ router.post('/', async (req: Request, res: Response) => {
 
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.json({ templates: [] }); return; }
     const scope = (req.query.scope as string) || 'all';
 
@@ -304,7 +304,7 @@ router.get('/', async (req: Request, res: Response) => {
  */
 router.post('/:id/rate', async (req: Request, res: Response) => {
   try {
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
     const templateId = req.params.id as string;
     const { rating } = req.body;
@@ -430,7 +430,7 @@ router.post('/:id/use', async (req: Request, res: Response) => {
  */
 router.get('/:id', async (req: Request, res: Response) => {
   try {
-    const user = getEffectiveUser(req);
+    const user = await getEffectiveUser(req);
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
     const row = await queryOne<TemplateRow>('SELECT * FROM templates WHERE id = $1', [req.params.id]);
 
