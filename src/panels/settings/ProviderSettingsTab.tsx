@@ -2057,6 +2057,237 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
   );
 }
 
+// ─── Model Browser Section (PM-005) ──────────────────────────────────────────
+
+type SortOption = 'best' | 'cost-asc' | 'cost-desc' | 'context' | 'speed';
+
+function ModelBrowserSection({
+  models,
+  effectiveModel,
+  workspaceModel,
+  workspaceId,
+  searchText,
+  setSearchText,
+  activeProvider,
+  setActiveProvider,
+  activeCostTier,
+  setActiveCostTier,
+  activeSpeedTier,
+  setActiveSpeedTier,
+  testResult,
+  testingModel,
+  onSelectModel,
+  onTestModel,
+}: {
+  models: DisplayModelOption[];
+  effectiveModel: string;
+  workspaceModel: string | null;
+  workspaceId: string | null;
+  searchText: string;
+  setSearchText: (v: string) => void;
+  activeProvider: string;
+  setActiveProvider: (v: string) => void;
+  activeCostTier: string;
+  setActiveCostTier: (v: string) => void;
+  activeSpeedTier: string;
+  setActiveSpeedTier: (v: string) => void;
+  testResult: ModelTestResult | null;
+  testingModel: string | null;
+  onSelectModel: (m: DisplayModelOption) => void;
+  onTestModel: (id: string) => void;
+}) {
+  const [sortBy, setSortBy] = useState<SortOption>('best');
+
+  const SPEED_ORDER: Record<string, number> = { fast: 0, medium: 1, slow: 2 };
+
+  // Compute per-provider counts respecting active cost+speed filters (but not provider filter)
+  // so that tab counts reflect what's visible in those tiers
+  const providerTabCounts = useMemo(() => {
+    const q = searchText.toLowerCase();
+    const counts: Record<string, number> = {};
+    for (const m of models) {
+      if (
+        (activeCostTier === 'All' || m.costTier === activeCostTier) &&
+        (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
+        (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
+      ) {
+        counts[m.provider] = (counts[m.provider] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [models, searchText, activeCostTier, activeSpeedTier]);
+
+  const providers = useMemo(
+    () => Object.entries(
+      models.reduce<Record<string, number>>((acc, m) => {
+        acc[m.provider] = (acc[m.provider] ?? 0) + 1;
+        return acc;
+      }, {})
+    )
+      .sort((a, b) => b[1] - a[1])
+      .map(([p]) => p),
+    [models]
+  );
+
+  const filtered = useMemo(() => {
+    const q = searchText.toLowerCase();
+    const base = models.filter(m =>
+      (activeProvider === 'All' || m.provider === activeProvider) &&
+      (activeCostTier === 'All' || m.costTier === activeCostTier) &&
+      (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
+      (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
+    );
+    switch (sortBy) {
+      case 'cost-asc':
+        return [...base].sort((a, b) => a.costPer1kInput - b.costPer1kInput);
+      case 'cost-desc':
+        return [...base].sort((a, b) => b.costPer1kInput - a.costPer1kInput);
+      case 'context':
+        return [...base].sort((a, b) => b.contextWindow - a.contextWindow);
+      case 'speed':
+        return [...base].sort((a, b) => (SPEED_ORDER[a.speedTier] ?? 1) - (SPEED_ORDER[b.speedTier] ?? 1));
+      default:
+        return base;
+    }
+  }, [models, searchText, activeProvider, activeCostTier, activeSpeedTier, sortBy]);
+
+  const clearFilters = () => {
+    setSearchText('');
+    setActiveProvider('All');
+    setActiveCostTier('All');
+    setActiveSpeedTier('All');
+    setSortBy('best');
+  };
+
+  const totalProviderCount = providerTabCounts['All'] ?? models.length;
+
+  return (
+    <div className="rounded-xl border border-border bg-panel p-5 mt-4">
+      {/* Card header */}
+      <div className="flex items-center gap-2 mb-4">
+        <Search size={15} className="text-accent flex-shrink-0" />
+        <span className="text-sm font-semibold text-[var(--text)]">Model Browser</span>
+        <span className="bg-panel border border-border rounded-full px-2 py-0.5 text-xs text-muted ml-auto">
+          {filtered.length} models
+        </span>
+      </div>
+
+      {/* Search input */}
+      <div className="relative mb-4">
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+        <input
+          type="text"
+          value={searchText}
+          onChange={e => setSearchText(e.target.value)}
+          placeholder={`Search ${models.length} models...`}
+          className="w-full text-sm bg-bg border border-border rounded-lg px-3 py-2 pl-9 focus:border-accent/50 outline-none placeholder:text-muted"
+        />
+      </div>
+
+      {/* Provider tab strip */}
+      <div className="flex gap-1.5 overflow-x-auto pb-1 mb-4 scrollbar-hide">
+        {(['All', ...providers]).map(p => {
+          const count = p === 'All' ? totalProviderCount : (providerTabCounts[p] ?? 0);
+          return (
+            <button
+              key={p}
+              onClick={() => setActiveProvider(p)}
+              className={`px-3 py-1 text-xs rounded-full border whitespace-nowrap flex-shrink-0 transition-colors ${
+                activeProvider === p
+                  ? 'border-accent bg-accent/10 text-accent font-medium'
+                  : 'border-border text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {p} {count > 0 && <span className="ml-1 opacity-70">{count}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* COST + SPEED filter rows */}
+      <div className="flex flex-col gap-2 mb-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] font-semibold text-muted uppercase tracking-widest w-10 flex-shrink-0">COST</span>
+          {(['All', 'free', 'low', 'medium', 'high', 'premium'] as const).map(tier => (
+            <button
+              key={tier}
+              onClick={() => setActiveCostTier(tier)}
+              className={`px-2.5 py-0.5 text-xs rounded border transition-colors ${
+                activeCostTier === tier
+                  ? 'border-accent/60 bg-accent/10 text-accent'
+                  : 'border-border text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {tier === 'All' ? 'All' : COST_LABELS[tier].label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] font-semibold text-muted uppercase tracking-widest w-10 flex-shrink-0">SPEED</span>
+          {(['All', 'fast', 'medium', 'slow'] as const).map(tier => (
+            <button
+              key={tier}
+              onClick={() => setActiveSpeedTier(tier)}
+              className={`px-2.5 py-0.5 text-xs rounded border transition-colors ${
+                activeSpeedTier === tier
+                  ? 'border-accent/60 bg-accent/10 text-accent'
+                  : 'border-border text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {tier === 'All' ? 'All' : SPEED_LABELS[tier].label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Result count + sort */}
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs text-muted">{filtered.length} models</span>
+        <select
+          value={sortBy}
+          onChange={e => setSortBy(e.target.value as SortOption)}
+          className="text-xs bg-bg border border-border rounded px-2 py-1 text-muted focus:border-accent/50 outline-none"
+        >
+          <option value="best">Best Match</option>
+          <option value="cost-asc">Cost ↑</option>
+          <option value="cost-desc">Cost ↓</option>
+          <option value="context">Context Window</option>
+          <option value="speed">Speed</option>
+        </select>
+      </div>
+
+      {/* Model grid or empty state */}
+      {filtered.length === 0 ? (
+        <div className="py-10 flex flex-col items-center gap-3 text-center">
+          <Search size={24} className="text-muted opacity-40" />
+          <p className="text-sm text-muted">No models match your filters</p>
+          <button
+            onClick={clearFilters}
+            className="text-xs text-accent hover:underline"
+          >
+            Clear filters
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
+          {filtered.map(m => (
+            <ModelCard
+              key={m.id}
+              model={m}
+              isSelected={m.id === effectiveModel}
+              isWorkspaceOverride={m.id === workspaceModel}
+              onSelect={() => onSelectModel(m)}
+              onTest={() => onTestModel(m.id)}
+              testResult={testResult}
+              isTesting={testingModel === m.id}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DisplaySection() {
   const toast = useGlobalToast();
   const { mode, setMode } = useTheme();
@@ -2258,156 +2489,32 @@ function DisplaySection() {
         </div>
       )}
 
-      {/* Model catalog with test buttons */}
-      <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-1">Available Models</h2>
-        <p className="text-xs text-muted mb-3">Click a model to set it as the {workspaceId ? 'workspace' : 'global'} default. Use Test to verify connectivity.</p>
-
-        {/* Search bar row */}
-        <div className="flex items-center gap-2 mb-3">
-          <div className="relative flex-1">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
-            <input
-              type="text"
-              value={searchText}
-              onChange={e => setSearchText(e.target.value)}
-              placeholder="Search models..."
-              className="w-full pl-8 pr-3 py-1.5 text-sm bg-bg border border-border rounded focus:border-accent outline-none placeholder:text-muted"
-            />
-          </div>
-          <span className="text-xs text-muted whitespace-nowrap">
-            {(() => {
-              const q = searchText.toLowerCase();
-              return models.filter(m =>
-                (activeProvider === 'All' || m.provider === activeProvider) &&
-                (activeCostTier === 'All' || m.costTier === activeCostTier) &&
-                (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
-                (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
-              ).length;
-            })()} models
-          </span>
-        </div>
-
-        {/* Provider filter chips */}
-        {(() => {
-          const providerCounts = models.reduce<Record<string, number>>((acc, m) => {
-            acc[m.provider] = (acc[m.provider] ?? 0) + 1;
-            return acc;
-          }, {});
-          const providers = Object.entries(providerCounts)
-            .sort((a, b) => b[1] - a[1])
-            .map(([p]) => p);
-          return (
-            <div className="flex flex-wrap gap-1.5 mb-4">
-              {(['All', ...providers]).map(p => (
-                <button
-                  key={p}
-                  onClick={() => setActiveProvider(p)}
-                  className={`px-2.5 py-1 text-xs rounded border transition-colors ${
-                    activeProvider === p
-                      ? 'bg-accent/10 border-accent text-accent'
-                      : 'border-border text-muted hover:text-[var(--text)]'
-                  }`}
-                >
-                  {p}
-                </button>
-              ))}
-            </div>
-          );
-        })()}
-
-        {/* Cost + Speed filter row */}
-        <div className="flex flex-wrap gap-x-4 gap-y-2 mb-4">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Cost</span>
-            {(['All', 'free', 'low', 'medium', 'high', 'premium'] as const).map(tier => (
-              <button
-                key={tier}
-                onClick={() => setActiveCostTier(tier)}
-                className={`px-2.5 py-1 text-xs rounded border transition-colors ${
-                  activeCostTier === tier
-                    ? 'bg-accent/10 border-accent text-accent'
-                    : 'border-border text-muted hover:text-[var(--text)]'
-                }`}
-              >
-                {tier === 'All' ? 'All' : COST_LABELS[tier].label}
-              </button>
-            ))}
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Speed</span>
-            {(['All', 'fast', 'medium', 'slow'] as const).map(tier => (
-              <button
-                key={tier}
-                onClick={() => setActiveSpeedTier(tier)}
-                className={`px-2.5 py-1 text-xs rounded border transition-colors ${
-                  activeSpeedTier === tier
-                    ? 'bg-accent/10 border-accent text-accent'
-                    : 'border-border text-muted hover:text-[var(--text)]'
-                }`}
-              >
-                {tier === 'All' ? 'All' : SPEED_LABELS[tier].label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Filtered model cards */}
-        <div className="space-y-4">
-          {(() => {
-            const q = searchText.toLowerCase();
-            const filtered = models.filter(m =>
-              (activeProvider === 'All' || m.provider === activeProvider) &&
-              (activeCostTier === 'All' || m.costTier === activeCostTier) &&
-              (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
-              (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
-            );
-            if (filtered.length === 0) {
-              return (
-                <div className="py-8 text-center">
-                  <p className="text-sm text-muted mb-2">No models match your filters</p>
-                  <button
-                    onClick={() => { setSearchText(''); setActiveProvider('All'); setActiveCostTier('All'); setActiveSpeedTier('All'); }}
-                    className="text-xs text-accent hover:underline"
-                  >
-                    Clear filters
-                  </button>
-                </div>
-              );
-            }
-            const filteredByProvider = filtered.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
-              (acc[m.provider] ??= []).push(m);
-              return acc;
-            }, {});
-            return Object.entries(filteredByProvider).map(([provider, providerModels]) => (
-              <div key={provider}>
-                <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">{provider}</h3>
-                <div className="space-y-1.5">
-                  {providerModels.map(m => (
-                    <ModelCard
-                      key={m.id}
-                      model={m}
-                      isSelected={m.id === effectiveModel}
-                      isWorkspaceOverride={m.id === workspaceModel}
-                      onSelect={() => {
-                        if (workspaceId) {
-                          setWorkspaceModel(m.id);
-                          saveWorkspaceModel(m.id);
-                        } else {
-                          setDefaultModel(m.id);
-                        }
-                      }}
-                      onTest={() => testModel(m.id)}
-                      testResult={testResult}
-                      isTesting={testingModel === m.id}
-                    />
-                  ))}
-                </div>
-              </div>
-            ));
-          })()}
-        </div>
-      </div>
+      {/* Model Browser — full-width card */}
+      <ModelBrowserSection
+        models={models}
+        effectiveModel={effectiveModel}
+        workspaceModel={workspaceModel}
+        workspaceId={workspaceId ?? null}
+        searchText={searchText}
+        setSearchText={setSearchText}
+        activeProvider={activeProvider}
+        setActiveProvider={setActiveProvider}
+        activeCostTier={activeCostTier}
+        setActiveCostTier={setActiveCostTier}
+        activeSpeedTier={activeSpeedTier}
+        setActiveSpeedTier={setActiveSpeedTier}
+        testResult={testResult}
+        testingModel={testingModel}
+        onSelectModel={(m) => {
+          if (workspaceId) {
+            setWorkspaceModel(m.id);
+            saveWorkspaceModel(m.id);
+          } else {
+            setDefaultModel(m.id);
+          }
+        }}
+        onTestModel={(id) => testModel(id)}
+      />
 
       {/* Items per page */}
       <div className="border-t border-border pt-6">
