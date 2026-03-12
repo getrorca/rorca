@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-cli",
   "runId": 47,
   "startedAt": "2026-03-12T06:04:08.654Z",
-  "lastUpdatedAt": "2026-03-12T06:35:57.357Z",
+  "lastUpdatedAt": "2026-03-12T06:40:54.393Z",
   "completedStories": [
     {
       "storyId": "MC-004",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 963696
+    },
+    {
+      "storyId": "MC-009",
+      "title": "rorca-vscode Extension Package Scaffold",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:36:15.661Z",
+      "finishedAt": "2026-03-12T06:40:54.393Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 278732
     }
   ],
   "failedStories": [],
