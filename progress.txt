@@ -3,9 +3,10 @@
 Spec: rorca-pg-boss-job-queue
 Run ID: 78
 Started: 2026-03-12T23:19:11.696Z
-Last Updated: 2026-03-12T23:30:37.865Z
+Last Updated: 2026-03-12T23:36:26.547Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - PG-002: Install pg-boss and scaffold worker process (backend/src/worker.ts) — DONE (claude, claude-sonnet-4-6, 138s)
 - PG-003: pg-boss schema migration 050 and initBoss() integration — DONE (claude, claude-sonnet-4-6, 140s)
 - PG-004: Migrate POST /api/pipeline/trigger to insert pg-boss job instead of spawn() — DONE (claude, claude-sonnet-4-6, 378s)
+- PG-005: Worker handler: pipeline:run job executes execution-engine and streams output to run_output_chunks — DONE (claude, claude-sonnet-4-6, 334s)

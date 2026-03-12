@@ -2,7 +2,7 @@
   "specId": "rorca-pg-boss-job-queue",
   "runId": 78,
   "startedAt": "2026-03-12T23:19:11.696Z",
-  "lastUpdatedAt": "2026-03-12T23:30:37.865Z",
+  "lastUpdatedAt": "2026-03-12T23:36:26.547Z",
   "completedStories": [
     {
       "storyId": "PG-002",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 378024
+    },
+    {
+      "storyId": "PG-005",
+      "title": "Worker handler: pipeline:run job executes execution-engine and streams output to run_output_chunks",
+      "status": "passed",
+      "startedAt": "2026-03-12T23:30:52.372Z",
+      "finishedAt": "2026-03-12T23:36:26.546Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 334174
     }
   ],
   "failedStories": [],
