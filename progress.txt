@@ -3,9 +3,10 @@
 Spec: rorca-ensure-postgres
 Run ID: 1
 Started: 2026-03-12T18:19:22.650Z
-Last Updated: 2026-03-12T18:32:47.985Z
+Last Updated: 2026-03-12T18:37:29.615Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - US-001: Platform detection and Postgres binary download — DONE (claude, 350s)
 - US-002: Extract archive and run initdb to initialize data directory — DONE (claude, 260s)
 - US-003: Start postgres process on port 5433 and create rorca user/database — DONE (claude, 15s)
+- US-004: Wire ensurePostgres() into bin/rorca.ts start command with graceful shutdown — DONE (claude, 256s)
