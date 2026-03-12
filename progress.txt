@@ -3,7 +3,8 @@
 Spec: add-rorca-edit-spec-mcp-tool
 Run ID: 68
 Started: 2026-03-12T20:40:00.872Z
-Last Updated: 2026-03-12T20:42:08.103Z
+Last Updated: 2026-03-12T20:44:41.524Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Add PUT /api/specs/:specId backend endpoint to update spec metadata — DONE (claude, claude-sonnet-4-6, 127s)
+- US-002: Register rorca_edit_spec MCP tool in backend/src/mcp/server.ts — DONE (claude, claude-sonnet-4-6, 138s)
