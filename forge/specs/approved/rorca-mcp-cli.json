@@ -311,7 +311,7 @@
       "dependsOn": [
         "MC-009"
       ],
-      "passes": false,
+      "passes": true,
       "complexity": 3,
       "suggestedSkills": [
         {
@@ -339,7 +339,8 @@
       "suggestedReviewers": [
         "best-practices",
         "spec-verifier"
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     }
   ],
   "mermaidDiagram": "graph TD\n  MC-001[\"MC-001: forge_and_run MCP tool\"]\n  MC-002[\"MC-002: cancel_run MCP tool\"]\n  MC-003[\"MC-003: CLI forge/run/status\"]\n  MC-004[\"MC-004: VS Code MCP tree view\"]\n  MC-005[\"MC-005: Shell completion\"]\n  MC-006[\"MC-006: VS Code settings\"]\n  MC-007[\"MC-007: MCP error recovery\"]\n  MC-008[\"MC-008: CLI CI/non-TTY mode\"]\n  MC-009[\"MC-009: Extension Package Scaffold\"]\n  MC-010[\"MC-010: Spec Tree View Provider\"]\n  MC-011[\"MC-011: JWT Auth & Connection\"]\n  MC-012[\"MC-012: VSIX Packaging & Publish\"]\n  MC-001 --> MC-002\n  MC-001 --> MC-003\n  MC-002 --> MC-003\n  MC-003 --> MC-005\n  MC-003 --> MC-008\n  MC-004 --> MC-006\n  MC-004 --> MC-007\n  MC-009 --> MC-010\n  MC-009 --> MC-011\n  MC-009 --> MC-012"
