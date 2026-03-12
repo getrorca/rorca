@@ -1400,3 +1400,138 @@ describe('V2-083: Story exclusion', () => {
     expect(row.status).toBe('excluded');
   });
 });
+
+// ─── SV-001: GET /:specId/check — Structural spec validation ──────────────────
+
+describe('GET /api/specs/:id/check', () => {
+  function seedCheckSpec(dir: string, slug: string, overrides?: Record<string, unknown>) {
+    fs.mkdirSync(dir, { recursive: true });
+    const spec = {
+      title: slug.replace(/-/g, ' '),
+      userStories: [
+        {
+          id: 'US-001',
+          title: 'Story one',
+          description: 'A valid description',
+          acceptanceCriteria: ['Criterion one', 'Criterion two'],
+          dependsOn: [],
+          passes: false,
+        },
+      ],
+      generatedAt: '2026-03-12T00:00:00.000Z',
+      ...overrides,
+    };
+    fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify(spec, null, 2), 'utf8');
+    return spec;
+  }
+
+  test('GET /api/specs/:id/check returns 404 for unknown spec', async () => {
+    const res = await request(app)
+      .get('/api/specs/nonexistent-spec-xyz/check?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/spec not found/i);
+  });
+
+  test('GET /api/specs/:id/check returns {valid: true} for valid spec', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    seedCheckSpec(pendingDir, 'valid-check-spec');
+
+    const res = await request(app)
+      .get('/api/specs/valid-check-spec/check?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(true);
+    expect(res.body.errors).toEqual([]);
+    expect(res.body.warnings).toBeDefined();
+    expect(res.body.stats).toBeDefined();
+    expect(res.body.stats.totalStories).toBe(1);
+  });
+
+  test('GET /api/specs/:id/check returns errors for spec with missing required fields', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    fs.mkdirSync(pendingDir, { recursive: true });
+    const badSpec = {
+      title: 'Bad Spec',
+      userStories: [
+        {
+          id: 'US-001',
+          // missing title, description, acceptanceCriteria
+        },
+      ],
+      generatedAt: '2026-03-12T00:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(pendingDir, 'bad-check-spec.json'), JSON.stringify(badSpec, null, 2), 'utf8');
+
+    const res = await request(app)
+      .get('/api/specs/bad-check-spec/check?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(false);
+    expect(res.body.errors.length).toBeGreaterThan(0);
+    const titleError = res.body.errors.find((e: any) => e.field === 'title');
+    expect(titleError).toBeDefined();
+  });
+
+  test('GET /api/specs/:id/check returns 404 when workspaceId is not in DB', async () => {
+    const res = await request(app)
+      .get('/api/specs/some-spec/check?workspaceId=nonexistent-ws')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/workspace not found/i);
+  });
+
+  test('GET /api/specs/:id/check returns 400 when workspaceId is missing', async () => {
+    const res = await request(app)
+      .get('/api/specs/some-spec/check')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  test('GET /api/specs/:id/check finds spec in approved dir', async () => {
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
+    seedCheckSpec(approvedDir, 'approved-check-spec');
+
+    const res = await request(app)
+      .get('/api/specs/approved-check-spec/check?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(true);
+  });
+
+  test('GET /api/specs/:id/check detects orphaned dependsOn references', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    fs.mkdirSync(pendingDir, { recursive: true });
+    const orphanSpec = {
+      title: 'Orphan Spec',
+      userStories: [
+        {
+          id: 'US-001',
+          title: 'Story one',
+          description: 'Desc',
+          acceptanceCriteria: ['AC1'],
+          dependsOn: ['US-999'], // US-999 does not exist
+          passes: false,
+        },
+      ],
+      generatedAt: '2026-03-12T00:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(pendingDir, 'orphan-check-spec.json'), JSON.stringify(orphanSpec, null, 2), 'utf8');
+
+    const res = await request(app)
+      .get('/api/specs/orphan-check-spec/check?workspaceId=ws-test')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(false);
+    const orphanError = res.body.errors.find((e: any) => e.field === 'dependsOn');
+    expect(orphanError).toBeDefined();
+    expect(orphanError.message).toContain('US-999');
+  });
+});
