@@ -9154,7 +9154,14 @@ router.post(
         }
         if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
           const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
-          res.status(400).json({ error: `Invalid file type: ${mimeType}` });
+          res.status(400).json({
+            error: `Unsupported file type: ${mimeType}`,
+            supportedTypes: [
+              'image/png', 'image/jpeg', 'image/webp',
+              'application/pdf', 'text/markdown', 'text/plain',
+              'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            ],
+          });
           return;
         }
         next(err);
