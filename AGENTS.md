@@ -45,9 +45,10 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
 - **Rules**:
   - PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
   - `query<T>()` → `T[]`, `queryOne<T>()` → `T | undefined`, `execute()` → `{ rowCount }`
-  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–049+), tracked via `schema_migrations` table
+  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–062+), tracked via `schema_migrations` table
   - Use `$1, $2, ...` numbered placeholders (NOT `?`)
   - FK constraints always on, connection pooling (max 20)
+  - **pgboss schema is NOT hand-managed** — `pgboss.*` tables (job, archive, subscription, version) are created and upgraded automatically by `boss.start()`. Never write migrations that touch `pgboss.*`. Migration 062 is a no-op placeholder that documents this.
 
 ### Execution Engine (`backend/src/lib/execution-engine.ts`)
 - **Owner**: Architect
