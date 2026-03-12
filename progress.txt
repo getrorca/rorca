@@ -1,9 +1,9 @@
 # Run State Summary
 
-Spec: auto-merge-worktree-on-completion
-Run ID: 76
-Started: 2026-03-12T22:29:29.503Z
-Last Updated: 2026-03-12T22:36:48.863Z
+Spec: rorca-enrich-spec
+Run ID: 77
+Started: 2026-03-12T23:12:07.557Z
+Last Updated: 2026-03-12T23:21:21.788Z
 
 ## Completed Stories (1)
-- AM-001: Auto-merge worktree branch to main after all stories pass — DONE (claude, claude-sonnet-4-6, 439s)
+- US-001: POST /api/specs/:id/enrich route with 4-layer retrieval cascade — DONE (claude, claude-sonnet-4-6, 554s)
