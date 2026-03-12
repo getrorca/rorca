@@ -26,6 +26,8 @@ import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
+import { route as routeContext } from '../lib/context-router';
+import { loadRorcaConfig } from '../lib/rorca-config';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 
@@ -931,11 +933,29 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const modelInfo = getModelInfo(resolvedModel);
     const modelContextWindow = modelInfo?.contextWindow ?? 200000;
 
+    // Extract first non-empty line of a layer's content as its title, truncated to 40 chars
+    function layerTitle(content: string | undefined): string | null {
+      if (!content) return null;
+      const firstLine = content.split('\n').map(l => l.trim()).find(l => l.length > 0) ?? null;
+      if (!firstLine) return null;
+      return firstLine.length > 40 ? firstLine.slice(0, 40) : firstLine;
+    }
+
+    const l1Content = l1Row?.content_yaml;
+    const l2Content = l2Row?.content_yaml;
+    const l3Content = l3Row?.content_yaml;
+
     precomputedContextSummary = {
       directionLayers: {
         l1: synthResult.meta.standards,
         l2: { present: synthResult.meta.conventions, domain: domain || null },
         l3: synthResult.meta.project,
+        l1Title: synthResult.meta.standards ? (layerTitle(l1Content) ?? 'Standards') : null,
+        l2Title: synthResult.meta.conventions ? (layerTitle(l2Content) ?? 'Conventions') : null,
+        l3Title: synthResult.meta.project ? (layerTitle(l3Content) ?? 'Project') : null,
+        l1Tokens: l1Content ? Math.ceil(l1Content.length / 4) : 0,
+        l2Tokens: l2Content ? Math.ceil(l2Content.length / 4) : 0,
+        l3Tokens: l3Content ? Math.ceil(l3Content.length / 4) : 0,
       },
       skills: skillNamesList,
       memoryEntries: memoryEntryCount,
@@ -1943,6 +1963,40 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // 10. Merge diagrams (algorithmic overwrites LLM for storyDeps)
     const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
+
+    // 11. CU-004: Compute predictedFiles — union of injectedFiles from routeContext() for each story
+    if (precomputedContextSummary && workspace.path) {
+      try {
+        const rorcaCfg = loadRorcaConfig(workspace.path as string);
+        if (rorcaCfg.routing && Array.isArray(rorcaCfg.routing.scopes) && rorcaCfg.routing.scopes.length > 0) {
+          const allFileSet = new Set<string>();
+          const stories: any[] = Array.isArray(parsed.stories) ? parsed.stories : [];
+          for (const story of stories) {
+            const payload = routeContext(
+              {
+                id: story.id ?? '',
+                title: story.title ?? '',
+                description: story.description ?? '',
+                acceptanceCriteria: story.acceptanceCriteria,
+                dependsOn: story.dependsOn,
+                tags: story.tags,
+              },
+              rorcaCfg.routing,
+              workspace.path as string,
+            );
+            for (const f of payload.injectedFiles) {
+              allFileSet.add(f);
+            }
+          }
+          // Sort by path, deduplicate, limit to 30
+          const allFiles = Array.from(allFileSet).sort();
+          (precomputedContextSummary as Record<string, unknown>).predictedFiles =
+            allFiles.slice(0, 30);
+        }
+      } catch {
+        // routeContext failures are non-fatal — predictedFiles simply absent
+      }
+    }
 
     // 12. WAL event
     const model = resolvedModel;

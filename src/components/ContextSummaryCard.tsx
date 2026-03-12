@@ -1,13 +1,21 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Check, X, AlertTriangle, FileText, Brain, Shield, Layers, Puzzle, Search, Share2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Check, X, AlertTriangle, FileText, Brain, Shield, Layers, Puzzle, Search, Share2, FolderOpen } from 'lucide-react';
 import type { ContextSummary } from '../panels/SpecForgeOutput';
+
+interface SkillDetail {
+  name: string;
+  relevance?: number;
+  reason?: string;
+}
 
 interface ContextSummaryCardProps {
   summary: ContextSummary;
   isGenerating?: boolean;
+  skillDetails?: SkillDetail[];
 }
 
-function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
+function StatusBadge({ ok, label, title, tokens }: { ok: boolean; label: string; title?: string | null; tokens?: number }) {
+  const displayLabel = ok && title ? `${label} ${title}` : label;
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
@@ -16,7 +24,12 @@ function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
       aria-label={`${label}: ${ok ? 'present' : 'missing'}`}
     >
       {ok ? <Check className="w-3 h-3" /> : <X className="w-3 h-3" />}
-      {label}
+      {displayLabel}
+      {ok && tokens != null && tokens > 0 && (
+        <span className="ml-1 px-1 py-0 rounded bg-success/20 text-[10px] font-mono text-success">
+          {tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : tokens} tok
+        </span>
+      )}
     </span>
   );
 }
@@ -71,8 +84,9 @@ function TokenBar({ estimated, contextWindow }: { estimated: number; contextWind
   );
 }
 
-export default function ContextSummaryCard({ summary, isGenerating }: ContextSummaryCardProps) {
+export default function ContextSummaryCard({ summary, isGenerating, skillDetails }: ContextSummaryCardProps) {
   const [expanded, setExpanded] = useState(!!isGenerating);
+  const [filesExpanded, setFilesExpanded] = useState(false);
 
   const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow, retrieval } = summary;
   // Prefer nested retrieval object (SW-010); fall back to legacy flat fields for older logs
@@ -106,6 +120,7 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
             <StatusBadge ok={directionLayers.l1} label="L1" />
             <StatusBadge ok={directionLayers.l2.present} label="L2" />
             <StatusBadge ok={directionLayers.l3} label="L3" />
+
             {skills.length > 0 && (
               <span className="text-[10px] text-muted font-medium px-1.5 py-0.5 bg-muted/10 rounded-full">
                 {skills.length} skill{skills.length !== 1 ? 's' : ''}
@@ -120,12 +135,36 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
         <div className="px-3 pb-3 space-y-3 border-t border-border/50">
           {/* Direction layers */}
           <div className="flex flex-wrap items-center gap-1.5 pt-2">
-            <StatusBadge ok={directionLayers.l1} label="L1 Standards" />
-            <StatusBadge
-              ok={directionLayers.l2.present}
-              label={directionLayers.l2.domain ? `L2 ${directionLayers.l2.domain}` : 'L2 Conventions'}
-            />
-            <StatusBadge ok={directionLayers.l3} label="L3 Project" />
+            {directionLayers.l1 ? (
+              <StatusBadge
+                ok={true}
+                label="L1"
+                title={directionLayers.l1Title ?? 'Standards'}
+                tokens={directionLayers.l1Tokens}
+              />
+            ) : (
+              <StatusBadge ok={false} label="L1 Standards" />
+            )}
+            {directionLayers.l2.present ? (
+              <StatusBadge
+                ok={true}
+                label="L2"
+                title={directionLayers.l2Title ?? (directionLayers.l2.domain ? directionLayers.l2.domain : 'Conventions')}
+                tokens={directionLayers.l2Tokens}
+              />
+            ) : (
+              <StatusBadge ok={false} label={directionLayers.l2.domain ? `L2 ${directionLayers.l2.domain}` : 'L2 Conventions'} />
+            )}
+            {directionLayers.l3 ? (
+              <StatusBadge
+                ok={true}
+                label="L3"
+                title={directionLayers.l3Title ?? 'Project'}
+                tokens={directionLayers.l3Tokens}
+              />
+            ) : (
+              <StatusBadge ok={false} label="L3 Project" />
+            )}
           </div>
 
           {/* Context files row */}
@@ -192,17 +231,79 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
 
           {/* Skills */}
           <div className="flex items-start gap-1.5 text-xs">
-            <span className={`inline-flex items-center gap-1 ${skills.length > 0 ? 'text-text' : 'text-muted'}`}>
+            <span className={`inline-flex items-center gap-1 shrink-0 ${skills.length > 0 ? 'text-text' : 'text-muted'}`}>
               <Puzzle className="w-3 h-3 mt-0.5 shrink-0" />
               Skills{' '}
               {skills.length > 0
                 ? <span className="text-success">✓ {skills.length}</span>
                 : <span>—</span>}
             </span>
-            {skills.length > 0 && (
+            {skills.length > 0 && skillDetails && skillDetails.length > 0 ? (
+              <div className="flex flex-wrap gap-1">
+                {skillDetails.map(sk => {
+                  const rel = sk.relevance ?? 0;
+                  const badgeClass = rel >= 8
+                    ? 'bg-emerald-500/15 text-emerald-400'
+                    : rel >= 5
+                      ? 'bg-blue-500/15 text-blue-400'
+                      : 'bg-muted/15 text-muted';
+                  return (
+                    <span
+                      key={sk.name}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-muted/10 border border-border/50 text-[10px]"
+                      title={sk.reason ?? undefined}
+                    >
+                      <span className="font-mono text-text">{sk.name}</span>
+                      {sk.relevance != null && (
+                        <span className={`px-1 py-0 rounded text-[9px] font-semibold ${badgeClass}`}>
+                          {sk.relevance}
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            ) : skills.length > 0 ? (
               <span className="text-muted">{skills.join(', ')}</span>
-            )}
+            ) : null}
           </div>
+
+          {/* Context Files (CU-004) — only shown if predictedFiles is non-empty */}
+          {summary.predictedFiles && summary.predictedFiles.length > 0 && (() => {
+            const allFiles = summary.predictedFiles!;
+            const displayFiles = allFiles.slice(0, 20);
+            const overflow = allFiles.length - 20;
+            return (
+              <div className="text-xs">
+                <button
+                  onClick={() => setFilesExpanded(e => !e)}
+                  className="flex items-center gap-1 text-muted hover:text-text transition-colors"
+                  aria-expanded={filesExpanded}
+                >
+                  {filesExpanded
+                    ? <ChevronDown className="w-3 h-3" />
+                    : <ChevronRight className="w-3 h-3" />
+                  }
+                  <FolderOpen className="w-3 h-3" />
+                  <span className="font-medium">Context Files ({allFiles.length})</span>
+                </button>
+                {filesExpanded && (
+                  <div className="mt-1.5 pl-4 space-y-0.5">
+                    {displayFiles.map(f => (
+                      <div key={f} className="flex items-center gap-1">
+                        <code className="px-1 py-0 rounded bg-muted/10 text-[10px] font-mono text-text break-all">
+                          {f}
+                        </code>
+                      </div>
+                    ))}
+                    {overflow > 0 && (
+                      <span className="text-muted text-[10px]">+{overflow} more</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Memory + Template */}
           <div className="flex flex-wrap items-center gap-3 text-xs">

@@ -30,6 +30,8 @@ import { TagChips } from './TagChips';
 import TriggerPopover from './TriggerPopover';
 import { ImagePreviewModal } from './ImagePreviewModal';
 import type { PanelId } from './Sidebar';
+import ContextSummaryCard from './ContextSummaryCard';
+import type { ContextSummary } from '../panels/SpecForgeOutput';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -658,7 +660,7 @@ function SpecDetailContent({
                 onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
-            {activeTab === 'context' && <GenerationLogTab specId={specId} />}
+            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} />}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
@@ -899,10 +901,27 @@ function estimateCost(model: string, inputTokens: number, outputTokens: number):
   return null;
 }
 
-function GenerationLogTab({ specId }: { specId: string }) {
+function GenerationLogTab({ specId, stories }: { specId: string; stories: Story[] }) {
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
+
+  // Aggregate skillDetails from all stories' suggestedSkills, taking max relevance per unique name
+  const skillDetails = useMemo(() => {
+    const toSkill = (raw: unknown): SuggestedSkill =>
+      typeof raw === 'string' ? { name: raw } : (raw as SuggestedSkill);
+    const map = new Map<string, SuggestedSkill>();
+    for (const story of stories) {
+      for (const raw of (story as any).suggestedSkills ?? []) {
+        const sk = toSkill(raw);
+        const existing = map.get(sk.name);
+        if (!existing || (sk.relevance ?? 0) > (existing.relevance ?? 0)) {
+          map.set(sk.name, sk);
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [stories]);
 
   useEffect(() => {
     let cancelled = false;
@@ -946,10 +965,32 @@ function GenerationLogTab({ specId }: { specId: string }) {
           ? estimateCost(log.model, log.input_tokens, log.output_tokens)
           : null;
 
+        // Parse context_summary from JSON string (may be "{}" for pre-migration specs)
+        let contextSummary: ContextSummary | null = null;
+        if (log.context_summary) {
+          try {
+            const parsed = typeof log.context_summary === 'string'
+              ? JSON.parse(log.context_summary)
+              : log.context_summary;
+            if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+              contextSummary = parsed as ContextSummary;
+            }
+          } catch {
+            // ignore parse errors
+          }
+        }
+
         return (
           <div key={log.id} className="border border-border rounded-lg bg-panel overflow-hidden">
-            {/* Header */}
-            <div className="px-4 py-3 border-b border-border/50">
+            {/* Context summary card — PRIMARY content, shown above generation header */}
+            {contextSummary && (
+              <div className="px-4 pt-3 pb-0">
+                <ContextSummaryCard summary={contextSummary} skillDetails={skillDetails.length > 0 ? skillDetails : undefined} />
+              </div>
+            )}
+
+            {/* Generation header */}
+            <div className={`px-4 py-3 ${contextSummary ? 'border-t border-border/50 mt-3' : ''}`}>
               <div className="flex items-center justify-between mb-1">
                 <div className="flex items-center gap-2">
                   {log.status === 'completed' ? (
@@ -1003,7 +1044,7 @@ function GenerationLogTab({ specId }: { specId: string }) {
 
             {/* Error detail (for failed generations) */}
             {log.error && (
-              <div className="px-4 py-2 bg-error/5 border-b border-error/20">
+              <div className="px-4 py-2 bg-error/5 border-t border-error/20">
                 <div className="flex items-start gap-2">
                   <AlertCircle size={12} className="text-error mt-0.5 shrink-0" />
                   <div className="text-xs">
