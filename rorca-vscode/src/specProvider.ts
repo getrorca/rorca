@@ -101,11 +101,7 @@ export class SpecTreeDataProvider implements vscode.TreeDataProvider<SpecTreeIte
 
   private async fetchSpecs(): Promise<RorcaSpec[]> {
     try {
-      const res = await apiFetch('/api/specs?status=all');
-      if (res.status !== 200) {
-        return [];
-      }
-      const data = await res.json() as unknown;
+      const data = await apiFetch('/api/specs?status=all');
       if (Array.isArray(data)) {
         return data as RorcaSpec[];
       }
@@ -114,12 +110,7 @@ export class SpecTreeDataProvider implements vscode.TreeDataProvider<SpecTreeIte
         return obj['items'] as RorcaSpec[];
       }
       return [];
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      const isOffline = message.includes('ECONNREFUSED') || message.includes('Timeout') || message.includes('connect');
-      if (isOffline) {
-        return [];
-      }
+    } catch {
       return [];
     }
   }
@@ -167,21 +158,16 @@ export class SpecTreeDataProvider implements vscode.TreeDataProvider<SpecTreeIte
     let offline = false;
 
     try {
-      const res = await apiFetch('/api/specs?status=all');
-      if (res.status !== 200) {
-        specs = [];
+      const data = await apiFetch('/api/specs?status=all');
+      if (Array.isArray(data)) {
+        specs = data as RorcaSpec[];
       } else {
-        const data = await res.json() as unknown;
-        if (Array.isArray(data)) {
-          specs = data as RorcaSpec[];
-        } else {
-          const obj = data as Record<string, unknown>;
-          specs = (Array.isArray(obj['items']) ? obj['items'] : []) as RorcaSpec[];
-        }
+        const obj = data as Record<string, unknown>;
+        specs = (Array.isArray(obj['items']) ? obj['items'] : []) as RorcaSpec[];
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      offline = message.includes('ECONNREFUSED') || message.includes('Timeout') || message.includes('connect');
+      offline = message.includes('ECONNREFUSED') || message.includes('Timeout') || message.includes('connect') || message.includes('Network Error');
       specs = [];
     }
 
