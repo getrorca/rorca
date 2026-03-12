@@ -1764,7 +1764,7 @@ function DisplaySection() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-5-20250929');
+  const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-6');
   const [itemsPerPage, setItemsPerPage] = useState(20);
 
   // Per-workspace preferred model override
