@@ -3,7 +3,8 @@
 Spec: fix-archive-500-jsonb-parse
 Run ID: 52
 Started: 2026-03-12T08:12:07.494Z
-Last Updated: 2026-03-12T08:13:51.053Z
+Last Updated: 2026-03-12T08:15:20.322Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Fix JSONB payload parsing in GET /api/specs/archive — DONE (claude, claude-sonnet-4-6, 103s)
+- US-002: Audit all JSONB payload parsing in specs.ts — DONE (claude, claude-sonnet-4-6, 74s)

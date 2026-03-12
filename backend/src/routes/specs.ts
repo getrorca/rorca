@@ -2558,7 +2558,8 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
   // Subscribe to WAL events for batch_progress
   const unsubscribe = subscribe((event) => {
     if (event.event_type !== 'batch_progress' && event.event_type !== 'batch_finished') return;
-    const payload = event.payload ? JSON.parse(event.payload) : {};
+    // pg auto-deserializes JSONB columns — typeof check prevents double-parse crash
+    const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : (event.payload ?? {});
     if (payload.batchId !== batchId) return;
     res.write(`event: progress\ndata: ${JSON.stringify(payload)}\n\n`);
   });
