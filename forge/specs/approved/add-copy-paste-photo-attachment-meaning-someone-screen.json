@@ -403,7 +403,8 @@
       "suggestedReviewers": [
         "database"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-016",
@@ -434,7 +435,8 @@
         "ux-designer",
         "accessibility-audit"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-017",
@@ -464,7 +466,8 @@
       "suggestedReviewers": [
         "ux-designer"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-018",
@@ -495,7 +498,8 @@
       "suggestedReviewers": [
         "ux-designer"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-019",
