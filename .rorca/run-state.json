@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-cli",
   "runId": 47,
   "startedAt": "2026-03-12T06:04:08.654Z",
-  "lastUpdatedAt": "2026-03-12T06:19:34.590Z",
+  "lastUpdatedAt": "2026-03-12T06:35:57.357Z",
   "completedStories": [
     {
       "storyId": "MC-004",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 420974
+    },
+    {
+      "storyId": "MC-007",
+      "title": "MCP Tool Error Recovery and Offline Graceful Degradation",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:19:53.660Z",
+      "finishedAt": "2026-03-12T06:35:57.356Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 963696
     }
   ],
   "failedStories": [],

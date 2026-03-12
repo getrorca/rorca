@@ -3,8 +3,9 @@
 Spec: rorca-mcp-cli
 Run ID: 47
 Started: 2026-03-12T06:04:08.654Z
-Last Updated: 2026-03-12T06:19:34.590Z
+Last Updated: 2026-03-12T06:35:57.357Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - MC-004: MCP Tools Tree View in rorca VS Code Extension — DONE (claude, claude-sonnet-4-6, 472s)
 - MC-006: VS Code Extension Settings Contribution Point Schema — DONE (claude, claude-sonnet-4-6, 421s)
+- MC-007: MCP Tool Error Recovery and Offline Graceful Degradation — DONE (claude, claude-sonnet-4-6, 964s)
