@@ -2,7 +2,7 @@
   "specId": "rorca-spec-validator",
   "runId": 41,
   "startedAt": "2026-03-12T05:48:49.923Z",
-  "lastUpdatedAt": "2026-03-12T06:24:35.554Z",
+  "lastUpdatedAt": "2026-03-12T06:28:36.917Z",
   "completedStories": [
     {
       "storyId": "SV-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 290466
+    },
+    {
+      "storyId": "SV-006",
+      "title": "Implement rorca_queue_run smart run trigger",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:24:52.234Z",
+      "finishedAt": "2026-03-12T06:28:36.916Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 224682
     }
   ],
   "failedStories": [],

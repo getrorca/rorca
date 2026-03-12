@@ -4878,4 +4878,141 @@ export async function cleanupOrphanRuns(): Promise<number> {
   return cleaned;
 }
 
+/**
+ * @swagger
+ * /api/pipeline/queue:
+ *   post:
+ *     summary: Smart run trigger — start immediately or queue if a run is active
+ *     description: >
+ *       Checks for an active run in the workspace. If none, triggers the run immediately.
+ *       If one is active, queues the run and returns its position. Accepts workspaceId + specId
+ *       (filename slug) instead of specPath for convenience.
+ *     tags: [Pipeline]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, specId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Rorca workspace ID
+ *               specId:
+ *                 type: string
+ *                 description: Spec slug (filename without .json)
+ *     responses:
+ *       200:
+ *         description: Run started immediately
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 queued:
+ *                   type: boolean
+ *                   example: false
+ *                 runId:
+ *                   type: number
+ *                 message:
+ *                   type: string
+ *                   example: "Run started immediately"
+ *       202:
+ *         description: Run queued (active run exists)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 queued:
+ *                   type: boolean
+ *                   example: true
+ *                 queuePosition:
+ *                   type: number
+ *                 activeRunId:
+ *                   type: number
+ *                 message:
+ *                   type: string
+ *                   example: "Run queued, position 2"
+ *       404:
+ *         description: Workspace or spec not found
+ */
+router.post('/queue', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, specId } = req.body as { workspaceId?: string; specId?: string };
+
+    if (!workspaceId || !specId) {
+      res.status(400).json({ error: 'workspaceId and specId are required' });
+      return;
+    }
+
+    // Validate workspace exists
+    const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]) as
+      { id: string } | undefined;
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Validate spec file exists
+    const workspaceRow = await queryOne('SELECT path FROM workspaces WHERE id = $1', [workspaceId]) as
+      { path: string } | undefined;
+    const specPath = `forge/specs/approved/${specId}.json`;
+    const absSpecPath = path.join(workspaceRow!.path, specPath);
+    if (!fs.existsSync(absSpecPath)) {
+      res.status(404).json({ error: `Spec not found at ${specPath}` });
+      return;
+    }
+
+    // Check for active run
+    const activeRun = await queryOne(
+      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`,
+      [workspaceId]
+    ) as { id: number } | undefined;
+
+    if (!activeRun) {
+      // No active run — trigger immediately
+      const triggerRes = await fetch(`http://localhost:${process.env.PORT || 3030}/api/pipeline/trigger`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, specPath }),
+      });
+      const triggerData = await triggerRes.json() as Record<string, unknown>;
+      if (!triggerRes.ok) {
+        res.status(triggerRes.status).json(triggerData);
+        return;
+      }
+      res.json({
+        queued: false,
+        runId: triggerData.runId,
+        message: 'Run started immediately',
+      });
+      return;
+    }
+
+    // Active run exists — queue it
+    const triggerRes = await fetch(`http://localhost:${process.env.PORT || 3030}/api/pipeline/trigger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId, specPath, queue: true }),
+    });
+    const triggerData = await triggerRes.json() as Record<string, unknown>;
+    if (!triggerRes.ok) {
+      res.status(triggerRes.status).json(triggerData);
+      return;
+    }
+    const queuePosition = (triggerData.position as number) ?? 1;
+    res.status(202).json({
+      queued: true,
+      queuePosition,
+      activeRunId: activeRun.id,
+      message: `Run queued, position ${queuePosition}`,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+
 export default router;
