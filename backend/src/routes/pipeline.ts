@@ -1412,6 +1412,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       if (attachAddr) {
         engineArgs.push('--attach', attachAddr);
       }
+      if (worktreePath && branchName) {
+        engineArgs.push('--worktree-path', worktreePath, '--branch-name', branchName, '--workspace-path', workspace.path);
+      }
       child = spawn(tsxBin, engineArgs, {
         cwd,
         stdio: ['ignore', logFd, logFd],
