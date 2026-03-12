@@ -3,9 +3,10 @@
 Spec: providers-models-page-redesign
 Run ID: 66
 Started: 2026-03-12T20:08:56.201Z
-Last Updated: 2026-03-12T20:20:59.301Z
+Last Updated: 2026-03-12T20:23:35.274Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - PM-001: Replace single-column scroll with responsive grid shell — DONE (claude, claude-sonnet-4-6, 264s)
 - PM-002: Status bar header with live agent/model/embedding summary — DONE (claude, claude-sonnet-4-6, 186s)
 - PM-003: Execution Engine + Embeddings side-by-side in 2-column card grid — DONE (claude, claude-sonnet-4-6, 244s)
+- PM-004: Model Routing card — 3-column internal layout — DONE (claude, claude-sonnet-4-6, 141s)
