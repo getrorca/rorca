@@ -38,11 +38,13 @@ Usage:
 Options for start:
   --port <port>            Server port (default: 3030)
   --no-open                Don't open browser on start
+  --no-postgres            Skip managed Postgres; requires DATABASE_URL to be set
 
 Examples:
   rorca start
   rorca start --port 4040
   rorca start --no-open
+  rorca start --no-postgres
   rorca init
 `);
   process.exit(0);
@@ -131,10 +133,17 @@ async function runStart(startArgs: string[]): Promise<void> {
   const portIdx = startArgs.indexOf('--port');
   const port = portIdx !== -1 && startArgs[portIdx + 1] ? startArgs[portIdx + 1] : '3030';
   const noOpen = startArgs.includes('--no-open');
+  const noPostgres = startArgs.includes('--no-postgres');
 
   const portNum = parseInt(port, 10);
   if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
     console.error(`Invalid port: ${port}`);
+    process.exit(1);
+  }
+
+  // --no-postgres: skip managed Postgres, require DATABASE_URL
+  if (noPostgres && !process.env.DATABASE_URL) {
+    console.error('DATABASE_URL required when --no-postgres is set');
     process.exit(1);
   }
 
@@ -148,11 +157,12 @@ async function runStart(startArgs: string[]): Promise<void> {
   // ── Postgres provisioning ──
   // If DATABASE_URL is already set and reachable, use it as-is (user-provided).
   // Otherwise, provision and start a managed Postgres instance.
+  // --no-postgres skips provisioning entirely.
   let managedPostgresStarted = false;
   let databaseUrl = process.env.DATABASE_URL || '';
 
-  if (databaseUrl) {
-    // User provided DATABASE_URL — check if it's reachable
+  if (noPostgres || databaseUrl) {
+    // User provided DATABASE_URL (or --no-postgres requires it) — check if it's reachable
     const urlObj = parsePostgresUrl(databaseUrl);
     if (urlObj && await tcpReachable(urlObj.host, urlObj.port, 3000)) {
       console.log(`Using user-provided DATABASE_URL (${urlObj.host}:${urlObj.port})`);
@@ -299,20 +309,31 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const DOWNLOAD_TIMEOUT_MS = 60_000; // 60s with no data = timeout
+
 /**
  * Download a URL to a local file, following redirects, showing progress via \r spinner.
  * Uses only Node.js built-in https/http modules.
+ * Times out if no data is received for DOWNLOAD_TIMEOUT_MS.
  */
 function downloadFile(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
+    let rejected = false;
+    const fail = (err: Error) => {
+      if (rejected) return;
+      rejected = true;
+      try { unlinkSync(dest); } catch { /* ignore */ }
+      reject(err);
+    };
+
     const doRequest = (requestUrl: string, redirectCount: number) => {
       if (redirectCount > 10) {
-        reject(new Error('Too many redirects'));
+        fail(new Error('Too many redirects'));
         return;
       }
 
       const getter = requestUrl.startsWith('https://') ? httpsGet : httpGet;
-      getter(requestUrl, (res: IncomingMessage) => {
+      const req = getter(requestUrl, (res: IncomingMessage) => {
         // Handle redirects
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume(); // Drain the response
@@ -322,16 +343,30 @@ function downloadFile(url: string, dest: string): Promise<void> {
 
         if (!res.statusCode || res.statusCode !== 200) {
           res.resume();
-          reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+          fail(new Error(`Download failed: HTTP ${res.statusCode}`));
           return;
         }
 
         const totalBytes = res.headers['content-length'] ? parseInt(res.headers['content-length'], 10) : 0;
         let downloadedBytes = 0;
 
+        // Inactivity timeout — fires if no data chunk arrives within 60s
+        let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
+        const resetTimer = () => {
+          if (inactivityTimer) clearTimeout(inactivityTimer);
+          inactivityTimer = setTimeout(() => {
+            res.destroy();
+            file.close();
+            fail(new Error('Postgres download timed out'));
+          }, DOWNLOAD_TIMEOUT_MS);
+        };
+
         const file = createWriteStream(dest);
+        resetTimer();
+
         res.on('data', (chunk: Buffer) => {
           downloadedBytes += chunk.length;
+          resetTimer();
           const progress = totalBytes
             ? `${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`
             : formatBytes(downloadedBytes);
@@ -341,23 +376,27 @@ function downloadFile(url: string, dest: string): Promise<void> {
         res.pipe(file);
 
         file.on('finish', () => {
+          if (inactivityTimer) clearTimeout(inactivityTimer);
           file.close();
-          process.stdout.write('\n');
-          resolve();
+          if (!rejected) {
+            process.stdout.write('\n');
+            resolve();
+          }
         });
 
         file.on('error', (err) => {
+          if (inactivityTimer) clearTimeout(inactivityTimer);
           file.close();
-          try { unlinkSync(dest); } catch { /* ignore */ }
-          reject(err);
+          fail(err);
         });
 
         res.on('error', (err) => {
+          if (inactivityTimer) clearTimeout(inactivityTimer);
           file.close();
-          try { unlinkSync(dest); } catch { /* ignore */ }
-          reject(err);
+          fail(err);
         });
-      }).on('error', reject);
+      });
+      req.on('error', (err) => fail(err));
     };
 
     doRequest(url, 0);
@@ -377,6 +416,19 @@ async function ensurePostgres(): Promise<string> {
   const binDir = join(pgDir, 'bin');
   const dataDir = join(pgDir, 'data');
   const versionFile = join(pgDir, '.version');
+
+  // Check for corrupt install: bin/ exists but required binaries are missing
+  if (existsSync(binDir)) {
+    const ext = platform() === 'win32' ? '.exe' : '';
+    const missing = REQUIRED_BINARIES.filter(
+      name => !existsSync(join(binDir, `${name}${ext}`))
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        'Postgres install appears corrupt — delete ~/.rorca/postgres and retry'
+      );
+    }
+  }
 
   // Skip download if already installed at correct version
   if (existsSync(versionFile)) {
@@ -412,10 +464,15 @@ async function ensurePostgres(): Promise<string> {
 
     // Extract the .txz from the jar (jar is a zip)
     console.log('  Extracting jar archive...');
-    if (platform() === 'win32') {
-      execSync(`tar -xf "${jarPath}" -C "${extractDir}"`, { stdio: 'pipe' });
-    } else {
-      execSync(`unzip -o -q "${jarPath}" -d "${extractDir}"`, { stdio: 'pipe' });
+    try {
+      if (platform() === 'win32') {
+        execSync(`tar -xf "${jarPath}" -C "${extractDir}"`, { stdio: 'pipe' });
+      } else {
+        execSync(`unzip -o -q "${jarPath}" -d "${extractDir}"`, { stdio: 'pipe' });
+      }
+    } catch (err: unknown) {
+      const stderr = (err as { stderr?: string }).stderr || (err instanceof Error ? err.message : String(err));
+      throw new Error(`Postgres extraction failed (jar → txz). Check disk space.\n${stderr}`);
     }
 
     // Find the .txz inside
@@ -434,13 +491,18 @@ async function ensurePostgres(): Promise<string> {
 
     const txzPath = join(extractDir, txzFile);
     console.log('  Extracting Postgres binaries...');
-    if (platform() === 'win32') {
-      // Windows 10+ tar supports xz via auto-detect when -a is not specified
-      // Use -xf (auto-detect compression) which works for both .txz and .tar.gz
-      execSync(`tar -xf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
-    } else {
-      // Unix: explicit xz decompression flag
-      execSync(`tar xJf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
+    try {
+      if (platform() === 'win32') {
+        // Windows 10+ tar supports xz via auto-detect when -a is not specified
+        // Use -xf (auto-detect compression) which works for both .txz and .tar.gz
+        execSync(`tar -xf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
+      } else {
+        // Unix: explicit xz decompression flag
+        execSync(`tar xJf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
+      }
+    } catch (err: unknown) {
+      const stderr = (err as { stderr?: string }).stderr || (err instanceof Error ? err.message : String(err));
+      throw new Error(`Postgres extraction failed (txz → binaries). Check disk space.\n${stderr}`);
     }
 
     // Locate the bin/ directory — may be at stage root or nested (e.g., pgsql/bin/)
@@ -601,8 +663,19 @@ async function startPostgres(pgDir: string): Promise<void> {
 
   // Check if already running on our port
   if (await tcpReachable('127.0.0.1', MANAGED_PG_PORT, 1000)) {
-    console.log(`Managed Postgres already running on port ${MANAGED_PG_PORT}`);
-    return;
+    // Verify it's actually our managed Postgres by checking pg_ctl status
+    const statusResult = spawnSync(pgCtl, ['status', '-D', dataDir], {
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    if (statusResult.status === 0) {
+      console.log(`Managed Postgres already running on port ${MANAGED_PG_PORT}`);
+      return;
+    }
+    // Port is occupied but it's NOT our managed Postgres
+    throw new Error(
+      `Port ${MANAGED_PG_PORT} is already in use by another process`
+    );
   }
 
   // Configure port in postgresql.conf if not already set
@@ -622,8 +695,13 @@ async function startPostgres(pgDir: string): Promise<void> {
   );
 
   if (startResult.status !== 0) {
-    const errMsg = startResult.stderr || startResult.stdout || 'unknown error';
-    throw new Error(`pg_ctl start failed:\n${errMsg}`);
+    const errMsg = (startResult.stderr || '') + (startResult.stdout || '');
+    if (errMsg.includes('address already in use') || errMsg.includes('Address already in use')) {
+      throw new Error(
+        `Port ${MANAGED_PG_PORT} is already in use by another process`
+      );
+    }
+    throw new Error(`pg_ctl start failed:\n${errMsg || 'unknown error'}`);
   }
 
   console.log(`  Postgres started (port ${MANAGED_PG_PORT}, log: ${logFile})`);
