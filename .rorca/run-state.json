@@ -1,18 +1,18 @@
 {
-  "specId": "rorca-quick-run-context-injection",
-  "runId": 44,
-  "startedAt": "2026-03-12T05:48:54.321Z",
-  "lastUpdatedAt": "2026-03-12T05:52:02.776Z",
+  "specId": "rorca-mcp-cli",
+  "runId": 47,
+  "startedAt": "2026-03-12T06:04:08.654Z",
+  "lastUpdatedAt": "2026-03-12T06:12:11.062Z",
   "completedStories": [
     {
-      "storyId": "QCI-001",
-      "title": "Inject direction stack, MEMORY.md, and installed skills into Quick Run spec generation prompt",
+      "storyId": "MC-004",
+      "title": "MCP Tools Tree View in rorca VS Code Extension",
       "status": "passed",
-      "startedAt": "2026-03-12T05:48:57.144Z",
-      "finishedAt": "2026-03-12T05:52:02.776Z",
+      "startedAt": "2026-03-12T06:04:18.671Z",
+      "finishedAt": "2026-03-12T06:12:11.025Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 185632
+      "elapsedMs": 472354
     }
   ],
   "failedStories": [],
