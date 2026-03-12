@@ -9,55 +9,42 @@
  *   pipeline:cancel — cancel an active run
  *
  * Start: npm run worker
- * Stop:  SIGTERM (graceful) — drains in-flight jobs up to 45 min, then exits
+ * Stop:  SIGTERM (graceful) — drains in-flight jobs up to 30s, then exits
  */
 
 import 'dotenv/config';
 import PgBoss from 'pg-boss';
+import { initDb } from './db/index';
+import { initBoss, getBoss } from './lib/pg-boss';
 import { logger } from './lib/logger';
 
 // ── Validate environment ─────────────────────────────────────────────────
 
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) {
+if (!process.env.DATABASE_URL) {
   logger.error('[worker] DATABASE_URL is not set — exiting');
   process.exit(1);
 }
-
-// ── Bootstrap pg-boss ────────────────────────────────────────────────────
-
-const boss = new PgBoss({
-  connectionString: databaseUrl,
-  // Schema for pg-boss internal tables — keeps them out of public schema
-  schema: 'pgboss',
-  // Maintenance interval for job archiving / expiry
-  maintenanceIntervalSeconds: 120,
-});
-
-boss.on('error', (err) => {
-  logger.error({ err }, '[worker] pg-boss internal error');
-});
 
 // ── Job handlers ─────────────────────────────────────────────────────────
 
 async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   for (const job of jobs) {
     logger.info({ jobId: job.id, data: job.data }, '[worker] pipeline:run received');
-    // Placeholder: execution-engine integration added in PG-003+
+    // Placeholder: execution-engine integration added in PG-004+
   }
 }
 
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   for (const job of jobs) {
     logger.info({ jobId: job.id, data: job.data }, '[worker] pipeline:retry received');
-    // Placeholder: retry logic added in PG-003+
+    // Placeholder: retry logic added in PG-004+
   }
 }
 
 async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   for (const job of jobs) {
     logger.info({ jobId: job.id, data: job.data }, '[worker] pipeline:cancel received');
-    // Placeholder: cancel logic added in PG-003+
+    // Placeholder: cancel logic added in PG-004+
   }
 }
 
@@ -70,8 +57,7 @@ async function shutdown(signal: string): Promise<void> {
   stopping = true;
   logger.info(`[worker] received ${signal} — stopping pg-boss (waiting up to 30s for in-flight jobs)`);
   try {
-    // pg-boss stop() drains in-flight jobs and closes connections
-    await boss.stop({ timeout: 30_000 });
+    await getBoss().stop({ timeout: 30_000 });
     logger.info('[worker] pg-boss stopped cleanly — exiting');
     process.exit(0);
   } catch (err) {
@@ -86,19 +72,29 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // ── Startup ──────────────────────────────────────────────────────────────
 
 async function start(): Promise<void> {
+  // 1. Run pending SQL migrations (001–NNN) against the main public schema
   try {
-    await boss.start();
+    await initDb();
   } catch (err) {
-    logger.error({ err }, '[worker] failed to connect to database or initialize pg-boss schema');
+    logger.error({ err }, '[worker] database initialisation failed');
     process.exit(1);
   }
 
-  // Register job queue handlers
+  // 2. Start pg-boss — creates/upgrades pgboss.* schema automatically
+  try {
+    await initBoss();
+  } catch (err) {
+    logger.error({ err }, '[worker] pg-boss initialisation failed');
+    process.exit(1);
+  }
+
+  // 3. Register job queue handlers
+  const boss = getBoss();
   await boss.work('pipeline:run', handlePipelineRun);
   await boss.work('pipeline:retry', handlePipelineRetry);
   await boss.work('pipeline:cancel', handlePipelineCancel);
 
-  logger.info('[worker] pg-boss started, listening for jobs');
+  logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel');
 }
 
 start();
