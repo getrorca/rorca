@@ -2,7 +2,7 @@
   "specId": "providers-models-page-redesign",
   "runId": 66,
   "startedAt": "2026-03-12T20:08:56.201Z",
-  "lastUpdatedAt": "2026-03-12T20:35:02.003Z",
+  "lastUpdatedAt": "2026-03-12T20:44:23.163Z",
   "completedStories": [
     {
       "storyId": "PM-001",
@@ -73,6 +73,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 121370
+    },
+    {
+      "storyId": "PM-008",
+      "title": "Final assembly — section order, spacing, and scroll anchors",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:35:16.342Z",
+      "finishedAt": "2026-03-12T20:44:23.162Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 546820
     }
   ],
   "failedStories": [],
