@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSidebarCollapsed } from './ResizableSidebar';
 import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Settings,
@@ -103,6 +104,7 @@ interface SidebarProps {
 export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCount = 0, activeRunCount = 0, healthColor }: SidebarProps) {
   const breakpoint = useBreakpoint();
   const [tabletExpanded, setTabletExpanded] = useState(false);
+  const collapsed = useSidebarCollapsed();
 
   // Map toggle drawer event to Command Palette trigger for backwards compat
   useEffect(() => {
@@ -156,30 +158,67 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
 
   const sidebarContent = (
     <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
-      {/* Top Section: Logo, Workspace & Search */}
-      <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
-        <div className="flex items-center gap-2 px-1 mb-1">
-          <RorcaLogo size={22} variant="gradient" />
-          <span className="font-mono font-bold text-[var(--text)] text-sm tracking-tight">rorca</span>
+      {/* Top Section: Logo, Workspace & Search — hidden when collapsed */}
+      {collapsed ? (
+        /* Collapsed logo — centered icon only */
+        <div className="flex items-center justify-center h-12 border-b border-border shrink-0">
+          <RorcaLogo size={20} variant="gradient" />
         </div>
-        <WorkspaceSelector />
+      ) : (
+        <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
+          <div className="flex items-center gap-2 px-1 mb-1">
+            <RorcaLogo size={22} variant="gradient" />
+            <span className="font-mono font-bold text-[var(--text)] text-sm tracking-tight">rorca</span>
+          </div>
+          <WorkspaceSelector />
 
-        <button
-          onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
-          className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors min-h-[44px] sm:min-h-0"
-          aria-label="Search (⌘K)"
-        >
-          <Search size={14} className="text-muted/70 shrink-0" aria-hidden="true" />
-          <span className="flex-1 text-left truncate">Search...</span>
-          <kbd className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</kbd>
-        </button>
-      </div>
+          <button
+            onClick={() => window.dispatchEvent(new Event('rorca:toggle-drawer'))}
+            className="flex items-center gap-2 px-2 py-1 rounded text-[13px] text-muted hover:text-[var(--text)] hover:bg-surface-100 transition-colors min-h-[44px] sm:min-h-0"
+            aria-label="Search (⌘K)"
+          >
+            <Search size={14} className="text-muted/70 shrink-0" aria-hidden="true" />
+            <span className="flex-1 text-left truncate">Search...</span>
+            <kbd className="text-[10px] font-mono text-muted/60 border border-border rounded px-1 shrink-0">⌘K</kbd>
+          </button>
+        </div>
+      )}
 
       {/* Main Navigation — 5 items */}
       <div className="flex-1 overflow-y-auto pt-2 pb-4 min-h-0" role="list">
-        <div className="space-y-[1px]">
+        <div className={collapsed ? 'flex flex-col items-center gap-1' : 'space-y-[1px]'}>
           {SIDEBAR_ITEMS.map((item) => {
             const Icon = item.icon;
+            if (collapsed) {
+              return (
+                <NavLink
+                  key={item.id}
+                  to={PANEL_ROUTES[item.id]}
+                  end={false}
+                  role="listitem"
+                  title={item.label}
+                  aria-label={item.label}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onNavigate(item.id);
+                    onMobileClose?.();
+                  }}
+                  className={({ isActive }) =>
+                    `relative flex items-center justify-center w-9 h-9 rounded transition-colors ${isActive
+                      ? 'text-accent bg-surface-200'
+                      : 'text-muted/70 hover:bg-surface-100 hover:text-[var(--text)]'
+                    }`
+                  }
+                >
+                  {({ isActive }) => (
+                    <span className="relative">
+                      <Icon size={18} className={isActive ? 'text-accent' : undefined} />
+                      {renderIconBadge(item)}
+                    </span>
+                  )}
+                </NavLink>
+              );
+            }
             return (
               <NavLink
                 key={item.id}
@@ -210,7 +249,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
       </div>
 
       {/* Bottom Section: Compact Controls */}
-      <div className="px-3 py-2 border-t border-border flex items-center gap-1.5 shrink-0">
+      <div className={`border-t border-border shrink-0 ${collapsed ? 'flex flex-col items-center gap-1 py-2' : 'px-3 py-2 flex items-center gap-1.5'}`}>
         <UserMenu onNavigate={onNavigate} />
         <NotificationBell onNavigate={onNavigate} />
         <ThemeToggle />
