@@ -45,7 +45,7 @@ beforeEach(async () => {
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-webhook-handlers-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   // Initialize DB by requiring it

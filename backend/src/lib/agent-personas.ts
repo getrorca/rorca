@@ -78,7 +78,7 @@ export function parseFrontmatter(content: string): { yaml: string; body: string 
  */
 function validateMetadata(
   raw: Record<string, unknown>,
-  filePath: string,
+  _filePath: string,
 ): { metadata: PersonaMetadata } | { error: string } {
   // category
   const category = raw['category'];

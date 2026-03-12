@@ -404,7 +404,7 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
  *       400: { description: "Missing modelId" }
  *       500: { description: "Model test failed" }
  */
-router.post('/models/test', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/models/test', async (req: Request, res: Response, _next: NextFunction) => {
   try {
     const { modelId } = req.body as { modelId?: string };
 
@@ -722,7 +722,7 @@ router.post('/synthesize', async (req: Request, res: Response, next: NextFunctio
  *       502: { description: "LLM returned invalid JSON or missing l1/l2/l3 keys" }
  *       500: { description: "Wizard generation failed" }
  */
-router.post('/wizard', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/wizard', async (req: Request, res: Response, _next: NextFunction) => {
   try {
     const { answers } = req.body as { answers: Record<string, string> };
 

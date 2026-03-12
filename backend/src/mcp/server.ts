@@ -66,7 +66,6 @@ async function timedFetch(url: string, init?: RequestInit): Promise<Response> {
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof Error && err.name === 'AbortError') {
       throw Object.assign(new Error('TIMEOUT'), { isTimeout: true });
     }

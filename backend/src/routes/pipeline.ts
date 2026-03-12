@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
-import { query, queryOne, execute, transaction } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
@@ -15,19 +15,18 @@ import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
 import { getCopilotToken } from './copilot';
-import type { AuthUser } from './auth';
 import type { AgentProfileRow } from './agent-profiles';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
-import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
+import { parseLine } from '../lib/semantic-log-parser';
 import { agentConfig, type AgentType } from '../lib/config';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
-import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
+import { checkSpec, type CapabilityStory } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
-import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
+import { readFallbackResults, deleteFallbackFile, type FallbackResultEntry } from '../lib/resilient-post';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
@@ -3065,7 +3064,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     }
 
     const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
-    const retryStoryIds = new Set(storiesToRetry.map(s => s.story_id));
+    const _retryStoryIds = new Set(storiesToRetry.map(s => s.story_id));
     // Include all stories (not just failed ones) so dependency resolution works correctly.
     // Passed stories (passes:true) are skipped naturally by the engine. Filtering them out
     // breaks dep checks — stories that depend on a passed-but-filtered story get stuck blocked.
@@ -4668,7 +4667,7 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
           }
         }
 
-        const range = baseRef ? `${baseRef}..${branchName}` : branchName;
+        const _range = baseRef ? `${baseRef}..${branchName}` : branchName;
         const log = await git.log({ from: baseRef || undefined, to: branchName, maxCount: 100 });
         commits = log.all.map((c) => ({
           sha: c.hash,

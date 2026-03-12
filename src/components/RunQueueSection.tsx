@@ -30,7 +30,7 @@ export default function RunQueueSection({ entries, onRefresh, onAddClick }: RunQ
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const dragSrcIdx = useRef<number | null>(null);
   const [removing, setRemoving] = useState<number | null>(null);
-  const [animatingOut, setAnimatingOut] = useState<number | null>(null);
+  const [animatingOut, _setAnimatingOut] = useState<number | null>(null);
 
   const handleRemove = useCallback(async (entryId: number) => {
     setRemoving(entryId);

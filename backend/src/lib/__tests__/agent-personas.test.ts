@@ -12,8 +12,6 @@ import * as os from 'os';
 import {
   parseFrontmatter,
   PersonaRegistry,
-  type Persona,
-  type PersonaCategory,
 } from '../agent-personas';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

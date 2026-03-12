@@ -9,7 +9,7 @@ import { query, queryOne, execute } from '../../db/index';
 
 let app: Express;
 let tmpDir: string;
-let authToken: string;
+let _authToken: string;
 
 const WEBHOOK_SECRET = 'test-webhook-secret-pr-merge';
 const WORKSPACE_ID = 'ws-pr-merge-test';
@@ -71,12 +71,12 @@ function createSpecFile(stories: Array<{ id: string; title: string; passes?: boo
 beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pr-merge-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-authToken = await getAuthToken(app);
+_authToken = await getAuthToken(app);
 
   await execute(`DELETE FROM wal_events`);
 
