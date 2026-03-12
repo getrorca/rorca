@@ -11,7 +11,7 @@ import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
   Download, Copy, Check, ChevronRight, Play, GitBranch, GitFork,
   Loader2, Plus, Sparkles, Trash2, History, FileSearch, Paperclip,
-  FileText, FileImage, File,
+  FileText, FileImage, File, ZoomIn,
 } from 'lucide-react';
 import type { Attachment } from '../types/attachment';
 import { BASE_URL } from '../lib/apiFetch';
@@ -28,6 +28,7 @@ import MermaidDiagram from './MermaidDiagram';
 import { SpecVersionHistory } from './SpecVersionHistory';
 import { TagChips } from './TagChips';
 import TriggerPopover from './TriggerPopover';
+import { ImagePreviewModal } from './ImagePreviewModal';
 import type { PanelId } from './Sidebar';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
@@ -1053,6 +1054,7 @@ function AttachmentsTab({ specId }: { specId: string }) {
   const [loading, setLoading] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [previewImage, setPreviewImage] = useState<{ url: string; filename: string } | null>(null);
   const toast = useGlobalToast();
 
   useEffect(() => {
@@ -1098,56 +1100,94 @@ function AttachmentsTab({ specId }: { specId: string }) {
   }
 
   return (
-    <div className="divide-y divide-border">
-      {attachments.map(a => (
-        <div key={a.id} className="flex items-center gap-3 px-4 py-3 hover:bg-panel/50 transition-colors">
-          <AttachmentTypeIcon contentType={a.contentType} />
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-text truncate">{a.filename}</p>
-            <p className="text-[10px] text-muted mt-0.5">
-              {formatFileSize(a.fileSize)} · {new Date(a.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-              {a.uploadedBy?.name && ` · ${a.uploadedBy.name}`}
-            </p>
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
-            <a
-              href={`${BASE_URL}/api/specs/${encodeURIComponent(specId)}/attachments/${a.id}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Download"
-              className="p-1.5 rounded text-muted hover:text-text hover:bg-panel transition-colors"
-            >
-              <Download size={13} />
-            </a>
-            {deleteConfirm === a.id ? (
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-muted whitespace-nowrap">Delete {a.filename.length > 12 ? a.filename.slice(0, 12) + '…' : a.filename}?</span>
+    <>
+      <div className="divide-y divide-border">
+        {attachments.map(a => {
+          const isImage = a.contentType.startsWith('image/');
+          const attachmentUrl = `${BASE_URL}/api/specs/${encodeURIComponent(specId)}/attachments/${a.id}`;
+          return (
+            <div key={a.id} className="flex items-center gap-3 px-4 py-3 hover:bg-panel/50 transition-colors">
+              {isImage ? (
                 <button
-                  onClick={() => handleDelete(a.id)}
-                  disabled={deleting === a.id}
-                  className="px-2 py-0.5 text-[10px] rounded bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors disabled:opacity-50"
+                  type="button"
+                  onClick={() => setPreviewImage({ url: attachmentUrl, filename: a.filename })}
+                  className="shrink-0 rounded overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  title="Preview image"
+                  aria-label={`Preview ${a.filename}`}
                 >
-                  {deleting === a.id ? <Loader2 size={10} className="animate-spin" /> : 'Yes'}
+                  <img
+                    src={attachmentUrl}
+                    alt={a.filename}
+                    className="w-10 h-10 object-cover rounded"
+                  />
                 </button>
-                <button
-                  onClick={() => setDeleteConfirm(null)}
-                  className="px-2 py-0.5 text-[10px] rounded bg-panel border border-border text-muted hover:text-text transition-colors"
-                >
-                  No
-                </button>
+              ) : (
+                <AttachmentTypeIcon contentType={a.contentType} />
+              )}
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-text truncate">{a.filename}</p>
+                <p className="text-[10px] text-muted mt-0.5">
+                  {formatFileSize(a.fileSize)} · {new Date(a.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                  {a.uploadedBy?.name && ` · ${a.uploadedBy.name}`}
+                </p>
               </div>
-            ) : (
-              <button
-                onClick={() => setDeleteConfirm(a.id)}
-                title="Delete"
-                className="p-1.5 rounded text-muted hover:text-error hover:bg-error/10 transition-colors"
-              >
-                <Trash2 size={13} />
-              </button>
-            )}
-          </div>
-        </div>
-      ))}
-    </div>
+              <div className="flex items-center gap-1 shrink-0">
+                {isImage && (
+                  <button
+                    onClick={() => setPreviewImage({ url: attachmentUrl, filename: a.filename })}
+                    title="Preview"
+                    aria-label={`Preview ${a.filename}`}
+                    className="p-1.5 rounded text-muted hover:text-text hover:bg-panel transition-colors"
+                  >
+                    <ZoomIn size={13} />
+                  </button>
+                )}
+                <a
+                  href={attachmentUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Download"
+                  className="p-1.5 rounded text-muted hover:text-text hover:bg-panel transition-colors"
+                >
+                  <Download size={13} />
+                </a>
+                {deleteConfirm === a.id ? (
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] text-muted whitespace-nowrap">Delete {a.filename.length > 12 ? a.filename.slice(0, 12) + '…' : a.filename}?</span>
+                    <button
+                      onClick={() => handleDelete(a.id)}
+                      disabled={deleting === a.id}
+                      className="px-2 py-0.5 text-[10px] rounded bg-error/15 text-error border border-error/30 hover:bg-error/25 transition-colors disabled:opacity-50"
+                    >
+                      {deleting === a.id ? <Loader2 size={10} className="animate-spin" /> : 'Yes'}
+                    </button>
+                    <button
+                      onClick={() => setDeleteConfirm(null)}
+                      className="px-2 py-0.5 text-[10px] rounded bg-panel border border-border text-muted hover:text-text transition-colors"
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setDeleteConfirm(a.id)}
+                    title="Delete"
+                    className="p-1.5 rounded text-muted hover:text-error hover:bg-error/10 transition-colors"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <ImagePreviewModal
+        isOpen={previewImage !== null}
+        onClose={() => setPreviewImage(null)}
+        imageUrl={previewImage?.url ?? ''}
+        filename={previewImage?.filename ?? ''}
+      />
+    </>
   );
 }
