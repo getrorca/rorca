@@ -1,18 +1,18 @@
 {
-  "specId": "rorca-mcp-cli-spec-enhancement",
-  "runId": 40,
-  "startedAt": "2026-03-12T04:20:33.580Z",
-  "lastUpdatedAt": "2026-03-12T04:29:43.149Z",
+  "specId": "rorca-mcp-cli",
+  "runId": 46,
+  "startedAt": "2026-03-12T05:51:51.758Z",
+  "lastUpdatedAt": "2026-03-12T06:00:05.166Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Research Best Practices and Rewrite rorca-mcp-cli Spec with Exhaustive Acceptance Criteria",
+      "storyId": "MC-001",
+      "title": "rorca_forge_and_run — Brief-to-Completion Single MCP Tool",
       "status": "passed",
-      "startedAt": "2026-03-12T04:20:41.412Z",
-      "finishedAt": "2026-03-12T04:29:43.149Z",
+      "startedAt": "2026-03-12T05:52:32.095Z",
+      "finishedAt": "2026-03-12T06:00:05.165Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 541737
+      "elapsedMs": 453070
     }
   ],
   "failedStories": [],

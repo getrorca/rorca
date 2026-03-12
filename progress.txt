@@ -1,9 +1,9 @@
 # Run State Summary
 
-Spec: rorca-mcp-cli-spec-enhancement
-Run ID: 40
-Started: 2026-03-12T04:20:33.580Z
-Last Updated: 2026-03-12T04:29:43.149Z
+Spec: rorca-mcp-cli
+Run ID: 46
+Started: 2026-03-12T05:51:51.758Z
+Last Updated: 2026-03-12T06:00:05.166Z
 
 ## Completed Stories (1)
-- US-001: Research Best Practices and Rewrite rorca-mcp-cli Spec with Exhaustive Acceptance Criteria — DONE (claude, claude-sonnet-4-6, 542s)
+- MC-001: rorca_forge_and_run — Brief-to-Completion Single MCP Tool — DONE (claude, claude-sonnet-4-6, 453s)
