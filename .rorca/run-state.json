@@ -1,18 +1,28 @@
 {
-  "specId": "context-tab-rich-generation-summary",
-  "runId": 55,
-  "startedAt": "2026-03-12T08:22:11.656Z",
-  "lastUpdatedAt": "2026-03-12T08:28:05.799Z",
+  "specId": "fix-mcp-approve-spec-runloop-references",
+  "runId": 58,
+  "startedAt": "2026-03-12T08:30:35.786Z",
+  "lastUpdatedAt": "2026-03-12T08:34:30.641Z",
   "completedStories": [
     {
       "storyId": "US-001",
-      "title": "Add context summary API endpoint and TypeScript interface",
+      "title": "Fix rorca_approve_spec response destructuring and update stale run-loop.sh references in MCP server",
       "status": "passed",
-      "startedAt": "2026-03-12T08:22:12.241Z",
-      "finishedAt": "2026-03-12T08:28:05.799Z",
+      "startedAt": "2026-03-12T08:30:44.618Z",
+      "finishedAt": "2026-03-12T08:32:38.340Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 353558
+      "elapsedMs": 113722
+    },
+    {
+      "storyId": "US-002",
+      "title": "Update model references from claude-sonnet-4-5-20250929 to claude-sonnet-4-6 in MCP server and specs.ts",
+      "status": "passed",
+      "startedAt": "2026-03-12T08:33:12.258Z",
+      "finishedAt": "2026-03-12T08:34:30.629Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 78371
     }
   ],
   "failedStories": [],
