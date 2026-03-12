@@ -2,7 +2,7 @@
   "specId": "rorca-spec-validator",
   "runId": 41,
   "startedAt": "2026-03-12T05:48:49.923Z",
-  "lastUpdatedAt": "2026-03-12T05:55:54.306Z",
+  "lastUpdatedAt": "2026-03-12T06:00:05.544Z",
   "completedStories": [
     {
       "storyId": "SV-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 203021
+    },
+    {
+      "storyId": "SV-002",
+      "title": "Implement rorca_score_spec quality scoring",
+      "status": "passed",
+      "startedAt": "2026-03-12T05:56:12.037Z",
+      "finishedAt": "2026-03-12T06:00:05.544Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 233507
     }
   ],
   "failedStories": [],
