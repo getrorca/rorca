@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import multer from 'multer';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
@@ -8767,5 +8768,135 @@ ${storyList}`;
     res.status(500).json({ error: error.message });
   }
 });
+
+// POST /api/specs/:specId/attachments — upload a file attachment for a spec
+const ALLOWED_CONTENT_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'application/pdf',
+  'text/markdown',
+  'text/plain',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_CONTENT_TYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`INVALID_FILE_TYPE:${file.mimetype}`));
+    }
+  },
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments:
+ *   post:
+ *     summary: Upload a file attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       201:
+ *         description: Attachment created
+ *       400:
+ *         description: Invalid file type
+ *       404:
+ *         description: Spec not found
+ *       413:
+ *         description: File size exceeded
+ */
+router.post(
+  '/:specId/attachments',
+  (req: Request, res: Response, next: any) => {
+    attachmentUpload.single('file')(req, res, (err: any) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          res.status(413).json({ error: 'File size exceeds 10MB limit' });
+          return;
+        }
+        if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
+          const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
+          res.status(400).json({ error: `Invalid file type: ${mimeType}` });
+          return;
+        }
+        next(err);
+        return;
+      }
+      next();
+    });
+  },
+  async (req: Request, res: Response) => {
+    const { specId } = req.params;
+
+    if (!req.file) {
+      res.status(400).json({ error: 'No file uploaded' });
+      return;
+    }
+
+    // Verify spec exists — check both pending and approved directories across all workspaces
+    const workspaces = await query<{ id: string; path: string }>(`SELECT id, path FROM workspaces`);
+    let specExists = false;
+    for (const ws of workspaces) {
+      const pendingPath = path.join(ws.path, 'forge', 'specs', 'pending', `${specId}.json`);
+      const approvedPath = path.join(ws.path, 'forge', 'specs', 'approved', `${specId}.json`);
+      if (fs.existsSync(pendingPath) || fs.existsSync(approvedPath)) {
+        specExists = true;
+        break;
+      }
+    }
+
+    if (!specExists) {
+      res.status(404).json({ error: `Spec not found: ${specId}` });
+      return;
+    }
+
+    const { originalname, mimetype, size, buffer } = req.file;
+
+    const row = await queryOne<{
+      id: string;
+      filename: string;
+      content_type: string;
+      file_size: number;
+      created_at: string;
+    }>(
+      `INSERT INTO spec_attachments (spec_id, filename, content_type, file_size, storage_type, file_data)
+       VALUES ($1, $2, $3, $4, 'database', $5)
+       RETURNING id, filename, content_type, file_size, created_at`,
+      [specId, originalname, mimetype, size, buffer],
+    );
+
+    if (!row) {
+      res.status(500).json({ error: 'Failed to save attachment' });
+      return;
+    }
+
+    res.status(201).json({
+      id: row.id,
+      filename: row.filename,
+      contentType: row.content_type,
+      fileSize: row.file_size,
+      createdAt: row.created_at,
+    });
+  },
+);
 
 export default router;
