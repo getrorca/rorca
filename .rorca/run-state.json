@@ -2,7 +2,7 @@
   "specId": "rorca-model-catalog-ux",
   "runId": 42,
   "startedAt": "2026-03-12T05:48:51.132Z",
-  "lastUpdatedAt": "2026-03-12T05:53:44.904Z",
+  "lastUpdatedAt": "2026-03-12T05:56:49.200Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 67790
+    },
+    {
+      "storyId": "US-003",
+      "title": "Replace Workspace Model Override native select with ModelSearchSelect",
+      "status": "passed",
+      "startedAt": "2026-03-12T05:54:10.930Z",
+      "finishedAt": "2026-03-12T05:56:49.200Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 158270
     }
   ],
   "failedStories": [],
