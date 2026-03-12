@@ -33,6 +33,7 @@ import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory 
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 import { synthesizeRunMemory } from '../lib/auto-memory';
 import { logger } from '../lib/logger';
+import { getBoss } from '../lib/pg-boss';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -1189,88 +1190,81 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     let runId: number;
 
     if (queuedRunId) {
-      // Promote queued run to running
-      await execute(`UPDATE pipeline_runs SET status = 'running', started_at = NOW(), queued_at = NULL, queue_position = NULL,
-         parallelism = $1, agent = $2, agent_type = $3, agent_model = $4 WHERE id = $5 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, queuedRunId]);
+      // Promote queued run to running — worker will actually execute it
+      await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
+         parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
+         branch_name = $5, worktree_path = $6 WHERE id = $7 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, queuedRunId]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<WalEvent>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model) VALUES ($1, $2, 'running', $3, $4, $5, $6, $7) RETURNING *`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath]);
       runId = runResult!.id;
     }
 
-    // PG-013: Pre-populate context cache for all stories in this run
-    try {
-      const { warmup: cacheWarmup } = await import('../lib/context-cache');
-      await cacheWarmup(workspaceId);
-    } catch (warmupErr: any) {
-      logger.warn('[pipeline/trigger] Cache warmup failed (non-fatal):', warmupErr.message);
-    }
+    // 7. Build env overrides — strip Claude Code vars and inject workspace/vault keys.
+    //    These are serialised into the pg-boss payload so the worker has everything it needs.
+    const envOverrides: Record<string, string> = {};
 
-    // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
-    const env: Record<string, string> = {};
+    // Strip Claude Code env vars that block nested invocation
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-        env[k] = v;
+        envOverrides[k] = v;
       }
     }
-    // Mark subprocess as execution engine so db/index.ts does not register
-    // SIGTERM/SIGINT pool-close handlers inside the child process.
-    env['RORCA_PROCESS_ROLE'] = 'engine';
+    envOverrides['RORCA_PROCESS_ROLE'] = 'engine';
 
-    // 7b. Inject workspace-specific env vars (decrypted)
+    // Inject workspace-specific env vars (decrypted)
     const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
     for (const [k, v] of Object.entries(workspaceEnvVars)) {
-      env[k] = v;
+      envOverrides[k] = v;
     }
 
-    // 7c. Inject vault API keys for all configured providers
+    // Inject vault API keys for all configured providers
     const pipelineUser = await getEffectiveUser(req);
     const anthropicVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'anthropic') : null;
     if (anthropicVaultKey) {
-      env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
+      envOverrides['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
     }
     const openaiVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'openai-compat') : null;
     if (openaiVaultKey) {
-      env['OPENAI_API_KEY'] = openaiVaultKey.key;
+      envOverrides['OPENAI_API_KEY'] = openaiVaultKey.key;
       if (openaiVaultKey.baseUrl) {
-        env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
+        envOverrides['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
       }
     }
     const openrouterVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'openrouter') : null;
     if (openrouterVaultKey) {
-      env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
+      envOverrides['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
     }
 
-    // 7c-copilot. Inject GitHub Copilot token when using github/copilot model
+    // Inject GitHub Copilot token when using github/copilot model
     if (resolvedAgentModel === 'github/copilot' && pipelineUser) {
       const copilotToken = await getCopilotToken(pipelineUser.id);
       if (copilotToken) {
-        env['GITHUB_TOKEN'] = copilotToken;
+        envOverrides['GITHUB_TOKEN'] = copilotToken;
       }
     }
 
-    // 7d. Inject active agent profile (system prompt + allowed tools + model override)
+    // Inject active agent profile (system prompt + allowed tools + model override)
     const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
-
     if (activeProfile) {
       if (activeProfile.system_prompt_override) {
-        env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
+        envOverrides['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
       }
       const tools = (Array.isArray(activeProfile.allowed_tools) ? activeProfile.allowed_tools : JSON.parse(activeProfile.allowed_tools)) as string[];
       if (tools.length > 0) {
-        env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
+        envOverrides['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
       }
       if (activeProfile.model_override) {
-        env['RORCA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
+        envOverrides['RORCA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
       }
     }
 
-    // 8. Run pre-run hooks — abort if any exit non-zero
+    // 8. Run pre-run hooks — abort if any exit non-zero.
+    //    Hooks run synchronously in the trigger request so the caller gets immediate feedback.
     const logPath = workspaceLogPath(workspace.path, runId);
     await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [logPath, runId]);
-    const preRunResults = await runHooks(workspaceId, 'pre_run', cwd, env);
+    const preRunResults = await runHooks(workspaceId, 'pre_run', cwd, envOverrides);
     if (preRunResults.length > 0) {
-      // Write hook output to the log file so it appears in the terminal
       const hookOutput = preRunResults.map(r =>
         `\x1b[36m[pre_run hook: ${r.command}]\x1b[0m\n${r.output}` +
         (r.exitCode !== 0 ? `\n\x1b[31m[Hook exited with code ${r.exitCode}]\x1b[0m\n` : '\n')
@@ -1279,7 +1273,6 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
       const failed = preRunResults.find(r => r.exitCode !== 0);
       if (failed) {
-        // Mark run as failed and emit WAL event
         await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
 
         const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
@@ -1287,16 +1280,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           hook_command: failed.command, exit_code: failed.exitCode,
         })]);
         broadcastAll(walEvent!);
-
-        // PR-RQ-1: Advance run queue even on pre-run hook failure
         advanceQueue(workspaceId);
 
-        // Set up output buffer so terminal can display hook output
         const failBuf: OutputBuffer = { chunks: [hookOutput], done: true, subscribers: new Set() };
         outputBuffers.set(runId, failBuf);
-        setTimeout(() => {
-          outputBuffers.delete(runId);
-        }, 30 * 60 * 1000);
+        setTimeout(() => { outputBuffers.delete(runId); }, 30 * 60 * 1000);
 
         res.status(422).json({
           error: 'Pre-run hook failed',
@@ -1309,172 +1297,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }
     }
 
-    // 9. Start OpenCode server if ANY story is assigned to opencode (OC-029: conditional start)
-    //    Server reused across all opencode-assigned stories; stopped after last one completes.
-    let ocServer: OpenCodeServer | null = null;
-    let attachAddr: string | null = null;
-
-    // Determine if any story needs opencode — check per-story assignments
-    let hasOpencodeStories = resolvedAgentType === 'opencode';
-    if (!hasOpencodeStories) {
-      try {
-        const specJson2 = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
-        const stories2 = (specJson2.userStories ?? []) as EngineUserStory[];
-        const engines = scanRequiredEngines(stories2, resolvedAgentType);
-        hasOpencodeStories = engines.has('opencode');
-      } catch { /* non-fatal */ }
-    }
-
-    if (hasOpencodeStories && useExecutionEngine) {
-      try {
-        ocServer = new OpenCodeServer({
-          runId,
-          onPidReady: async (pid) => {
-            await execute('UPDATE pipeline_runs SET opencode_server_pid = $1 WHERE id = $2', [pid, runId]);
-          },
-        });
-        await ocServer.start();
-        attachAddr = ocServer.attach();
-      } catch (serverErr: any) {
-        // Failed to start OpenCode server — mark run failed
-        await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
-          run_id: runId, status: 'failed', reason: 'opencode_server_start_failed',
-          error: serverErr.message,
-        })]);
-        broadcastAll(walEvent!);
-        // PR-RQ-1: Advance run queue even on OpenCode server failure
-        advanceQueue(workspaceId);
-        res.status(422).json({ error: `Failed to start OpenCode server: ${serverErr.message}`, runId });
-        return;
-      }
-    }
-
-    // 9c. Write OpenCode skill file (direction stack → .opencode/skills/rorca.md)
-    //     OpenCode reads skill files from .opencode/skills/ automatically.
-    //     Written fresh before each run; cleaned up after run completes.
-    let openCodeSkillPath: string | null = null;
-    if (resolvedAgentType === 'opencode') {
-      try {
-        // Read spec title from the spec JSON for L4 brief
-        const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
-        const specBrief = specJson.title || path.basename(specPath, '.json');
-        openCodeSkillPath = await writeOpenCodeSkillFile(cwd, workspaceId, `Running spec: ${specBrief}`);
-        if (openCodeSkillPath) {
-          logger.info(`[Pipeline] Wrote OpenCode skill file: ${openCodeSkillPath}`);
-        }
-      } catch (err: any) {
-        // Non-fatal — run can proceed without the skill file
-        logger.warn(`[Pipeline] Failed to write OpenCode skill file: ${err.message}`);
-      }
-    }
-
-    // 9d. Write Codex AGENTS.md (direction stack → workspace root AGENTS.md)
-    //     Codex CLI auto-discovers AGENTS.md from workspace root and injects as context.
-    //     If AGENTS.md exists, appends delimited section; otherwise creates it.
-    //     Written fresh before each run; cleaned up after run completes.
-    let codexAgentsMdState: CodexAgentsMdState | null = null;
-    if (resolvedAgentType === 'codex') {
-      try {
-        const specJson3 = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
-        const specBrief3 = specJson3.title || path.basename(specPath, '.json');
-        codexAgentsMdState = await writeCodexAgentsMd(cwd, workspaceId, `Running spec: ${specBrief3}`);
-        if (codexAgentsMdState) {
-          logger.info(`[Pipeline] Wrote Codex AGENTS.md: ${codexAgentsMdState.agentsMdPath}`);
-        }
-      } catch (err: any) {
-        // Non-fatal — run can proceed without direction context
-        logger.warn(`[Pipeline] Failed to write Codex AGENTS.md: ${err.message}`);
-      }
-    }
-
-    // 10. Spawn execution engine — detached so it survives backend restarts.
-    //     stdout+stderr go directly to the log file via file descriptor (no pipes).
-    const logFd = fs.openSync(logPath, 'a');
-    let child: ReturnType<typeof spawn>;
-
-    if (useExecutionEngine) {
-      // Universal execution engine (supports claude, opencode, codex)
-      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
-      const backendPort = process.env.PORT || '3030';
-      const engineArgs = [
-        executionEngineTs,
-        '--json', absSpecPath,
-        '--cwd', cwd,
-        '--run-id', String(runId),
-        '--port', backendPort,
-        '--parallelism', String(parallelism),
-        '--agent', resolvedAgentType,
-      ];
-      if (resolvedAgentModel) {
-        engineArgs.push('--model', resolvedAgentModel);
-      }
-      if (attachAddr) {
-        engineArgs.push('--attach', attachAddr);
-      }
-      if (worktreePath && branchName) {
-        engineArgs.push('--worktree-path', worktreePath, '--branch-name', branchName, '--workspace-path', workspace.path);
-      }
-      child = spawn(tsxBin, engineArgs, {
-        cwd,
-        stdio: ['ignore', logFd, logFd],
-        detached: true,
-        env,
-      });
-    } else {
-      // Legacy bash run-loop (fallback for workspaces that still have run-loop.sh)
-      const scriptInCwd = path.join(cwd, 'forge', 'run-loop.sh');
-      child = spawn('bash', [scriptInCwd, '--json', absSpecPath], {
-        cwd,
-        stdio: ['ignore', logFd, logFd],
-        detached: true,
-        env,
-      });
-    }
-    fs.closeSync(logFd);  // parent closes its copy; child keeps its own fd
-    child.unref();        // don't keep Node alive waiting for this child
-
-    // 10b. Store PID + branch info
-    if (child.pid) {
-      await execute(`UPDATE pipeline_runs SET pid = $1, branch_name = $2, worktree_path = $3 WHERE id = $4`, [child.pid, branchName, worktreePath, runId]);
-    }
-
-    // CIE-016: Compute and store predicted context preview for post-run comparison
-    // CIE-017: Include monorepo apps for cross-app story detection
-    try {
-      const { loadRorcaConfig: loadCfg } = require('../lib/rorca-config') as typeof import('../lib/rorca-config');
-      const { route: routeCtx } = require('../lib/context-router') as typeof import('../lib/context-router');
-      const { loadMonorepoApps: loadApps } = require('../lib/workspace-echolocation') as typeof import('../lib/workspace-echolocation');
-      const rorcaCfg = loadCfg(workspace.path);
-      let triggerMonorepoApps: import('../lib/workspace-echolocation').MonorepoPackage[] | undefined;
-      try {
-        const apps = loadApps(workspace.path);
-        if (apps.length > 0) triggerMonorepoApps = apps;
-      } catch { /* non-fatal */ }
-
-      const specForCtx = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
-      const ctxStories = (specForCtx.userStories ?? [])
-        .filter((s: any) => !s.passes && !s.excluded)
-        .map((s: any) => {
-          const routed = routeCtx(s, rorcaCfg.routing, workspace.path, triggerMonorepoApps);
-          return {
-            storyId: s.id,
-            totalTokens: routed.totalTokens,
-            injectedFiles: routed.injectedFiles,
-          };
-        });
-      await execute('UPDATE pipeline_runs SET context_preview = $1 WHERE id = $2', [JSON.stringify({ tokenBudget: rorcaCfg.routing.tokenBudget, stories: ctxStories }), runId]);
-    } catch { /* non-fatal — context preview is best-effort */ }
-
-    // 9b. Record excluded stories immediately — run-loop.sh will skip them,
-    //     but we insert story_results rows so the UI shows them as excluded.
-    // 9c. Backfill already-passing stories (passes:true) as 'skipped' so the
-    //     progress bar reflects true completion state from the start.
+    // 9. Record excluded / already-passing stories so the UI shows them immediately.
     try {
       const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
       const specSlug = path.basename(specPath, '.json');
 
-      // 9b — excluded stories
       const excludedStories = (specJson.userStories ?? []).filter(
         (s: { excluded?: boolean }) => s.excluded === true
       );
@@ -1487,7 +1314,6 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         broadcastAll(walEvent!);
       }
 
-      // 9c — backfill already-passing stories as 'skipped'
       const alreadyPassing = (specJson.userStories ?? []).filter(
         (s: { passes?: boolean; excluded?: boolean }) => s.passes === true && s.excluded !== true
       );
@@ -1499,207 +1325,50 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_skipped', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId, reason: 'already_passing' })]);
         broadcastAll(walEvent!);
       }
-    } catch { /* spec read error — non-fatal, run-loop will handle */ }
+    } catch { /* spec read error — non-fatal, worker will handle */ }
 
-    // 10. Set up in-memory output buffer — tail the log file at 200ms for live streaming
-    const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
-    outputBuffers.set(runId, buf);
+    // 10. Enqueue the pipeline run via pg-boss.
+    //     The worker process picks it up and does the actual spawn / execution.
+    //     Job ID = String(runId) for direct lookup by runId.
+    const jobPayload = {
+      runId,
+      specPath,
+      workspacePath: workspace.path,
+      agent: resolvedAgentType,
+      model: resolvedAgentModel ?? null,
+      worktreePath: worktreePath ?? null,
+      branchName: branchName ?? null,
+      autoWorktree: needsWorktree,
+      envOverrides,
+    };
 
-    let tailPos = 0;
-    const tailInterval = setInterval(() => {
-      try {
-        const stat = fs.statSync(logPath);
-        if (stat.size > tailPos) {
-          const fd = fs.openSync(logPath, 'r');
-          const newBytes = Buffer.alloc(stat.size - tailPos);
-          fs.readSync(fd, newBytes, 0, newBytes.length, tailPos);
-          fs.closeSync(fd);
-          tailPos = stat.size;
-          const text = newBytes.toString('utf8');
-          buf.chunks.push(text);
-          buf.subscribers.forEach(cb => cb(text));
-        }
-      } catch { /* file not yet created or transient read error */ }
-    }, 200);
-
-    // 10b. Poll for fallback result files (.rorca-results.jsonl) every 5 seconds.
-    // When the execution engine can't POST results (backend restart, port mismatch),
-    // it writes them to this file. We sync them back to DB here.
-    const fallbackPollCwd = cwd; // worktree path or main workspace path
-    const fallbackPollInterval = setInterval(() => {
-      try {
-        if (true /* pg pool always available */) {
-          syncFallbackResults(fallbackPollCwd, workspaceId);
-        }
-      } catch { /* non-fatal */ }
-    }, 5_000);
-
-    // 10c. Monitor OpenCode server health during run — detect crashes and attempt one restart
-    let ocHealthInterval: ReturnType<typeof setInterval> | null = null;
-    if (ocServer && resolvedAgentType === 'opencode') {
-      ocHealthInterval = setInterval(async () => {
-        if (!ocServer || ocServer.getState() === 'stopped') {
-          if (ocHealthInterval) clearInterval(ocHealthInterval);
-          return;
-        }
-
-        if (!ocServer.isAlive()) {
-          logger.info(`[Pipeline] OpenCode server crashed for run ${runId}, attempting restart...`);
-
-          const restartMsg = `\r\n\x1b[33m[OpenCode server crashed — attempting restart...]\x1b[0m\r\n`;
-          buf.chunks.push(restartMsg);
-          buf.subscribers.forEach(cb => cb(restartMsg));
-          fs.appendFileSync(logPath, restartMsg);
-
-          const restarted = await ocServer.restart();
-          if (restarted) {
-            logger.info(`[Pipeline] OpenCode server restarted for run ${runId}`);
-            const successMsg = `\r\n\x1b[32m[OpenCode server restarted successfully]\x1b[0m\r\n`;
-            buf.chunks.push(successMsg);
-            buf.subscribers.forEach(cb => cb(successMsg));
-            fs.appendFileSync(logPath, successMsg);
-
-            // Emit WAL event for restart
-            if (true /* pg pool always available */) {
-              const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('opencode_server_restarted', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId })]);
-              broadcastAll(walEvent!);
-            }
-          } else {
-            logger.error(`[Pipeline] OpenCode server restart failed for run ${runId} — killing execution engine`);
-            const failMsg = `\r\n\x1b[31m[OpenCode server restart failed — aborting run]\x1b[0m\r\n`;
-            buf.chunks.push(failMsg);
-            buf.subscribers.forEach(cb => cb(failMsg));
-            fs.appendFileSync(logPath, failMsg);
-
-            if (ocHealthInterval) clearInterval(ocHealthInterval);
-
-            // Kill the execution engine — the exit handler will mark the run failed
-            try { process.kill(-child.pid!, 'SIGTERM'); } catch { /* already dead */ }
-            setTimeout(() => {
-              try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already dead */ }
-            }, 5_000);
-
-            // Emit WAL event
-            if (true /* pg pool always available */) {
-              const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('opencode_server_crash', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
-                run_id: runId, reason: 'restart_failed',
-                error: 'OpenCode server crashed and could not be restarted. Run aborted.',
-              })]);
-              broadcastAll(walEvent!);
-            }
-          }
-        }
-      }, 5_000); // Check every 5 seconds
-    }
-
-    // 11. Update status when process exits; stop OpenCode server if running
-    child.on('exit', async (code) => {
-      clearInterval(tailInterval);
-      clearInterval(fallbackPollInterval);
-      if (ocHealthInterval) clearInterval(ocHealthInterval);
-
-      // Final sync of any remaining fallback results before marking run complete
-      if (true /* pg pool always available */) {
-        try { syncFallbackResults(fallbackPollCwd, workspaceId); } catch { /* best-effort */ }
-      }
-
-      // Stop OpenCode server — lifecycle tied to this pipeline run
-      if (ocServer) {
-        ocServer.stop().catch(() => { /* best-effort cleanup */ });
-      }
-
-      // Clean up OpenCode skill file — written fresh before each run
-      if (openCodeSkillPath) {
-        removeOpenCodeSkillFile(openCodeSkillPath);
-      }
-
-      // Clean up Codex AGENTS.md — restore original or delete if Rorca created it
-      if (codexAgentsMdState) {
-        removeCodexAgentsMd(codexAgentsMdState);
-      }
-
-      // Flush any remaining bytes not yet picked up by the interval
-      try {
-        const stat = fs.statSync(logPath);
-        if (stat.size > tailPos) {
-          const fd = fs.openSync(logPath, 'r');
-          const remaining = Buffer.alloc(stat.size - tailPos);
-          fs.readSync(fd, remaining, 0, remaining.length, tailPos);
-          fs.closeSync(fd);
-          buf.chunks.push(remaining.toString('utf8'));
-          buf.subscribers.forEach(cb => cb(remaining.toString('utf8')));
-        }
-      } catch { /* ignore */ }
-
-      // Guard: DB may be closed if the process exits after test teardown
-      if (false /* pg pool always available */) {
-        buf.done = true;
-        buf.subscribers.clear();
-        return;
-      }
-
-      const status = code === 0 ? 'done' : 'failed';
-      await execute(`UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`, [status, runId]);
-
-      // FR-005: Mark spec as completed when run succeeds
-      if (status === 'done') markSpecCompleted(specPath);
-
-      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
-      synthesizeRunMemory(runId, workspaceId).catch(() => {});
-
-      // Run post-run hooks with RUN_STATUS and RUN_ID env vars
-      const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
-      const postRunResults = await runHooks(workspaceId, 'post_run', cwd, postRunEnv);
-      if (postRunResults.length > 0) {
-        const hookOutput = postRunResults.map(r =>
-          `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +
-          (r.exitCode !== 0 ? `\r\n\x1b[31m[Hook exited with code ${r.exitCode}]\x1b[0m\r\n` : '\r\n')
-        ).join('');
-        buf.chunks.push(hookOutput);
-        buf.subscribers.forEach(cb => cb(hookOutput));
-        fs.appendFileSync(logPath, hookOutput);
-      }
-
-      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code })]);
-      broadcastAll(walEvent!);
-
-      // PR-RQ-1: Advance run queue — promote next queued run if any
-      advanceQueue(workspaceId);
-
-      // Notify terminal that the process exited
-      const exitMsg = `\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`;
-      buf.chunks.push(exitMsg);
-      buf.subscribers.forEach(cb => cb(exitMsg));
-      fs.appendFileSync(logPath, exitMsg);
-
-      // Close the buffer — handles both worktree and non-worktree paths
-      const closeBuffer = () => {
-        buf.done = true;
-        buf.subscribers.clear();
-        setTimeout(() => { outputBuffers.delete(runId); }, 30 * 60 * 1000);
-      };
-
-      // Auto-merge worktree if run used one — safety pre-check included
-      if (worktreePath && branchName) {
-        autoMergeWorktree(workspace.path, worktreePath, branchName, workspaceId, runId, buf, logPath)
-          .then(closeBuffer)
-          .catch((err: Error) => {
-            const errMsg = `\r\n\x1b[31m[auto-merge] Unexpected error: ${err.message}\x1b[0m\r\n`;
-            buf.chunks.push(errMsg);
-            fs.appendFileSync(logPath, errMsg);
-            closeBuffer();
-          });
-      } else {
-        closeBuffer();
-      }
+    await getBoss().send('pipeline:run', jobPayload, {
+      id: String(runId),
+      retryLimit: 3,
+      retryDelay: 10,
     });
+
+    logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
+
+    // Determine queue position for response (count jobs queued before this one)
+    const queuePos = (await queryOne<{ count: string }>(
+      `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND id < $2`,
+      [workspaceId, runId]
+    ))?.count ?? '0';
 
     // OC-031: Include capability warnings in trigger response
     const capWarnings = (req as any)._capabilityWarnings;
     const capMode = (req as any)._capabilityMismatchMode;
     res.status(201).json({
-      ok: true, runId, worktreePath, branchName,
-      agentType: resolvedAgentType, agentModel: resolvedAgentModel,
+      ok: true,
+      runId,
+      queued: true,
+      specId: path.basename(specPath, '.json'),
+      queuePosition: parseInt(queuePos, 10) + 1,
+      worktreePath,
+      branchName,
+      agentType: resolvedAgentType,
+      agentModel: resolvedAgentModel,
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(orchestration ? { orchestration } : {}),
     });
