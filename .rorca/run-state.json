@@ -2,7 +2,7 @@
   "specId": "rorca-ensure-postgres",
   "runId": 1,
   "startedAt": "2026-03-12T18:19:22.650Z",
-  "lastUpdatedAt": "2026-03-12T18:32:47.985Z",
+  "lastUpdatedAt": "2026-03-12T18:37:29.615Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-12T18:32:47.985Z",
       "agentType": "claude",
       "elapsedMs": 15439
+    },
+    {
+      "storyId": "US-004",
+      "title": "Wire ensurePostgres() into bin/rorca.ts start command with graceful shutdown",
+      "status": "passed",
+      "startedAt": "2026-03-12T18:33:13.352Z",
+      "finishedAt": "2026-03-12T18:37:29.614Z",
+      "agentType": "claude",
+      "elapsedMs": 256262
     }
   ],
   "failedStories": [],
