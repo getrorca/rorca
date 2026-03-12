@@ -2,7 +2,7 @@
   "specId": "add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.",
   "runId": 45,
   "startedAt": "2026-03-12T05:48:55.677Z",
-  "lastUpdatedAt": "2026-03-12T06:08:33.460Z",
+  "lastUpdatedAt": "2026-03-12T06:13:07.957Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -73,6 +73,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 144077
+    },
+    {
+      "storyId": "US-008",
+      "title": "Add file input button to SpecForge UI",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:08:58.064Z",
+      "finishedAt": "2026-03-12T06:13:07.954Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 249890
     }
   ],
   "failedStories": [],
