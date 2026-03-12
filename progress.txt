@@ -3,8 +3,9 @@
 Spec: rorca-model-catalog-ux
 Run ID: 42
 Started: 2026-03-12T05:48:51.132Z
-Last Updated: 2026-03-12T05:53:44.904Z
+Last Updated: 2026-03-12T05:56:49.200Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - US-001: Fix hardcoded stale default model state — DONE (claude, claude-sonnet-4-6, 93s)
 - US-002: Replace Default Model native select with ModelSearchSelect — DONE (claude, claude-sonnet-4-6, 68s)
+- US-003: Replace Workspace Model Override native select with ModelSearchSelect — DONE (claude, claude-sonnet-4-6, 158s)
