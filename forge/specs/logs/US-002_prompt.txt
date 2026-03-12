@@ -1326,7 +1326,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1479,15 +1479,12 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-As a user, I want the Default Model selector to use the searchable ModelSearchSelect dropdown so I can find models by typing instead of scrolling a long native select.
+Implement POST /api/specs/:specId/attachments endpoint to handle multipart/form-data file uploads. Support image paste (PNG/JPEG) and file uploads (PDF, DOCX, MD, TXT). Validate file types and size limits.
 
 Acceptance Criteria:
-- The Default Model <select> element (~line 1907 in ProviderSettingsTab.tsx) is replaced with <ModelSearchSelect>
-- models array is mapped to ModelOption[] shape (id, label, provider, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended) for the ModelSearchSelect props
-- onChange prop calls setDefaultModel(modelId)
-- value prop is wired to the defaultModel state string
-- defaultModelId prop is passed as null
-- The old <option> map is fully removed — no dead code remains
-- Trigger button shows: model label, cost/1K badge, context window text
-- npx tsc --noEmit passes, npm run lint passes
-- Settings > Display tab loads and the Default Model dropdown opens, searches, and selects correctly in the browser
+- Endpoint accepts multipart/form-data with 'file' field via multer middleware
+- File type validation: allow image/png, image/jpeg, image/webp, application/pdf, text/markdown, text/plain, application/vnd.openxmlformats-officedocument.wordprocessingml.document
+- File size limit enforced: 10MB per file
+- Inserts record into spec_attachments table with storage_type='database' and file_data as bytea
+- Returns JSON: { id, filename, contentType, fileSize, createdAt }
+- Error handling: 400 for invalid file type, 413 for size exceeded, 404 for spec not found
