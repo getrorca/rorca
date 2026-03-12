@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import app from '../../server';
 import { JWT_SECRET } from '../auth';
-import { query, queryOne, execute } from '../../db/index';
+import { queryOne, execute } from '../../db/index';
 
 // Helpers
 
