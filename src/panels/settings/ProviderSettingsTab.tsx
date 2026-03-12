@@ -1777,6 +1777,10 @@ function DisplaySection() {
   const [testingModel, setTestingModel] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
 
+  // Catalog filter state
+  const [searchText, setSearchText] = useState('');
+  const [activeProvider, setActiveProvider] = useState<string>('All');
+
   useEffect(() => {
     const fetchPromises: Promise<any>[] = [
       apiFetch<DisplaySettings>('/api/settings/display'),
@@ -1953,33 +1957,97 @@ function DisplaySection() {
       <div className="border-t border-border pt-6">
         <h2 className="text-sm font-semibold text-[var(--text)] mb-1">Available Models</h2>
         <p className="text-xs text-muted mb-3">Click a model to set it as the {workspaceId ? 'workspace' : 'global'} default. Use Test to verify connectivity.</p>
-        <div className="space-y-4">
-          {Object.entries(modelsByProvider).map(([provider, providerModels]) => (
-            <div key={provider}>
-              <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">{provider}</h3>
-              <div className="space-y-1.5">
-                {providerModels.map(m => (
-                  <ModelCard
-                    key={m.id}
-                    model={m}
-                    isSelected={m.id === effectiveModel}
-                    isWorkspaceOverride={m.id === workspaceModel}
-                    onSelect={() => {
-                      if (workspaceId) {
-                        setWorkspaceModel(m.id);
-                        saveWorkspaceModel(m.id);
-                      } else {
-                        setDefaultModel(m.id);
-                      }
-                    }}
-                    onTest={() => testModel(m.id)}
-                    testResult={testResult}
-                    isTesting={testingModel === m.id}
-                  />
-                ))}
-              </div>
+
+        {/* Search bar row */}
+        <div className="flex items-center gap-2 mb-3">
+          <div className="relative flex-1">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+            <input
+              type="text"
+              value={searchText}
+              onChange={e => setSearchText(e.target.value)}
+              placeholder="Search models..."
+              className="w-full pl-8 pr-3 py-1.5 text-sm bg-bg border border-border rounded focus:border-accent outline-none placeholder:text-muted"
+            />
+          </div>
+          <span className="text-xs text-muted whitespace-nowrap">
+            {(() => {
+              const q = searchText.toLowerCase();
+              return models.filter(m =>
+                (activeProvider === 'All' || m.provider === activeProvider) &&
+                (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
+              ).length;
+            })()} models
+          </span>
+        </div>
+
+        {/* Provider filter chips */}
+        {(() => {
+          const providerCounts = models.reduce<Record<string, number>>((acc, m) => {
+            acc[m.provider] = (acc[m.provider] ?? 0) + 1;
+            return acc;
+          }, {});
+          const providers = Object.entries(providerCounts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([p]) => p);
+          return (
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {(['All', ...providers]).map(p => (
+                <button
+                  key={p}
+                  onClick={() => setActiveProvider(p)}
+                  className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                    activeProvider === p
+                      ? 'bg-accent/10 border-accent text-accent'
+                      : 'border-border text-muted hover:text-[var(--text)]'
+                  }`}
+                >
+                  {p}
+                </button>
+              ))}
             </div>
-          ))}
+          );
+        })()}
+
+        {/* Filtered model cards */}
+        <div className="space-y-4">
+          {(() => {
+            const q = searchText.toLowerCase();
+            const filtered = models.filter(m =>
+              (activeProvider === 'All' || m.provider === activeProvider) &&
+              (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
+            );
+            const filteredByProvider = filtered.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
+              (acc[m.provider] ??= []).push(m);
+              return acc;
+            }, {});
+            return Object.entries(filteredByProvider).map(([provider, providerModels]) => (
+              <div key={provider}>
+                <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">{provider}</h3>
+                <div className="space-y-1.5">
+                  {providerModels.map(m => (
+                    <ModelCard
+                      key={m.id}
+                      model={m}
+                      isSelected={m.id === effectiveModel}
+                      isWorkspaceOverride={m.id === workspaceModel}
+                      onSelect={() => {
+                        if (workspaceId) {
+                          setWorkspaceModel(m.id);
+                          saveWorkspaceModel(m.id);
+                        } else {
+                          setDefaultModel(m.id);
+                        }
+                      }}
+                      onTest={() => testModel(m.id)}
+                      testResult={testResult}
+                      isTesting={testingModel === m.id}
+                    />
+                  ))}
+                </div>
+              </div>
+            ));
+          })()}
         </div>
       </div>
 
