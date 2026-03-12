@@ -11,12 +11,9 @@ const esbuildProblemMatcherPlugin = {
       console.log('[watch] build started');
     });
     build.onEnd((result) => {
-      for (const { text, location } of result.errors) {
-        const file = location ? location.file : '<unknown>';
-        const line = location ? location.line : 0;
-        const col = location ? location.column : 0;
-        console.error(`> ${file}:${line}:${col}: error: ${text}`);
-      }
+      result.errors.forEach(({ text, location }) => {
+        console.error(`> ${location.file}:${location.line}:${location.column}: error: ${text}`);
+      });
       console.log('[watch] build finished');
     });
   },

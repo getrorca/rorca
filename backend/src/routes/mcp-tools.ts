@@ -1,11 +1,13 @@
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router } from 'express';
 
 const router = Router();
 
 /**
- * MCP tool definitions — canonical list with categories, descriptions, and schemas.
- * Grouped into exactly 5 categories matching the CLAUDE.md spec.
- * Tools from MC-001 and MC-002 are appended to 'Specs & Pipeline'.
+ * The canonical list of MCP tools, grouped into 5 categories.
+ * This data is derived from backend/src/mcp/server.ts and stays
+ * in sync manually when new tools are added to the stdio server.
+ *
+ * MC-004: Exposed as GET /api/mcp/tools for the VS Code extension tree view.
  */
 interface McpToolDef {
   name: string;
@@ -16,79 +18,79 @@ interface McpToolDef {
 }
 
 const MCP_TOOLS: McpToolDef[] = [
-  // ─── Specs & Pipeline (9 existing + MC-001 + MC-002 = 11) ─────────────────
+  // ─── Specs & Pipeline (9 + MC-001/MC-002 = 11) ──────────────────────────────
   {
     name: 'rorca_get_context',
-    description: 'Get the synthesized Direction Stack (L1–L5) for a workspace. Returns all direction layers merged in priority order.',
     category: 'Specs & Pipeline',
+    description: 'Get the synthesized Direction Stack for a workspace (L1–L5 merged in priority order).',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      specBrief: { type: 'string', description: 'L4: description of the specific spec being worked on' },
+      specBrief: { type: 'string', description: 'L4: one-paragraph description of the specific spec' },
       storyAnnotations: { type: 'string', description: 'L5: story-level context, acceptance criteria notes' },
     },
     requiredParams: ['workspaceId'],
   },
   {
     name: 'rorca_generate_spec',
-    description: 'Generate a spec JSON (with userStories array) from a brief. Calls the Rorca synthesis engine which injects the full Direction Stack before sending to the LLM.',
     category: 'Specs & Pipeline',
+    description: 'Generate a spec JSON (with userStories array) from a brief using the full Direction Stack.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      specBrief: { type: 'string', description: 'One-paragraph description of the feature or system to spec out' },
+      specBrief: { type: 'string', description: 'One-paragraph description of the feature to spec out' },
       title: { type: 'string', description: 'Short title for the spec (used as filename slug)' },
       storyCount: { type: 'number', description: 'Target number of user stories (default 8)' },
-      includeDiagrams: { type: 'boolean', description: 'Whether to include Mermaid and ASCII diagrams' },
-      model: { type: 'string', description: 'LLM model to use for generation' },
+      includeDiagrams: { type: 'boolean', description: 'Whether to include Mermaid/ASCII diagrams' },
+      model: { type: 'string', description: 'LLM model override (e.g. claude-opus-4-6)' },
     },
     requiredParams: ['workspaceId', 'specBrief', 'title'],
   },
   {
     name: 'rorca_list_specs',
-    description: 'List all specs in a workspace grouped by status: pending (awaiting review), approved (ready to run), and running (currently executing).',
     category: 'Specs & Pipeline',
+    description: 'List all specs in a workspace grouped by status (pending/approved/running).',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      status: { type: 'string', description: 'Filter by spec status: pending | approved | all' },
+      status: { type: 'string', description: 'Filter by status: pending | approved | all' },
     },
     requiredParams: ['workspaceId'],
   },
   {
     name: 'rorca_approve_spec',
-    description: 'Approve a pending spec and move it to the approved queue. Once approved, the spec can be executed via the pipeline.',
     category: 'Specs & Pipeline',
+    description: 'Approve a pending spec and move it to the approved queue ready for pipeline execution.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      specId: { type: 'string', description: 'Spec ID (from rorca_list_specs output)' },
+      specId: { type: 'string', description: 'Spec ID (from rorca_list_specs)' },
       notes: { type: 'string', description: 'Optional approval notes to append to the spec' },
     },
     requiredParams: ['workspaceId', 'specId'],
   },
   {
     name: 'rorca_pipeline_status',
-    description: 'Get the status of the active or most recent pipeline run for a workspace. Returns run status, story progress counts, elapsed time.',
     category: 'Specs & Pipeline',
+    description: 'Get the status of the active or most recent pipeline run with story-level progress.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      runId: { type: 'number', description: 'Specific run ID. If omitted, returns the most recent run.' },
+      runId: { type: 'number', description: 'Specific run ID (optional, defaults to most recent)' },
     },
     requiredParams: ['workspaceId'],
   },
   {
     name: 'rorca_trigger_run',
-    description: 'Start a pipeline run for an approved spec. Spawns the execution engine to execute all user stories sequentially. Supports dry-run and git worktree isolation.',
     category: 'Specs & Pipeline',
+    description: 'Start a pipeline run for an approved spec. Supports dry-run and isolated git worktree.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      specId: { type: 'string', description: 'Spec ID (filename slug) — must be in approved status' },
-      dryRun: { type: 'boolean', description: 'If true, returns a cost estimate without spawning the run' },
-      autoWorktree: { type: 'boolean', description: 'If true, creates an isolated git worktree branch for this run' },
+      specId: { type: 'string', description: 'Spec ID (filename slug, must be in approved status)' },
+      dryRun: { type: 'boolean', description: 'Return cost estimate without executing (default false)' },
+      autoWorktree: { type: 'boolean', description: 'Create isolated git worktree branch (default false)' },
     },
     requiredParams: ['workspaceId', 'specId'],
   },
   {
     name: 'rorca_run_status',
-    description: 'Get detailed status of a specific pipeline run including per-story progress, elapsed time, token counts, and retry counts.',
     category: 'Specs & Pipeline',
+    description: 'Get detailed per-story status of a specific pipeline run with token counts.',
     inputSchema: {
       runId: { type: 'number', description: 'Pipeline run ID' },
     },
@@ -96,105 +98,91 @@ const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: 'rorca_list_runs',
-    description: 'List recent pipeline runs for a workspace. Returns run status, spec path, story counts, start/finish times.',
     category: 'Specs & Pipeline',
+    description: 'List recent pipeline runs for a workspace ordered by most recent first.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      limit: { type: 'number', description: 'Maximum runs to return (default 10)' },
+      limit: { type: 'number', description: 'Maximum number of runs to return (default 10, max 50)' },
     },
     requiredParams: ['workspaceId'],
   },
   {
     name: 'rorca_retry_story',
-    description: 'Retry failed stories in a completed run. Spawns the execution engine for only the failed stories.',
     category: 'Specs & Pipeline',
+    description: 'Retry one or more failed stories in a completed pipeline run.',
     inputSchema: {
-      runId: { type: 'number', description: 'Pipeline run ID containing the failed stories' },
-      storyId: { type: 'string', description: 'Specific story ID to retry. If omitted, retries all failed stories.' },
+      runId: { type: 'number', description: 'Pipeline run ID' },
+      storyIds: { type: 'array', description: 'Story IDs to retry (e.g. ["US-003"]). Omit to retry all failed.' },
     },
     requiredParams: ['runId'],
   },
   {
-    name: 'rorca_forge_and_run',
-    description: 'Brief-to-completion single tool. Generates a spec from a brief, approves it, and starts the pipeline run — all in one call. Reports progress as stories complete.',
+    name: 'rorca_usage_stats',
     category: 'Specs & Pipeline',
+    description: 'Get token usage and cost summary for a workspace over a date range.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      brief: { type: 'string', description: 'Plain-English description of the feature to build' },
-      title: { type: 'string', description: 'Short title for the spec (used as filename slug)' },
-      storyCount: { type: 'number', description: 'Target number of user stories (default 8)' },
-      model: { type: 'string', description: 'LLM model to use for spec generation' },
-      autoWorktree: { type: 'boolean', description: 'If true, runs in an isolated git worktree branch' },
-      dryRun: { type: 'boolean', description: 'If true, generates and approves spec but does not trigger run' },
+      from: { type: 'string', description: 'Start date (ISO-8601, e.g. "2026-01-01")' },
+      to: { type: 'string', description: 'End date (ISO-8601, e.g. "2026-02-01")' },
+      groupBy: { type: 'string', description: 'Group by: model | spec | story | user (default: model)' },
     },
-    requiredParams: ['workspaceId', 'brief', 'title'],
-  },
-  {
-    name: 'rorca_cancel_run',
-    description: 'Cancel an active pipeline run. Sends SIGTERM to the execution engine process then marks the run as failed in the database.',
-    category: 'Specs & Pipeline',
-    inputSchema: {
-      runId: { type: 'number', description: 'Pipeline run ID to cancel' },
-      reason: { type: 'string', description: 'Optional cancellation reason (recorded in WAL events)' },
-    },
-    requiredParams: ['runId'],
+    requiredParams: ['workspaceId'],
   },
 
-  // ─── Story Editing (4) ────────────────────────────────────────────────────
+  // ─── Story Editing (4 tools) ─────────────────────────────────────────────────
   {
     name: 'rorca_edit_story',
-    description: 'Update a story\'s title, description, or acceptance criteria in a spec file.',
     category: 'Story Editing',
+    description: 'Update a single story\'s title, description, or acceptance criteria in an existing spec.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
       specId: { type: 'string', description: 'Spec ID (filename slug)' },
-      storyId: { type: 'string', description: 'Story ID (e.g. US-001)' },
-      title: { type: 'string', description: 'New story title' },
-      description: { type: 'string', description: 'New story description' },
-      acceptanceCriteria: { type: 'array', description: 'New acceptance criteria list' },
+      storyId: { type: 'string', description: 'Story ID (e.g. "US-001")' },
+      title: { type: 'string', description: 'New title for the story' },
+      description: { type: 'string', description: 'New description for the story' },
+      acceptanceCriteria: { type: 'array', description: 'New acceptance criteria (replaces existing)' },
     },
     requiredParams: ['workspaceId', 'specId', 'storyId'],
   },
   {
     name: 'rorca_add_stories',
-    description: 'Generate and append new LLM-generated stories to an existing spec. Useful for extending a spec after initial generation.',
     category: 'Story Editing',
+    description: 'Generate and append new LLM-generated stories to an existing spec.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      specId: { type: 'string', description: 'Spec ID (filename slug)' },
-      brief: { type: 'string', description: 'Description of the additional stories to generate' },
-      count: { type: 'number', description: 'Number of stories to generate (default 3)' },
+      specId: { type: 'string', description: 'Spec ID (filename slug) to add stories to' },
+      count: { type: 'number', description: 'Number of new stories to generate (default 3, max 20)' },
+      brief: { type: 'string', description: 'Optional guidance for what the new stories should cover' },
     },
-    requiredParams: ['workspaceId', 'specId', 'brief'],
+    requiredParams: ['workspaceId', 'specId'],
   },
   {
     name: 'rorca_delete_story',
-    description: 'Remove a story from a spec. Reindexes remaining stories and creates a snapshot before deletion.',
     category: 'Story Editing',
+    description: 'Remove a story from a spec. Remaining stories are reindexed; a version snapshot is created.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
       specId: { type: 'string', description: 'Spec ID (filename slug)' },
-      storyId: { type: 'string', description: 'Story ID to delete (e.g. US-003)' },
+      storyId: { type: 'string', description: 'Story ID to delete (e.g. "US-003")' },
     },
     requiredParams: ['workspaceId', 'specId', 'storyId'],
   },
   {
     name: 'rorca_search_stories',
-    description: 'Full-text search across all stories in all specs in a workspace. Returns matching stories with their spec and context.',
     category: 'Story Editing',
+    description: 'Full-text search across all specs in a workspace for stories matching a query string.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      query: { type: 'string', description: 'Search query' },
-      limit: { type: 'number', description: 'Max results to return (default 20)' },
+      query: { type: 'string', description: 'Search query — matches story ID, title, description, and AC' },
     },
     requiredParams: ['workspaceId', 'query'],
   },
 
-  // ─── Direction Stack (3) ──────────────────────────────────────────────────
+  // ─── Direction Stack (3 tools) ───────────────────────────────────────────────
   {
     name: 'rorca_get_direction',
-    description: 'Get all direction layers (L1–L3) for a workspace with raw content. L1 = global engineering principles, L2 = domain conventions, L3 = project-specific stack and constraints.',
     category: 'Direction Stack',
+    description: 'Get the full direction stack for a workspace (L1 global brain, L2 domain, L3 project brief).',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
     },
@@ -202,50 +190,53 @@ const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: 'rorca_update_direction',
-    description: 'Update a specific direction layer (L1/L2/L3) for a workspace. Content is markdown. Changes take effect immediately on next spec generation or pipeline run.',
     category: 'Direction Stack',
+    description: 'Update a specific direction layer (L1, L2, or L3) for a workspace with YAML content.',
     inputSchema: {
-      workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      layer: { type: 'string', description: 'Direction layer to update: L1 | L2 | L3' },
-      content: { type: 'string', description: 'New markdown content for this direction layer' },
+      workspaceId: { type: 'string', description: 'Rorca workspace ID (required for L2/L3)' },
+      layer: { type: 'number', description: 'Direction layer: 1 (global brain), 2 (domain), or 3 (project)' },
+      contentYaml: { type: 'string', description: 'YAML content for the layer' },
+      domain: { type: 'string', description: 'Domain name (only relevant for L2 layers)' },
+      preferredModel: { type: 'string', description: 'Preferred LLM model (only valid for L3)' },
     },
-    requiredParams: ['workspaceId', 'layer', 'content'],
+    requiredParams: ['workspaceId', 'layer', 'contentYaml'],
   },
   {
     name: 'rorca_synthesize_direction',
-    description: 'Preview the merged direction string exactly as sent to the LLM. Shows how L1–L5 layers combine, with L4/L5 from an optional spec brief and story annotations.',
     category: 'Direction Stack',
+    description: 'Preview the fully merged direction string exactly as it would be sent to the LLM.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      specBrief: { type: 'string', description: 'L4: spec-level context to include in synthesis' },
-      storyAnnotations: { type: 'string', description: 'L5: story-level annotations to include' },
+      specBrief: { type: 'string', description: 'L4: spec brief text (one-paragraph description)' },
+      storyAnnotations: { type: 'string', description: 'L5: story-level annotations, edge cases' },
     },
     requiredParams: ['workspaceId'],
   },
 
-  // ─── Workspaces (4) ───────────────────────────────────────────────────────
+  // ─── Workspaces (4 tools) ────────────────────────────────────────────────────
   {
     name: 'rorca_list_workspaces',
-    description: 'List all registered workspaces with their paths, domains, and labels.',
     category: 'Workspaces',
+    description: 'List all registered workspaces with their IDs, labels, filesystem paths, and domain tags.',
     inputSchema: {},
     requiredParams: [],
   },
   {
     name: 'rorca_create_workspace',
-    description: 'Register a new workspace by filesystem path. The path must be an existing git repository.',
     category: 'Workspaces',
+    description: 'Register a new workspace by its filesystem path. Path must exist and be a git repository root.',
     inputSchema: {
-      path: { type: 'string', description: 'Absolute filesystem path to the git repository' },
-      label: { type: 'string', description: 'Human-readable label for the workspace' },
-      domain: { type: 'string', description: 'Domain tag (e.g. saas, cli, mobile) for L2 direction routing' },
+      id: { type: 'string', description: 'Unique workspace ID (slug, e.g. "my-project")' },
+      path: { type: 'string', description: 'Absolute filesystem path to the project root' },
+      label: { type: 'string', description: 'Human-readable label (defaults to directory name)' },
+      domains: { type: 'array', description: 'Domain tags for L2 direction matching (e.g. ["saas"])' },
     },
-    requiredParams: ['path', 'label'],
+    requiredParams: ['id', 'path'],
   },
   {
     name: 'rorca_workspace_stats',
-    description: 'Get spec count, run count, pass rate, and last activity timestamp for a workspace.',
     category: 'Workspaces',
+    description: 'Get summary stats for a workspace: spec count, run count, story pass rate, last activity.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
     },
@@ -253,60 +244,49 @@ const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: 'rorca_team_members',
-    description: 'Get team members for a workspace including their roles and last active timestamps.',
     category: 'Workspaces',
+    description: 'Get the team member list for a workspace with roles, emails, and last activity.',
     inputSchema: {
-      workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-    },
-    requiredParams: ['workspaceId'],
-  },
-  // rorca_usage_stats added to Workspaces for 4 total
-  {
-    name: 'rorca_usage_stats',
-    description: 'Get token usage and cost summary for a workspace over a date range. Returns per-model breakdown and total spend.',
-    category: 'Workspaces',
-    inputSchema: {
-      workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      from: { type: 'string', description: 'Start date (ISO format, e.g. 2026-01-01)' },
-      to: { type: 'string', description: 'End date (ISO format, e.g. 2026-03-31)' },
+      workspaceId: { type: 'string', description: 'Rorca workspace ID (must be linked to a team)' },
     },
     requiredParams: ['workspaceId'],
   },
 
-  // ─── Memory (3) ───────────────────────────────────────────────────────────
+  // ─── Memory (3 tools) ────────────────────────────────────────────────────────
   {
     name: 'rorca_save_memory',
-    description: 'Save a memory entry (Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha) to the workspace episodic ledger. Entries are injected into each story\'s context on the next pipeline run.',
     category: 'Memory',
+    description: 'Save a memory entry (Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha) to the workspace ledger.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
       category: { type: 'string', description: 'Memory category: Architecture | Convention | Bug Fix | Decision | Pattern | Gotcha' },
       title: { type: 'string', description: 'Short title summarizing the memory' },
-      rule: { type: 'string', description: 'The rule, convention, or lesson learned' },
-      context: { type: 'string', description: 'Additional context or background' },
+      rule: { type: 'string', description: 'The actual rule, convention, or lesson learned' },
+      context: { type: 'string', description: 'Additional context: why this matters, related files' },
+      source: { type: 'string', description: 'Source of the memory (e.g. "manual", "code-review")' },
     },
     requiredParams: ['workspaceId', 'category', 'title', 'rule'],
   },
   {
     name: 'rorca_log_decision',
-    description: 'Shortcut for saving an architectural decision with structured reasoning. Saved as a Decision category memory entry.',
     category: 'Memory',
+    description: 'Shortcut to save an architectural decision with structured reasoning and alternatives considered.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
       title: { type: 'string', description: 'Decision title (e.g. "Use Zustand over Redux")' },
       decision: { type: 'string', description: 'What was decided and why' },
-      alternatives: { type: 'string', description: 'Alternatives considered and why rejected' },
+      alternatives: { type: 'string', description: 'What alternatives were considered and why rejected' },
     },
     requiredParams: ['workspaceId', 'title', 'decision'],
   },
   {
     name: 'rorca_get_memories',
-    description: 'Retrieve memories from the workspace ledger, optionally filtered by category. Returns timestamped entries sorted by date descending.',
     category: 'Memory',
+    description: 'Retrieve memories from the workspace ledger, optionally filtered by category.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
-      category: { type: 'string', description: 'Filter by category: Architecture | Convention | Bug Fix | Decision | Pattern | Gotcha' },
-      limit: { type: 'number', description: 'Max entries to return (default 20)' },
+      category: { type: 'string', description: 'Filter by category (optional)' },
+      limit: { type: 'number', description: 'Maximum entries to return (default 20, max 100)' },
     },
     requiredParams: ['workspaceId'],
   },
@@ -316,24 +296,16 @@ const MCP_TOOLS: McpToolDef[] = [
  * @swagger
  * /api/mcp/tools:
  *   get:
- *     tags: [MCP]
  *     summary: List all available Rorca MCP tools
- *     operationId: listMcpTools
  *     description: >
- *       Returns the complete list of Rorca MCP tools with their names, descriptions,
- *       categories, input schemas, and required parameters. Tools are grouped into
- *       5 categories: 'Specs & Pipeline' (11 tools), 'Story Editing' (4 tools),
- *       'Direction Stack' (3 tools), 'Workspaces' (5 tools), 'Memory' (3 tools).
- *       Used by the VS Code extension MCP Tools panel to populate its tree view.
- *     parameters:
- *       - in: query
- *         name: category
- *         schema:
- *           type: string
- *         description: Filter tools by category (optional)
+ *       Returns all 24+ Rorca MCP tools grouped into 5 categories: Specs & Pipeline,
+ *       Story Editing, Direction Stack, Workspaces, and Memory. Used by the VS Code
+ *       extension tree view (MC-004) and any OpenAPI-to-MCP generation.
+ *     tags:
+ *       - MCP
  *     responses:
  *       200:
- *         description: List of MCP tools
+ *         description: List of all MCP tools
  *         content:
  *           application/json:
  *             schema:
@@ -343,43 +315,32 @@ const MCP_TOOLS: McpToolDef[] = [
  *                   type: array
  *                   items:
  *                     type: object
+ *                     required:
+ *                       - name
+ *                       - description
+ *                       - category
+ *                       - inputSchema
+ *                       - requiredParams
  *                     properties:
- *                       name: { type: string }
- *                       description: { type: string }
- *                       category: { type: string }
- *                       inputSchema: { type: object }
+ *                       name:
+ *                         type: string
+ *                         example: rorca_generate_spec
+ *                       description:
+ *                         type: string
+ *                         example: Generate a spec JSON from a brief
+ *                       category:
+ *                         type: string
+ *                         enum: [Specs & Pipeline, Story Editing, Direction Stack, Workspaces, Memory]
+ *                       inputSchema:
+ *                         type: object
+ *                         additionalProperties: true
  *                       requiredParams:
  *                         type: array
- *                         items: { type: string }
- *                 total: { type: integer }
- *                 categories:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       name: { type: string }
- *                       count: { type: integer }
+ *                         items:
+ *                           type: string
  */
-router.get('/', (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    const category = _req.query.category as string | undefined;
-    const tools = category
-      ? MCP_TOOLS.filter(t => t.category === category)
-      : MCP_TOOLS;
-
-    // Build category summary
-    const categoryMap = new Map<string, number>();
-    for (const t of MCP_TOOLS) {
-      categoryMap.set(t.category, (categoryMap.get(t.category) ?? 0) + 1);
-    }
-    const categories = Array.from(categoryMap.entries()).map(([name, count]) => ({ name, count }));
-
-    res.json({
-      tools,
-      total: tools.length,
-      categories,
-    });
-  } catch (err) { next(err); }
+router.get('/', (_req, res) => {
+  res.json({ tools: MCP_TOOLS });
 });
 
 export default router;

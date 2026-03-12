@@ -33,16 +33,25 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getServerUrl = getServerUrl;
-exports.isServerOnline = isServerOnline;
+exports.RorcaMcpToolsProvider = void 0;
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const http = __importStar(require("http"));
 const https = __importStar(require("https"));
-/** Categories with their default collapse state */
-const CATEGORY_COLLAPSED_BY_DEFAULT = new Set(['Memory', 'Direction Stack']);
-// ─── Settings helpers ─────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
+const HEALTH_POLL_INTERVAL_MS = 30000;
+/** Categories expanded by default in the tree */
+const EXPANDED_BY_DEFAULT = new Set(['Specs & Pipeline']);
+/** Map category name → /api/docs tag anchor for "View Documentation" */
+const CATEGORY_DOC_TAG = {
+    'Specs & Pipeline': 'MCP',
+    'Story Editing': 'MCP',
+    'Direction Stack': 'MCP',
+    'Workspaces': 'MCP',
+    'Memory': 'MCP',
+};
+// ─── Config helpers ───────────────────────────────────────────────────────────
 function getConfig() {
     return vscode.workspace.getConfiguration('rorca');
 }
@@ -61,331 +70,336 @@ function getInsertSyntax() {
 function isValidUrl(url) {
     return url.startsWith('http://') || url.startsWith('https://');
 }
-class CategoryTreeItem extends vscode.TreeItem {
-    constructor(categoryName, toolCount) {
-        super(categoryName, CATEGORY_COLLAPSED_BY_DEFAULT.has(categoryName)
-            ? vscode.TreeItemCollapsibleState.Collapsed
-            : vscode.TreeItemCollapsibleState.Expanded);
-        this.categoryName = categoryName;
-        this.toolCount = toolCount;
-        this.kind = 'category';
-        this.description = `${toolCount} tool${toolCount === 1 ? '' : 's'}`;
-        this.iconPath = new vscode.ThemeIcon('folder');
-        this.tooltip = `${categoryName} — ${toolCount} tool${toolCount === 1 ? '' : 's'}`;
-        this.accessibilityInformation = {
-            label: `${categoryName} category, ${toolCount} tools`,
-            role: 'treeitem',
-        };
+// ─── Insert-at-cursor text builder ────────────────────────────────────────────
+function buildInsertText(tool, syntax) {
+    switch (syntax) {
+        case 'name-only':
+            return tool.name;
+        case 'json-call': {
+            const call = {
+                tool: tool.name,
+                params: Object.fromEntries(tool.requiredParams.map(p => [p, ''])),
+            };
+            return JSON.stringify(call, null, 2);
+        }
+        case 'slash-command': {
+            const args = tool.requiredParams.join(' ');
+            return args ? `/mcp__rorca__${tool.name} ${args}` : `/mcp__rorca__${tool.name}`;
+        }
     }
 }
-class ToolTreeItem extends vscode.TreeItem {
-    constructor(tool) {
-        super(tool.name, vscode.TreeItemCollapsibleState.None);
-        this.tool = tool;
-        this.kind = 'tool';
-        const requiredCount = tool.requiredParams.length;
-        this.description = `· ${requiredCount} required param${requiredCount === 1 ? '' : 's'}`;
-        this.iconPath = new vscode.ThemeIcon('symbol-function');
-        this.contextValue = 'rorcaMcpTool';
-        this.accessibilityInformation = {
-            label: `${tool.name} ${tool.category}`,
-            role: 'treeitem',
-        };
-        // Double-click triggers insert — handled via command binding
-        this.command = {
-            command: 'rorca._selectTool',
-            title: 'Select Tool',
-            arguments: [tool],
-        };
-    }
-}
-class OfflineTreeItem extends vscode.TreeItem {
-    constructor() {
-        super('⚠ Rorca server offline', vscode.TreeItemCollapsibleState.None);
-        this.kind = 'offline';
-        this.description = 'click to start';
-        this.contextValue = 'rorcaOffline';
-        this.iconPath = new vscode.ThemeIcon('warning');
-        this.command = {
-            command: 'rorca.startServer',
-            title: 'Start Rorca Server',
-        };
-    }
-}
-class EmptyTreeItem extends vscode.TreeItem {
-    constructor() {
-        super('No MCP tools found. Is the Rorca server running?', vscode.TreeItemCollapsibleState.None);
-        this.kind = 'empty';
-        this.iconPath = new vscode.ThemeIcon('info');
-    }
-}
-class CachedToolTreeItem extends vscode.TreeItem {
-    constructor(tool) {
-        super(tool.name, vscode.TreeItemCollapsibleState.None);
-        this.tool = tool;
-        this.kind = 'tool';
-        const requiredCount = tool.requiredParams.length;
-        this.description = `· ${requiredCount} required param${requiredCount === 1 ? '' : 's'} (cached)`;
-        this.iconPath = new vscode.ThemeIcon('symbol-function');
-        this.contextValue = 'rorcaMcpTool';
-        this.accessibilityInformation = {
-            label: `${tool.name} ${tool.category} (cached)`,
-            role: 'treeitem',
-        };
-        this.command = {
-            command: 'rorca._selectTool',
-            title: 'Select Tool',
-            arguments: [tool],
-        };
-    }
-}
-// ─── TreeDataProvider ─────────────────────────────────────────────────────────
+// ─── RorcaMcpToolsProvider ────────────────────────────────────────────────────
 class RorcaMcpToolsProvider {
     constructor() {
         this._onDidChangeTreeData = new vscode.EventEmitter();
         this.onDidChangeTreeData = this._onDidChangeTreeData.event;
         this.tools = [];
-        this.cachedTools = [];
-        this.isOnline = false;
-        this.lastFetch = 0;
-        // Track last single click time for double-click detection
-        this.lastClickTime = 0;
-        this.lastClickedTool = null;
+        this.cachedTools = []; // Kept across offline periods
+        this.serverOnline = false;
+        // Initial fetch is triggered from activate() after status bar is ready
     }
+    // ─── TreeDataProvider ────────────────────────────────────────────────────
     getTreeItem(element) {
         return element;
     }
     getChildren(element) {
         if (!element) {
-            // Root level
-            if (!this.isOnline && this.cachedTools.length === 0) {
-                return [new OfflineTreeItem()];
+            // Root level: offline sentinel OR category nodes
+            if (!this.serverOnline && this.tools.length === 0) {
+                if (this.cachedTools.length > 0) {
+                    // Server offline but we have cached data — show cached + offline warning
+                    return [this.buildOfflineItem(), ...this.buildCategoryNodes(this.cachedTools, true)];
+                }
+                return [this.buildOfflineItem()];
             }
-            const toolList = this.isOnline ? this.tools : this.cachedTools;
-            if (!this.isOnline && this.cachedTools.length > 0) {
-                // Show offline item + cached categories
-                const offlineItem = new OfflineTreeItem();
-                const categories = this.buildCategoryItems(toolList, true);
-                return [offlineItem, ...categories];
+            const toolsToShow = this.tools.length > 0 ? this.tools : this.cachedTools;
+            if (toolsToShow.length === 0) {
+                return [this.buildEmptyItem()];
             }
-            if (toolList.length === 0) {
-                return [new EmptyTreeItem()];
+            const nodes = this.buildCategoryNodes(toolsToShow, !this.serverOnline);
+            if (!this.serverOnline) {
+                nodes.unshift(this.buildOfflineItem());
             }
-            return this.buildCategoryItems(toolList, false);
+            return nodes;
         }
         if (element.kind === 'category') {
-            const toolList = this.isOnline ? this.tools : this.cachedTools;
-            const categoryTools = toolList.filter(t => t.category === element.categoryName);
-            return categoryTools.map(t => this.isOnline ? new ToolTreeItem(t) : new CachedToolTreeItem(t));
+            return element.children ?? [];
         }
         return [];
     }
-    buildCategoryItems(toolList, _cached) {
-        const categoryMap = new Map();
-        for (const t of toolList) {
-            categoryMap.set(t.category, (categoryMap.get(t.category) ?? 0) + 1);
-        }
-        return Array.from(categoryMap.entries()).map(([name, count]) => new CategoryTreeItem(name, count));
-    }
-    resolveTreeItem(item, element) {
-        if (element.kind !== 'tool')
+    resolveTreeItem(item, _element) {
+        if (item.kind !== 'tool' || !item.tool) {
             return item;
-        const tool = element.tool;
-        const md = new vscode.MarkdownString();
-        md.isTrusted = true;
-        md.appendMarkdown(`**${tool.name}**\n\n`);
-        md.appendMarkdown(`${tool.description}\n\n`);
-        if (tool.requiredParams.length > 0) {
-            md.appendMarkdown(`**Required parameters:**\n`);
-            for (const p of tool.requiredParams) {
-                const schema = tool.inputSchema[p];
-                md.appendMarkdown(`- \`${p}\`: ${schema?.description ?? ''}\n`);
-            }
-            md.appendMarkdown('\n');
         }
-        md.appendMarkdown(`**Example call:**\n`);
-        md.appendCodeblock(JSON.stringify({ tool: tool.name, params: Object.fromEntries(tool.requiredParams.map(p => [p, ''])) }, null, 2), 'json');
+        const tool = item.tool;
+        const paramLines = tool.requiredParams.length > 0
+            ? tool.requiredParams.map(p => `- \`${p}\` *(required)*`).join('\n')
+            : '*(no required params)*';
+        const exampleCall = JSON.stringify({ tool: tool.name, params: Object.fromEntries(tool.requiredParams.map(p => [p, ''])) }, null, 2);
+        const md = new vscode.MarkdownString(`**${tool.name}**\n\n${tool.description}\n\n**Required parameters:**\n${paramLines}\n\n**Example:**\n\`\`\`json\n${exampleCall}\n\`\`\``, true);
+        md.isTrusted = true;
         item.tooltip = md;
         return item;
     }
+    // ─── Data fetching ────────────────────────────────────────────────────────
     async fetchTools() {
         try {
-            const data = await this.httpGet('/api/mcp/tools');
-            this.tools = data.tools;
-            if (data.tools.length > 0) {
-                this.cachedTools = data.tools;
+            const data = await apiGet('/api/mcp/tools');
+            this.tools = data.tools ?? [];
+            if (this.tools.length > 0) {
+                this.cachedTools = [...this.tools];
             }
-            this.setOnline(true);
-            this.lastFetch = Date.now();
-            vscode.commands.executeCommand('setContext', 'rorca.toolsLoaded', true);
         }
         catch {
-            this.setOnline(false);
+            // Keep previously cached tools; mark as offline (serverOnline managed by health poll)
             this.tools = [];
         }
-        this._onDidChangeTreeData.fire(undefined);
+        this._onDidChangeTreeData.fire();
     }
-    setOnline(online) {
-        const changed = this.isOnline !== online;
-        this.isOnline = online;
-        if (changed) {
-            this._onDidChangeTreeData.fire(undefined);
+    setServerOnline(online) {
+        if (this.serverOnline === online) {
+            return;
+        }
+        this.serverOnline = online;
+        if (online) {
+            // Server came back — re-fetch tools immediately
+            void this.fetchTools();
+        }
+        else {
+            // Server went offline — clear live list but keep cache
+            this.tools = [];
+            this._onDidChangeTreeData.fire();
         }
     }
     refresh() {
-        this._onDidChangeTreeData.fire(undefined);
+        void this.fetchTools();
+    }
+    startAutoRefresh(intervalSeconds) {
+        this.stopAutoRefresh();
+        const secs = intervalSeconds ?? getAutoRefreshInterval();
+        if (secs <= 0) {
+            return; // 0 = disabled
+        }
+        this.toolsRefreshTimer = setInterval(() => {
+            if (this.serverOnline) {
+                void this.fetchTools();
+            }
+        }, secs * 1000);
+    }
+    stopAutoRefresh() {
+        if (this.toolsRefreshTimer) {
+            clearInterval(this.toolsRefreshTimer);
+            this.toolsRefreshTimer = undefined;
+        }
     }
     dispose() {
+        this.stopAutoRefresh();
         this._onDidChangeTreeData.dispose();
     }
-    handleToolClick(tool) {
-        const now = Date.now();
-        const isDoubleClick = now - this.lastClickTime < 500 && this.lastClickedTool?.name === tool.name;
-        this.lastClickTime = now;
-        this.lastClickedTool = tool;
-        if (isDoubleClick) {
-            // Double-click → insert at cursor using configured syntax
-            insertAtCursorWithSyntax(tool);
+    // ─── Builder helpers ──────────────────────────────────────────────────────
+    buildCategoryNodes(tools, cached) {
+        const byCategory = new Map();
+        for (const tool of tools) {
+            const list = byCategory.get(tool.category) ?? [];
+            list.push(tool);
+            byCategory.set(tool.category, list);
         }
-        // Single click → no-op (just selection)
+        return [...byCategory.entries()].map(([cat, catTools]) => {
+            const children = catTools.map(t => this.buildToolNode(t, cached));
+            const node = {
+                kind: 'category',
+                category: cat,
+                label: cat,
+                description: `${catTools.length} tool${catTools.length !== 1 ? 's' : ''}`,
+                collapsibleState: EXPANDED_BY_DEFAULT.has(cat)
+                    ? vscode.TreeItemCollapsibleState.Expanded
+                    : vscode.TreeItemCollapsibleState.Collapsed,
+                iconPath: new vscode.ThemeIcon('folder'),
+                tooltip: `${cat} — ${catTools.length} tool${catTools.length !== 1 ? 's' : ''}`,
+                accessibilityInformation: {
+                    label: `${cat} category, ${catTools.length} tools`,
+                },
+                children,
+            };
+            return node;
+        });
     }
-    httpGet(path) {
+    buildToolNode(tool, cached) {
+        const reqCount = tool.requiredParams.length;
+        const suffix = reqCount > 0 ? ` · ${reqCount} required param${reqCount !== 1 ? 's' : ''}` : '';
+        const node = {
+            kind: 'tool',
+            tool,
+            label: tool.name,
+            description: cached
+                ? `${tool.description.slice(0, 60)}${tool.description.length > 60 ? '…' : ''} (cached)${suffix}`
+                : `${tool.description.slice(0, 60)}${tool.description.length > 60 ? '…' : ''}${suffix}`,
+            collapsibleState: vscode.TreeItemCollapsibleState.None,
+            iconPath: new vscode.ThemeIcon('symbol-function'),
+            contextValue: 'rorcaMcpTool',
+            // tooltip is populated lazily via resolveTreeItem
+            accessibilityInformation: {
+                label: `${tool.name}, ${tool.category}`,
+            },
+            command: {
+                // Double-click fires insertAtCursor; single-click just selects
+                command: 'rorca.insertAtCursor',
+                title: 'Insert at Cursor',
+                arguments: [{ kind: 'tool', tool }],
+            },
+        };
+        return node;
+    }
+    buildOfflineItem() {
         const apiUrl = getApiUrl();
-        const fullUrl = `${apiUrl}${path}`;
-        const isHttps = fullUrl.startsWith('https://');
-        const lib = isHttps ? https : http;
-        return new Promise((resolve, reject) => {
-            const req = lib.get(fullUrl, (res) => {
+        return {
+            kind: 'offline',
+            label: '⚠ Rorca server offline',
+            description: 'click to start',
+            collapsibleState: vscode.TreeItemCollapsibleState.None,
+            iconPath: new vscode.ThemeIcon('warning'),
+            contextValue: 'rorcaOffline',
+            tooltip: `The Rorca backend is not reachable at ${apiUrl}`,
+            command: {
+                command: 'rorca.startServer',
+                title: 'Start Rorca Server',
+                arguments: [],
+            },
+        };
+    }
+    buildEmptyItem() {
+        return {
+            kind: 'offline',
+            label: 'No MCP tools found. Is the Rorca server running?',
+            collapsibleState: vscode.TreeItemCollapsibleState.None,
+            iconPath: new vscode.ThemeIcon('info'),
+            contextValue: '',
+        };
+    }
+}
+exports.RorcaMcpToolsProvider = RorcaMcpToolsProvider;
+// ─── HTTP helpers ─────────────────────────────────────────────────────────────
+function apiGet(path, baseUrl) {
+    return new Promise((resolve, reject) => {
+        const base = baseUrl ?? getApiUrl();
+        const url = new URL(path, base);
+        const isHttps = url.protocol === 'https:';
+        const transport = isHttps ? https : http;
+        const port = Number(url.port) || (isHttps ? 443 : 3030);
+        const req = transport.get({ hostname: url.hostname, port, path: url.pathname + url.search, timeout: 5000 }, (res) => {
+            let body = '';
+            res.on('data', (chunk) => { body += chunk.toString(); });
+            res.on('end', () => {
                 if (res.statusCode === 401) {
-                    reject(new Error('UNAUTHORIZED'));
+                    reject(new Error('AUTH_REQUIRED'));
                     return;
                 }
-                if (!res.statusCode || res.statusCode >= 400) {
+                if ((res.statusCode ?? 0) >= 400) {
                     reject(new Error(`HTTP ${res.statusCode}`));
                     return;
                 }
-                const chunks = [];
-                res.on('data', (chunk) => chunks.push(chunk));
-                res.on('end', () => {
-                    try {
-                        resolve(JSON.parse(Buffer.concat(chunks).toString()));
-                    }
-                    catch (e) {
-                        reject(e);
-                    }
-                });
+                try {
+                    resolve(JSON.parse(body));
+                }
+                catch {
+                    reject(new Error('Invalid JSON from server'));
+                }
             });
-            req.on('error', reject);
-            req.setTimeout(5000, () => { req.destroy(); reject(new Error('Timeout')); });
         });
-    }
-    getIsOnline() { return this.isOnline; }
-    getApi() { return getApiUrl(); }
-}
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function buildInsertText(tool) {
-    const syntax = getInsertSyntax();
-    if (syntax === 'json-call') {
-        return JSON.stringify({ tool: tool.name, params: Object.fromEntries(tool.requiredParams.map(p => [p, ''])) }, null, 2);
-    }
-    if (syntax === 'slash-command') {
-        const args = tool.requiredParams.map(p => p).join(' ');
-        return `/mcp__rorca__${tool.name}${args ? ' ' + args : ''}`;
-    }
-    // default: name-only
-    return tool.name;
-}
-function insertAtCursorWithSyntax(tool) {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-        vscode.window.showWarningMessage('Open a file to insert the tool name');
-        return;
-    }
-    const text = buildInsertText(tool);
-    editor.edit(editBuilder => {
-        editBuilder.insert(editor.selection.active, text);
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('ECONNREFUSED')); });
     });
 }
-function insertAtCursor(text) {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-        vscode.window.showWarningMessage('Open a file to insert the tool name');
-        return;
+async function checkHealth(apiUrl) {
+    try {
+        await apiGet('/api/health', apiUrl);
+        return true;
     }
-    editor.edit(editBuilder => {
-        editBuilder.insert(editor.selection.active, text);
-    });
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return !msg.includes('ECONNREFUSED') && !msg.includes('ENOTFOUND') && !msg.includes('ECONNRESET');
+    }
 }
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── Extension entry points ───────────────────────────────────────────────────
+// Module-level state for public API
+let _currentApiUrl = 'http://localhost:3030';
 let _serverOnline = false;
-function getServerUrl() {
-    return getApiUrl();
-}
-function isServerOnline() {
-    return _serverOnline;
-}
-// ─── Activation ───────────────────────────────────────────────────────────────
-function activate(context) {
-    // Validate settings on activation
-    const initialApiUrl = getApiUrl();
-    if (!isValidUrl(initialApiUrl)) {
-        vscode.window.showWarningMessage(`Rorca: rorca.apiUrl must start with http:// or https://. Current value: "${initialApiUrl}"`);
+async function activate(context) {
+    void vscode.commands.executeCommand('setContext', 'rorca.extensionActive', true);
+    void vscode.commands.executeCommand('setContext', 'rorca.serverOnline', false);
+    _currentApiUrl = getApiUrl();
+    // ── Validate initial settings ─────────────────────────────────────────────
+    if (!isValidUrl(_currentApiUrl)) {
+        void vscode.window.showWarningMessage(`Rorca: rorca.apiUrl '${_currentApiUrl}' is invalid. Must start with http:// or https://. Using http://localhost:3030.`);
+        _currentApiUrl = 'http://localhost:3030';
     }
-    // Set initial context flags
-    vscode.commands.executeCommand('setContext', 'rorca.extensionActive', true);
-    vscode.commands.executeCommand('setContext', 'rorca.serverOnline', false);
-    vscode.commands.executeCommand('setContext', 'rorca.toolsLoaded', false);
-    const provider = new RorcaMcpToolsProvider();
-    // Register tree data provider
-    const treeDisposable = vscode.window.registerTreeDataProvider('rorcaMcpTools', provider);
-    context.subscriptions.push(treeDisposable);
-    // ─── Status bar ───────────────────────────────────────────────────────────
-    const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
-    statusBar.command = 'rorca.openToolsPanel';
+    const initialRefreshInterval = getAutoRefreshInterval();
+    if (initialRefreshInterval > 3600) {
+        void vscode.window.showWarningMessage('Rorca: autoRefreshInterval must be between 0 and 3600 seconds');
+    }
+    // ── Status bar item ──────────────────────────────────────────────────────
+    const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBar.text = '○ Rorca';
-    statusBar.color = new vscode.ThemeColor('charts.yellow');
-    statusBar.tooltip = 'Rorca — server offline. Click to open MCP Tools panel.';
-    // Show/hide based on setting
+    statusBar.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+    statusBar.tooltip = 'Rorca — server offline. Click to open MCP Tools.';
+    statusBar.command = 'rorca.openMcpPanel';
     if (getShowStatusBarItem()) {
         statusBar.show();
     }
-    else {
-        statusBar.hide();
-    }
     context.subscriptions.push(statusBar);
-    function updateStatusBar(online) {
-        if (online) {
-            statusBar.text = '● Rorca';
-            statusBar.color = new vscode.ThemeColor('charts.green');
-            statusBar.tooltip = 'Rorca — server online. Click to open MCP Tools panel.';
-        }
-        else {
-            statusBar.text = '○ Rorca';
-            statusBar.color = new vscode.ThemeColor('charts.yellow');
-            statusBar.tooltip = 'Rorca — server offline. Click to open MCP Tools panel.';
-        }
+    // ── Tree view provider ───────────────────────────────────────────────────
+    const provider = new RorcaMcpToolsProvider();
+    const treeView = vscode.window.registerTreeDataProvider('rorcaMcpTools', provider);
+    context.subscriptions.push(treeView);
+    // ── Health polling ───────────────────────────────────────────────────────
+    let previousOnline = false;
+    async function pollHealth() {
+        const online = await checkHealth(_currentApiUrl);
         _serverOnline = online;
-        vscode.commands.executeCommand('setContext', 'rorca.serverOnline', online);
+        if (online !== previousOnline) {
+            previousOnline = online;
+            provider.setServerOnline(online);
+            void vscode.commands.executeCommand('setContext', 'rorca.serverOnline', online);
+            if (online) {
+                statusBar.text = '● Rorca';
+                statusBar.color = new vscode.ThemeColor('statusBarItem.prominentForeground');
+                statusBar.tooltip = 'Rorca — server online. Click to open MCP Tools.';
+            }
+            else {
+                statusBar.text = '○ Rorca';
+                statusBar.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+                statusBar.tooltip = 'Rorca — server offline. Click to open MCP Tools.';
+            }
+        }
     }
-    // ─── Configuration change listener ────────────────────────────────────────
+    // First health check within 5s of activation
+    void pollHealth();
+    const healthTimer = setInterval(() => { void pollHealth(); }, HEALTH_POLL_INTERVAL_MS);
+    context.subscriptions.push({ dispose: () => clearInterval(healthTimer) });
+    // Auto-refresh tools
+    provider.startAutoRefresh(getAutoRefreshInterval());
+    context.subscriptions.push({ dispose: () => provider.stopAutoRefresh() });
+    context.subscriptions.push({ dispose: () => provider.dispose() });
+    // ── Configuration change listener ─────────────────────────────────────────
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (e) => {
         if (e.affectsConfiguration('rorca.apiUrl')) {
             const newUrl = getApiUrl();
             if (!isValidUrl(newUrl)) {
-                vscode.window.showWarningMessage(`Rorca: rorca.apiUrl must start with http:// or https://. Current value: "${newUrl}"`);
+                void vscode.window.showWarningMessage(`Rorca: rorca.apiUrl '${newUrl}' is invalid. Must start with http:// or https://.`);
+                return;
             }
-            else {
-                // Re-fetch tools with new URL
-                await provider.fetchTools();
-            }
+            _currentApiUrl = newUrl;
+            // Re-fetch tools with new URL
+            provider.refresh();
+            void pollHealth();
         }
         if (e.affectsConfiguration('rorca.autoRefreshInterval')) {
-            const interval = getAutoRefreshInterval();
-            if (interval > 3600) {
-                vscode.window.showWarningMessage('Rorca: autoRefreshInterval must be between 0 and 3600 seconds');
+            const secs = getAutoRefreshInterval();
+            if (secs > 3600) {
+                void vscode.window.showWarningMessage('Rorca: autoRefreshInterval must be between 0 and 3600 seconds');
+                return;
             }
-            // Restart auto-refresh with new interval
-            restartAutoRefresh();
+            provider.startAutoRefresh(secs);
         }
         if (e.affectsConfiguration('rorca.showStatusBarItem')) {
             if (getShowStatusBarItem()) {
@@ -396,164 +410,107 @@ function activate(context) {
             }
         }
     }));
-    // ─── Health poll ──────────────────────────────────────────────────────────
-    let previousOnline = null;
-    async function pollHealth() {
-        try {
-            await provider.httpGet('/api/health');
-            const isOnline = true;
-            if (isOnline !== previousOnline) {
-                previousOnline = isOnline;
-                updateStatusBar(true);
-                provider.setOnline(true);
-                // Server came back online — refresh tools
-                await provider.fetchTools();
-            }
-        }
-        catch (err) {
-            const isUnauth = err instanceof Error && err.message === 'UNAUTHORIZED';
-            const isOnline = false;
-            if (isOnline !== previousOnline) {
-                previousOnline = isOnline;
-                updateStatusBar(false);
-                provider.setOnline(false);
-                provider.refresh();
-            }
-            if (isUnauth) {
-                // Auth tree item rendered via offline state + contextValue handling
-                void isUnauth; // handled via tree display
-            }
-        }
-    }
-    // Initial poll + fetch
-    void pollHealth().then(() => {
-        if (provider.getIsOnline()) {
-            return provider.fetchTools();
-        }
-    });
-    const healthInterval = setInterval(() => void pollHealth(), 30000);
-    context.subscriptions.push({ dispose: () => clearInterval(healthInterval) });
-    // ─── Auto-refresh (restartable when interval changes) ────────────────────
-    let autoRefreshTimer = null;
-    function restartAutoRefresh() {
-        if (autoRefreshTimer !== null) {
-            clearInterval(autoRefreshTimer);
-            autoRefreshTimer = null;
-        }
-        const intervalSec = getAutoRefreshInterval();
-        if (intervalSec > 0) {
-            autoRefreshTimer = setInterval(() => {
-                if (provider.getIsOnline()) {
-                    void provider.fetchTools();
-                }
-            }, intervalSec * 1000);
-        }
-    }
-    restartAutoRefresh();
-    context.subscriptions.push({ dispose: () => { if (autoRefreshTimer !== null)
-            clearInterval(autoRefreshTimer); } });
-    // ─── Commands ──────────────────────────────────────────────────────────────
+    // ── Commands ──────────────────────────────────────────────────────────────
+    context.subscriptions.push(vscode.commands.registerCommand('rorca.openMcpPanel', () => {
+        void vscode.commands.executeCommand('rorcaMcpTools.focus');
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('rorca.refreshMcpTools', async () => {
-        if (!provider.getIsOnline()) {
-            vscode.window.showWarningMessage('Rorca server is offline. Start the server first.');
+        provider.refresh();
+        // Wait for fetch to complete then show message
+        await new Promise(r => setTimeout(r, 800));
+        const count = provider.tools?.length ?? 0;
+        void vscode.window.showInformationMessage(`Rorca: MCP tools refreshed (${count} tools)`);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('rorca.copyToolName', (item) => {
+        const toolName = item?.tool?.name;
+        if (!toolName) {
             return;
         }
-        await provider.fetchTools();
-        vscode.window.showInformationMessage('Rorca: MCP tools refreshed');
-    }), vscode.commands.registerCommand('rorca.startServer', () => {
-        // Open a terminal and guide user to start the server
-        const terminal = vscode.window.createTerminal('Rorca Server');
-        terminal.sendText('# Start the Rorca backend server:');
-        terminal.sendText('# cd /path/to/rorca && npm run dev');
-        terminal.show();
-    }), vscode.commands.registerCommand('rorca.openToolsPanel', () => {
-        vscode.commands.executeCommand('rorcaMcpTools.focus');
-    }), vscode.commands.registerCommand('rorca.copyToolName', async (item) => {
-        if (!item?.tool)
+        void vscode.env.clipboard.writeText(toolName).then(() => {
+            void vscode.window.showInformationMessage(`Copied ${toolName} to clipboard`);
+        });
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('rorca.insertAtCursor', (item) => {
+        const tool = item?.tool;
+        if (!tool) {
             return;
-        await vscode.env.clipboard.writeText(item.tool.name);
-        vscode.window.showInformationMessage(`Copied ${item.tool.name} to clipboard`);
-    }), vscode.commands.registerCommand('rorca.insertAtCursor', (item) => {
-        if (!item?.tool)
+        }
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            void vscode.window.showWarningMessage('Open a file to insert the tool name');
             return;
-        insertAtCursorWithSyntax(item.tool);
-    }), vscode.commands.registerCommand('rorca.copyAsMcpCall', async (item) => {
-        if (!item?.tool)
+        }
+        const text = buildInsertText(tool, getInsertSyntax());
+        void editor.edit(eb => eb.insert(editor.selection.active, text));
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('rorca.copyAsMcpCall', (item) => {
+        const tool = item?.tool;
+        if (!tool) {
             return;
-        const { tool } = item;
-        const mcpCall = JSON.stringify({
+        }
+        const call = JSON.stringify({
             tool: tool.name,
             params: Object.fromEntries(tool.requiredParams.map(p => [p, ''])),
         }, null, 2);
-        await vscode.env.clipboard.writeText(mcpCall);
-        vscode.window.showInformationMessage(`Copied MCP call for ${tool.name} to clipboard`);
-    }), vscode.commands.registerCommand('rorca.viewDocumentation', (item) => {
-        if (!item?.tool)
-            return;
-        const category = encodeURIComponent(item.tool.category);
-        const docsUrl = `${provider.getApi()}/api/docs#tag/${category}`;
-        void vscode.env.openExternal(vscode.Uri.parse(docsUrl));
-    }), 
-    // Internal: handle single/double click on tool items
-    vscode.commands.registerCommand('rorca._selectTool', (tool) => {
-        provider.handleToolClick(tool);
-    }), 
-    // Test connection command
-    vscode.commands.registerCommand('rorca.testConnection', async () => {
-        const apiUrl = getApiUrl();
-        if (!isValidUrl(apiUrl)) {
-            vscode.window.showErrorMessage(`Cannot connect to Rorca at ${apiUrl}. Check rorca.apiUrl in settings.`);
-            return;
-        }
+        void vscode.env.clipboard.writeText(call).then(() => {
+            void vscode.window.showInformationMessage(`Copied MCP call for ${tool.name} to clipboard`);
+        });
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('rorca.viewDocumentation', (item) => {
+        const category = item?.tool?.category ?? '';
+        const tag = CATEGORY_DOC_TAG[category] ?? 'MCP';
+        const docUrl = `${_currentApiUrl}/api/docs#tag/${tag}`;
+        void vscode.env.openExternal(vscode.Uri.parse(docUrl));
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('rorca.startServer', () => {
+        // Open a terminal and run the start command — user must have rorca installed
+        const terminal = vscode.window.createTerminal('Rorca');
+        terminal.show();
+        terminal.sendText('npm run dev', false);
+        void vscode.window.showInformationMessage('Rorca: starting server in terminal (npm run dev)');
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('rorca.testConnection', async () => {
+        const url = _currentApiUrl;
         try {
-            const health = await provider.httpGet('/api/health');
-            const version = health.version ?? '1.x.x';
-            const choice = await vscode.window.showInformationMessage(`Rorca server is online (v${version})`, 'Change Server URL');
-            if (choice === 'Change Server URL') {
-                await vscode.commands.executeCommand('workbench.action.openSettings', 'rorca.apiUrl');
+            const result = await apiGet('/api/health', url);
+            const version = result?.version ?? '1.x.x';
+            const action = await vscode.window.showInformationMessage(`Rorca server is online (v${version})`, 'Change Server URL');
+            if (action === 'Change Server URL') {
+                void vscode.commands.executeCommand('workbench.action.openSettings', 'rorca.apiUrl');
             }
         }
         catch {
-            vscode.window.showErrorMessage(`Cannot connect to Rorca at ${apiUrl}. Check rorca.apiUrl in settings.`);
+            void vscode.window.showErrorMessage(`Cannot connect to Rorca at ${url}. Check rorca.apiUrl in settings.`);
         }
-    }), 
-    // Forge from selection command
-    vscode.commands.registerCommand('rorca.forgeFromSelection', () => {
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('rorca.forgeFromSelection', () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            vscode.window.showWarningMessage('No active editor');
+            void vscode.window.showWarningMessage('Rorca: Open a file and select text to forge from selection');
             return;
         }
         const selection = editor.document.getText(editor.selection);
-        if (!selection) {
-            vscode.window.showWarningMessage('No text selected');
+        if (!selection.trim()) {
+            void vscode.window.showWarningMessage('Rorca: Select some text first to use as the spec brief');
             return;
         }
-        const defaultWorkspacePath = getConfig().get('defaultWorkspacePath', '');
-        const workspaceArg = defaultWorkspacePath ? ` --workspace "${defaultWorkspacePath}"` : '';
         const terminal = vscode.window.createTerminal('Rorca Forge');
-        terminal.sendText(`rorca forge "${selection.replace(/"/g, '\\"')}"${workspaceArg}`);
         terminal.show();
-    }), 
-    // Run spec from explorer context menu
-    vscode.commands.registerCommand('rorca.runSpec', (uri) => {
-        if (!uri)
-            return;
-        const specPath = uri.fsPath;
-        const defaultWorkspacePath = getConfig().get('defaultWorkspacePath', '');
-        const workspaceArg = defaultWorkspacePath ? ` --workspace "${defaultWorkspacePath}"` : '';
-        const terminal = vscode.window.createTerminal('Rorca Run');
-        terminal.sendText(`rorca run --spec "${specPath}"${workspaceArg}`);
-        terminal.show();
+        // Escape single quotes in the selection for shell safety
+        const escaped = selection.replace(/'/g, "'\\''");
+        const workspacePath = getConfig().get('defaultWorkspacePath', '');
+        const workspaceArg = workspacePath ? ` --workspace '${workspacePath}'` : '';
+        terminal.sendText(`rorca forge --brief '${escaped}'${workspaceArg}`, false);
     }));
-    context.subscriptions.push({ dispose: () => provider.dispose() });
-    // Export public API
-    return { getServerUrl, isServerOnline };
+    // ── Public API ────────────────────────────────────────────────────────────
+    const publicApi = {
+        getServerUrl: () => _currentApiUrl,
+        isServerOnline: () => _serverOnline,
+    };
+    return publicApi;
 }
 function deactivate() {
-    // All disposables are registered via context.subscriptions and cleaned up automatically.
-    // Intervals and event emitters are disposed via their context.subscriptions entries.
-    vscode.commands.executeCommand('setContext', 'rorca.extensionActive', false);
-    _serverOnline = false;
+    // All disposables are registered in context.subscriptions — VS Code cleans them up.
+    // Explicit disposal not needed here; nothing leaks.
 }
 //# sourceMappingURL=extension.js.map
