@@ -2,7 +2,7 @@
   "specId": "rorca-pg-boss-job-queue",
   "runId": 78,
   "startedAt": "2026-03-12T23:19:11.696Z",
-  "lastUpdatedAt": "2026-03-12T23:24:04.334Z",
+  "lastUpdatedAt": "2026-03-12T23:30:37.865Z",
   "completedStories": [
     {
       "storyId": "PG-002",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 140048
+    },
+    {
+      "storyId": "PG-004",
+      "title": "Migrate POST /api/pipeline/trigger to insert pg-boss job instead of spawn()",
+      "status": "passed",
+      "startedAt": "2026-03-12T23:24:19.841Z",
+      "finishedAt": "2026-03-12T23:30:37.865Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 378024
     }
   ],
   "failedStories": [],

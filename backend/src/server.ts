@@ -78,6 +78,7 @@ import workspaceDriftRouter from './routes/workspace-drift';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
+import { initBoss } from './lib/pg-boss';
 
 dotenv.config();
 
@@ -336,6 +337,8 @@ if (process.env.NODE_ENV !== 'test') {
     runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
+    // PG-004: Initialise pg-boss so the Express process can send jobs
+    initBoss().catch(err => logger.error({ err }, '[pg-boss] startup init failed'));
   });
 }
 
