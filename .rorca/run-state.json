@@ -1,58 +1,208 @@
 {
-  "specId": "rorca-mcp-cli",
-  "runId": 47,
-  "startedAt": "2026-03-12T06:04:08.654Z",
-  "lastUpdatedAt": "2026-03-12T06:44:39.969Z",
+  "specId": "add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.",
+  "runId": 45,
+  "startedAt": "2026-03-12T05:48:55.677Z",
+  "lastUpdatedAt": "2026-03-12T07:42:25.632Z",
   "completedStories": [
     {
-      "storyId": "MC-004",
-      "title": "MCP Tools Tree View in rorca VS Code Extension",
+      "storyId": "US-001",
+      "title": "Add spec_attachments database table",
       "status": "passed",
-      "startedAt": "2026-03-12T06:04:18.671Z",
-      "finishedAt": "2026-03-12T06:12:11.025Z",
+      "startedAt": "2026-03-12T05:48:58.183Z",
+      "finishedAt": "2026-03-12T05:50:29.084Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 472354
+      "elapsedMs": 90901
     },
     {
-      "storyId": "MC-006",
-      "title": "VS Code Extension Settings Contribution Point Schema",
+      "storyId": "US-002",
+      "title": "Create backend API route for attachment upload",
       "status": "passed",
-      "startedAt": "2026-03-12T06:12:33.616Z",
-      "finishedAt": "2026-03-12T06:19:34.590Z",
+      "startedAt": "2026-03-12T05:52:31.994Z",
+      "finishedAt": "2026-03-12T05:54:49.448Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 420974
+      "elapsedMs": 137454
     },
     {
-      "storyId": "MC-007",
-      "title": "MCP Tool Error Recovery and Offline Graceful Degradation",
+      "storyId": "US-003",
+      "title": "Create backend API route to list spec attachments",
       "status": "passed",
-      "startedAt": "2026-03-12T06:19:53.660Z",
-      "finishedAt": "2026-03-12T06:35:57.356Z",
+      "startedAt": "2026-03-12T05:55:06.326Z",
+      "finishedAt": "2026-03-12T05:57:01.476Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 963696
+      "elapsedMs": 115150
     },
     {
-      "storyId": "MC-009",
-      "title": "rorca-vscode Extension Package Scaffold",
+      "storyId": "US-004",
+      "title": "Create backend API route to download attachment",
       "status": "passed",
-      "startedAt": "2026-03-12T06:36:15.661Z",
-      "finishedAt": "2026-03-12T06:40:54.393Z",
+      "startedAt": "2026-03-12T05:57:18.424Z",
+      "finishedAt": "2026-03-12T05:59:47.415Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 278732
+      "elapsedMs": 148991
     },
     {
-      "storyId": "MC-010",
-      "title": "Spec Tree View Provider — V2-060 Feature Properly Built",
+      "storyId": "US-005",
+      "title": "Create backend API route to delete attachment",
       "status": "passed",
-      "startedAt": "2026-03-12T06:41:13.443Z",
-      "finishedAt": "2026-03-12T06:44:39.969Z",
+      "startedAt": "2026-03-12T06:00:02.742Z",
+      "finishedAt": "2026-03-12T06:01:44.499Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 206526
+      "elapsedMs": 101757
+    },
+    {
+      "storyId": "US-006",
+      "title": "Add paste event listener to SpecForge description textarea",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:02:00.000Z",
+      "finishedAt": "2026-03-12T06:05:52.019Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 232019
+    },
+    {
+      "storyId": "US-007",
+      "title": "Implement frontend attachment upload handler",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:06:09.382Z",
+      "finishedAt": "2026-03-12T06:08:33.459Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 144077
+    },
+    {
+      "storyId": "US-008",
+      "title": "Add file input button to SpecForge UI",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:08:58.064Z",
+      "finishedAt": "2026-03-12T06:13:07.954Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 249890
+    },
+    {
+      "storyId": "US-009",
+      "title": "Display attached files list in SpecForge UI",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:13:29.820Z",
+      "finishedAt": "2026-03-12T06:20:42.347Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 432527
+    },
+    {
+      "storyId": "US-010",
+      "title": "Pass attachment context to spec generation LLM call",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:20:58.954Z",
+      "finishedAt": "2026-03-12T06:29:47.347Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 528393
+    },
+    {
+      "storyId": "US-011",
+      "title": "Add Attachment type to frontend types",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:30:03.444Z",
+      "finishedAt": "2026-03-12T06:31:49.695Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 106251
+    },
+    {
+      "storyId": "US-012",
+      "title": "Show attachment count badge in SpecsPanel kanban cards",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:32:07.485Z",
+      "finishedAt": "2026-03-12T06:40:15.620Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 488135
+    },
+    {
+      "storyId": "US-013",
+      "title": "Add Attachments tab to SpecDetailSlideOver",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:40:33.222Z",
+      "finishedAt": "2026-03-12T06:44:52.512Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 259290
+    },
+    {
+      "storyId": "US-014",
+      "title": "Update SpecForgeProgress to show attachment upload status",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:45:05.288Z",
+      "finishedAt": "2026-03-12T06:53:57.334Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 532046
+    },
+    {
+      "storyId": "US-015",
+      "title": "Add attachment metadata to spec_generation_logs table",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:54:10.850Z",
+      "finishedAt": "2026-03-12T06:59:49.524Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 338674
+    },
+    {
+      "storyId": "US-016",
+      "title": "Add image preview modal for attachment thumbnails",
+      "status": "passed",
+      "startedAt": "2026-03-12T07:00:14.882Z",
+      "finishedAt": "2026-03-12T07:09:12.163Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 537281
+    },
+    {
+      "storyId": "US-017",
+      "title": "Add drag-and-drop file upload to SpecForge UI",
+      "status": "passed",
+      "startedAt": "2026-03-12T07:09:37.207Z",
+      "finishedAt": "2026-03-12T07:13:01.435Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 204228
+    },
+    {
+      "storyId": "US-018",
+      "title": "Add file type validation error messages",
+      "status": "passed",
+      "startedAt": "2026-03-12T07:13:21.868Z",
+      "finishedAt": "2026-03-12T07:17:38.227Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 256359
+    },
+    {
+      "storyId": "US-019",
+      "title": "Add attachment context extraction unit tests",
+      "status": "passed",
+      "startedAt": "2026-03-12T07:18:27.953Z",
+      "finishedAt": "2026-03-12T07:34:42.476Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 974522
+    },
+    {
+      "storyId": "US-020",
+      "title": "Add attachment upload E2E tests",
+      "status": "passed",
+      "startedAt": "2026-03-12T07:35:08.965Z",
+      "finishedAt": "2026-03-12T07:42:25.632Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 436666
     }
   ],
   "failedStories": [],

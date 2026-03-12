@@ -11,6 +11,7 @@ import {
   GripVertical, Trash2, Pencil, AlignJustify,
   Sparkles,
   Paperclip,
+  ZoomIn,
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -36,6 +37,7 @@ import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
 import ContextSummaryCard from '../components/ContextSummaryCard';
+import { ImagePreviewModal } from '../components/ImagePreviewModal';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -2095,6 +2097,9 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Template picker
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
+  // Image preview lightbox
+  const [previewImage, setPreviewImage] = useState<{ url: string; filename: string } | null>(null);
+
   // Pasted image attachments (uploaded to backend, associated by specId after generation)
   const [pendingAttachments, setPendingAttachments] = useState<Array<{ filename: string; contentType: string; size: number }>>([]);
 
@@ -2103,6 +2108,14 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [savedAttachments, setSavedAttachments] = useState<SavedAttachment[]>([]);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
+  const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+  const SUPPORTED_FILE_TYPES = new Set([
+    'image/png', 'image/jpeg', 'image/webp',
+    'application/pdf', 'text/markdown', 'text/plain',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ]);
+  const SUPPORTED_EXTENSIONS = 'PNG, JPEG, WebP, PDF, Markdown, TXT, DOCX';
+
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(e.clipboardData.items);
     const imageItem = items.find((item) => item.type.startsWith('image/'));
@@ -2110,6 +2123,11 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
     const file = imageItem.getAsFile();
     if (!file) return;
+
+    if (!SUPPORTED_IMAGE_TYPES.has(file.type)) {
+      showToast('Unsupported image format. Please use PNG, JPEG, or WebP.', 'error');
+      return;
+    }
 
     const ext = file.type.split('/')[1] ?? 'png';
     const filename = `pasted-image-${Date.now()}.${ext}`;
@@ -2121,12 +2139,13 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       const formData = new FormData();
       formData.append('file', namedFile);
       // Upload to a temporary "forge" slot — spec ID will be wired after generation (US-007)
-      await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+      await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
       setPendingAttachments((prev) => [...prev, { filename, contentType: file.type, size: file.size }]);
-    } catch {
-      showToast('Image upload failed', 'error');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Image upload failed';
+      showToast(msg, 'error');
     }
-  }, [showToast]);
+  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -2134,18 +2153,67 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     // Reset so the same file can be re-selected
     e.target.value = '';
     for (const file of files) {
+      if (!SUPPORTED_FILE_TYPES.has(file.type)) {
+        const ext = file.name.includes('.') ? file.name.split('.').pop()?.toUpperCase() ?? 'unknown' : 'unknown';
+        showToast(`Unsupported file type: .${ext.toLowerCase()}. Supported: ${SUPPORTED_EXTENSIONS}.`, 'error');
+        continue;
+      }
       showToast(`Uploading ${file.name}...`, 'info');
       try {
         const formData = new FormData();
         formData.append('file', file);
-        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
         setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
         showToast(`Uploaded ${file.name}`, 'success');
-      } catch {
-        showToast(`Upload failed: ${file.name}`, 'error');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : `Upload failed: ${file.name}`;
+        showToast(msg, 'error');
       }
     }
-  }, [showToast]);
+  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only clear if leaving the drop zone itself (not entering a child)
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDraggingOver(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+    for (const file of files) {
+      if (!SUPPORTED_FILE_TYPES.has(file.type)) {
+        const ext = file.name.includes('.') ? file.name.split('.').pop()?.toUpperCase() ?? 'unknown' : 'unknown';
+        showToast(`Unsupported file type: .${ext.toLowerCase()}. Supported: ${SUPPORTED_EXTENSIONS}.`, 'error');
+        continue;
+      }
+      showToast(`Uploading ${file.name}...`, 'info');
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData, silent: true });
+        setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
+        showToast(`Uploaded ${file.name}`, 'success');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : `Upload failed: ${file.name}`;
+        showToast(msg, 'error');
+      }
+    }
+  }, [showToast]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Model accept handler — PUTs the accepted model to the story on disk
   const handleModelAccepted = useCallback(async (storyId: string, model: string) => {
@@ -2441,7 +2509,17 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
       {/* Brief textarea */}
       {(!generatedSpec || isGenerating) && (
-        <div>
+        <div
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`relative transition-colors rounded-lg ${isDraggingOver ? 'ring-2 ring-accent border-accent' : ''}`}
+        >
+          {isDraggingOver && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-accent/10 border-2 border-dashed border-accent pointer-events-none">
+              <span className="text-sm font-medium text-accent">Drop files here</span>
+            </div>
+          )}
           <textarea
             ref={briefRef} rows={6} value={specBrief}
             onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
@@ -2496,15 +2574,28 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
             return (
               <div className="mt-2 space-y-1.5">
-                {savedAttachments.map((att) => (
+                {savedAttachments.map((att) => {
+                  const isImage = att.contentType.startsWith('image/');
+                  const attUrl = `${BASE_URL}/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(att.id)}`;
+                  return (
                   <div key={att.id} className="flex items-center gap-2 px-2 py-1.5 bg-panel border border-border rounded-lg group">
-                    {att.contentType.startsWith('image/') ? (
-                      <img
-                        src={`${BASE_URL}/api/specs/${encodeURIComponent(effectiveSlug)}/attachments/${encodeURIComponent(att.id)}`}
-                        alt={att.filename}
-                        style={{ maxHeight: 80 }}
-                        className="rounded object-contain shrink-0"
-                      />
+                    {isImage ? (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewImage({ url: attUrl, filename: att.filename })}
+                        title="Preview image"
+                        aria-label={`Preview ${att.filename}`}
+                        className="shrink-0 rounded overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-accent relative group/thumb"
+                      >
+                        <img
+                          src={attUrl}
+                          alt={att.filename}
+                          className="w-10 h-10 object-cover rounded"
+                        />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center rounded">
+                          <ZoomIn size={14} className="text-white" />
+                        </div>
+                      </button>
                     ) : (
                       getFileIcon(att.contentType, att.filename)
                     )}
@@ -2522,7 +2613,8 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                       {deletingIds.has(att.id) ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
                     </button>
                   </div>
-                ))}
+                  );
+                })}
                 {pendingAttachments.map((att) => (
                   <div key={att.filename} className="flex items-center gap-2 px-2 py-1.5 bg-accent/5 border border-accent/20 rounded-lg">
                     {att.contentType.startsWith('image/') ? (
@@ -2765,6 +2857,13 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
         <TemplatePickerModal onClose={() => setShowTemplatePicker(false)}
           onSelect={(tpl) => { setSpecBrief(tpl.brief); setStoryCount(tpl.storyCount); setShowTemplatePicker(false); setTimeout(() => briefRef.current?.focus(), 50); }} />
       )}
+
+      <ImagePreviewModal
+        isOpen={previewImage !== null}
+        onClose={() => setPreviewImage(null)}
+        imageUrl={previewImage?.url ?? ''}
+        filename={previewImage?.filename ?? ''}
+      />
     </div>
   );
 }

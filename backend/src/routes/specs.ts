@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import multer from 'multer';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
@@ -22,7 +23,9 @@ import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
+import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
+import { extractAttachmentText, MAX_ATTACHMENT_TOKENS, IMAGE_CONTENT_TYPES } from '../lib/attachment-extraction';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -45,6 +48,76 @@ function briefToSlug(text: string): string {
   let slug = words.slice(0, 8).join('-');
   if (slug.length > 60) slug = words.slice(0, 5).join('-');
   return slug.slice(0, 60).replace(/-$/, '');
+}
+
+
+export interface AttachmentContextMeta {
+  id: string;
+  filename: string;
+  contentType: string;
+  tokenCount: number;
+  extractionMethod: 'utf8' | 'pdf-parse' | 'mammoth' | 'none';
+}
+
+/**
+ * Query spec_attachments for a given spec slug and build the
+ * '=== ATTACHED DOCUMENTS ===' prompt section.
+ * Returns the section string (empty string if no attachments) and per-attachment metadata
+ * for inclusion in the spec_generation_logs.context_summary audit trail.
+ * Optionally emits SSE attachment_processing events via the provided callback.
+ */
+async function buildAttachmentSection(
+  specSlug: string,
+  onAttachment?: (filename: string, status: 'extracting_text' | 'complete') => void,
+): Promise<{ section: string; metadata: AttachmentContextMeta[] }> {
+  type AttachmentRow = {
+    id: string;
+    filename: string;
+    content_type: string;
+    file_size: number;
+    file_data: Buffer;
+  };
+
+  const rows = await query<AttachmentRow>(
+    'SELECT id, filename, content_type, file_size, file_data FROM spec_attachments WHERE spec_id = $1 ORDER BY created_at ASC',
+    [specSlug],
+  );
+
+  if (rows.length === 0) return { section: '', metadata: [] };
+
+  const parts: string[] = ['=== ATTACHED DOCUMENTS ==='];
+  const metadata: AttachmentContextMeta[] = [];
+
+  for (const row of rows) {
+    if (IMAGE_CONTENT_TYPES.has(row.content_type)) {
+      onAttachment?.(row.filename, 'extracting_text');
+      parts.push(
+        `${row.filename}:`,
+        `[Image attachment — type: ${row.content_type}, size: ${row.file_size} bytes. Image provided for visual context.]`,
+        '',
+      );
+      onAttachment?.(row.filename, 'complete');
+      metadata.push({ id: row.id, filename: row.filename, contentType: row.content_type, tokenCount: 0, extractionMethod: 'none' });
+    } else {
+      onAttachment?.(row.filename, 'extracting_text');
+      const text = await extractAttachmentText(row.content_type, row.file_data, row.filename);
+      if (text !== null) {
+        parts.push(`${row.filename}:`, text, '');
+      }
+      onAttachment?.(row.filename, 'complete');
+      const extractedTokenCount = text ? Math.min(Math.ceil(text.length / 4), MAX_ATTACHMENT_TOKENS) : 0;
+      let extractionMethod: AttachmentContextMeta['extractionMethod'] = 'utf8';
+      if (row.content_type === 'application/pdf') {
+        extractionMethod = 'pdf-parse';
+      } else if (row.content_type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        extractionMethod = 'mammoth';
+      }
+      metadata.push({ id: row.id, filename: row.filename, contentType: row.content_type, tokenCount: extractedTokenCount, extractionMethod });
+    }
+  }
+
+  parts.push('=== END ATTACHED DOCUMENTS ===');
+  return { section: parts.join('\n'), metadata };
 }
 
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
@@ -270,7 +343,7 @@ function safeReadFile(filePath: string): string {
  * Build skill + persona catalog context for spec generation prompts.
  * Discovers installed skills and personas from the workspace, reads MEMORY.md and AGENTS.md.
  */
-async function buildCatalogContext(workspacePath: string): Promise<{
+async function buildCatalogContext(workspacePath: string, workspaceId?: string): Promise<{
   skillCatalog: string;
   personaCatalog: string;
   memoryMd: string;
@@ -284,7 +357,28 @@ async function buildCatalogContext(workspacePath: string): Promise<{
   const skillCatalog = skillRegistry.getCatalogForPrompt();
   const personaCatalog = personaRegistry.getPersonaCatalogForPrompt();
 
-  const memoryMd = safeReadFile(path.join(rorcaDir, 'MEMORY.md'));
+  let memoryMd = safeReadFile(path.join(rorcaDir, 'MEMORY.md'))
+    || safeReadFile(path.join(rorcaDir, 'memory', 'MEMORY.md'))
+    || safeReadFile(path.join(workspacePath, 'MEMORY.md'));
+
+  // Fallback: if no MEMORY.md file found, build from DB memories table
+  if (!memoryMd && workspaceId) {
+    try {
+      const dbMemories = await query<{ category: string; content: string; created_at: string }>(
+        `SELECT category, content, created_at FROM memories
+         WHERE workspace_id = $1 AND deleted_at IS NULL
+         ORDER BY created_at DESC LIMIT 50`,
+        [workspaceId]
+      );
+      if (dbMemories.length > 0) {
+        memoryMd = dbMemories.map(m => {
+          const date = new Date(m.created_at).toISOString().slice(0, 10);
+          return `## ${date} [${m.category}]\n${m.content}`;
+        }).join('\n\n');
+      }
+    } catch { /* DB memories optional — don't block spec gen */ }
+  }
+
   const agentsMd = safeReadFile(path.join(workspacePath, 'AGENTS.md'))
     || safeReadFile(path.join(rorcaDir, 'AGENTS.md'));
 
@@ -605,6 +699,27 @@ async function emitPassEvent(
   });
 }
 
+/** Emit an attachment_processing WAL event and broadcast via SSE. */
+async function emitAttachmentEvent(
+  specId: string,
+  filename: string,
+  status: 'extracting_text' | 'complete',
+  workspaceId?: string,
+): Promise<void> {
+  const payload = JSON.stringify({ filename, status });
+  const result = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('attachment_processing', $1, $2, $3) RETURNING *`, [specId, workspaceId ?? null, payload]);
+  broadcastAll({
+    id: result!.id,
+    ts: new Date().toISOString(),
+    event_type: 'attachment_processing',
+    workspace_id: workspaceId ?? null,
+    spec_id: specId,
+    story_id: null,
+    actor: 'system',
+    payload,
+  });
+}
+
 /**
  * Load convention files from .rorca/conventions/ directory.
  * Returns a map of convention name → content for prompt injection.
@@ -663,6 +778,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
   let resolvedModel = 'unknown';
   let usedProvider = 'unknown';
   let precomputedContextSummary: Record<string, unknown> | undefined;
+  let attachmentMeta: AttachmentContextMeta[] = [];
   const genStartTime = Date.now();
   let genSlug = 'unknown';
 
@@ -730,7 +846,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     let semanticGraphSection = '';
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
-      const retrieved = await retrieveContext(Number(workspaceId), brief, {
+      const retrieved = await retrieveContext(workspaceId, brief, {
         maxTokens: 16000,
         includeGraph: true,
       });
@@ -773,7 +889,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 6c. Discover skill + persona catalogs and read context files
-    const catalogs = await buildCatalogContext(workspace.path as string);
+    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
 
     // 6d. Pre-compute contextSummary for error responses (also used in success response)
     const skillNamesList = catalogs.skillCatalog
@@ -784,9 +900,9 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       : 0;
     const dbMemoryRow = await queryOne<{ cnt: string }>(
       'SELECT COUNT(*) as cnt FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL',
-      [workspaceId]
+      [workspace.id]
     );
-    const dbMemoryCount = parseInt(dbMemoryRow?.cnt || '0', 10);
+    const dbMemoryCount = dbMemoryRow ? parseInt(dbMemoryRow.cnt, 10) : 0;
     const memoryEntryCount = Math.max(fsMemoryCount, dbMemoryCount);
     const catalogTokens = Math.ceil(
       (catalogs.skillCatalog.length + catalogs.personaCatalog.length +
@@ -810,6 +926,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       gitMemory: synthResult.meta.memory,
       estimatedTokens,
       modelContextWindow,
+      attachments: attachmentMeta,
       ...(retrievalMeta ? {
         vectorHits: retrievalMeta.ragHits,
         graphHits: retrievalMeta.graphHits,
@@ -891,6 +1008,20 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ];
 
+    // Pre-compute slug — needed for attachment lookup and multi-pass version snapshots
+    const slug = title
+      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      : briefToSlug(brief);
+    genSlug = slug;
+
+    // Load attachment context for this spec slug (before prompt assembly)
+    // Emit SSE events for each attachment as it's being processed
+    const attachmentBuild = await buildAttachmentSection(slug, (filename, status) => {
+      emitAttachmentEvent(slug, filename, status, String(workspaceId)).catch(() => {/* non-fatal */});
+    });
+    const attachmentSection = attachmentBuild.section;
+    attachmentMeta = attachmentBuild.metadata;
+
     // Build catalog sections (only include if non-empty)
     const catalogSections: string[] = [];
     if (catalogs.memoryMd) {
@@ -925,6 +1056,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         '',
       ] : []),
       ...catalogSections,
+      ...(attachmentSection ? [attachmentSection, ''] : []),
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
       storyCount === 0
@@ -963,12 +1095,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
     let tokenUsage = { inputTokens: 0, outputTokens: 0 };
 
-    // Pre-compute slug early — needed for multi-pass version snapshots
-    const slug = title
-      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-      : briefToSlug(brief);
-    genSlug = slug;
-
     if (multiPass) {
       // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
       logger.info(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
@@ -1001,6 +1127,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         '=== END PERSONA ===',
         '',
         synthesized,
+        ...(attachmentSection ? [attachmentSection, ''] : []),
         ...(templateContext ? [templateContext, '---'] : []),
         '---',
         'TASK: Generate a HIGH-LEVEL software specification JSON with coarse user stories (10-20 stories).',
@@ -2002,7 +2129,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const storyPrefix = 'US';
 
   // Discover skill + persona catalogs for batch brief
-  const batchCatalogs = await buildCatalogContext(workspace.path);
+  const batchCatalogs = await buildCatalogContext(workspace.path, workspace.id);
   const batchCatalogSections: string[] = [];
   if (batchCatalogs.memoryMd) {
     batchCatalogSections.push('=== PROJECT MEMORY ===', batchCatalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
@@ -2591,6 +2718,7 @@ interface KanbanSpec {
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
   model?: string;
+  attachmentCount: number;
 }
 
 router.get('/kanban', async (req: Request, res: Response) => {
@@ -2609,6 +2737,15 @@ router.get('/kanban', async (req: Request, res: Response) => {
 
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
 
+    // Fetch attachment counts for all specs
+    const attachmentRows = await query<{ spec_id: string; cnt: string }>(
+      `SELECT spec_id, COUNT(*)::text AS cnt FROM spec_attachments GROUP BY spec_id`
+    );
+    const attachmentCountBySpecId = new Map<string, number>();
+    for (const row of attachmentRows) {
+      attachmentCountBySpecId.set(row.spec_id, parseInt(row.cnt, 10));
+    }
+
     // Build summaries from filesystem
     const pendingSpecs: KanbanSpec[] = [];
     for (const file of safeReaddir(pendingDir)) {
@@ -2626,6 +2763,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
+          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
         });
       } catch { /* skip unparseable */ }
     }
@@ -2647,6 +2785,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
+          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
         });
       } catch { /* skip unparseable */ }
     }
@@ -3611,7 +3750,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     let semanticGraphSection = '';
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
-      const retrieved = await retrieveContext(Number(workspaceId), brief || specContent.title || specId, {
+      const retrieved = await retrieveContext(workspaceId, brief || specContent.title || specId, {
         maxTokens: 16000,
         includeGraph: true,
       });
@@ -8340,7 +8479,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     }
 
     // Build skill catalog context
-    const catalogs = await buildCatalogContext(workspace.path as string);
+    const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
     if (catalogs.skillNames.size === 0) {
       res.status(422).json({ error: 'No skills installed. Install skills from the Marketplace before matching.' });
       return;
@@ -8356,7 +8495,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
     try {
       const storyBrief = stories.map(s => `${s.title}: ${s.description ?? ''}`).join('\n');
-      const retrieved = await retrieveContext(Number(workspaceId), storyBrief, {
+      const retrieved = await retrieveContext(workspaceId, storyBrief, {
         maxTokens: 8000,
         includeGraph: true,
       });
@@ -8374,6 +8513,50 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       logger.warn({ err, workspaceId }, '[Specs] match-skills: retrieveContext failed — using catalog context only');
     }
 
+    // Query graph for skill effectiveness and file-path affinity (SE-011)
+    let skillEffectivenessData: SkillEffectivenessRow[] = [];
+    let skillPathAffinityData: SkillPathAffinityRow[] = [];
+    let skillEffectivenessSection = '';
+    try {
+      const [effectiveness, pathAffinity] = await Promise.all([
+        querySkillEffectiveness(),
+        querySkillPathAffinity(50),
+      ]);
+      skillEffectivenessData = effectiveness;
+      skillPathAffinityData = pathAffinity;
+
+      if (effectiveness.length > 0) {
+        const lines: string[] = ['## SKILL EFFECTIVENESS (from past runs)'];
+        for (const row of effectiveness) {
+          const passRate = Math.round((row.passCount / row.totalCount) * 100);
+          lines.push(`- ${row.skill}: used in ${row.totalCount} stories, ${row.passCount} passed (${passRate}% pass rate)`);
+        }
+
+        if (pathAffinity.length > 0) {
+          lines.push('');
+          lines.push('## SKILL FILE-PATH AFFINITY (skills effective on specific file patterns)');
+          // Group by skill
+          const bySkill = new Map<string, Array<{ filePath: string; storyCount: number }>>();
+          for (const pa of pathAffinity) {
+            const existing = bySkill.get(pa.skill) ?? [];
+            existing.push({ filePath: pa.filePath, storyCount: pa.storyCount });
+            bySkill.set(pa.skill, existing);
+          }
+          for (const [skill, paths] of bySkill) {
+            const pathList = paths.slice(0, 5).map(p => `\`${p.filePath}\` (${p.storyCount}x)`).join(', ');
+            lines.push(`- ${skill}: effective on ${pathList}`);
+          }
+        }
+
+        skillEffectivenessSection = lines.join('\n');
+        logger.debug({ effectivenessCount: effectiveness.length, pathAffinityCount: pathAffinity.length }, '[Specs] match-skills: graph skill effectiveness data available');
+      } else {
+        logger.debug('[Specs] match-skills: graph returned 0 skill effectiveness results — prompt works without it');
+      }
+    } catch (err) {
+      logger.debug({ err }, '[Specs] match-skills: graph skill effectiveness query unavailable — prompt works without it');
+    }
+
     // Build numbered story list
     const storyList = stories.map((s, i) =>
       `${i + 1}. [${s.id}] ${s.title}\n   ${s.description ?? ''}`
@@ -8386,7 +8569,9 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       resolvedModel = l3Pref.preferred_model;
     }
 
-    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.${skillGraphSection ? ' Use the KNOWLEDGE GRAPH CONTEXT to see which skills were effective on similar stories in the past (USED_IN edges) — prefer skills with proven track records.' : ''}
+    const hasEffectiveness = skillEffectivenessSection.length > 0;
+    const hasGraphContext = !!skillGraphSection;
+    const prompt = `You are a skill-matching agent. For each story, select the most relevant skills from the installed catalog. Use MEMORY.md entries as the strongest signal — if MEMORY.md mentions past bugs with authentication, bias toward security-related skills for auth stories. Use AGENTS.md zone governance as secondary signal. Use story description text as tertiary signal.${hasGraphContext ? ' Use the KNOWLEDGE GRAPH CONTEXT to see which skills were effective on similar stories in the past (USED_IN edges) — prefer skills with proven track records.' : ''}${hasEffectiveness ? ' Use the SKILL EFFECTIVENESS data to prefer skills with high pass rates. Use FILE-PATH AFFINITY to match skills to stories that will touch similar files.' : ''}
 
 Relevance scoring: 10 = this skill is essential for the story, 7-9 = highly relevant, 4-6 = moderately helpful, 1-3 = tangentially related. Only include skills with relevance >= 4. If no skills apply to a story, return empty suggestedSkills array.
 
@@ -8395,7 +8580,9 @@ Respond with valid JSON only, no markdown fences. Format:
 
 ## Installed Skills (one per line: name: description)
 ${catalogs.skillCatalog}
-${skillGraphSection ? `
+${skillEffectivenessSection ? `
+${skillEffectivenessSection}
+` : ''}${skillGraphSection ? `
 ## KNOWLEDGE GRAPH CONTEXT
 ${skillGraphSection}
 ` : ''}
@@ -8413,10 +8600,20 @@ ${storyList}`;
       { model: resolvedModel as any },
     );
 
-    // Parse LLM response
+    // Parse LLM response — strip markdown fences and prose preamble before JSON
     let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkillRaw[] }> };
     try {
-      const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      // If the LLM added prose before the JSON, extract the first { ... } block
+      const jsonStart = cleaned.indexOf('{');
+      if (jsonStart > 0) {
+        cleaned = cleaned.slice(jsonStart);
+      }
+      // Trim any trailing prose after the JSON
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
+        cleaned = cleaned.slice(0, lastBrace + 1);
+      }
       parsed = JSON.parse(cleaned);
     } catch {
       logger.error(`[Specs] match-skills: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
@@ -8480,15 +8677,32 @@ ${storyList}`;
     res.json({
       matched: totalSkillsMatched,
       stories: responseStories,
-      ...(retrievalMeta ? {
+      ...((retrievalMeta || skillEffectivenessData.length > 0) ? {
         contextSummary: {
-          retrieval: {
-            cagHits: retrievalMeta.cagHits,
-            ragHits: retrievalMeta.ragHits,
-            graphHits: retrievalMeta.graphHits,
-            tier: retrievalMeta.tier,
-            latencyMs: retrievalMeta.latencyMs,
-          },
+          ...(retrievalMeta ? {
+            retrieval: {
+              cagHits: retrievalMeta.cagHits,
+              ragHits: retrievalMeta.ragHits,
+              graphHits: retrievalMeta.graphHits,
+              tier: retrievalMeta.tier,
+              latencyMs: retrievalMeta.latencyMs,
+            },
+          } : {}),
+          ...(skillEffectivenessData.length > 0 ? {
+            skillEffectiveness: skillEffectivenessData.map(row => ({
+              skill: row.skill,
+              passCount: row.passCount,
+              totalCount: row.totalCount,
+              passRate: Math.round((row.passCount / row.totalCount) * 100),
+            })),
+          } : {}),
+          ...(skillPathAffinityData.length > 0 ? {
+            skillPathAffinity: skillPathAffinityData.slice(0, 20).map(row => ({
+              skill: row.skill,
+              filePath: row.filePath,
+              storyCount: row.storyCount,
+            })),
+          } : {}),
         },
       } : {}),
     });
@@ -8624,10 +8838,18 @@ ${storyList}`;
       { model: resolvedModel as any },
     );
 
-    // Parse LLM response
+    // Parse LLM response — strip markdown fences and prose preamble before JSON
     let parsed: { suggestions: Array<{ storyId: string; suggestedModel: string; confidence: number; reason: string }> };
     try {
-      const cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const jsonStart = cleaned.indexOf('{');
+      if (jsonStart > 0) {
+        cleaned = cleaned.slice(jsonStart);
+      }
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
+        cleaned = cleaned.slice(0, lastBrace + 1);
+      }
       parsed = JSON.parse(cleaned);
     } catch {
       logger.error(`[Specs] suggest-models: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
@@ -8661,6 +8883,346 @@ ${storyList}`;
     logger.error('[Specs] suggest-models error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// GET /api/specs/:specId/attachments — list all attachments for a spec
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments:
+ *   get:
+ *     summary: List all attachments for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug ID
+ *     responses:
+ *       200:
+ *         description: List of attachments (metadata only, no binary data)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   id:
+ *                     type: string
+ *                   filename:
+ *                     type: string
+ *                   contentType:
+ *                     type: string
+ *                   fileSize:
+ *                     type: integer
+ *                   createdAt:
+ *                     type: string
+ *                   uploadedBy:
+ *                     type: object
+ *                     nullable: true
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       name:
+ *                         type: string
+ *       404:
+ *         description: Spec not found
+ */
+router.get('/:specId/attachments', async (req: Request, res: Response) => {
+  const { specId } = req.params;
+
+  // Verify spec exists across all workspaces
+  const workspaces = await query<{ id: string; path: string }>(
+    `SELECT id, path FROM workspaces`
+  );
+  let specExists = false;
+  for (const ws of workspaces) {
+    const pendingPath = path.join(ws.path, 'forge/specs/pending', `${specId}.json`);
+    const approvedPath = path.join(ws.path, 'forge/specs/approved', `${specId}.json`);
+    if (fs.existsSync(pendingPath) || fs.existsSync(approvedPath)) {
+      specExists = true;
+      break;
+    }
+  }
+
+  if (!specExists) {
+    res.status(404).json({ error: `Spec not found: ${specId}` });
+    return;
+  }
+
+  const rows = await query<{
+    id: string;
+    filename: string;
+    content_type: string;
+    file_size: number;
+    created_at: string;
+    uploader_id: string | null;
+    uploader_name: string | null;
+  }>(
+    `SELECT
+       sa.id,
+       sa.filename,
+       sa.content_type,
+       sa.file_size,
+       sa.created_at,
+       u.id AS uploader_id,
+       u.name AS uploader_name
+     FROM spec_attachments sa
+     LEFT JOIN users u ON u.id = sa.uploaded_by
+     WHERE sa.spec_id = $1
+     ORDER BY sa.created_at DESC`,
+    [specId]
+  );
+
+  res.json(
+    rows.map((row) => ({
+      id: row.id,
+      filename: row.filename,
+      contentType: row.content_type,
+      fileSize: row.file_size,
+      createdAt: row.created_at,
+      uploadedBy: row.uploader_id
+        ? { id: row.uploader_id, name: row.uploader_name }
+        : null,
+    }))
+  );
+});
+
+// GET /api/specs/:specId/attachments/:attachmentId — download a specific attachment
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments/{attachmentId}:
+ *   get:
+ *     summary: Download a specific attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug ID
+ *       - in: path
+ *         name: attachmentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Attachment UUID
+ *     responses:
+ *       200:
+ *         description: Binary file data
+ *         content:
+ *           application/octet-stream:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       404:
+ *         description: Attachment not found or spec mismatch
+ */
+router.get('/:specId/attachments/:attachmentId', async (req: Request, res: Response) => {
+  const { specId, attachmentId } = req.params;
+
+  const row = await queryOne<{
+    filename: string;
+    content_type: string;
+    file_size: number;
+    file_data: Buffer;
+  }>(
+    `SELECT filename, content_type, file_size, file_data
+     FROM spec_attachments
+     WHERE id = $1 AND spec_id = $2`,
+    [attachmentId, specId]
+  );
+
+  if (!row || !row.file_data) {
+    res.status(404).json({ error: 'Attachment not found' });
+    return;
+  }
+
+  res.setHeader('Content-Type', row.content_type);
+  res.setHeader('Content-Disposition', `attachment; filename="${row.filename}"`);
+  res.setHeader('Content-Length', row.file_size);
+  res.send(row.file_data);
+});
+
+// POST /api/specs/:specId/attachments — upload a file attachment for a spec
+const ALLOWED_CONTENT_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'application/pdf',
+  'text/markdown',
+  'text/plain',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_CONTENT_TYPES.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`INVALID_FILE_TYPE:${file.mimetype}`));
+    }
+  },
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments:
+ *   post:
+ *     summary: Upload a file attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       201:
+ *         description: Attachment created
+ *       400:
+ *         description: Invalid file type
+ *       404:
+ *         description: Spec not found
+ *       413:
+ *         description: File size exceeded
+ */
+router.post(
+  '/:specId/attachments',
+  (req: Request, res: Response, next: any) => {
+    attachmentUpload.single('file')(req, res, (err: any) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          res.status(413).json({ error: 'File size exceeds 10MB limit' });
+          return;
+        }
+        if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
+          const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
+          res.status(400).json({
+            error: `Unsupported file type: ${mimeType}`,
+            supportedTypes: [
+              'image/png', 'image/jpeg', 'image/webp',
+              'application/pdf', 'text/markdown', 'text/plain',
+              'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            ],
+          });
+          return;
+        }
+        next(err);
+        return;
+      }
+      next();
+    });
+  },
+  async (req: Request, res: Response) => {
+    const { specId } = req.params;
+
+    if (!req.file) {
+      res.status(400).json({ error: 'No file uploaded' });
+      return;
+    }
+
+    // Verify spec exists — check both pending and approved directories across all workspaces
+    const workspaces = await query<{ id: string; path: string }>(`SELECT id, path FROM workspaces`);
+    let specExists = false;
+    for (const ws of workspaces) {
+      const pendingPath = path.join(ws.path, 'forge', 'specs', 'pending', `${specId}.json`);
+      const approvedPath = path.join(ws.path, 'forge', 'specs', 'approved', `${specId}.json`);
+      if (fs.existsSync(pendingPath) || fs.existsSync(approvedPath)) {
+        specExists = true;
+        break;
+      }
+    }
+
+    if (!specExists) {
+      res.status(404).json({ error: `Spec not found: ${specId}` });
+      return;
+    }
+
+    const { originalname, mimetype, size, buffer } = req.file;
+
+    const row = await queryOne<{
+      id: string;
+      filename: string;
+      content_type: string;
+      file_size: number;
+      created_at: string;
+    }>(
+      `INSERT INTO spec_attachments (spec_id, filename, content_type, file_size, storage_type, file_data)
+       VALUES ($1, $2, $3, $4, 'database', $5)
+       RETURNING id, filename, content_type, file_size, created_at`,
+      [specId, originalname, mimetype, size, buffer],
+    );
+
+    if (!row) {
+      res.status(500).json({ error: 'Failed to save attachment' });
+      return;
+    }
+
+    res.status(201).json({
+      id: row.id,
+      filename: row.filename,
+      contentType: row.content_type,
+      fileSize: row.file_size,
+      createdAt: row.created_at,
+    });
+  },
+);
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments/{attachmentId}:
+ *   delete:
+ *     summary: Delete a specific attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: attachmentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       204:
+ *         description: Attachment deleted
+ *       404:
+ *         description: Attachment not found
+ */
+router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Response) => {
+  const { specId, attachmentId } = req.params;
+
+  const result = await execute(
+    `DELETE FROM spec_attachments WHERE id = $1 AND spec_id = $2`,
+    [attachmentId, specId],
+  );
+
+  if (result.rowCount === 0) {
+    res.status(404).json({ error: 'Attachment not found' });
+    return;
+  }
+
+  res.status(204).send();
 });
 
 export default router;
