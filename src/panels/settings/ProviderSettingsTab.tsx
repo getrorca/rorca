@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal } from 'lucide-react';
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';
@@ -322,6 +322,8 @@ type ProviderTabId = typeof PROVIDER_TABS[number]['id'];
 export function ProviderSettingsTab() {
   const [activeTab, setActiveTab] = useState<ProviderTabId>('execution');
 
+  // Refs for each scrollable section. 'embeddings' maps to the same DOM node as 'execution'
+  // (they share a card row), so clicking Embeddings tab scrolls to top of that grid.
   const sectionRefs = useRef<Record<ProviderTabId, HTMLDivElement | null>>({
     'execution': null,
     'model-browser': null,
@@ -333,14 +335,18 @@ export function ProviderSettingsTab() {
 
   const scrollToSection = (id: ProviderTabId) => {
     setActiveTab(id);
-    sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // 'embeddings' and 'execution' share the same card row — scroll to execution ref
+    const targetId: ProviderTabId = id === 'embeddings' ? 'execution' : id;
+    sectionRefs.current[targetId]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   useEffect(() => {
     const observers: IntersectionObserver[] = [];
     const visibilityMap: Record<string, number> = {};
 
-    PROVIDER_TABS.forEach(({ id }) => {
+    // Observe the 5 distinct DOM sections (embeddings shares execution's ref)
+    const observedTabs: ProviderTabId[] = ['execution', 'model-browser', 'routing', 'providers', 'display'];
+    observedTabs.forEach((id) => {
       const el = sectionRefs.current[id];
       if (!el) return;
       const obs = new IntersectionObserver(
@@ -352,7 +358,7 @@ export function ProviderSettingsTab() {
           );
           if (mostVisible[1] > 0) setActiveTab(mostVisible[0] as ProviderTabId);
         },
-        { threshold: [0, 0.1, 0.25, 0.5, 0.75, 1] }
+        { threshold: 0.3, rootMargin: '-10% 0px -60% 0px' }
       );
       obs.observe(el);
       observers.push(obs);
@@ -363,10 +369,10 @@ export function ProviderSettingsTab() {
 
   return (
     <div className="w-full">
-      {/* Status bar */}
+      {/* (1) Status bar */}
       <StatusBar />
 
-      {/* Sticky tab nav */}
+      {/* (2) Sticky section tab nav */}
       <div
         className="sticky top-0 z-10 border-b border-border overflow-x-auto scrollbar-none"
         style={{ background: 'var(--bg)' }}
@@ -388,54 +394,54 @@ export function ProviderSettingsTab() {
         </div>
       </div>
 
-      {/* Sections */}
-      <div className="grid grid-cols-12 gap-0">
-        <div className="col-span-12 space-y-10 pt-6">
-          {/* Execution + Semantic side-by-side */}
-          <div
-            className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start"
-          >
-            {/* Execution Engine card */}
-            <div
-              ref={el => { sectionRefs.current['execution'] = el; }}
-              className="rounded-xl border border-border bg-panel p-5"
-            >
-              <div className="flex items-center gap-2 mb-4">
-                <Zap size={15} className="text-accent flex-shrink-0" />
-                <span className="text-sm font-semibold text-[var(--text)]">Execution Engine</span>
-              </div>
-              <ExecutionEngineSection />
+      {/* (3–7) Section cards — space-y-4 provides visual separation, no border dividers */}
+      <div className="space-y-4 pt-4">
+        {/* (3) Execution Engine + Embeddings side-by-side grid */}
+        <div
+          ref={el => {
+            sectionRefs.current['execution'] = el;
+            // 'embeddings' tab maps to this same row
+            sectionRefs.current['embeddings'] = el;
+          }}
+          className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start"
+        >
+          {/* Execution Engine card */}
+          <div className="rounded-xl border border-border bg-panel p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Zap size={15} className="text-accent flex-shrink-0" />
+              <span className="text-sm font-semibold text-[var(--text)]">Execution Engine</span>
             </div>
-
-            {/* Semantic Engine card */}
-            <div
-              ref={el => { sectionRefs.current['embeddings'] = el; }}
-              className="rounded-xl border border-border bg-panel p-5"
-            >
-              <div className="flex items-center gap-2 mb-4">
-                <Database size={15} className="text-accent flex-shrink-0" />
-                <span className="text-sm font-semibold text-[var(--text)]">Semantic Engine</span>
-              </div>
-              <SemanticEngineSection />
-            </div>
+            <ExecutionEngineSection />
           </div>
 
-          <div ref={el => { sectionRefs.current['model-browser'] = el; }} className="border-t border-border pt-6">
-            <DisplaySection />
-          </div>
-          <div ref={el => { sectionRefs.current['routing'] = el; }} className="border-t border-border pt-6">
-            <ModelRoutingSection />
-          </div>
-          <div ref={el => { sectionRefs.current['providers'] = el; }} className="border-t border-border pt-6">
-            <div className="flex items-center gap-2 mb-1">
-              <Globe size={15} className="text-accent flex-shrink-0" />
-              <span className="text-sm font-semibold text-[var(--text)]">Providers &amp; Vault</span>
+          {/* Embeddings / Semantic Engine card */}
+          <div className="rounded-xl border border-border bg-panel p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Database size={15} className="text-accent flex-shrink-0" />
+              <span className="text-sm font-semibold text-[var(--text)]">Semantic Engine</span>
             </div>
-            <p className="text-xs text-muted mb-0">
-              Configure LLM providers and manage encrypted API keys.
-            </p>
-            <ProviderConnectionsAndVaultSection />
+            <SemanticEngineSection />
           </div>
+        </div>
+
+        {/* (4) Model Routing card */}
+        <div ref={el => { sectionRefs.current['routing'] = el; }}>
+          <ModelRoutingSection />
+        </div>
+
+        {/* (5) Model Browser */}
+        <div ref={el => { sectionRefs.current['model-browser'] = el; }}>
+          <ModelBrowserContainer />
+        </div>
+
+        {/* (6) Providers + API Keys */}
+        <div ref={el => { sectionRefs.current['providers'] = el; }}>
+          <ProviderConnectionsAndVaultSection />
+        </div>
+
+        {/* (7) Display card */}
+        <div ref={el => { sectionRefs.current['display'] = el; }}>
+          <DisplaySection />
         </div>
       </div>
     </div>
@@ -2480,6 +2486,116 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
   );
 }
 
+// ─── Model Browser Container (PM-008 — standalone, owns its own state) ───────
+
+function ModelBrowserContainer() {
+  const { workspaceId } = useWorkspace();
+  const [models, setModels] = useState<DisplayModelOption[]>([]);
+  const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-6');
+  const [workspaceModel, setWorkspaceModel] = useState<string | null>(null);
+  const [workspaceModelInitial, setWorkspaceModelInitial] = useState<string | null>(null);
+  const [savingWorkspace, setSavingWorkspace] = useState(false);
+  const [testingModel, setTestingModel] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
+  const [searchText, setSearchText] = useState('');
+  const [activeProvider, setActiveProvider] = useState<string>('All');
+  const [activeCostTier, setActiveCostTier] = useState<string>('All');
+  const [activeSpeedTier, setActiveSpeedTier] = useState<string>('All');
+
+  useEffect(() => {
+    const fetchPromises: Promise<any>[] = [
+      apiFetch<DisplaySettings>('/api/settings/display'),
+      apiFetch<{ models: DisplayModelOption[]; defaultModel: string }>(`/api/direction/models${workspaceId ? `?workspaceId=${workspaceId}` : ''}`),
+    ];
+    if (workspaceId) {
+      fetchPromises.push(
+        apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`)
+      );
+    }
+    Promise.all(fetchPromises).then(([displayData, modelData, l3Data]) => {
+      setDefaultModel(displayData.defaultModel);
+      setModels(modelData.models);
+      if (l3Data) {
+        setWorkspaceModel(l3Data.preferredModel);
+        setWorkspaceModelInitial(l3Data.preferredModel);
+      }
+    }).catch(() => { });
+  }, [workspaceId]);
+
+  const saveWorkspaceModel = async (modelId: string | null) => {
+    if (!workspaceId) return;
+    setSavingWorkspace(true);
+    try {
+      const l3 = await apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`);
+      await apiFetch('/api/direction', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          layer: 3,
+          workspaceId,
+          contentYaml: l3.contentYaml || '',
+          preferredModel: modelId,
+          skipValidation: true,
+        }),
+      });
+      setWorkspaceModel(modelId);
+      setWorkspaceModelInitial(modelId);
+    } catch { /* silent */ }
+    finally { setSavingWorkspace(false); }
+  };
+
+  const testModel = async (modelId: string) => {
+    setTestingModel(modelId);
+    setTestResult(null);
+    try {
+      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>(`/api/models/${encodeURIComponent(modelId)}/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelId }),
+      });
+      setTestResult({ modelId, ok: true, latencyMs: result.latencyMs, response: result.response });
+    } catch (err: any) {
+      setTestResult({ modelId, ok: false, error: err.message || 'Test failed' });
+    } finally {
+      setTestingModel(null);
+    }
+  };
+
+  const effectiveModel = workspaceModel ?? defaultModel;
+
+  // Suppress unused variable warning — savingWorkspace used indirectly via saveWorkspaceModel
+  void savingWorkspace;
+  void workspaceModelInitial;
+
+  return (
+    <ModelBrowserSection
+      models={models}
+      effectiveModel={effectiveModel}
+      workspaceModel={workspaceModel}
+      workspaceId={workspaceId ?? null}
+      searchText={searchText}
+      setSearchText={setSearchText}
+      activeProvider={activeProvider}
+      setActiveProvider={setActiveProvider}
+      activeCostTier={activeCostTier}
+      setActiveCostTier={setActiveCostTier}
+      activeSpeedTier={activeSpeedTier}
+      setActiveSpeedTier={setActiveSpeedTier}
+      testResult={testResult}
+      testingModel={testingModel}
+      onSelectModel={(m) => {
+        if (workspaceId) {
+          setWorkspaceModel(m.id);
+          saveWorkspaceModel(m.id);
+        } else {
+          setDefaultModel(m.id);
+        }
+      }}
+      onTestModel={(id) => testModel(id)}
+    />
+  );
+}
+
 // ─── Model Browser Section (PM-005) ──────────────────────────────────────────
 
 type SortOption = 'best' | 'cost-asc' | 'cost-desc' | 'context' | 'speed';
@@ -2730,16 +2846,6 @@ function DisplaySection() {
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [savedWorkspace, setSavedWorkspace] = useState(false);
 
-  // Test model state
-  const [testingModel, setTestingModel] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
-
-  // Catalog filter state
-  const [searchText, setSearchText] = useState('');
-  const [activeProvider, setActiveProvider] = useState<string>('All');
-  const [activeCostTier, setActiveCostTier] = useState<string>('All');
-  const [activeSpeedTier, setActiveSpeedTier] = useState<string>('All');
-
   useEffect(() => {
     const fetchPromises: Promise<any>[] = [
       apiFetch<DisplaySettings>('/api/settings/display'),
@@ -2812,40 +2918,14 @@ function DisplaySection() {
     }
   };
 
-  const testModel = async (modelId: string) => {
-    setTestingModel(modelId);
-    setTestResult(null);
-    try {
-      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/direction/models/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelId }),
-      });
-      setTestResult({ modelId, ok: true, latencyMs: result.latencyMs, response: result.response });
-    } catch (err: any) {
-      setTestResult({ modelId, ok: false, error: err.message || 'Test failed' });
-    } finally {
-      setTestingModel(null);
-    }
-  };
-
   if (loading) {
-    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading model settings...</div>;
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading display settings...</div>;
   }
 
   const hasChanges = settings !== null && defaultModel !== settings.defaultModel;
-  const effectiveModel = workspaceModel ?? defaultModel;
-
-  // Group models by provider
-  const _modelsByProvider = models.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
-    (acc[m.provider] ??= []).push(m);
-    return acc;
-  }, {});
 
   return (
-    <>
-      {/* Display card */}
-      <div className="rounded-xl border border-border bg-panel p-5 mt-4">
+      <div className="rounded-xl border border-border bg-panel p-5">
         {/* Card header */}
         <div className="flex items-center gap-2 mb-4">
           <SlidersHorizontal size={15} className="text-accent" />
@@ -2933,34 +3013,6 @@ function DisplaySection() {
 
         {/* itemsPerPage deprecated */}
       </div>
-
-      {/* Model Browser — full-width card (rendered outside the Display card) */}
-      <ModelBrowserSection
-        models={models}
-        effectiveModel={effectiveModel}
-        workspaceModel={workspaceModel}
-        workspaceId={workspaceId ?? null}
-        searchText={searchText}
-        setSearchText={setSearchText}
-        activeProvider={activeProvider}
-        setActiveProvider={setActiveProvider}
-        activeCostTier={activeCostTier}
-        setActiveCostTier={setActiveCostTier}
-        activeSpeedTier={activeSpeedTier}
-        setActiveSpeedTier={setActiveSpeedTier}
-        testResult={testResult}
-        testingModel={testingModel}
-        onSelectModel={(m) => {
-          if (workspaceId) {
-            setWorkspaceModel(m.id);
-            saveWorkspaceModel(m.id);
-          } else {
-            setDefaultModel(m.id);
-          }
-        }}
-        onTestModel={(id) => testModel(id)}
-      />
-    </>
   );
 }
 
