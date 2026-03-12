@@ -1,9 +1,9 @@
 # Run State Summary
 
-Spec: fix-kanban-progress-bar-multi-run
-Run ID: 53
-Started: 2026-03-12T08:12:10.359Z
-Last Updated: 2026-03-12T08:14:04.468Z
+Spec: context-tab-rich-generation-summary
+Run ID: 55
+Started: 2026-03-12T08:22:11.656Z
+Last Updated: 2026-03-12T08:28:05.799Z
 
 ## Completed Stories (1)
-- US-001: Fix kanban progress calculation to use spec JSON passes field — DONE (claude, claude-sonnet-4-6, 114s)
+- US-001: Add context summary API endpoint and TypeScript interface — DONE (claude, claude-sonnet-4-6, 354s)
