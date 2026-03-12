@@ -742,6 +742,36 @@ server.registerTool(
 );
 
 server.registerTool(
+  'rorca_edit_spec',
+  {
+    description: 'Update spec-level metadata (model, title, or notes) for an existing spec. The spec can be in pending or approved status. Use rorca_list_specs to find the spec ID. Only fields that are provided will be updated — omitted fields are left unchanged.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec ID (filename slug, e.g. "my-feature-spec")'),
+      model: z.string().optional().describe('New model for the spec (e.g. "claude-opus-4-6")'),
+      title: z.string().optional().describe('New human-readable title for the spec'),
+      notes: z.string().optional().describe('New notes / brief for the spec'),
+    },
+  },
+  async ({ workspaceId, specId, model, title, notes }) => {
+    return wrapToolCall('rorca_edit_spec', async () => {
+      const body: Record<string, unknown> = { workspaceId };
+      if (model !== undefined) body.model = model;
+      if (title !== undefined) body.title = title;
+      if (notes !== undefined) body.notes = notes;
+      const res = await timedFetch(`${RORCA_API}/api/specs/${specId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) return httpError('rorca_edit_spec', res);
+      const data = await res.json() as { ok: boolean; id: string; title: string; model: string; storyCount: number };
+      return { content: [{ type: 'text' as const, text: `Updated spec "${data.id}": title="${data.title}", model=${data.model}, stories=${data.storyCount}` }] };
+    });
+  }
+);
+
+server.registerTool(
   'rorca_search_stories',
   {
     description: 'Search across all specs in a workspace for stories matching a query string. Searches story IDs, titles, descriptions, and acceptance criteria. Returns matching stories with their spec context. Useful for finding related stories, checking for duplicates, or locating a specific story when you only know partial text.',
@@ -2155,6 +2185,38 @@ server.registerPrompt(
     }
 
     return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  }
+);
+
+server.registerPrompt(
+  'edit_spec',
+  {
+    title: 'Edit Spec',
+    description: 'Update spec-level metadata (model, title, or notes). Only provided fields are updated.',
+    argsSchema: {
+      specId: z.string().describe('Spec ID slug (e.g. rorca-feature-enhancements)'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+      model: z.string().optional().describe('New model (e.g. claude-opus-4-6)'),
+      title: z.string().optional().describe('New human-readable title'),
+      notes: z.string().optional().describe('New notes / brief for the spec'),
+    },
+  },
+  async ({ specId, workspaceId, model, title, notes }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const body: Record<string, unknown> = { workspaceId: ws };
+    if (model !== undefined) body.model = model;
+    if (title !== undefined) body.title = title;
+    if (notes !== undefined) body.notes = notes;
+    const res = await fetch(`${RORCA_API}/api/specs/${specId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Failed to update spec "${specId}" (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as { ok: boolean; id: string; title: string; model: string; storyCount: number };
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `✅ Spec "${data.id}" updated:\n  title: ${data.title}\n  model: ${data.model}\n  stories: ${data.storyCount}` } }] };
   }
 );
 
