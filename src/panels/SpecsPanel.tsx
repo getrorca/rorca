@@ -2074,6 +2074,34 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Template picker
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
+  // Pasted image attachments (uploaded to backend, associated by specId after generation)
+  const [pendingAttachments, setPendingAttachments] = useState<Array<{ filename: string; contentType: string; size: number }>>([]);
+
+  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData.items);
+    const imageItem = items.find((item) => item.type.startsWith('image/'));
+    if (!imageItem) return;
+
+    const file = imageItem.getAsFile();
+    if (!file) return;
+
+    const ext = file.type.split('/')[1] ?? 'png';
+    const filename = `pasted-image-${Date.now()}.${ext}`;
+    const namedFile = new File([file], filename, { type: file.type });
+
+    showToast('Image pasted, uploading...', 'info');
+
+    try {
+      const formData = new FormData();
+      formData.append('file', namedFile);
+      // Upload to a temporary "forge" slot — spec ID will be wired after generation (US-007)
+      await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+      setPendingAttachments((prev) => [...prev, { filename, contentType: file.type, size: file.size }]);
+    } catch {
+      showToast('Image upload failed', 'error');
+    }
+  }, [showToast]);
+
   // Model accept handler — PUTs the accepted model to the story on disk
   const handleModelAccepted = useCallback(async (storyId: string, model: string) => {
     if (!generatedSpec || !workspaceId) return;
@@ -2351,10 +2379,21 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
           <textarea
             ref={briefRef} rows={6} value={specBrief}
             onChange={(e) => setSpecBrief(e.target.value.slice(0, 4000))}
+            onPaste={handlePaste}
             placeholder="What do you want to build?"
             aria-label="Spec brief — describe what you want to build"
             className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors resize-none leading-relaxed"
           />
+          {pendingAttachments.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {pendingAttachments.map((att) => (
+                <span key={att.filename} className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] bg-accent/10 text-accent rounded border border-accent/20">
+                  <FileText size={10} />
+                  {att.filename}
+                </span>
+              ))}
+            </div>
+          )}
           {/* Skills count indicator */}
           {skillsCount !== null && (
             <div className="mt-1.5 px-1">
@@ -2569,7 +2608,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
           onEditBrief={() => { setGeneratedSpec(null); setGenerateError(null); setApiDone(false); setTimeout(() => briefRef.current?.focus(), 50); }}
           isRegenerating={isGenerating} onNavigate={onNavigate}
           onNavigateToRun={(runId) => { onClose(); onNavigateToRun?.(runId); }}
-          onReset={() => { setGeneratedSpec(null); setGenerateError(null); setApiDone(false); setSpecBrief(''); setTimeout(() => briefRef.current?.focus(), 50); }}
+          onReset={() => { setGeneratedSpec(null); setGenerateError(null); setApiDone(false); setSpecBrief(''); setPendingAttachments([]); setTimeout(() => briefRef.current?.focus(), 50); }}
           modelSuggestions={modelSuggestions}
           onModelAccepted={handleModelAccepted}
         />
