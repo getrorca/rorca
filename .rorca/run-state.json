@@ -2,7 +2,7 @@
   "specId": "rorca-model-catalog-ux",
   "runId": 42,
   "startedAt": "2026-03-12T05:48:51.132Z",
-  "lastUpdatedAt": "2026-03-12T06:03:42.583Z",
+  "lastUpdatedAt": "2026-03-12T06:10:05.009Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 174375
+    },
+    {
+      "storyId": "US-006",
+      "title": "Collapse OpenRouter section by default with count badge and expand toggle",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:04:05.530Z",
+      "finishedAt": "2026-03-12T06:10:05.009Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 359479
     }
   ],
   "failedStories": [],
