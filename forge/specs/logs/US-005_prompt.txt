@@ -1326,7 +1326,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1479,14 +1479,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-005):
-As a user, I want to further narrow the model catalog by cost tier and speed so I can quickly find e.g. free fast models.
+Harden ensurePostgres() with proper error handling for all failure modes: disk full during download, network timeout, extraction failure, initdb failure, pg_ctl start failure, and port 5453 already in use by a non-Postgres process. Add a --no-postgres flag to rorca start that skips ensurePostgres() and preserves the old behavior (requires user-provided DATABASE_URL). Verify the full flow works end-to-end by running rorca start on a clean machine (no DATABASE_URL, no existing ~/.rorca/postgres/) and confirming Express starts successfully with migrations applied.
 
 Acceptance Criteria:
-- A second filter row renders below the provider chips with two pill groups: Cost (All | Free | Low | Medium | High | Premium) and Speed (All | Fast | Medium | Slow)
-- Each group's 'All' option is selected by default
-- Active pill uses same accent highlight as provider chips
-- All four filters (search text + provider + cost tier + speed tier) compose with AND logic
-- When no ModelCards match all active filters, show an empty state message: 'No models match your filters' with a 'Clear filters' text button that resets searchText, activeProvider, activeCostTier, and activeSpeedTier to their defaults
-- Filter state resets to defaults when DisplaySection unmounts and remounts
-- npx tsc --noEmit passes, npm run lint passes
-- Verify in browser: selecting Free + Fast pills shows only free fast models; Clear filters restores full list
+- Network timeout during download (>60s with no data) throws Error('Postgres download timed out') and cleans up the partial temp file
+- If ~/.rorca/postgres/bin/ exists but is missing expected binaries (postgres, initdb, pg_ctl), ensurePostgres() throws Error('Postgres install appears corrupt — delete ~/.rorca/postgres and retry') with actionable user guidance
+- rorca start --no-postgres skips ensurePostgres() entirely, requires DATABASE_URL to be set, and exits with code 1 + message 'DATABASE_URL required when --no-postgres is set' if it is not
+- When port 5453 is already bound by a non-Postgres process, pg_ctl start fails — ensurePostgres() detects this (non-zero exit + 'address already in use' in stderr) and throws Error('Port 5453 is already in use by another process') with suggestion to kill the conflicting process
+- Full zero-prereq test: after deleting ~/.rorca/postgres/, running `rorca start` downloads Postgres, runs initdb, starts on 5433, creates rorca user/db, sets DATABASE_URL, runs migrations, and Express is reachable on :3030 within 90 seconds

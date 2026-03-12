@@ -1326,7 +1326,102 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
 
 Follow this workflow for implementation:
-## Agent Role: Database
+
+## Skill: logging-fundamentals (relevance: 6)
+---
+name: logging-fundamentals
+description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, SREs, DevOps engineers
+  category: observability
+---
+
+# Logging Fundamentals
+
+Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
+
+## When to use me
+
+Use this skill when:
+- Setting up logging for new applications or services
+- Reviewing existing logging implementations
+- Establishing logging standards for teams or projects
+- Debugging issues with incomplete or poor logging
+- Implementing structured logging for better observability
+- Configuring log levels and verbosity for different environments
+- Ensuring logs contain sufficient context for troubleshooting
+
+## What I do
+
+### 1. Log Level Management
+- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
+- **Configure level filtering** per environment (development, staging, production)
+- **Implement dynamic level adjustment** without application restarts
+- **Establish level usage guidelines** for different types of information
+
+### 2. Structured Logging Implementation
+- **Design log schema** with consistent field naming and types
+- **Implement structured formats** (JSON, key-value pairs, structured text)
+- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
+- **Handle nested structures and arrays** appropriately in logs
+
+### 3. Context Propagation
+- **Implement correlation IDs** for request tracing across services
+- **Propagate context through async operations** (queues, background jobs)
+- **Maintain user/session context** throughout request lifecycle
+- **Include business context** (order_id, transaction_id, etc.) in logs
+
+### 4. Log Content Best Practices
+- **Include sufficient context** for debugging without external systems
+- **Balance detail with noise** - log enough but not too much
+- **Use consistent message formats** across the codebase
+- **Log before and after significant operations**
+- **Include error details** (stack traces, error codes, recovery suggestions)
+- **Avoid logging secrets, passwords, or sensitive data**
+
+## Logging Principles
+
+### The 5 Ws of Logging
+1. **WHO** - Which user/service/process generated the log?
+2. **WHAT** - What action/event is being logged?
+3. **WHEN** - Precise timestamp with timezone information
+4. **WHERE** - Which component/function/file generated the log?
+5. **WHY** - What is the significance/severity of the logged event?
+
+### Structured Logging Fields
+```json
+{
+  "timestamp": "2026-02-26T18:00:00Z",
+  "level": "INFO",
+  "service": "spec-generator",
+  "component": "chatComplete",
+  "trace_id": "gen-abc123",
+  "message": "LLM call completed",
+  "duration_ms": 5123,
+  "context": {
+    "model": "claude-sonnet-4-5-20250929",
+    "input_tokens": 12000,
+    "output_tokens": 4500
+  }
+}
+```
+
+### Log Level Guidelines
+- **DEBUG**: Detailed information for debugging, typically disabled in production
+- **INFO**: Routine information about normal operation
+- **WARN**: Warning conditions that might require attention but don't indicate failure
+- **ERROR**: Error conditions that indicate failure of a specific operation
+- **FATAL**: Critical errors that cause application termination
+
+## Notes
+
+- **Structured logging is essential** for modern log analysis and observability
+- **Context is more important than message content** - ensure logs can be correlated
+- **Log levels should reflect operational importance**, not developer convenience
+- **Consider log volume** - too many logs can overwhelm systems and teams
+- **Balance human readability with machine parsability** in log formats
 
 ---
 name: rorca
@@ -1479,11 +1574,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-001):
-Create a new PostgreSQL table to store file attachments (images, PDFs, etc.) associated with specs. Store file metadata, content type, file size, and binary data or S3 reference.
+Implement the platform detection logic and binary download function in bin/rorca.ts. Detect the current OS/arch combination (darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64) and download the correct Postgres 16 binary archive from the zonkyio/embedded-postgres-binaries GitHub releases. Use only Node.js built-ins (https, fs, os, path, child_process). Show a spinner with download progress bytes. Store a version marker at ~/.rorca/postgres/.version after successful download. Skip download if .version file already exists with matching version.
 
 Acceptance Criteria:
-- Migration file created in backend/src/db/pg-migrations/ with spec_attachments table
-- Table includes: id (uuid), spec_id (fk), filename (text), content_type (text), file_size (int), storage_type (enum: 'database'|'s3'), file_data (bytea nullable), s3_key (text nullable), uploaded_by (uuid fk to users), created_at (timestamp)
-- Foreign key constraints on spec_id and uploaded_by with CASCADE delete
-- Index on spec_id for fast attachment queries per spec
-- Migration runs successfully with IF NOT EXISTS guards
+- Platform detection returns one of: darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64 — throws a clear error for unsupported platforms (e.g. linux-arm32)
+- Download function uses Node.js https module to fetch the .tar.gz archive from https://github.com/zonkyio/embedded-postgres-binaries/releases — no npm dependencies added to bin/rorca.ts
+- Spinner displays during download showing bytes downloaded (e.g. 'Downloading Postgres 16... 42.3 MB / 87.1 MB') using process.stdout.write with \r to overwrite the line
+- After successful download and extraction, ~/.rorca/postgres/.version file is written containing the version string (e.g. '16.2.0')
+- If ~/.rorca/postgres/.version already exists with the correct version string, the entire download and extraction is skipped with a log line 'Postgres 16 already installed'
