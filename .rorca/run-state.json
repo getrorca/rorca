@@ -2,7 +2,7 @@
   "specId": "add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.",
   "runId": 45,
   "startedAt": "2026-03-12T05:48:55.677Z",
-  "lastUpdatedAt": "2026-03-12T07:34:42.484Z",
+  "lastUpdatedAt": "2026-03-12T07:42:25.632Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -193,6 +193,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 974522
+    },
+    {
+      "storyId": "US-020",
+      "title": "Add attachment upload E2E tests",
+      "status": "passed",
+      "startedAt": "2026-03-12T07:35:08.965Z",
+      "finishedAt": "2026-03-12T07:42:25.632Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 436666
     }
   ],
   "failedStories": [],
