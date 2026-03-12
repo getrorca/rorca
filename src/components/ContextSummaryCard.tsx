@@ -2,9 +2,16 @@ import { useState } from 'react';
 import { ChevronDown, ChevronRight, Check, X, AlertTriangle, FileText, Brain, Shield, Layers, Puzzle, Search, Share2 } from 'lucide-react';
 import type { ContextSummary } from '../panels/SpecForgeOutput';
 
+interface SkillDetail {
+  name: string;
+  relevance?: number;
+  reason?: string;
+}
+
 interface ContextSummaryCardProps {
   summary: ContextSummary;
   isGenerating?: boolean;
+  skillDetails?: SkillDetail[];
 }
 
 function StatusBadge({ ok, label, title, tokens }: { ok: boolean; label: string; title?: string | null; tokens?: number }) {
@@ -77,7 +84,7 @@ function TokenBar({ estimated, contextWindow }: { estimated: number; contextWind
   );
 }
 
-export default function ContextSummaryCard({ summary, isGenerating }: ContextSummaryCardProps) {
+export default function ContextSummaryCard({ summary, isGenerating, skillDetails }: ContextSummaryCardProps) {
   const [expanded, setExpanded] = useState(!!isGenerating);
 
   const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow, retrieval } = summary;
@@ -223,16 +230,41 @@ export default function ContextSummaryCard({ summary, isGenerating }: ContextSum
 
           {/* Skills */}
           <div className="flex items-start gap-1.5 text-xs">
-            <span className={`inline-flex items-center gap-1 ${skills.length > 0 ? 'text-text' : 'text-muted'}`}>
+            <span className={`inline-flex items-center gap-1 shrink-0 ${skills.length > 0 ? 'text-text' : 'text-muted'}`}>
               <Puzzle className="w-3 h-3 mt-0.5 shrink-0" />
               Skills{' '}
               {skills.length > 0
                 ? <span className="text-success">✓ {skills.length}</span>
                 : <span>—</span>}
             </span>
-            {skills.length > 0 && (
+            {skills.length > 0 && skillDetails && skillDetails.length > 0 ? (
+              <div className="flex flex-wrap gap-1">
+                {skillDetails.map(sk => {
+                  const rel = sk.relevance ?? 0;
+                  const badgeClass = rel >= 8
+                    ? 'bg-emerald-500/15 text-emerald-400'
+                    : rel >= 5
+                      ? 'bg-blue-500/15 text-blue-400'
+                      : 'bg-muted/15 text-muted';
+                  return (
+                    <span
+                      key={sk.name}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-muted/10 border border-border/50 text-[10px]"
+                      title={sk.reason ?? undefined}
+                    >
+                      <span className="font-mono text-text">{sk.name}</span>
+                      {sk.relevance != null && (
+                        <span className={`px-1 py-0 rounded text-[9px] font-semibold ${badgeClass}`}>
+                          {sk.relevance}
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            ) : skills.length > 0 ? (
               <span className="text-muted">{skills.join(', ')}</span>
-            )}
+            ) : null}
           </div>
 
           {/* Memory + Template */}

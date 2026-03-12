@@ -660,7 +660,7 @@ function SpecDetailContent({
                 onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
-            {activeTab === 'context' && <GenerationLogTab specId={specId} />}
+            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} />}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
@@ -901,10 +901,27 @@ function estimateCost(model: string, inputTokens: number, outputTokens: number):
   return null;
 }
 
-function GenerationLogTab({ specId }: { specId: string }) {
+function GenerationLogTab({ specId, stories }: { specId: string; stories: Story[] }) {
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
+
+  // Aggregate skillDetails from all stories' suggestedSkills, taking max relevance per unique name
+  const skillDetails = useMemo(() => {
+    const toSkill = (raw: unknown): SuggestedSkill =>
+      typeof raw === 'string' ? { name: raw } : (raw as SuggestedSkill);
+    const map = new Map<string, SuggestedSkill>();
+    for (const story of stories) {
+      for (const raw of (story as any).suggestedSkills ?? []) {
+        const sk = toSkill(raw);
+        const existing = map.get(sk.name);
+        if (!existing || (sk.relevance ?? 0) > (existing.relevance ?? 0)) {
+          map.set(sk.name, sk);
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [stories]);
 
   useEffect(() => {
     let cancelled = false;
@@ -968,7 +985,7 @@ function GenerationLogTab({ specId }: { specId: string }) {
             {/* Context summary card — PRIMARY content, shown above generation header */}
             {contextSummary && (
               <div className="px-4 pt-3 pb-0">
-                <ContextSummaryCard summary={contextSummary} />
+                <ContextSummaryCard summary={contextSummary} skillDetails={skillDetails.length > 0 ? skillDetails : undefined} />
               </div>
             )}
 
