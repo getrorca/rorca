@@ -1,5 +1,6 @@
 # Run State Summary
 
+<<<<<<< HEAD
 Spec: add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.
 Run ID: 45
 Started: 2026-03-12T05:48:55.677Z
@@ -20,3 +21,20 @@ Last Updated: 2026-03-12T06:53:57.334Z
 - US-012: Show attachment count badge in SpecsPanel kanban cards — DONE (claude, claude-sonnet-4-6, 488s)
 - US-013: Add Attachments tab to SpecDetailSlideOver — DONE (claude, claude-sonnet-4-6, 259s)
 - US-014: Update SpecForgeProgress to show attachment upload status — DONE (claude, claude-sonnet-4-6, 532s)
+=======
+Spec: rorca-mcp-cli
+Run ID: 46
+Started: 2026-03-12T05:51:51.758Z
+Last Updated: 2026-03-12T06:48:15.784Z
+
+## Completed Stories (9)
+- MC-001: rorca_forge_and_run — Brief-to-Completion Single MCP Tool — DONE (claude, claude-sonnet-4-6, 453s)
+- MC-002: rorca_cancel_run MCP Tool — DONE (claude, claude-sonnet-4-6, 179s)
+- MC-004: MCP Tools Tree View in rorca VS Code Extension — DONE (claude, claude-sonnet-4-6, 415s)
+- MC-006: VS Code Extension Settings Contribution Point Schema — DONE (claude, claude-sonnet-4-6, 372s)
+- MC-007: MCP Tool Error Recovery and Offline Graceful Degradation — DONE (claude, claude-sonnet-4-6, 843s)
+- MC-009: rorca-vscode Extension Package Scaffold — DONE (claude, claude-sonnet-4-6, 300s)
+- MC-010: Spec Tree View Provider — V2-060 Feature Properly Built — DONE (claude, claude-sonnet-4-6, 259s)
+- MC-011: JWT Auth and Server Connection Management — DONE (claude, claude-sonnet-4-6, 210s)
+- MC-012: VSIX Packaging and Marketplace Publish Workflow — DONE (claude, claude-sonnet-4-6, 149s)
+>>>>>>> feat/rorca-mcp-cli-1773294710510
